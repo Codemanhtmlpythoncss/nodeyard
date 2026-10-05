@@ -207,6 +207,7 @@ ny_cfg_get() {
     else
         printf '%s\n' "${4:-}"
     fi
+    return 0
 }
 
 # ny_cfg_get_list SECTION SUB KEY -- every value, splitting repeats and commas.
@@ -216,6 +217,7 @@ ny_cfg_get_list() {
     while IFS= read -r v; do
         ny_csv_split "$v"
     done <<<"${NY_CFG[$k]}"
+    return 0
 }
 
 ny_cfg_has() {
@@ -234,6 +236,7 @@ ny_cfg_subs() {
         [[ "${entry%%"$NY_US"*}" == "$s" ]] || continue
         printf '%s\n' "${entry#*"$NY_US"}"
     done
+    return 0
 }
 
 # ny_cfg_keys SECTION SUB -- key names present in a section.
@@ -242,6 +245,7 @@ ny_cfg_keys() {
     for k in "${!NY_CFG[@]}"; do
         [[ "$k" == "$prefix"* ]] && printf '%s\n' "${k#"$prefix"}"
     done | sort
+    return 0
 }
 
 # --- this node ---------------------------------------------------------------
@@ -272,6 +276,7 @@ ny_role_normalize() {
         standalone) echo standalone ;;
         *) echo "" ;;
     esac
+    return 0
 }
 
 # --- writing -----------------------------------------------------------------
@@ -288,6 +293,7 @@ ny_cfg_format_value() {
     else
         printf '%s' "$v"
     fi
+    return 0
 }
 
 ny_cfg_header() {
@@ -296,6 +302,7 @@ ny_cfg_header() {
     else
         printf '[%s]' "$1"
     fi
+    return 0
 }
 
 # ny_cfg_edit MODE SECTION SUB KEY [VALUE] [FILE]
@@ -304,7 +311,13 @@ ny_cfg_header() {
 # Comments and layout are preserved. The change is journaled.
 ny_cfg_edit() {
     local mode="$1" section="${2,,}" sub="$3" key="${4,,}" value="${5:-}" file="${6:-$NY_CONFIG}"
-    local real="$file"
+    local real="$file" batching=0
+    # Inside ny_cfg_batch_begin/commit, edits accumulate in a scratch copy
+    # and the real file is written (and journaled) once.
+    if [[ -n "${NY_CFG_BATCH_TMP:-}" && "$file" == "$NY_CFG_BATCH_TARGET" ]]; then
+        real="$NY_CFG_BATCH_TMP"
+        batching=1
+    fi
     local -a lines=()
     if [[ -f "$real" ]]; then
         mapfile -t lines <"$real"
@@ -372,13 +385,48 @@ ny_cfg_edit() {
         out=("${keep[@]+"${keep[@]}"}")
     fi
 
-    # Config edits are journaled as their own feature, so undoing a feature
-    # (e.g. uninstalling k3s) never rolls back unrelated config changes.
-    local NY_FEATURE="config"
-    printf '%s\n' "${out[@]+"${out[@]}"}" | ny_write_file "$(ny_unroot "$file")" 0640
+    if [[ "$batching" -eq 1 ]]; then
+        printf '%s\n' "${out[@]+"${out[@]}"}" >"$real"
+        return 0
+    fi
+    # A file outside the system root (e.g. one being prepared for import) is
+    # simply rewritten; system config goes through the journal.
+    if [[ -n "$NY_ROOT" && "$file" != "$NY_ROOT"/* ]]; then
+        printf '%s\n' "${out[@]+"${out[@]}"}" >"${file}.nodeyard-new.$$"
+        mv -f "${file}.nodeyard-new.$$" "$file"
+    else
+        # Config edits are journaled as their own feature, so undoing a
+        # feature (e.g. uninstalling k3s) never rolls back unrelated config.
+        local NY_FEATURE="config"
+        printf '%s\n' "${out[@]+"${out[@]}"}" | ny_write_file "$(ny_unroot "$file")" 0640
+    fi
     if [[ "$NY_DRY_RUN" -ne 1 && "$NY_CFG_LOADED_FROM" == "$file" ]]; then
         ny_cfg_parse "$file" || true
     fi
+    return 0
+}
+
+# ny_cfg_batch_begin [FILE] / ny_cfg_batch_commit -- group several edits into
+# one write (one backup, one journal entry, one diff in --dry-run).
+ny_cfg_batch_begin() {
+    NY_CFG_BATCH_TARGET="${1:-$NY_CONFIG}"
+    NY_CFG_BATCH_TMP="$(ny_mktemp)"
+    if [[ -f "$NY_CFG_BATCH_TARGET" ]]; then
+        cat "$NY_CFG_BATCH_TARGET" >"$NY_CFG_BATCH_TMP"
+    fi
+}
+
+ny_cfg_batch_commit() {
+    local tmp="$NY_CFG_BATCH_TMP" target="$NY_CFG_BATCH_TARGET"
+    NY_CFG_BATCH_TMP=""
+    NY_CFG_BATCH_TARGET=""
+    [[ -n "$tmp" ]] || return 0
+    local NY_FEATURE="config"
+    ny_write_file "$(ny_unroot "$target")" 0640 <"$tmp"
+    if [[ "$NY_DRY_RUN" -ne 1 && "$NY_CFG_LOADED_FROM" == "$target" ]]; then
+        ny_cfg_parse "$target" || true
+    fi
+    return 0
 }
 
 ny_cfg_set() { ny_cfg_edit set "$@"; }

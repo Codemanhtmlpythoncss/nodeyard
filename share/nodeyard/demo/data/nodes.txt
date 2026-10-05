@@ -1,0 +1,4 @@
+yard-1   Ready    control-plane,etcd,master   41d   v1.33.4+k3s1
+yard-2   Ready    control-plane,etcd,master   41d   v1.33.4+k3s1
+yard-3   Ready    control-plane,etcd,master   40d   v1.33.4+k3s1
+yard-4   Ready    <none>   12d   v1.33.4+k3s1

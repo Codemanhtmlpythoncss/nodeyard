@@ -39,6 +39,7 @@ ny_term_init() {
         NY_UTF8=0
         NY_SYM_OK="OK" NY_SYM_FAIL="FAIL" NY_SYM_WARN="!" NY_SYM_STEP=">" NY_SYM_ARROW="->" NY_SYM_DOT="-"
     fi
+    return 0
 }
 
 # ny_term_width -- usable terminal width (minimum 40).

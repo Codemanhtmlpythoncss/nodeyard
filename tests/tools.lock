@@ -1,0 +1,9 @@
+# Pinned development tools (fetched into .tools/ by 'make deps').
+# name         version  platform     sha256                                                            url
+bats-core      1.14.0   any          bb537b70b15b732f6d8827dd6578e3d8ce166636ce1f18ea9a074184fcce9177  https://github.com/bats-core/bats-core/archive/refs/tags/v1.14.0.tar.gz
+bats-support   0.3.0    any          7815237aafeb42ddcc1b8c698fc5808026d33317d8701d5ec2396e9634e2918f  https://github.com/bats-core/bats-support/archive/refs/tags/v0.3.0.tar.gz
+bats-assert    2.2.4    any          e305df20c4c36cba4570e10f1cd824efb1ae71d88b5ef474550781ebee04192f  https://github.com/bats-core/bats-assert/archive/refs/tags/v2.2.4.tar.gz
+shellcheck     0.11.0   linux-amd64  8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+shellcheck     0.11.0   linux-arm64  12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588  https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.aarch64.tar.xz
+shfmt          3.14.1   linux-amd64  76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf  https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_linux_amd64
+shfmt          3.14.1   linux-arm64  5f2db09dae91fca848f7adbdd014632e921a383863a2ad7e0450ad3aba0c6489  https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_linux_arm64

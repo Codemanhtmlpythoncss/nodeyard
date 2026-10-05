@@ -13,7 +13,9 @@ NY_UI_TITLE="nodeyard"
 # ny_ui_init -- pick the backend once: env NODEYARD_UI, config ui.backend, auto.
 ny_ui_init() {
     [[ -n "$NY_UI" ]] && return 0
-    if [[ "$NY_NONINTERACTIVE" -eq 1 || ! -t 2 ]]; then
+    # NODEYARD_INTERACTIVE=1 forces prompts without a terminal (scripted
+    # input, tests); otherwise no terminal means no prompts.
+    if [[ "${NODEYARD_INTERACTIVE:-0}" != 1 ]] && [[ "$NY_NONINTERACTIVE" -eq 1 || ! -t 2 ]]; then
         NY_UI="none"
         return 0
     fi
@@ -69,6 +71,7 @@ ny_ui_box_size() {
     ((NY_UI_H < 10)) && NY_UI_H=10
     NY_UI_W=$((cols - 6))
     ((NY_UI_W > 78)) && NY_UI_W=78
+    return 0
 }
 
 # Run whiptail/dialog with its output (the answer) captured from stderr.
@@ -94,6 +97,7 @@ ny_ui_plain_hint() {
     else
         printf '%s' "$(ny_color dim " (q = quit)")"
     fi
+    return 0
 }
 
 # ny_ui_choose PROMPT DEFAULT ITEM... -- pick one item. Each ITEM is
@@ -186,6 +190,7 @@ ny_ui_choose() {
             done
             ;;
     esac
+    return 0
 }
 
 # ny_ui_input PROMPT DEFAULT [TYPE] [HELP] -- free text, validated with
@@ -361,6 +366,7 @@ ny_ui_msg() {
             printf '\n%s\n%s\n' "$(ny_color bold "$title")" "$text" >&2
             ;;
     esac
+    return 0
 }
 
 # ny_ui_pause -- "press Enter to continue" (interactive only).
@@ -448,6 +454,7 @@ ny_status_color() {
             ;;
         *) printf '%s' "$w" ;;
     esac
+    return 0
 }
 
 # ny_table [--status COL]... < TSV -- render tab-separated rows (first row is
@@ -489,8 +496,10 @@ ny_table() {
         total=0
         for ((c = 0; c < ncol; c++)); do total=$((total + widths[c] + 2)); done
         ((total <= avail)) && break
-        local widest=0
-        for ((c = 1; c < ncol; c++)); do ((widths[c] > widths[widest])) && widest=$c; done
+        # Never shrink the first column: it usually holds names/IDs people copy.
+        ((ncol > 1)) || break
+        local widest=1
+        for ((c = 2; c < ncol; c++)); do ((widths[c] > widths[widest])) && widest=$c; done
         ((widths[widest] <= 6)) && break
         widths[widest]=$((widths[widest] - 1))
     done
@@ -522,4 +531,5 @@ ny_table() {
         printf '%s\n' "${line%"${line##*[![:space:]]}"}"
         first=0
     done
+    return 0
 }

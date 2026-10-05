@@ -48,6 +48,7 @@ ny_pkg_index() {
         apk) echo 4 ;;
         *) echo -1 ;;
     esac
+    return 0
 }
 
 # ny_pkg_for CMD -- the package that provides CMD here (empty if unknown).
@@ -73,6 +74,7 @@ ny_pkg_install_cmd() {
         apk) echo "apk add $*" ;;
         *) echo "(install $* with your package manager)" ;;
     esac
+    return 0
 }
 
 # ny_pkg_install PKG... -- install packages (retries, refreshes the index once).
@@ -104,6 +106,7 @@ ny_pkg_install() {
             return 1
             ;;
     esac
+    return 0
 }
 
 # ny_deps_missing CMD... -- print the commands that are not installed.
@@ -112,6 +115,7 @@ ny_deps_missing() {
     for c in "$@"; do
         have "$c" || printf '%s\n' "$c"
     done
+    return 0
 }
 
 # ny_deps_ensure REASON CMD... -- make sure commands exist, offering to install
@@ -155,6 +159,7 @@ ny_deps_ensure() {
     else
         ny_die "Cannot continue without $(ny_join ', ' "${missing[@]}")." "Install with: sudo ${install_cmd}" "$NY_E_PRECONDITION"
     fi
+    return 0
 }
 
 # ny_deps_ensure_feature FEATURE... -- ensure every command a feature needs.
@@ -217,6 +222,7 @@ ny_download() {
         fi
         ny_vlog "checksum ok: ${url}"
     fi
+    return 0
 }
 
 # ny_fetch_pinned NAME DEST -- download NAME for this platform as pinned in

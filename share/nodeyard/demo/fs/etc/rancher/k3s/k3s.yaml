@@ -1,0 +1,15 @@
+# Demo kubeconfig: not a real cluster.
+apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    certificate-authority-data: ZGVtbw==
+    server: https://127.0.0.1:6443
+  name: default
+contexts:
+- context: {cluster: default, user: default}
+  name: default
+current-context: default
+users:
+- name: default
+  user: {client-certificate-data: ZGVtbw==, client-key-data: ZGVtbw==}

@@ -1,0 +1,1 @@
+reboot=w coherent_pool=1M 8250.nr_uarts=1 cgroup_disable=memory numa_policy=interleave console=tty1 root=PARTUUID=0b1d2c3a-02 rootfstype=ext4 fsck.repair=yes rootwait cgroup_memory=1 cgroup_enable=memory

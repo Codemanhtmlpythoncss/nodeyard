@@ -109,6 +109,7 @@ menu_cmd() {
             quit | *) return 0 ;;
         esac
     done
+    return 0
 }
 
 menu_join() {
@@ -121,6 +122,7 @@ menu_join() {
         worker) menu_wizard install-worker ;;
         server) menu_wizard install-join-master ;;
     esac
+    return 0
 }
 
 menu_ai() {
@@ -149,6 +151,7 @@ menu_ai() {
             *) return 0 ;;
         esac
     done
+    return 0
 }
 
 menu_backups() {
@@ -166,6 +169,7 @@ menu_backups() {
             *) return 0 ;;
         esac
     done
+    return 0
 }
 
 menu_updates() {
@@ -183,6 +187,7 @@ menu_updates() {
             *) return 0 ;;
         esac
     done
+    return 0
 }
 
 menu_settings() {
@@ -218,6 +223,7 @@ menu_settings() {
             *) return 0 ;;
         esac
     done
+    return 0
 }
 
 menu_changes() {
@@ -232,6 +238,7 @@ menu_changes() {
             [[ -n "$id" ]] && menu_run undo "$id"
             ;;
     esac
+    return 0
 }
 
 menu_ui_style() {
@@ -351,6 +358,7 @@ menu_quickstart_cmd() {
             menu_wizard install-master ha=yes worker=yes
             ;;
     esac
+    return 0
 }
 
 menu_wizard_cmd() {

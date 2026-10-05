@@ -234,6 +234,7 @@ tool_uninstall_cmd() {
         everything) tool_uninstall_everything_cmd ;;
         *) return 0 ;;
     esac
+    return 0
 }
 
 tool_uninstall_everything_cmd_help() {
@@ -277,4 +278,5 @@ tool_uninstall_everything_cmd() {
     else
         ny_warn "uninstall.sh was not found next to nodeyard; remove ${NY_HOME} yourself."
     fi
+    return 0
 }

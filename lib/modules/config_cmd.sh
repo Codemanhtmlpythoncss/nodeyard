@@ -118,6 +118,7 @@ config_set_cmd() {
     else
         ny_ok "Set ${pos[0]} = ${value}"
     fi
+    return 0
 }
 
 config_unset_cmd() {
@@ -333,4 +334,5 @@ config_drift_cmd() {
     else
         ny_ok "This node matches the cluster config."
     fi
+    return 0
 }

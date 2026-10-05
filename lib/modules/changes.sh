@@ -121,4 +121,5 @@ changes_undo_cmd() {
     else
         ny_die "Some changes could not be undone (see above)." "Check those files by hand, or re-run with --force to restore the backups anyway."
     fi
+    return 0
 }

@@ -74,6 +74,7 @@ ny_cmd_children() {
             printf '%s\n' "$p"
         fi
     done
+    return 0
 }
 
 ny_help_command() {
@@ -132,6 +133,7 @@ ny_cmd_suggest() {
             printf '%s\n' "$p"
         fi
     done | head -n 5
+    return 0
 }
 
 # ny_dispatch WORD... -- run the matching command.
@@ -167,6 +169,9 @@ ny_dispatch() {
         fi
         "${NY_CMD_FN[$path]}" "$@"
         local rc=$?
+        if [[ "$NY_DRY_RUN" -eq 1 && "$NY_JSON" -eq 0 && "${#NY_PLAN[@]}" -gt 0 ]]; then
+            printf '\n%s\n' "$(ny_color cyan "Dry run: nothing was changed. Run the same command without --dry-run to apply ${#NY_PLAN[@]} step(s).")" >&2
+        fi
         if [[ "$NY_JSON" -eq 1 && "$NY_RESULT_PRINTED" -eq 0 && "$rc" -eq 0 ]]; then
             ny_json_out "$(ny_json_result)"
         fi

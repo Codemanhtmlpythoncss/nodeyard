@@ -316,6 +316,7 @@ ai_status_cmd() {
         printf '\n%s\n' "$(ny_color bold "Split model (experimental)")"
         printf '  Deployed; see: nodeyard ai split status\n'
     fi
+    return 0
 }
 
 ai_nodes_cmd() {
@@ -345,6 +346,7 @@ ai_model_targets() {
         AI_T_PODS+=("$pod")
         AI_T_NODES+=("$node")
     done < <(ai_pods)
+    return 0
 }
 
 ai_model_parse() {
@@ -361,6 +363,7 @@ ai_model_parse() {
                 ;;
         esac
     done
+    return 0
 }
 
 ai_model_install_cmd() {

@@ -1,0 +1,5 @@
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP mode DEFAULT group default qlen 1000\    link/ether 2c:cf:67:0a:1b:2c brd ff:ff:ff:ff:ff:ff
+3: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DORMANT group default qlen 1000\    link/ether 2c:cf:67:0a:1b:2d brd ff:ff:ff:ff:ff:ff
+4: flannel.1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1450 qdisc noqueue state UNKNOWN mode DEFAULT group default \    link/ether 7a:11:22:33:44:55 brd ff:ff:ff:ff:ff:ff
+5: cni0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1450 qdisc noqueue state UP mode DEFAULT group default qlen 1000\    link/ether 8e:aa:bb:cc:dd:ee brd ff:ff:ff:ff:ff:ff

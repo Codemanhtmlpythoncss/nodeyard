@@ -1,0 +1,1 @@
+2: eth0    inet 192.168.1.10/24 brd 192.168.1.255 scope global noprefixroute eth0\       valid_lft forever preferred_lft forever

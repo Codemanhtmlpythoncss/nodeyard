@@ -9,9 +9,9 @@ ny_valid_ipv4() {
     local ip="$1"
     NY_VALID_MSG="'${ip}' is not a valid IPv4 address (expected four numbers 0-255, e.g. 192.168.1.10)."
     [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
-    local i o
-    for i in 1 2 3 4; do
-        o="${BASH_REMATCH[i]}"
+    local -a octets=("${BASH_REMATCH[@]:1}")
+    local o
+    for o in "${octets[@]}"; do
         [[ "$o" =~ ^(0|[1-9][0-9]*)$ ]] || return 1
         ((10#$o <= 255)) || return 1
     done

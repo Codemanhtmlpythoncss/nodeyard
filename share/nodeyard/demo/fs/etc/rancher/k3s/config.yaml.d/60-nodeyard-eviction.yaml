@@ -1,0 +1,3 @@
+# nodeyard: after a low-disk eviction only reclaim 2GiB (k3s default: 10% of the disk)
+kubelet-arg+:
+  - eviction-minimum-reclaim=imagefs.available=2Gi,nodefs.available=2Gi

@@ -1,0 +1,7 @@
+ai-inference   ollama-4kx9z                              1/1   Running     0     6d
+ai-inference   ollama-9wq2m                              1/1   Running     0     6d
+kube-system    coredns-7f496c8d7d-x2kq4                  1/1   Running     0     41d
+kube-system    local-path-provisioner-578895bd58-5hm2p   1/1   Running     0     41d
+kube-system    metrics-server-7b9c9c4b9c-8tcrw           1/1   Running     0     41d
+kube-system    traefik-6f5f87584-q9bnd                   1/1   Running     0     41d
+kube-system    svclb-traefik-4b8c1d2e-7xk2p              2/2   Running     0     41d

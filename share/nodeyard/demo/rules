@@ -1,0 +1,128 @@
+# Demo-mode answers for system commands (see shim.sh for the format).
+# Columns: GLOB <TAB> EXIT CODE <TAB> OUTPUT (@file from data/, or text).
+
+hostname	0	yard-1
+hostname -f	0	yard-1.home.arpa
+hostname -s	0	yard-1
+hostname -I	0	192.168.1.10 192.168.1.53
+hostname *	0
+uname -m	0	aarch64
+uname -n	0	yard-1
+uname -r	0	6.6.51+rpt-rpi-2712
+uname*	0	Linux
+nproc*	0	4
+
+ip -o link show	0	@ip-link.txt
+ip -4 -o addr show dev eth0 scope global	0	@ip-addr-eth0.txt
+ip -4 -o addr show dev wlan0 scope global	0	@ip-addr-wlan0.txt
+ip -4 -o addr show dev *	0
+ip -4 -o addr show scope global	0	2: eth0    inet 192.168.1.10/24 brd 192.168.1.255 scope global eth0\n3: wlan0    inet 192.168.1.53/24 brd 192.168.1.255 scope global dynamic wlan0
+ip -4 route get 1.1.1.1	0	@ip-route-get.txt
+ip -4 route get 192.168.1.*	0	192.168.1.10 dev eth0 src 192.168.1.10 uid 0
+ip -4 route show default	0	default via 192.168.1.1 dev eth0 proto dhcp src 192.168.1.10 metric 100
+ip link show dev eth0	0	2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP
+ip link show dev wlan0	0	3: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP
+ip link show dev *	1	Device does not exist.
+ip *	0
+
+systemctl is-active --quiet k3s	0
+systemctl is-active --quiet NetworkManager	0
+systemctl is-active --quiet systemd-timesyncd	0
+systemctl is-active --quiet *	3
+systemctl is-active k3s	0	active
+systemctl is-enabled --quiet k3s	0
+systemctl is-enabled --quiet *	1
+systemctl cat systemd-timesyncd.service	0	# /lib/systemd/system/systemd-timesyncd.service
+systemctl cat *	1	No files found.
+systemctl list-units *	0
+systemctl --no-pager*status*	0	● k3s.service - Lightweight Kubernetes\n     Active: active (running) since Mon 2026-08-25 09:12:00 UTC; 1 month 10 days ago
+systemctl *	0
+
+nmcli -t -f DEVICE,STATE device status	0	eth0:connected\nwlan0:connected\nlo:unmanaged\ncni0:unmanaged\nflannel.1:unmanaged
+nmcli *	0
+networkctl *	1
+netplan *	0
+
+swapon --noheadings	0	/var/swap file 512M 0B -2
+swapon *	0
+lsmod	0	Module                  Size  Used by\noverlay               151552  4\nbr_netfilter           32768  0\nbridge                327680  1 br_netfilter
+modprobe *	0
+sysctl *	0
+findmnt -no SOURCE /	0	/dev/nvme0n1p2
+lsblk -no PKNAME /dev/nvme0n1p2	0	nvme0n1
+lsblk -dno MODEL /dev/nvme0n1	0	Samsung SSD 980 500GB
+lsblk -dno TRAN *	0	nvme
+lsblk -dno ROTA *	0	0
+lsblk *	0
+systemd-detect-virt *	1	none
+lspci*	0	0000:00:00.0 PCI bridge: Broadcom Inc. and subsidiaries BCM2712 PCIe Bridge (rev 21)\n0001:01:00.0 Ethernet controller: Raspberry Pi Ltd RP1 PCIe 2.0 South Bridge
+nvidia-smi*	9	NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.
+
+ss -ltn	0	@ss-listen.txt
+ss *	0	@ss-listen.txt
+iptables -S FORWARD	0	-P FORWARD ACCEPT
+iptables -S	0	-P INPUT ACCEPT\n-P FORWARD ACCEPT\n-P OUTPUT ACCEPT
+iptables *	0
+nft list ruleset	0
+nft *	0
+ufw status*	0	Status: inactive
+ufw *	0
+firewall-cmd *	252	FirewallD is not running
+tailscale ip -4	0	100.101.102.103
+tailscale *	0
+snap *	1
+docker *	1
+ping *	0	PING ok
+timeout *	0
+journalctl *	0	@journal-k3s.txt
+timedatectl *	0	System clock synchronized: yes
+chronyc *	1
+rc-service *	1
+getent passwd *	0	pi:x:1000:1000:pi:/home/pi:/bin/bash
+getent *	0
+flock *	0
+
+k3s --version	0	k3s version v1.33.4+k3s1 (b9a1c3d2)\ngo version go1.24.6
+k3s etcd-snapshot ls*	0	@etcd-snapshots.txt
+k3s etcd-snapshot save*	0	Snapshot saved
+k3s kubectl get nodes --no-headers -o wide*	0	@nodes-wide.txt
+k3s kubectl get nodes --no-headers*	0	@nodes.txt
+k3s kubectl get nodes -o json	0	@nodes.json
+k3s kubectl get node yard-1 --no-headers*	0	yard-1   Ready    control-plane,etcd,master   41d   v1.33.4+k3s1
+k3s kubectl get node * -o jsonpath=*InternalIP*	0	192.168.1.10
+k3s kubectl get node * -o jsonpath=*architecture*	0	arm64
+k3s kubectl get node * -o jsonpath=*allocatable.memory*	0	8031888Ki
+k3s kubectl get node *	0	yard   Ready
+k3s kubectl get --raw=/healthz	0	ok
+k3s kubectl get pods -A --no-headers*	0	@pods.txt
+k3s kubectl get nodes -o jsonpath=*DiskPressure*	0	yard-1 False False\nyard-2 False False\nyard-3 False False\nyard-4 False False
+k3s kubectl get nodes -o jsonpath=*InternalIP*	0	yard-1\t192.168.1.10\nyard-2\t192.168.1.11\nyard-3\t192.168.1.12\nyard-4\t192.168.1.13
+k3s kubectl get nodes -l * -o jsonpath=*	0	yard-1\nyard-3
+k3s kubectl get nodes -o jsonpath=*allocatable.memory*	0	yard-1\tarm64\tTrue\t8031888Ki\ttrue\nyard-2\tarm64\tTrue\t8031888Ki\t\nyard-3\tamd64\tTrue\t16110524Ki\ttrue\nyard-4\tarm64\tTrue\t3884208Ki\t
+k3s kubectl get nodes -o jsonpath=*	0	yard-1\nyard-2\nyard-3\nyard-4
+k3s kubectl get namespace ai-inference*	0	ai-inference   Active   6d
+k3s kubectl get namespace *	1	Error from server (NotFound): namespaces not found
+k3s kubectl get pods -n ai-inference -o wide	0	@ai-pods-wide.txt
+k3s kubectl get pods -n ai-inference -l app=ollama*	0	ollama-4kx9z\tyard-1\nollama-9wq2m\tyard-3
+k3s kubectl get svc -n ai-inference	0	NAME     TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)     AGE\nollama   ClusterIP   10.43.118.20   <none>        11434/TCP   6d
+k3s kubectl get svc ollama -n ai-inference -o jsonpath=*	0	10.43.118.20
+k3s kubectl get svc -n kube-system traefik	0	traefik   LoadBalancer
+k3s kubectl exec -n ai-inference * -- ollama list	0	@ollama-list.txt
+k3s kubectl *	0
+
+ssh-keyscan *	0	yard-5.home.arpa ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDemoDemoDemoDemoDemoDemoDemoDemoDemoDemoDemo
+ssh-keygen -F *	1
+ssh-keygen -lf -	0	256 SHA256:pJ8bDemoFingerprintN0tRealXk2qWv7mE4sLhA yard-5 (ED25519)
+ssh-keygen *	0
+ssh *	0
+scp *	0
+
+curl *github.com/*/releases/latest*	0	https://github.com/Codemanhtmlpythoncss/nodeyard/releases/tag/v0.1.0
+curl *	7	curl: (7) demo mode: no network
+
+apt-get *	0
+dnf *	0
+yum *	0
+zypper *	0
+pacman *	0
+apk *	0

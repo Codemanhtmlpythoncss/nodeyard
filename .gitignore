@@ -1,0 +1,12 @@
+# Pinned dev tools fetched by 'make deps' (tests/install-tools.sh)
+.tools/
+
+# Build output
+dist/
+
+# Editor and OS clutter
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/

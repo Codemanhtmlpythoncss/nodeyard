@@ -123,6 +123,7 @@ cluster_add_node_cmd() {
     else
         ny_die "Setting up ${target} failed (exit ${rc})." "Run 'sudo nodeyard doctor' on ${host} to see why; re-running add-node is safe."
     fi
+    return 0
 }
 
 # ny_self_bundle DEST -- a tarball of this nodeyard installation.
@@ -368,4 +369,5 @@ YAML
         ny_err "${fails} of ${total} checks failed."
         ny_hint "If the failures all involve one node's pods, that node's firewall is dropping forwarded traffic: run 'sudo nodeyard doctor --fix' on it."
     fi
+    return 0
 }

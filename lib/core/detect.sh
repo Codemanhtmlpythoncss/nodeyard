@@ -134,6 +134,7 @@ ny_detect_os() {
     else
         NY_OS_LABEL="${NY_OS_PRETTY:-${NY_OS_ID} ${NY_OS_VERSION}}"
     fi
+    return 0
 }
 
 ny_detect_pi() {
@@ -184,6 +185,7 @@ ny_detect_pkg() {
             fi
         done
     fi
+    return 0
 }
 
 ny_detect_init() {
@@ -194,6 +196,7 @@ ny_detect_init() {
     else
         NY_INIT="unknown"
     fi
+    return 0
 }
 
 ny_detect_arch() {
@@ -205,6 +208,7 @@ ny_detect_arch() {
         riscv64) NY_ARCH="riscv64" ;;
         *) NY_ARCH="$NY_ARCH_RAW" ;;
     esac
+    return 0
 }
 
 ny_detect_resources() {
@@ -224,6 +228,7 @@ ny_detect_resources() {
         c="$(systemd-detect-virt --container 2>/dev/null || true)"
         [[ -n "$c" && "$c" != none ]] && NY_CONTAINER="$c"
     fi
+    return 0
 }
 
 # ny_detect_boot_disk -- what the root filesystem lives on: sd, emmc, nvme,
@@ -271,6 +276,7 @@ ny_detect_boot_disk() {
             fi
             ;;
     esac
+    return 0
 }
 
 # ny_detect_all -- run every detector once per process.
@@ -310,6 +316,7 @@ ny_iface_kind() {
     else
         echo virtual
     fi
+    return 0
 }
 
 ny_iface_ipv4() {
@@ -357,6 +364,7 @@ ny_list_ifaces() {
         kind="$(ny_iface_kind "$name")"
         printf '%s\t%s\t%s\t%s\n' "$name" "$kind" "$(ny_iface_state "$name")" "$(ny_iface_cidr "$name")"
     done < <(ip -o link show 2>/dev/null | awk -F': ' '{sub(/@.*/, "", $2); print $2}')
+    return 0
 }
 
 ny_unit_active() {
@@ -420,4 +428,5 @@ ny_detect_firewall() {
     else
         echo none
     fi
+    return 0
 }

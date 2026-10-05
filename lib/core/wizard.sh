@@ -106,6 +106,7 @@ ny_wizard_build_args() {
                 ;;
         esac
     done
+    return 0
 }
 
 # ny_wizard_stdin SPEC -- the answer of the (single) step passed on stdin.

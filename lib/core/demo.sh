@@ -10,10 +10,10 @@
 # The sandbox lives in ${NODEYARD_DEMO_DIR:-~/.cache/nodeyard-demo}; delete it
 # (or run 'nodeyard demo reset') to start over.
 
-NY_DEMO_SHIMS=(ip systemctl nmcli netplan kubectl k3s uname hostname findmnt lsblk swapon lsmod modprobe sysctl
+NY_DEMO_SHIMS=(curl timeout ip systemctl nmcli netplan kubectl k3s uname hostname findmnt lsblk swapon lsmod modprobe sysctl
     iptables nft ufw firewall-cmd ss journalctl ping nproc systemd-detect-virt lspci nvidia-smi
     ssh scp ssh-keyscan ssh-keygen rc-service timedatectl chronyc tailscale snap docker getent
-    apt-get dnf yum zypper pacman apk ollama networkctl)
+    apt-get dnf yum zypper pacman apk flock networkctl)
 
 ny_demo_dir() {
     printf '%s\n' "${NODEYARD_DEMO_DIR:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/nodeyard-demo}"
@@ -46,7 +46,8 @@ ny_demo_setup() {
 
     export NODEYARD_DEMO=1
     export NODEYARD_ROOT="${dir}/fs"
-    export NODEYARD_SHIM_RULES="${src}/rules"
+    # NODEYARD_SHIM_RULES_EXTRA lets tests override individual answers.
+    export NODEYARD_SHIM_RULES="${NODEYARD_SHIM_RULES_EXTRA:+${NODEYARD_SHIM_RULES_EXTRA}:}${src}/rules"
     export NODEYARD_SHIM_DATA="${src}/data"
     case ":${PATH}:" in
         *":${dir}/shims:"*) ;;

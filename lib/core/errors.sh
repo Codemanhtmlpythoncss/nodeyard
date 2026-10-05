@@ -24,7 +24,14 @@ ny_die() {
         printf '  %s\n' "$(ny_color dim "Details are in ${NY_LOG_FILE}")" >&2
     fi
     NY_DIED=1
+    # In a $(...) subshell NY_DIED can't reach the main shell; $$ is still the
+    # main shell's PID there, so leave a marker for ny_on_err to find.
+    : >"$(ny_died_marker)" 2>/dev/null || true
     exit "$code"
+}
+
+ny_died_marker() {
+    printf '%s/nodeyard-died.%s\n' "${TMPDIR:-/tmp}" "$$"
 }
 
 # ny_usage_error MESSAGE [USAGE] -- a bad command line.
@@ -54,6 +61,12 @@ ny_on_err() {
     local code=$? line="${BASH_LINENO[0]:-0}" cmd="${BASH_COMMAND:-?}"
     [[ "$NY_DIED" -eq 1 || "$NY_ERR_REPORTED" -eq 1 ]] && return 0
     [[ "${BASHPID:-$$}" == "$$" ]] || return 0
+    # A ny_die inside a command substitution already explained itself.
+    if [[ -e "$(ny_died_marker)" ]]; then
+        rm -f "$(ny_died_marker)"
+        NY_DIED=1
+        return 0
+    fi
     # A command deliberately returning an exit code (e.g. 130 = cancelled)
     # is not an unexpected failure.
     [[ "$cmd" == *'NY_CMD_FN['* ]] && return 0
@@ -64,8 +77,10 @@ ny_on_err() {
     if [[ "$NY_JSON" -eq 1 ]]; then
         printf '%s\n' "$(ny_json_obj ok:=false "error:=$(ny_json_obj "message=Unexpected failure: $(ny_redact "$cmd")" "fix=Run 'sudo nodeyard doctor'" "code:=$code")")" >&"${NY_JSON_FD:-1}"
     fi
+    return 0
 }
 
 ny_on_exit() {
+    rm -f "$(ny_died_marker)" 2>/dev/null || true
     ny_cleanup_tmp
 }

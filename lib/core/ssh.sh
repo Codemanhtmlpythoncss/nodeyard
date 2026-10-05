@@ -21,6 +21,7 @@ ny_ssh_split() {
         NY_SSH_USER=""
         NY_SSH_HOST="$t"
     fi
+    return 0
 }
 
 # ny_ssh_keyname HOST PORT -- the known_hosts name for a host.
@@ -30,6 +31,7 @@ ny_ssh_keyname() {
     else
         printf '[%s]:%s\n' "$1" "$2"
     fi
+    return 0
 }
 
 ny_ssh_user_known_hosts() {
@@ -48,17 +50,19 @@ ny_ssh_trust_host() {
     local kh name
     kh="$(ny_ssh_known_hosts)"
     name="$(ny_ssh_keyname "$host" "$port")"
-    mkdir -p -- "$(ny_ssh_dir)"
-    chmod 0700 -- "$(ny_ssh_dir)"
-    touch -- "$kh"
+    if [[ "$NY_DRY_RUN" -ne 1 ]]; then
+        mkdir -p "$(ny_ssh_dir)"
+        chmod 0700 "$(ny_ssh_dir)"
+        touch "$kh"
+    fi
 
-    if ssh-keygen -F "$name" -f "$kh" >/dev/null 2>&1; then
+    if [[ -f "$kh" ]] && ssh-keygen -F "$name" -f "$kh" >/dev/null 2>&1; then
         return 0
     fi
     local ukh
     ukh="$(ny_ssh_user_known_hosts)"
     if [[ -z "$expected" && -r "$ukh" ]] && ssh-keygen -F "$name" -f "$ukh" >/dev/null 2>&1; then
-        ssh-keygen -F "$name" -f "$ukh" | grep -v '^#' >>"$kh"
+        [[ "$NY_DRY_RUN" -eq 1 ]] || ssh-keygen -F "$name" -f "$ukh" | grep -v '^#' >>"$kh"
         ny_vlog "trusting ${name}: already in ${ukh}"
         return 0
     fi
@@ -89,6 +93,10 @@ ny_ssh_trust_host() {
         fi
         ny_ui_yesno "Trust this host key for ${host}?" n ||
             ny_die "Host key not trusted; nothing was changed on ${host}." "" "$NY_E_CANCELLED"
+    fi
+    if [[ "$NY_DRY_RUN" -eq 1 ]]; then
+        ny_info "[dry-run] would trust the SSH host key of ${host} (${fp_main})."
+        return 0
     fi
     printf '%s\n' "$scanned" | grep -v '^#' >>"$kh"
     ny_ok "Trusted the SSH host key of ${host} (${fp_main})."

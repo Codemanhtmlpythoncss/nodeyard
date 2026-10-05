@@ -66,6 +66,7 @@ firewall_status_cmd() {
         nftables) nft list ruleset 2>/dev/null | head -n 80 || true ;;
         iptables) iptables -S 2>/dev/null || true ;;
     esac
+    return 0
 }
 
 firewall_open_cmd_help() {
@@ -113,4 +114,5 @@ firewall_disable_cmd() {
         firewalld) ny_service_disable firewalld --now ;;
         *) ny_info "No ufw or firewalld firewall is active (found: ${fw})." ;;
     esac
+    return 0
 }

@@ -14,13 +14,18 @@ ny_journal_dir() {
     printf '%s/journal\n' "$NY_STATE"
 }
 
-# ny_journal_txn -- the current transaction id, created on first use.
+# ny_journal_txn_init -- create the current transaction id. Must run in the
+# main shell (not inside $(...)), so every change shares one id.
+ny_journal_txn_init() {
+    [[ -n "$NY_TXN" ]] && return 0
+    local slug="${NY_CMD_PATH// /-}"
+    slug="${slug//[^a-zA-Z0-9-]/}"
+    NY_TXN="$(printf '%(%Y%m%d-%H%M%S)T' -1)-$$${slug:+-$slug}"
+}
+
+# ny_journal_txn -- print the current transaction id.
 ny_journal_txn() {
-    if [[ -z "$NY_TXN" ]]; then
-        local slug="${NY_CMD_PATH// /-}"
-        slug="${slug//[^a-zA-Z0-9-]/}"
-        NY_TXN="$(printf '%(%Y%m%d-%H%M%S)T' -1)-$$${slug:+-$slug}"
-    fi
+    ny_journal_txn_init
     printf '%s\n' "$NY_TXN"
 }
 
@@ -29,12 +34,14 @@ ny_journal_ensure() {
     dir="$(ny_journal_dir)"
     if [[ ! -d "$dir" ]]; then
         mkdir -p -- "$dir/files"
-        chmod 0700 -- "$dir"
+        chmod 0700 "$dir"
     fi
+    return 0
 }
 
 # ny_journal_append JSON -- add one entry (fields: op, path, ...).
 ny_journal_append() {
+    ny_journal_txn_init
     ny_journal_ensure
     local entry="$1"
     # Prepend the common fields to the caller's object.

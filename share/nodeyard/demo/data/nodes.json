@@ -1,0 +1,193 @@
+{
+ "apiVersion": "v1",
+ "kind": "List",
+ "items": [
+  {
+   "metadata": {
+    "name": "yard-1",
+    "labels": {
+     "kubernetes.io/hostname": "yard-1",
+     "kubernetes.io/arch": "arm64",
+     "node-role.kubernetes.io/control-plane": "true",
+     "node-role.kubernetes.io/etcd": "true",
+     "node-role.kubernetes.io/master": "true",
+     "k3smgr.io/ai": "true"
+    }
+   },
+   "status": {
+    "conditions": [
+     {
+      "type": "Ready",
+      "status": "True"
+     },
+     {
+      "type": "DiskPressure",
+      "status": "False"
+     },
+     {
+      "type": "MemoryPressure",
+      "status": "False"
+     }
+    ],
+    "addresses": [
+     {
+      "type": "InternalIP",
+      "address": "192.168.1.10"
+     },
+     {
+      "type": "Hostname",
+      "address": "yard-1"
+     }
+    ],
+    "allocatable": {
+     "memory": "8031888Ki",
+     "cpu": "4"
+    },
+    "nodeInfo": {
+     "kubeletVersion": "v1.33.4+k3s1",
+     "architecture": "arm64",
+     "osImage": "Debian GNU/Linux 12 (bookworm)"
+    }
+   }
+  },
+  {
+   "metadata": {
+    "name": "yard-2",
+    "labels": {
+     "kubernetes.io/hostname": "yard-2",
+     "kubernetes.io/arch": "arm64",
+     "node-role.kubernetes.io/control-plane": "true",
+     "node-role.kubernetes.io/etcd": "true",
+     "node-role.kubernetes.io/master": "true"
+    }
+   },
+   "status": {
+    "conditions": [
+     {
+      "type": "Ready",
+      "status": "True"
+     },
+     {
+      "type": "DiskPressure",
+      "status": "False"
+     },
+     {
+      "type": "MemoryPressure",
+      "status": "False"
+     }
+    ],
+    "addresses": [
+     {
+      "type": "InternalIP",
+      "address": "192.168.1.11"
+     },
+     {
+      "type": "Hostname",
+      "address": "yard-2"
+     }
+    ],
+    "allocatable": {
+     "memory": "8031888Ki",
+     "cpu": "4"
+    },
+    "nodeInfo": {
+     "kubeletVersion": "v1.33.4+k3s1",
+     "architecture": "arm64",
+     "osImage": "Debian GNU/Linux 12 (bookworm)"
+    }
+   }
+  },
+  {
+   "metadata": {
+    "name": "yard-3",
+    "labels": {
+     "kubernetes.io/hostname": "yard-3",
+     "kubernetes.io/arch": "amd64",
+     "node-role.kubernetes.io/control-plane": "true",
+     "node-role.kubernetes.io/etcd": "true",
+     "node-role.kubernetes.io/master": "true",
+     "k3smgr.io/ai": "true"
+    }
+   },
+   "status": {
+    "conditions": [
+     {
+      "type": "Ready",
+      "status": "True"
+     },
+     {
+      "type": "DiskPressure",
+      "status": "False"
+     },
+     {
+      "type": "MemoryPressure",
+      "status": "False"
+     }
+    ],
+    "addresses": [
+     {
+      "type": "InternalIP",
+      "address": "192.168.1.12"
+     },
+     {
+      "type": "Hostname",
+      "address": "yard-3"
+     }
+    ],
+    "allocatable": {
+     "memory": "16110524Ki",
+     "cpu": "4"
+    },
+    "nodeInfo": {
+     "kubeletVersion": "v1.33.4+k3s1",
+     "architecture": "amd64",
+     "osImage": "Ubuntu 24.04.3 LTS"
+    }
+   }
+  },
+  {
+   "metadata": {
+    "name": "yard-4",
+    "labels": {
+     "kubernetes.io/hostname": "yard-4",
+     "kubernetes.io/arch": "arm64"
+    }
+   },
+   "status": {
+    "conditions": [
+     {
+      "type": "Ready",
+      "status": "True"
+     },
+     {
+      "type": "DiskPressure",
+      "status": "False"
+     },
+     {
+      "type": "MemoryPressure",
+      "status": "False"
+     }
+    ],
+    "addresses": [
+     {
+      "type": "InternalIP",
+      "address": "192.168.1.13"
+     },
+     {
+      "type": "Hostname",
+      "address": "yard-4"
+     }
+    ],
+    "allocatable": {
+     "memory": "3884208Ki",
+     "cpu": "4"
+    },
+    "nodeInfo": {
+     "kubeletVersion": "v1.33.4+k3s1",
+     "architecture": "arm64",
+     "osImage": "Debian GNU/Linux 12 (bookworm)"
+    }
+   }
+  }
+ ]
+}

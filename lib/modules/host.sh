@@ -158,6 +158,7 @@ host_preflight_ports() {
         ny_info "Disabling Traefik and ServiceLB for this install to avoid the clash (pass --keep-ingress to override)."
         HOST_DISABLE_INGRESS=1
     fi
+    return 0
 }
 
 host_forward_policy_blocking() {

@@ -46,6 +46,7 @@ backup_snapshot_list_cmd() {
         printf 'No etcd snapshots (this server uses SQLite). SQLite copies:\n'
         ls -lh "$(ny_path "$BACKUP_SQLITE_DIR")"/k3s-sqlite-*.tar.gz 2>/dev/null || printf '  (none)\n'
     fi
+    return 0
 }
 
 backup_snapshot_restore_cmd_help() {

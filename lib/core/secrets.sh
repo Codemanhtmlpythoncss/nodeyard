@@ -53,6 +53,7 @@ ny_random_hex() {
     else
         head -c "$bytes" /dev/urandom | od -An -tx1 | tr -d ' \n'
     fi
+    return 0
 }
 
 # ny_secret_list -- "NAME<TAB>MODIFIED" for every stored secret (never values).
@@ -64,4 +65,5 @@ ny_secret_list() {
         [[ -f "$f" ]] || continue
         printf '%s\t%s\n' "$(basename -- "$f")" "$(date -r "$f" '+%Y-%m-%d %H:%M' 2>/dev/null || echo '?')"
     done
+    return 0
 }

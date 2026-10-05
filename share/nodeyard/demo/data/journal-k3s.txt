@@ -1,0 +1,4 @@
+Oct 05 09:12:01 yard-1 k3s[812]: I1005 09:12:01.204118     812 leaderelection.go:268] successfully acquired lease kube-system/k3s
+Oct 05 09:12:02 yard-1 k3s[812]: time="2026-10-05T09:12:02Z" level=info msg="Tunnel server egress proxy mode: agent"
+Oct 05 09:12:04 yard-1 k3s[812]: time="2026-10-05T09:12:04Z" level=info msg="Etcd is running on 3 members"
+Oct 05 09:30:44 yard-1 k3s[812]: time="2026-10-05T09:30:44Z" level=info msg="Saving etcd snapshot to /var/lib/rancher/k3s/server/db/snapshots"

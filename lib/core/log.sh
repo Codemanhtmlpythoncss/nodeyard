@@ -58,7 +58,7 @@ NY_LOG_READY=0
 ny_log_init() {
     [[ "$NY_LOG_READY" -eq 1 ]] && return 0
     if mkdir -p -- "$NY_LOG_DIR" 2>/dev/null; then
-        chmod 0750 -- "$NY_LOG_DIR" 2>/dev/null || true
+        chmod 0750 "$NY_LOG_DIR" 2>/dev/null || true
         if [[ ! -e "$NY_LOG_FILE" ]]; then
             (umask 027 && : >>"$NY_LOG_FILE") 2>/dev/null || true
         fi

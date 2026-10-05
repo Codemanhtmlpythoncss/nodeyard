@@ -3,6 +3,11 @@
 # NY_HOME is set. Libraries only define functions and variables; nothing
 # runs until ny_main is called.
 
+# "printf ... | ny_write_file" must run ny_write_file in this shell, so the
+# --dry-run plan and the journal see every change (needs job control off,
+# which it is for scripts).
+shopt -s lastpipe
+
 # shellcheck source=core/base.sh
 . "${NY_HOME}/lib/core/base.sh"
 # shellcheck source=core/term.sh

@@ -15,6 +15,7 @@ info_version_cmd() {
     else
         printf 'nodeyard %s\n' "$NY_VERSION"
     fi
+    return 0
 }
 
 info_help_cmd() {
@@ -25,6 +26,7 @@ info_help_cmd() {
     else
         ny_help_main
     fi
+    return 0
 }
 
 info_completion_cmd_help() {
@@ -44,6 +46,7 @@ info_completion_cmd() {
         zsh) cat "${NY_HOME}/completions/_nodeyard" ;;
         *) ny_usage_error "Say which shell: bash or zsh." "nodeyard completion bash|zsh" ;;
     esac
+    return 0
 }
 
 # info_gpu -- a short description of any GPU.
@@ -63,6 +66,7 @@ info_gpu() {
     else
         echo "none"
     fi
+    return 0
 }
 
 info_detect_cmd_help() {
@@ -151,4 +155,5 @@ info_network_cmd() {
         ts="$(ny_tailscale_ip || true)"
         printf '%s %s\n' "$(ny_color bold "Tailscale:")" "${ts:-not connected}"
     fi
+    return 0
 }

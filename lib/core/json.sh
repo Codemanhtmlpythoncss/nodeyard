@@ -67,6 +67,7 @@ ny_json_bool() {
     else
         printf 'false'
     fi
+    return 0
 }
 
 # ny_json_num VALUE -- VALUE if numeric, otherwise null.
@@ -76,4 +77,5 @@ ny_json_num() {
     else
         printf 'null'
     fi
+    return 0
 }

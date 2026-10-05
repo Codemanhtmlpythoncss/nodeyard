@@ -1,0 +1,6 @@
+NAME="Linux Mint"
+VERSION="22.1 (Xia)"
+ID=linuxmint
+ID_LIKE="ubuntu debian"
+VERSION_ID="22.1"
+PRETTY_NAME="Linux Mint 22.1"

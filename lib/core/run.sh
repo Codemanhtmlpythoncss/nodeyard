@@ -69,6 +69,7 @@ ny_run_undoable() {
 
 # ny_ensure_dir PATH [MODE] -- create a directory (recorded for undo).
 ny_ensure_dir() {
+    ny_journal_txn_init
     local path="$1" mode="${2:-0755}" real
     real="$(ny_path "$path")"
     [[ -d "$real" ]] && return 0
@@ -85,16 +86,18 @@ ny_ensure_dir() {
         p="$(dirname -- "$p")"
     done
     mkdir -p -- "$real"
-    chmod "$mode" -- "$real"
+    chmod "$mode" "$real"
     for p in "${created[@]+"${created[@]}"}"; do
         ny_journal_append "$(ny_json_obj op=mkdir "path=$p")"
     done
+    return 0
 }
 
 # ny_write_file PATH [MODE] [OWNER] < CONTENT -- write a system file atomically.
 # Idempotent: an identical file is left untouched. Secret files (mode 0600 or
 # 0400) never have their contents shown in --dry-run output.
 ny_write_file() {
+    ny_journal_txn_init
     local path="$1" mode="${2:-0644}" owner="${3:-}"
     local real tmp
     real="$(ny_path "$path")"
@@ -108,6 +111,14 @@ ny_write_file() {
             ny_vlog "unchanged: ${path}"
             return 0
         fi
+        # Same content, different permissions: only the mode changes.
+        if [[ "$NY_DRY_RUN" -eq 1 ]]; then
+            ny_plan_add chmod "Set permissions of ${path} to ${mode}" "path=$path" "mode=$mode"
+            printf '%s %s %s\n' "$(ny_color cyan "[dry-run] would set permissions of")" "$path" "to ${mode}" >&2
+            return 0
+        fi
+        ny_run_undoable chmod "$cur_mode" "$real" -- chmod "$mode" "$real"
+        return 0
     fi
 
     local secret=0
@@ -140,7 +151,7 @@ ny_write_file() {
 
     local staged="${real}.nodeyard-new.$$"
     cp -- "$tmp" "$staged"
-    chmod "$mode" -- "$staged"
+    chmod "$mode" "$staged"
     if [[ -n "$owner" ]] && ! ny_simulating; then
         chown "$owner" -- "$staged" 2>/dev/null || ny_warn "Could not set owner ${owner} on ${path}"
     fi
@@ -152,6 +163,7 @@ ny_write_file() {
 
 # ny_remove_file PATH -- remove a system file (backed up for undo).
 ny_remove_file() {
+    ny_journal_txn_init
     local path="$1" real
     real="$(ny_path "$path")"
     [[ -e "$real" || -L "$real" ]] || return 0
@@ -169,6 +181,7 @@ ny_remove_file() {
 
 # ny_symlink TARGET LINK -- create or update a symlink (recorded for undo).
 ny_symlink() {
+    ny_journal_txn_init
     local target="$1" link="$2" real
     real="$(ny_path "$link")"
     if [[ -L "$real" && "$(readlink -- "$real")" == "$target" ]]; then

@@ -58,13 +58,28 @@ k3s_load_state() {
 k3s_save_state() {
     local self
     self="$(ny_self_name)"
+    ny_cfg_batch_begin
     ny_cfg_set node "$self" role "$1"
     if [[ -n "$2" ]]; then ny_cfg_set node "$self" interface "$2"; else ny_cfg_unset node "$self" interface; fi
     [[ -n "$3" ]] && ny_cfg_set node "$self" node-ip "$3"
     if [[ -n "$4" ]]; then ny_cfg_set node "$self" server "$4"; else ny_cfg_unset node "$self" server; fi
     [[ -n "${5:-}" ]] && ny_cfg_set cluster "" k3s-channel "$5"
     [[ -n "${6:-}" ]] && ny_cfg_set node "$self" tls-san "$6"
-    return 0
+    [[ -n "${7:-}" ]] && ny_cfg_set node "$self" init "$7"
+    [[ -n "${8:-}" ]] && ny_cfg_set node "$self" allow-workloads "$8"
+    ny_cfg_batch_commit
+}
+
+# k3s_guard_role WANTED -- refuse to turn an existing server into an agent
+# (or the reverse): k3s keeps different state for each, so that needs a
+# clean uninstall first.
+k3s_guard_role() {
+    local want="$1"
+    ny_k3s_installed || return 0
+    [[ -n "$K3S_ROLE" && "$K3S_ROLE" != "$want" ]] || return 0
+    local -A names=([server]="server" [agent]="worker")
+    ny_die "This machine is already a k3s ${names[$K3S_ROLE]:-$K3S_ROLE}; it can't be turned into a ${names[$want]:-$want} in place." \
+        "Remove k3s first (sudo nodeyard uninstall k3s), then run this again." "$NY_E_PRECONDITION"
 }
 
 k3s_service_name() {
@@ -239,6 +254,8 @@ k3s_install_server_cmd() {
         [[ "$l" == --node-taint ]] || ny_valid_taint "$l" || ny_usage_error "$NY_VALID_MSG"
     done
 
+    k3s_load_state
+    k3s_guard_role server
     ny_deps_ensure_feature core k3s
     host_preflight_ports "$keep_ingress"
     [[ "$HOST_DISABLE_INGRESS" -eq 1 ]] && disable+=(--disable traefik --disable servicelb)
@@ -263,9 +280,8 @@ k3s_install_server_cmd() {
         return 0
     }
 
-    k3s_save_state server "$iface" "$node_ip" "" "$channel" "$san_csv"
-    ny_cfg_set node "$(ny_self_name)" init "$([[ $cluster_init -eq 1 ]] && echo true || echo false)"
-    ny_cfg_set node "$(ny_self_name)" allow-workloads "$([[ $allow -eq 1 ]] && echo true || echo false)"
+    k3s_save_state server "$iface" "$node_ip" "" "$channel" "$san_csv" \
+        "$([[ $cluster_init -eq 1 ]] && echo true || echo false)" "$([[ $allow -eq 1 ]] && echo true || echo false)"
 
     host_install_prereqs
     k3s_network_args "$iface" server
@@ -309,7 +325,9 @@ k3s_install_server_cmd() {
         ny_run "$(ny_path "$NY_K3S_BIN")" kubectl taint nodes "$(hostname)" \
             node-role.kubernetes.io/control-plane:NoSchedule- node-role.kubernetes.io/master:NoSchedule- >/dev/null 2>&1 || true
     fi
-    if ny_wait_node_ready "$(hostname)"; then
+    if [[ "$NY_DRY_RUN" -eq 1 ]]; then
+        return 0
+    elif ny_wait_node_ready "$(hostname)"; then
         ny_ok "k3s server installed and this node is Ready."
     else
         ny_warn "k3s server installed, but the node hasn't reported Ready yet. If this persists: sudo nodeyard doctor"
@@ -320,6 +338,7 @@ k3s_install_server_cmd() {
     if [[ "$HOST_DISABLE_INGRESS" -eq 1 ]]; then
         ny_hint "Traefik and ServiceLB were disabled because ports 80/443 were taken. Re-run with --keep-ingress to change that."
     fi
+    return 0
 }
 
 k3s_join_common_args() {
@@ -416,6 +435,8 @@ k3s_join() {
     [[ -z "$K3S_J_CHANNEL" ]] || ny_valid_enum "$K3S_J_CHANNEL" stable latest testing || ny_usage_error "$NY_VALID_MSG"
     [[ -z "$K3S_J_VERSION" ]] || ny_valid_k3s_version "$K3S_J_VERSION" || ny_usage_error "$NY_VALID_MSG"
 
+    k3s_load_state
+    k3s_guard_role "$mode"
     ny_deps_ensure_feature core k3s
     k3s_preflight_join "$K3S_J_SERVER"
 
@@ -471,6 +492,7 @@ k3s_join() {
     fi
     ny_wait_service "$svc" || ny_die "${svc}.service did not start." "Check: sudo journalctl -u ${svc} -n 100 --no-pager, then: sudo nodeyard doctor"
     firewall_open_k3s "$mode"
+    [[ "$NY_DRY_RUN" -eq 1 ]] && return 0
     ny_ok "Joined ${K3S_J_SERVER} as a ${what}."
 }
 
@@ -559,7 +581,7 @@ k3s_token_cmd() {
     default_ip="$(ny_best_ip)"
     for a in "${addrs[@]+"${addrs[@]}"}"; do
         local ifn="${a%%:*}" ip="${a#*:}" note=""
-        [[ "$ip" == "$default_ip" ]] && note=" $(ny_color dim "(this server's default-route address; often Wi-Fi/LAN rather than a dedicated cluster NIC)")"
+        [[ "$ip" == "$default_ip" ]] && note=" $(ny_color dim "(default route)")"
         printf '\n-- via %s (%s)%s --\n' "$ifn" "$ip" "$note"
         printf '  Worker:            sudo nodeyard install worker --server https://%s:6443 --token-file /root/k3s-token --interface eth0\n' "$ip"
         printf '  Additional server: sudo nodeyard install join-master --server https://%s:6443 --token-file /root/k3s-token --interface eth0\n' "$ip"
@@ -622,6 +644,7 @@ k3s_status_cmd() {
     elif [[ "$NY_VERBOSE" -eq 1 ]] && ny_k3s_installed; then
         systemctl --no-pager --full status "$svc" 2>/dev/null || true
     fi
+    return 0
 }
 
 k3s_nodes_table() {
@@ -664,16 +687,30 @@ k3s_service_action() {
             *) ny_run systemctl "$action" "$svc" ;;
         esac
     fi
+    return 0
 }
 
-k3s_start_cmd() { k3s_service_action start && ny_ok "$(k3s_service_name) started."; }
+k3s_start_cmd() {
+    k3s_service_action start
+    ny_ok "$(k3s_service_name) started."
+}
 k3s_stop_cmd() {
     ny_confirm "Stop k3s on this node? Its workloads stop until it is started again." y || return 0
-    k3s_service_action stop && ny_ok "$(k3s_service_name) stopped."
+    k3s_service_action stop
+    ny_ok "$(k3s_service_name) stopped."
 }
-k3s_restart_cmd() { k3s_service_action restart && ny_ok "$(k3s_service_name) restarted."; }
-k3s_enable_boot_cmd() { k3s_service_action enable && ny_ok "$(k3s_service_name) will start at boot."; }
-k3s_disable_boot_cmd() { k3s_service_action disable && ny_ok "$(k3s_service_name) will not start at boot."; }
+k3s_restart_cmd() {
+    k3s_service_action restart
+    ny_ok "$(k3s_service_name) restarted."
+}
+k3s_enable_boot_cmd() {
+    k3s_service_action enable
+    ny_ok "$(k3s_service_name) will start at boot."
+}
+k3s_disable_boot_cmd() {
+    k3s_service_action disable
+    ny_ok "$(k3s_service_name) will not start at boot."
+}
 
 k3s_logs_cmd_help() {
     cat <<'HELP'
@@ -708,6 +745,7 @@ k3s_logs_cmd() {
     else
         tail -n "$lines" "$NY_LOG_FILE"
     fi
+    return 0
 }
 
 k3s_upgrade_cmd_help() {
@@ -754,6 +792,7 @@ k3s_upgrade_cmd() {
     }
     k3s_run_installer "${env[@]}"
     [[ "$NY_INIT" == systemd ]] && ny_run systemctl restart "$svc"
+    [[ "$NY_DRY_RUN" -eq 1 ]] && return 0
     ny_wait_service "$svc" || ny_die "${svc} did not come back after the upgrade." "Check: sudo journalctl -u ${svc} -n 100 --no-pager"
     ny_ok "k3s upgraded: ${before:-?} -> $(k3s_version)"
 }
@@ -782,6 +821,7 @@ k3s_current_install_env() {
             printf '%s=%s\n' "$k" "$v"
         done <"$envf"
     fi
+    return 0
 }
 
 k3s_kubeconfig_cmd_help() {

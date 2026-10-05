@@ -1,0 +1,20 @@
+[Unit]
+Description=Lightweight Kubernetes
+Documentation=https://k3s.io
+After=network-online.target
+
+[Service]
+Type=notify
+EnvironmentFile=-/etc/systemd/system/k3s.service.env
+ExecStart=/usr/local/bin/k3s \
+    server \
+	'--cluster-init' \
+	'--node-ip' \
+	'192.168.1.10' \
+	'--flannel-iface' \
+	'eth0' \
+	'--advertise-address' \
+	'192.168.1.10' \
+
+[Install]
+WantedBy=multi-user.target
