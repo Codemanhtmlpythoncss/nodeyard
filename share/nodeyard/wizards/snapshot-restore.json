@@ -1,0 +1,13 @@
+{
+  "id": "snapshot-restore",
+  "title": "Restore the cluster from a snapshot",
+  "intro": "DESTRUCTIVE: k3s stops and the cluster state goes back to the snapshot. Anything created since is lost. List snapshots with 'nodeyard snapshot list'.",
+  "command": ["snapshot", "restore"],
+  "success": "Restore complete.",
+  "steps": [
+    {
+      "id": "snapshot", "type": "input", "flag_mode": "positional", "default": "",
+      "label": "Snapshot name or path"
+    }
+  ]
+}

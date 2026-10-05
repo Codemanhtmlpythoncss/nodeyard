@@ -1,0 +1,47 @@
+{
+  "id": "install-master",
+  "title": "Create a cluster",
+  "intro": "This machine becomes the first k3s server (control plane). You can add more machines afterwards.",
+  "command": ["install", "master"],
+  "success": "Your cluster is up. Next: add machines from 'Install on other machines', or run 'nodeyard token' on this server.",
+  "steps": [
+    {
+      "id": "ha", "type": "yesno", "default": "yes", "flag": "--ha", "flag_mode": "bool",
+      "label": "Set it up for high availability (embedded etcd)?",
+      "help": "Choose yes if you will have 3 or more servers: the cluster then survives one failing. With fewer machines it costs a little memory and gains nothing."
+    },
+    {
+      "id": "worker", "type": "yesno", "default": "yes", "flag": "--worker", "flag_mode": "bool",
+      "label": "Run workloads on this server too?",
+      "help": "Yes is best for small clusters. No keeps this machine as a dedicated control plane."
+    },
+    {
+      "id": "interface", "type": "choose", "flag": "--interface",
+      "label": "Which network interface should cluster traffic use?",
+      "help": "Pick the wired interface connected to your switch.",
+      "options": [{"value": "", "label": "Automatic (the one with the default route)"}],
+      "options_from": {
+        "command": ["detect"],
+        "query": ".network.interfaces[] | select(.kind != \"virtual\" and .address != null)",
+        "value": ".name",
+        "label": ".name + \"  \" + .address + \"  (\" + .kind + \", \" + .state + \")\""
+      },
+      "default_from": {"command": ["detect"], "query": ".network.primary_interface"}
+    },
+    {
+      "id": "channel", "type": "choose", "default": "stable", "flag": "--channel",
+      "label": "Which k3s release?",
+      "options": [
+        {"value": "stable", "label": "Stable (recommended)"},
+        {"value": "latest", "label": "Latest"},
+        {"value": "", "label": "A specific version"}
+      ]
+    },
+    {
+      "id": "version", "type": "input", "flag": "--version", "validate": "k3s-version",
+      "label": "k3s version", "default": "",
+      "help": "Exact release, e.g. v1.33.4+k3s1 (see github.com/k3s-io/k3s/releases).",
+      "when": {"step": "channel", "equals": ""}
+    }
+  ]
+}

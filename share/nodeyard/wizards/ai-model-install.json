@@ -1,0 +1,17 @@
+{
+  "id": "ai-model-install",
+  "title": "Download a model",
+  "intro": "Downloads a model from the Ollama library onto every AI node (or one node).",
+  "command": ["ai", "model", "install"],
+  "success": "Model downloaded.",
+  "steps": [
+    {
+      "id": "model", "type": "input", "flag_mode": "positional", "default": "llama3.2",
+      "label": "Model name", "help": "e.g. llama3.2, qwen2.5:7b, gemma3:4b (see ollama.com/library). Small models (1-4B) suit Raspberry Pis."
+    },
+    {
+      "id": "node", "type": "input", "flag": "--node", "default": "",
+      "label": "Only on this node (leave empty for every AI node)"
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "id": "install-join-master",
+  "title": "Join a cluster as an additional server",
+  "intro": "This machine becomes another control-plane server. The cluster must have been created with high availability (embedded etcd); 3 servers survive one failing.",
+  "command": [
+    "install",
+    "join-master"
+  ],
+  "success": "This machine is now a server in the cluster.",
+  "steps": [
+    {
+      "id": "server",
+      "type": "input",
+      "flag": "--server",
+      "validate": "url",
+      "label": "Server address",
+      "default": "https://192.168.1.10:6443",
+      "help": "An existing server: https://ADDRESS:6443"
+    },
+    {
+      "id": "token",
+      "type": "secret",
+      "flag": "--token-stdin",
+      "flag_mode": "stdin",
+      "label": "Join token (shown by 'sudo nodeyard token --reveal' on the server)"
+    },
+    {
+      "id": "interface",
+      "type": "choose",
+      "flag": "--interface",
+      "label": "Which network interface should cluster traffic use?",
+      "options": [
+        {
+          "value": "",
+          "label": "Automatic (the one that routes to the server)"
+        }
+      ],
+      "options_from": {
+        "command": [
+          "detect"
+        ],
+        "query": ".network.interfaces[] | select(.kind != \"virtual\" and .address != null)",
+        "value": ".name",
+        "label": ".name + \"  \" + .address + \"  (\" + .kind + \", \" + .state + \")\""
+      }
+    },
+    {
+      "id": "version",
+      "type": "input",
+      "flag": "--version",
+      "label": "k3s version (leave empty for the stable release)",
+      "default": "",
+      "help": "Use exactly the same version as the existing servers."
+    }
+  ]
+}

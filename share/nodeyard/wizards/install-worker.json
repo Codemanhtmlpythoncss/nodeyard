@@ -1,0 +1,34 @@
+{
+  "id": "install-worker",
+  "title": "Join a cluster as a worker",
+  "intro": "This machine joins an existing cluster and runs workloads. You need the server's address and its join token (run 'sudo nodeyard token' on the server).",
+  "command": ["install", "worker"],
+  "success": "This machine has joined the cluster.",
+  "steps": [
+    {
+      "id": "server", "type": "input", "flag": "--server", "validate": "url",
+      "label": "Server address", "default": "https://192.168.1.10:6443",
+      "help": "The cluster's API address: https://ADDRESS:6443 (use the virtual IP if your cluster has one)."
+    },
+    {
+      "id": "token", "type": "secret", "flag": "--token-stdin", "flag_mode": "stdin",
+      "label": "Join token (shown by 'sudo nodeyard token --reveal' on the server)"
+    },
+    {
+      "id": "interface", "type": "choose", "flag": "--interface",
+      "label": "Which network interface should cluster traffic use?",
+      "options": [{"value": "", "label": "Automatic (the one that routes to the server)"}],
+      "options_from": {
+        "command": ["detect"],
+        "query": ".network.interfaces[] | select(.kind != \"virtual\" and .address != null)",
+        "value": ".name",
+        "label": ".name + \"  \" + .address + \"  (\" + .kind + \", \" + .state + \")\""
+      }
+    },
+    {
+      "id": "version", "type": "input", "flag": "--version",
+      "label": "k3s version (leave empty for the stable release)", "default": "",
+      "help": "Use the same version as the servers (shown by 'nodeyard status' there). A worker must never be newer than the servers."
+    }
+  ]
+}

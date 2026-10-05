@@ -1,0 +1,14 @@
+# Pinned third-party downloads. Every file nodeyard downloads at runtime is
+# listed here with the SHA-256 of the official release file; nodeyard refuses
+# a download whose checksum doesn't match.
+#
+# Checksums are taken from the project's published checksum file where one
+# exists (noted below), otherwise computed from the official release asset
+# when the pin was added. To bump a pin, update version, sha256 and url
+# together and note it in CHANGELOG.md.
+#
+# name  version  platform     sha256                                                            url
+
+# gum: interactive terminal UI (github.com/charmbracelet/gum, from checksums.txt)
+gum     2.0.2    linux-amd64  d842e06d93dbed90af48cb8dd10698db6f22e331fc40346bb37bbc753109edc2  https://github.com/charmbracelet/gum/releases/download/v2.0.2/gum_2.0.2_Linux_x86_64.tar.gz
+gum     2.0.2    linux-arm64  8ebf8b54ec1e8c81f2bb58b59ff9b70998186a4d11375f0cf357b80e0ccfa1d5  https://github.com/charmbracelet/gum/releases/download/v2.0.2/gum_2.0.2_Linux_arm64.tar.gz

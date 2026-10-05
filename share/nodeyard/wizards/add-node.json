@@ -1,0 +1,31 @@
+{
+  "id": "add-node",
+  "title": "Add a machine over SSH",
+  "intro": "nodeyard copies itself to another Linux machine over SSH, installs there, and joins it to this cluster. You'll confirm the machine's SSH fingerprint and may be asked for its passwords.",
+  "command": ["add-node"],
+  "success": "The machine has joined the cluster.",
+  "steps": [
+    {
+      "id": "kind", "type": "choose", "flag_mode": "positional", "default": "worker",
+      "label": "Add it as",
+      "options": [
+        {"value": "worker", "label": "A worker (runs workloads)"},
+        {"value": "master", "label": "An additional server (needs a cluster created with HA)"}
+      ]
+    },
+    {
+      "id": "ssh", "type": "input", "flag": "--ssh",
+      "label": "SSH login for the machine (user@address)", "default": "pi@192.168.1.11",
+      "help": "The user must be able to use sudo on that machine."
+    },
+    {
+      "id": "port", "type": "input", "flag": "--port", "validate": "port", "default": "22",
+      "label": "SSH port"
+    },
+    {
+      "id": "interface", "type": "input", "flag": "--interface",
+      "label": "Its cluster network interface (leave empty for automatic)", "default": "",
+      "help": "e.g. eth0 or end0 on a Raspberry Pi, enp1s0 on many PCs. Automatic uses the interface that routes to this server."
+    }
+  ]
+}

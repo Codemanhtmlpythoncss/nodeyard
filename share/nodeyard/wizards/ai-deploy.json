@@ -1,0 +1,21 @@
+{
+  "id": "ai-deploy",
+  "title": "Run Ollama across the cluster",
+  "intro": "Ollama runs on each chosen node behind one service. Every node keeps its own copy of each model, so models must fit on the smallest node.",
+  "command": ["ai", "deploy"],
+  "success": "Ollama is running. Download a model next (AI workloads > Download a model).",
+  "steps": [
+    {
+      "id": "min_mem", "type": "input", "flag": "--min-memory-gb", "validate": "int:0:4096", "default": "0",
+      "label": "Skip nodes with less memory than (GiB, 0 = use every node)"
+    },
+    {
+      "id": "expose", "type": "yesno", "default": "no", "flag_mode": "none",
+      "label": "Also make the API reachable from your network (not just inside the cluster)?"
+    },
+    {
+      "id": "nodeport", "type": "input", "flag": "--nodeport", "validate": "int:30000:32767", "default": "31434",
+      "label": "Port on every node's address", "when": {"step": "expose", "equals": "yes"}
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "id": "k3s-upgrade",
+  "title": "Upgrade k3s on this node",
+  "intro": "Upgrade servers before workers; a worker must never run a newer k3s than the servers. Workloads on this node restart.",
+  "command": ["upgrade"],
+  "success": "k3s upgraded.",
+  "steps": [
+    {
+      "id": "channel", "type": "choose", "default": "stable", "flag": "--channel",
+      "label": "Upgrade to",
+      "options": [
+        {"value": "stable", "label": "The latest stable release"},
+        {"value": "latest", "label": "The latest release"},
+        {"value": "", "label": "A specific version"}
+      ]
+    },
+    {
+      "id": "version", "type": "input", "flag": "--version", "validate": "k3s-version", "default": "",
+      "label": "k3s version (e.g. v1.33.4+k3s1)", "when": {"step": "channel", "equals": ""}
+    }
+  ]
+}
