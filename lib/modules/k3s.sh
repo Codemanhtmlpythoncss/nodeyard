@@ -184,8 +184,94 @@ k3s_run_installer() {
     tmp="$(ny_mktemp)"
     ny_step "Running the official k3s installer (${K3S_INSTALLER_URL})"
     ny_download "$K3S_INSTALLER_URL" "$tmp"
-    ny_run env "$@" sh "$tmp" ||
-        ny_die "The k3s installer failed." "See the output above, then: sudo journalctl -u k3s -u k3s-agent -n 100 --no-pager / sudo nodeyard doctor"
+    # The installer only installs; nodeyard starts the service itself so that
+    # if it won't start, it can read the log and explain why.
+    ny_run env INSTALL_K3S_SKIP_START=true "$@" sh "$tmp" ||
+        ny_die "The k3s installer failed." "See the output above, then run this command again (it is safe to repeat). 'sudo nodeyard doctor' checks the usual problems."
+}
+
+# k3s_start_service SERVICE -- enable and (re)start a k3s service. If it won't
+# start or stay up, show why in plain English and stop.
+k3s_start_service() {
+    local svc="$1"
+    if [[ "$NY_INIT" == systemd ]]; then
+        ny_run systemctl enable "$svc" >/dev/null 2>&1 || true
+        if ! ny_run systemctl restart "$svc"; then
+            k3s_diagnose "$svc"
+            ny_die "${svc}.service failed to start." "Read the cause above and fix it, then run the same command again (it is safe to repeat)."
+        fi
+    fi
+    if ! ny_wait_service "$svc"; then
+        k3s_diagnose "$svc"
+        ny_die "${svc}.service did not stay running." "Read the cause above and fix it, then run the same command again (it is safe to repeat)."
+    fi
+    return 0
+}
+
+# k3s_diagnose SERVICE -- show the log lines that explain a failed start, then
+# name the likely cause(s) and the fix. Everything shown is redacted.
+k3s_diagnose() {
+    local svc="$1" log="" shown line
+    if have journalctl; then
+        log="$(journalctl -u "$svc" -n 80 --no-pager 2>/dev/null || true)"
+    fi
+    if [[ -z "$log" && -r "$NY_LOG_FILE" ]]; then
+        log="$(tail -n 40 "$NY_LOG_FILE" 2>/dev/null || true)"
+    fi
+    printf '\n' >&2
+    ny_err "${svc}.service would not start. Its log says:"
+    shown="$(grep -iE 'level=(error|fatal)|error|fatal|failed|refused|denied|rejected|unauthorized|x509|cgroup|nm-cloud|exec format|no such|not found|unable|cannot|can.t' <<<"$log" | tail -n 12 || true)"
+    [[ -n "$shown" ]] || shown="$(tail -n 10 <<<"$log")"
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && printf '    %s\n' "$(ny_redact "$line")" >&2
+    done <<<"$shown"
+
+    local found=0 server="${K3S_J_SERVER:-${K3S_SERVER_URL:-}}"
+    k3s_cause() { # PATTERN CAUSE FIX...
+        local pat="$1" cause="$2"
+        shift 2
+        grep -qiE "$pat" <<<"$log" || return 0
+        found=1
+        printf '\n' >&2
+        ny_warn "Likely cause: ${cause}"
+        local fix
+        for fix in "$@"; do ny_hint "$fix"; done
+        return 0
+    }
+    k3s_cause 'nm-cloud-setup' "NetworkManager's cloud-setup service is enabled, and k3s refuses to run beside it." \
+        "Fix: sudo systemctl disable --now nm-cloud-setup.service nm-cloud-setup.timer" "then reboot, and run the command again."
+    k3s_cause 'cgroup.*(memory|not found|controller)|memory.*cgroup|failed to find memory' "the kernel's memory cgroup is switched off (common on Raspberry Pi OS)." \
+        "Fix: sudo nodeyard doctor --fix   (edits the boot command line)" "then: sudo reboot, and run the command again."
+    k3s_cause 'node password rejected|duplicate hostname|password.*(does not match|rejected)' "the server already has a node with this machine's name, registered with a different password." \
+        "Fix: give this machine a unique hostname: sudo hostnamectl set-hostname NEW-NAME" \
+        "or, on a server, remove the old node: sudo nodeyard remove-node NAME   (and here: sudo rm /etc/rancher/node/password)"
+    k3s_cause 'unauthorized|invalid (cluster )?token|bad (cluster )?token' "the server did not accept the join token." \
+        "Fix: get the current token on a server (sudo nodeyard token --reveal) and use exactly that."
+    k3s_cause 'failed to get CA certs|connection refused|no route to host|i/o timeout|dial tcp|network is unreachable|no such host|context deadline exceeded' "this machine can't reach the k3s server${server:+ at ${server}}." \
+        "Fix: on the server, check the firewall allows 6443/tcp: sudo nodeyard firewall status" \
+        "and from here: curl -k ${server:-https://SERVER:6443}/ping   (should print 'pong')" \
+        "Also check both machines are on the same network and the server is running: sudo nodeyard status"
+    k3s_cause 'address already in use' "another program is already using a port k3s needs (6443, 10250...)." \
+        "Fix: find it with: sudo ss -ltnp | grep -E ':(6443|10250|2379|2380) '"
+    k3s_cause 'flannel.*(interface|iface|not found|no such)|(interface|iface).*not found|could not find (the )?(interface|iface)' "k3s could not use the network interface it was given." \
+        "Fix: list this machine's interfaces with: ip -br addr" "then run the command again with --interface set to the wired one."
+    k3s_cause 'x509|certificate has expired|not yet valid|clock (skew|drift)' "a certificate problem, usually because this machine's clock is wrong." \
+        "Fix: sudo nodeyard doctor --fix   (turns on time sync), check with: timedatectl"
+    k3s_cause '(iptables|ip6tables|nftables|nf_tables).*(not found|failed|error|unable|no such|cannot)' "a firewall tool or kernel module k3s needs is missing or failing." \
+        "Fix: install iptables (or nftables) with your package manager, then: sudo nodeyard doctor --fix"
+    k3s_cause 'exec format error' "the k3s binary does not match this machine's CPU." \
+        "Fix: remove it and install again: sudo nodeyard uninstall k3s   (check the CPU with: uname -m)"
+    k3s_cause 'flag provided but not defined|unknown flag|unknown shorthand' "k3s rejected one of the options nodeyard gave it." \
+        "Fix: please report this at https://github.com/${NY_REPO}/issues with the lines above."
+    if [[ "$found" -eq 0 ]]; then
+        printf '\n' >&2
+        ny_warn "No known cause matched. The log lines above are the reason."
+    fi
+    printf '\n' >&2
+    ny_hint "Full log:  sudo journalctl -u ${svc} -n 100 --no-pager"
+    ny_hint "Checks:    sudo nodeyard doctor"
+    ny_hint "Start over on this machine (removes k3s): sudo nodeyard uninstall k3s"
+    return 0
 }
 
 k3s_install_server_cmd_help() {
@@ -387,11 +473,7 @@ k3s_install_server_cmd() {
     ny_k3s_installed && ny_info "k3s is already installed; the installer will reconcile its settings (safe to repeat)."
     k3s_run_installer "${env[@]}"
     K3S_ROLE="server"
-    if [[ "$NY_INIT" == systemd ]]; then
-        ny_run systemctl enable k3s >/dev/null 2>&1 || true
-        ny_run systemctl restart k3s
-    fi
-    ny_wait_service k3s || ny_die "k3s.service did not start." "Check: sudo journalctl -u k3s -n 100 --no-pager, then: sudo nodeyard doctor"
+    k3s_start_service k3s
 
     firewall_open_k3s server
 
@@ -634,11 +716,7 @@ k3s_join() {
     local svc="k3s"
     [[ "$mode" == agent ]] && svc="k3s-agent"
     K3S_ROLE="$mode"
-    if [[ "$NY_INIT" == systemd ]]; then
-        ny_run systemctl enable "$svc" >/dev/null 2>&1 || true
-        ny_run systemctl restart "$svc"
-    fi
-    ny_wait_service "$svc" || ny_die "${svc}.service did not start." "Check: sudo journalctl -u ${svc} -n 100 --no-pager, then: sudo nodeyard doctor"
+    k3s_start_service "$svc"
     firewall_open_k3s "$mode"
     [[ "$NY_DRY_RUN" -eq 1 ]] && return 0
     ny_ok "Joined ${K3S_J_SERVER} as a ${what}."
@@ -964,9 +1042,8 @@ k3s_upgrade_cmd() {
         return 0
     }
     k3s_run_installer "${env[@]}"
-    [[ "$NY_INIT" == systemd ]] && ny_run systemctl restart "$svc"
+    k3s_start_service "$svc"
     [[ "$NY_DRY_RUN" -eq 1 ]] && return 0
-    ny_wait_service "$svc" || ny_die "${svc} did not come back after the upgrade." "Check: sudo journalctl -u ${svc} -n 100 --no-pager"
     ny_ok "k3s upgraded: ${before:-?} -> $(k3s_version)"
 }
 

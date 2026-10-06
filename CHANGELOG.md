@@ -9,6 +9,13 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- When a k3s service won't start after `install` or `upgrade`, nodeyard
+  now reads its log, shows the lines that matter and names the likely
+  cause with a fix (cloud-setup service, memory cgroup, duplicate node
+  name, wrong token, server unreachable, port in use, wrong interface,
+  clock trouble, missing firewall tools). The k3s installer no longer
+  starts the service itself, so a failed start is explained instead of
+  ending in "the installer failed".
 - `add-node --become auto|sudo|su`: become root on the new machine with
   sudo, or with su and the root password (for machines without sudo).
   Automatic by default.
