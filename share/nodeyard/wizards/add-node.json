@@ -1,7 +1,7 @@
 {
   "id": "add-node",
   "title": "Add a machine over SSH",
-  "intro": "nodeyard copies itself to another Linux machine over SSH, installs there as root (using sudo, or su with the root password) and joins it to this cluster. You'll confirm the machine's SSH fingerprint and may be asked for its passwords.",
+  "intro": "nodeyard copies itself to another Linux machine over SSH, installs there as root and joins it to this cluster. You'll confirm the machine's SSH fingerprint (press Enter to accept it), then type its password.",
   "command": [
     "add-node"
   ],
@@ -30,7 +30,7 @@
       "flag": "--ssh",
       "label": "SSH login for the machine (user@address)",
       "default": "pi@192.168.1.11",
-      "help": "The user must be able to use sudo on that machine."
+      "help": "Your login on that machine. To install, nodeyard needs root there: via sudo if your user may use it, otherwise via su with the root password."
     },
     {
       "id": "port",

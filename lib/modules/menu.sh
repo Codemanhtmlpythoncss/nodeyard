@@ -17,6 +17,13 @@ menu_header() {
     read -r dev src gw <<<"$(ny_primary_route)"
     addr="${K3S_NODE_IP:-${src#-}}"
     role="${K3S_ROLE:-not set up}"
+    # Name the interface that really holds this address (the default route
+    # may be a different one, e.g. Wi-Fi).
+    local ifname="" n k _s c
+    while IFS=$'\t' read -r n k _s c; do
+        [[ "${c%%/*}" == "$addr" ]] && ifname="$n"
+    done < <(ny_list_ifaces)
+    [[ -n "$ifname" ]] || ifname="${K3S_IFACE:-${dev#-}}"
     if ny_k3s_installed; then
         local svc
         svc="$(k3s_service_name)"
@@ -41,7 +48,7 @@ menu_header() {
     local sep
     sep="$(ny_color dim " | ")"
     printf '\n%s%s%s%s%s%s%s%s%s\n' "$(ny_color bold "nodeyard ${NY_VERSION}")" "$sep" "$(hostname 2>/dev/null || uname -n)" "$sep" \
-        "${addr:-no address}${dev:+$([[ $dev != - ]] && printf ' (%s)' "$dev")}" "$sep" "role: ${role}" "$sep" "cluster: ${health}" >&2
+        "${addr:-no address}${ifname:+ (${ifname})}" "$sep" "role: ${role}" "$sep" "cluster: ${health}" >&2
     [[ "$NY_DEMO" -eq 1 ]] && printf '%s\n' "$(ny_color yellow "DEMO MODE - simulated machines; nothing on this computer is changed")" >&2
     return 0
 }

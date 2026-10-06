@@ -151,3 +151,122 @@ demo_cmd() { # run nodeyard in a demo sandbox (own setup: this file's setup is l
     assert_success
     assert_output --partial "K10demo"
 }
+
+# --- SSH host keys ------------------------------------------------------------
+
+NEW_FP="SHA256:pJ8bDemoFingerprintN0tRealXk2qWv7mE4sLhA"
+OLD_FP="SHA256:OLDoldOLDoldOLDoldOLDoldOLDoldOLDoldOLDold"
+
+@test "a new machine's key can't be trusted without a terminal; the message names the fix" {
+    run ny_ssh_trust_host 10.50.0.9 22
+    assert_failure 10
+    assert_output --partial "First connection to 10.50.0.9"
+    assert_output --partial "--host-key ${NEW_FP}"
+}
+
+@test "with a terminal, a new machine's key is confirmed with Enter (default yes)" {
+    export NODEYARD_INTERACTIVE=1
+    NY_UI=plain
+    run ny_ssh_trust_host 10.50.0.9 22 <<<""
+    assert_success
+    assert_output --partial "Trusted the SSH host key of 10.50.0.9"
+}
+
+@test "--yes does not skip the key confirmation when there is no terminal" {
+    NY_YES=1
+    run ny_ssh_trust_host 10.50.0.9 22
+    assert_failure 10
+}
+
+@test "a saved key that still matches is accepted silently" {
+    ny_rule "ssh-keygen -l -F *" 0 "# Host 10.50.0.9 found: line 1\n10.50.0.9 ED25519 ${NEW_FP}"
+    run ny_ssh_trust_host 10.50.0.9 22
+    assert_success
+    assert_output ""
+}
+
+@test "a changed key is explained, with old and new fingerprints, and refused without a terminal" {
+    ny_rule "ssh-keygen -l -F *" 0 "# Host 10.50.0.4 found: line 7\n10.50.0.4 ED25519 ${OLD_FP}"
+    run ny_ssh_trust_host 10.50.0.4 22
+    assert_failure 10
+    assert_output --partial "has CHANGED"
+    assert_output --partial "$OLD_FP"
+    assert_output --partial "$NEW_FP"
+    assert_output --partial "reinstalled"
+}
+
+@test "an out-of-date key in the user's own known_hosts is ignored, not copied" {
+    mkdir -p "${NODEYARD_ROOT}/home"
+    export HOME="${NODEYARD_ROOT}/home"
+    unset SUDO_USER
+    mkdir -p "${HOME}/.ssh"
+    : >"${HOME}/.ssh/known_hosts"
+    # The rule answers for any file: nodeyard's own has nothing, the user's has an old key.
+    ny_rule "ssh-keygen -l -F 10.50.0.4 -f ${HOME}/.ssh/known_hosts" 0 "# Host 10.50.0.4 found: line 5\n10.50.0.4 ED25519 ${OLD_FP}"
+    run ny_ssh_trust_host 10.50.0.4 22
+    assert_failure 10
+    assert_output --partial "has CHANGED"
+    run grep -c . "$(ny_ssh_known_hosts)"
+    assert_output 0
+}
+
+@test "--host-key that matches the machine's current key replaces a stale one without asking" {
+    ny_rule "ssh-keygen -l -F *" 0 "# Host 10.50.0.4 found: line 7\n10.50.0.4 ED25519 ${OLD_FP}"
+    run ny_ssh_trust_host 10.50.0.4 22 "$NEW_FP"
+    assert_success
+    assert_output --partial "Trusted the SSH host key"
+}
+
+@test "--host-key that does not match is refused" {
+    run ny_ssh_trust_host 10.50.0.4 22 "SHA256:somethingElseEntirely"
+    assert_failure
+    assert_output --partial "does not match the fingerprint you gave"
+}
+
+@test "dry-run never blocks on the key and says it would ask" {
+    NY_DRY_RUN=1
+    run ny_ssh_trust_host 10.50.0.9 22
+    assert_success
+    assert_output --partial "would ask you to confirm this host key"
+}
+
+@test "login failures get a plain next step" {
+    local f="${BATS_TEST_TMPDIR}/err"
+    printf 'Dead_channel@10.50.0.4: Permission denied (publickey,password).\n' >"$f"
+    run ny_ssh_failure_fix "$f" 10.50.0.4 22 Dead_channel@10.50.0.4
+    assert_output --partial "user name or password was refused"
+    printf 'ssh: connect to host 10.50.0.4 port 22: Connection refused\n' >"$f"
+    run ny_ssh_failure_fix "$f" 10.50.0.4 22 Dead_channel@10.50.0.4
+    assert_output --partial "Is SSH running"
+    printf 'Host key verification failed.\n' >"$f"
+    run ny_ssh_failure_fix "$f" 10.50.0.4 22 Dead_channel@10.50.0.4
+    assert_output --partial "reinstall"
+}
+
+# --- remove-node -----------------------------------------------------------------
+
+@test "remove-node drains a Ready node, deletes it, and clears its stored password" {
+    run --separate-stderr demo_cmd remove-node yard-4 --yes --dry-run --json
+    assert_success
+    printf '%s' "$output" | jq -e '[.plan[].command | join(" ")] | (map(test("drain yard-4")) | any) and (map(test("delete node yard-4")) | any)
+        and (map(test("delete secret -n kube-system yard-4.node-password.k3s")) | any)' >/dev/null
+}
+
+@test "remove-node skips the drain for a node that is not Ready" {
+    ny_rule "k3s kubectl get node yard-3 --no-headers*" 0 "yard-3   NotReady   control-plane   40d   v1.33.4+k3s1"
+    run --separate-stderr demo_cmd remove-node yard-3 --yes --dry-run --json
+    assert_success
+    printf '%s' "$output" | jq -e '[.plan[].command | join(" ")] | (map(test("drain")) | any | not)
+        and (map(test("delete secret -n kube-system yard-3.node-password.k3s")) | any)' >/dev/null
+}
+
+# --- menu header -------------------------------------------------------------------
+
+@test "the menu header names the interface that holds the address, not the default route's" {
+    # demo: address 192.168.1.10 is on eth0; pretend the default route uses wlan0
+    ny_rule "ip -4 route get 1.1.1.1" 0 "1.1.1.1 via 192.168.1.1 dev wlan0 src 192.168.1.53 uid 0"
+    export NODEYARD_DEMO_DIR="${BATS_TEST_TMPDIR}/demo"
+    run bash -c 'printf "q\n" | NODEYARD_INTERACTIVE=1 NODEYARD_UI=plain NODEYARD_COLOR=never NODEYARD_SHIM_RULES_EXTRA="$1" "$0" --demo menu' "${NY_REPO_ROOT}/bin/nodeyard" "${BATS_TEST_TMPDIR}/rules"
+    assert_output --partial "192.168.1.10 (eth0)"
+    refute_output --partial "192.168.1.10 (wlan0)"
+}

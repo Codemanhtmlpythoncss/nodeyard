@@ -44,63 +44,139 @@ ny_ssh_user_known_hosts() {
     printf '%s/.ssh/known_hosts\n' "$home"
 }
 
+# ny_ssh_stored_fps NAME FILE -- SHA256 fingerprints of the keys FILE holds for NAME.
+ny_ssh_stored_fps() {
+    [[ -f "$2" ]] || return 0
+    ssh-keygen -l -F "$1" -f "$2" 2>/dev/null | grep -oE 'SHA256:[A-Za-z0-9+/=]+' || true
+    return 0
+}
+
+# ny_ssh_fps_overlap LIST_A LIST_B -- true if the two newline-separated
+# fingerprint lists have one in common.
+ny_ssh_fps_overlap() {
+    local a b
+    while IFS= read -r a; do
+        [[ -n "$a" ]] || continue
+        while IFS= read -r b; do
+            [[ "$a" == "$b" ]] && return 0
+        done <<<"$2"
+    done <<<"$1"
+    return 1
+}
+
 # ny_ssh_trust_host HOST [PORT] [EXPECTED_FINGERPRINT] -- make sure HOST's key
-# is in nodeyard's known_hosts, verified by the user or the given fingerprint.
+# is in nodeyard's known_hosts and matches what the machine presents NOW.
+#   - a saved key that still matches: fine, nothing to ask;
+#   - a key in your own ~/.ssh/known_hosts is only reused if it matches the
+#     machine's current key (an out-of-date one is ignored, never copied);
+#   - a new machine, or one whose key changed (e.g. after a reinstall): the
+#     fingerprint is shown and you confirm it at the terminal. --yes does not
+#     skip this; without a terminal, pass --host-key FINGERPRINT.
 ny_ssh_trust_host() {
     local host="$1" port="${2:-22}" expected="${3:-}"
-    local kh name
+    local kh name ukh
     kh="$(ny_ssh_known_hosts)"
     name="$(ny_ssh_keyname "$host" "$port")"
+    ukh="$(ny_ssh_user_known_hosts)"
     if [[ "$NY_DRY_RUN" -ne 1 ]]; then
         mkdir -p "$(ny_ssh_dir)"
         chmod 0700 "$(ny_ssh_dir)"
         touch "$kh"
     fi
 
-    if [[ -f "$kh" ]] && ssh-keygen -F "$name" -f "$kh" >/dev/null 2>&1; then
-        return 0
-    fi
-    local ukh
-    ukh="$(ny_ssh_user_known_hosts)"
-    if [[ -z "$expected" && -r "$ukh" ]] && ssh-keygen -F "$name" -f "$ukh" >/dev/null 2>&1; then
-        [[ "$NY_DRY_RUN" -eq 1 ]] || ssh-keygen -F "$name" -f "$ukh" | grep -v '^#' >>"$kh"
-        ny_vlog "trusting ${name}: already in ${ukh}"
-        return 0
-    fi
-
-    local scanned
+    # What the machine presents right now.
+    local scanned fps live fp_main
     scanned="$(ssh-keyscan -T 6 -p "$port" "$host" 2>/dev/null || true)"
     [[ -n "$scanned" ]] || ny_die "Could not read the SSH host key of ${host}:${port}." \
         "Check that the machine is on, SSH is running (sudo systemctl status ssh) and port ${port} is reachable."
-
-    local fps fp_main
     fps="$(ssh-keygen -lf - <<<"$scanned" 2>/dev/null || true)"
+    live="$(grep -oE 'SHA256:[A-Za-z0-9+/=]+' <<<"$fps" || true)"
     fp_main="$(awk '/ED25519/{print $2; exit}' <<<"$fps")"
     [[ -n "$fp_main" ]] || fp_main="$(awk 'NR==1{print $2}' <<<"$fps")"
 
-    if [[ -n "$expected" ]]; then
-        if ! grep -qF -- "$expected" <<<"$fps"; then
-            ny_die "The SSH host key of ${host} does not match the fingerprint you gave (${expected}); it reported ${fp_main}." \
-                "If the machine was reinstalled, check its fingerprint on its console: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub. Otherwise someone may be intercepting the connection."
+    if [[ -n "$expected" ]] && ! grep -qxF -- "$expected" <<<"$live"; then
+        ny_die "The SSH host key of ${host} does not match the fingerprint you gave (${expected}); it presents ${fp_main}." \
+            "If the machine was reinstalled, check its fingerprint on its console: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub. Otherwise someone may be intercepting the connection."
+    fi
+
+    # Keys we already know for this machine.
+    local own_stored user_stored old=""
+    own_stored="$(ny_ssh_stored_fps "$name" "$kh")"
+    if ny_ssh_fps_overlap "$own_stored" "$live"; then
+        return 0
+    fi
+    [[ -z "$own_stored" ]] || old="$own_stored"
+    if [[ -z "$own_stored" && -z "$expected" ]]; then
+        user_stored="$(ny_ssh_stored_fps "$name" "$ukh")"
+        if ny_ssh_fps_overlap "$user_stored" "$live"; then
+            if [[ "$NY_DRY_RUN" -ne 1 ]]; then
+                ssh-keygen -F "$name" -f "$ukh" | grep -v '^#' >>"$kh"
+            fi
+            ny_vlog "trusting ${name}: it matches the key in ${ukh}"
+            return 0
         fi
-    else
-        ny_info "First connection to ${host}. Its SSH host key fingerprint is:"
-        ny_info "    ${fp_main}"
-        ny_hint "To be sure it's really that machine, compare with what its own console shows for:"
-        ny_hint "    ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub"
-        if [[ "$NY_YES" -eq 1 ]] || ! ny_ui_interactive; then
+        if [[ -n "$user_stored" ]]; then
+            ny_vlog "ignoring an out-of-date key for ${name} in ${ukh}"
+            old="$user_stored"
+        fi
+    fi
+    local changed=0
+    [[ -z "$old" ]] || changed=1
+
+    if [[ -z "$expected" ]]; then
+        if [[ "$changed" -eq 1 ]]; then
+            ny_warn "The SSH host key of ${host} has CHANGED since it was last trusted."
+            ny_info "    Trusted before:  $(paste -sd' ' - <<<"$old")"
+            ny_info "    Presents now:    ${fp_main}"
+            ny_hint "That is expected if the machine was reinstalled, had its disk or SD card replaced, or another device took its address."
+            ny_hint "It is NOT expected otherwise: it can mean someone is intercepting the connection."
+        else
+            ny_info "First connection to ${host}. Its SSH host key fingerprint is:"
+            ny_info "    ${fp_main}"
+        fi
+        ny_hint "To be sure, compare with what the machine itself shows: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub"
+        if [[ "$NY_DRY_RUN" -eq 1 ]]; then
+            ny_info "[dry-run] would ask you to confirm this host key."
+            return 0
+        fi
+        if ! ny_ui_interactive; then
             ny_die "Not trusting an unverified SSH host key for ${host} without confirmation." \
-                "Run interactively, or pass --host-key ${fp_main} once you have checked it." "$NY_E_CONFIRM"
+                "Run this at a terminal, or pass --host-key ${fp_main} once you have checked it." "$NY_E_CONFIRM"
         fi
-        ny_ui_yesno "Trust this host key for ${host}?" n ||
+        local default=y what="this"
+        if [[ "$changed" -eq 1 ]]; then
+            default=n
+            what="the new"
+        fi
+        ny_ui_yesno "Trust ${what} host key for ${host}?" "$default" ||
             ny_die "Host key not trusted; nothing was changed on ${host}." "" "$NY_E_CANCELLED"
     fi
     if [[ "$NY_DRY_RUN" -eq 1 ]]; then
         ny_info "[dry-run] would trust the SSH host key of ${host} (${fp_main})."
         return 0
     fi
+    if [[ -n "$own_stored" ]]; then
+        ssh-keygen -R "$name" -f "$kh" >/dev/null 2>&1 || true
+    fi
     printf '%s\n' "$scanned" | grep -v '^#' >>"$kh"
     ny_ok "Trusted the SSH host key of ${host} (${fp_main})."
+    return 0
+}
+
+# ny_ssh_failure_fix ERRFILE HOST PORT TARGET -- a plain-English next step for
+# a failed ssh login, from what ssh said.
+ny_ssh_failure_fix() {
+    local errf="$1" host="$2" port="$3" target="$4" text
+    text="$(<"$errf")"
+    case "$text" in
+        *"HOST IDENTIFICATION HAS CHANGED"* | *"Host key verification failed"*)
+            echo "The machine's SSH key no longer matches the one nodeyard saved (a reinstall changes it). Run this again: nodeyard will show the new fingerprint and ask you to confirm it."
+            ;;
+        *"Permission denied"*) echo "The user name or password was refused. Try it by hand: ssh -p ${port} ${target}" ;;
+        *"Connection refused"*) echo "Nothing is listening on port ${port}. Is SSH running on ${host}? (sudo systemctl status ssh)" ;;
+        *"timed out"* | *"No route to host"* | *"unreachable"*) echo "${host} did not answer: is it on, on the same network, and not blocking port ${port}?" ;;
+        *) echo "Try it by hand to see the reason: ssh -p ${port} ${target}" ;;
+    esac
 }
 
 # ny_ssh_opts HOST [PORT] -- fills NY_SSH_OPTS for ssh/scp.

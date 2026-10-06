@@ -29,6 +29,20 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Fixed
 
+- SSH host keys in `add-node`: a saved key is now checked against the key the
+  machine presents *now*. A changed key (for example after a reinstall) is
+  explained with the old and new fingerprints and needs a deliberate yes;
+  an out-of-date key in your own `~/.ssh/known_hosts` is ignored instead of
+  being copied back in; a new machine's fingerprint is confirmed by pressing
+  Enter. `--yes` no longer skips this at a terminal, so the menu wizard now
+  works for machines it hasn't seen (without a terminal, pass `--host-key`).
+  `--dry-run` never blocks on it, and login failures get a plain next step
+  instead of "check the user name and password".
+- `remove-node` now clears the join password k3s stored for the node, so the
+  same name can be added again (a reinstalled machine was refused as a
+  "duplicate hostname"), and skips the drain for a node that is not Ready.
+- The menu header named the default route's interface (e.g. wlan0) next to
+  an address that is on another (eth0).
 - `add-node` left root-owned files behind in `/tmp` on the new machine
   ("Permission denied" while cleaning up), because it unpacked as root but
   cleaned up as the SSH user. Everything now runs as root in one step in

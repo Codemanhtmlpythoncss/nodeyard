@@ -285,7 +285,12 @@ cluster_add_node_cmd() {
     fi
 
     ny_step "Connecting to ${target} (enter its SSH password if asked)"
-    ssh "${NY_SSH_OPTS[@]}" -fN "$target" || ny_die "Could not connect to ${target}." "Check the user name and password/key: ssh -p ${port} ${target}"
+    local errf
+    errf="$(ny_mktemp)"
+    if ! ssh "${NY_SSH_OPTS[@]}" -fN "$target" 2>"$errf"; then
+        sed 's/^/    /' "$errf" >&2
+        ny_die "Could not log in to ${target}." "$(ny_ssh_failure_fix "$errf" "$host" "$port" "$target")"
+    fi
 
     # Look before changing anything: who we are there, whether sudo is
     # usable, and which network interfaces it has.
@@ -426,9 +431,12 @@ cluster_remove_node_cmd_help() {
     cat <<'HELP'
 Usage: nodeyard remove-node NODE [--purge]
 
-Drains NODE (moves its workloads elsewhere) and removes it from the
-cluster. To also wipe k3s from that machine, run 'sudo nodeyard uninstall k3s'
-on it afterwards.
+Removes NODE from the cluster: drains it first (moves its workloads
+elsewhere) if it is Ready, deletes it, and clears the join password k3s
+stored for its name so the same machine can be added again, for example
+after a reinstall. A machine that is still running its k3s agent will
+re-register itself; to wipe k3s from it, run 'sudo nodeyard uninstall k3s'
+on that machine.
 HELP
 }
 
@@ -452,15 +460,29 @@ cluster_remove_node_cmd() {
     [[ -n "$node" ]] || ny_usage_error "Say which node to remove." "nodeyard remove-node NODE"
     ny_need_kube
     kctl get node "$node" >/dev/null 2>&1 || ny_die "There is no node called '${node}'." "List nodes with: nodeyard list-nodes" "$NY_E_USAGE"
-    ny_confirm "Drain ${node} and remove it from the cluster? Its workloads move to other nodes." n || {
+    ny_confirm "Remove ${node} from the cluster? Its workloads move to other nodes." n || {
         ny_info "Cancelled."
         return 0
     }
-    ny_run "$(ny_path "$NY_K3S_BIN")" kubectl drain "$node" --ignore-daemonsets --delete-emptydir-data --force --timeout=120s ||
-        ny_warn "Drain reported problems; continuing."
-    ny_run "$(ny_path "$NY_K3S_BIN")" kubectl delete node "$node" || ny_warn "Deleting the node object reported problems."
-    [[ "$purge" -eq 1 ]] && ny_hint "To remove k3s from ${node} itself, run there: sudo nodeyard uninstall k3s"
-    ny_ok "Node removed: ${node}"
+    local status
+    status="$(kctl get node "$node" --no-headers 2>/dev/null | awk '{print $2}' || true)"
+    if [[ "$status" == Ready* ]]; then
+        ny_run "$(ny_path "$NY_K3S_BIN")" kubectl drain "$node" --ignore-daemonsets --delete-emptydir-data --force --timeout=120s ||
+            ny_warn "Drain reported problems; continuing."
+    else
+        ny_info "${node} is not Ready, so there is nothing to drain; removing it directly."
+    fi
+    ny_run "$(ny_path "$NY_K3S_BIN")" kubectl delete node "$node" --wait=false || ny_warn "Deleting the node object reported problems."
+    # k3s remembers each node's join password under its name. Without
+    # deleting it, the same name can't rejoin (a reinstalled machine is
+    # refused as a "duplicate hostname").
+    ny_run "$(ny_path "$NY_K3S_BIN")" kubectl delete secret -n kube-system "${node}.node-password.k3s" --ignore-not-found ||
+        ny_warn "Could not delete the stored node password."
+    if [[ "$purge" -eq 1 ]]; then
+        ny_hint "To remove k3s from ${node} itself, run there: sudo nodeyard uninstall k3s"
+    fi
+    ny_ok "Node removed: ${node} (it can be added again under the same name)"
+    return 0
 }
 
 # --- watchdog ----------------------------------------------------------------
