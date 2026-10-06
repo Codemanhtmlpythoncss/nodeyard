@@ -412,7 +412,9 @@ trap 'rm -rf "\$work"' EXIT
 chmod 700 "\$work"
 install -m 600 "\$here/k3s-token" "\$work/k3s-token"
 tar --no-same-owner -xzf "\$here/nodeyard.tar.gz" -C "\$work"
-bash "\$work/install.sh" --from-dir "\$work" --yes
+# --force: always put THIS server's exact copy there, even if the version
+# number is the same (a leftover copy from an earlier attempt can differ).
+bash "\$work/install.sh" --from-dir "\$work" --yes --force
 /usr/local/bin/nodeyard${args}
 SCRIPT
 }

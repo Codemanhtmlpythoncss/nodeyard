@@ -29,6 +29,10 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Fixed
 
+- `add-node` skipped installing nodeyard on a machine that already had the
+  same version number ("already installed; nothing to do"), so a leftover
+  copy from an earlier attempt kept running, without any later fixes. It
+  now always installs the server's exact copy.
 - A worker whose first start fails (for example because the cluster still
   lists the node under its old address) is no longer reported as failed
   while systemd is still retrying it: nodeyard waits up to 90 seconds for

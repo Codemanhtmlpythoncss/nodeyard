@@ -21,6 +21,7 @@ remote_cmd() { grep -E '^ssh .* -t ' "$NODEYARD_SHIM_LOG" | tail -n1; }
     run cluster_remote_script install worker --server https://10.0.0.1:6443 --token-file TOKENFILE --yes
     assert_output --partial "trap 'rm -rf \"\$work\"' EXIT"
     assert_output --partial '--token-file "${work}/k3s-token"'
+    assert_output --partial 'install.sh" --from-dir "$work" --yes --force'
     refute_output --partial TOKENFILE
     cluster_remote_script install worker --token-file TOKENFILE >"${BATS_TEST_TMPDIR}/run.sh"
     bash -n "${BATS_TEST_TMPDIR}/run.sh"
