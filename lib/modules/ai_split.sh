@@ -96,7 +96,7 @@ split_model_info() {
 
 # split_node_table -> "name<TAB>capMiB<TAB>usedMiB<TAB>cpus<TAB>controlPlane<TAB>arch<TAB>ready" per node
 split_node_table() {
-    local tops name cap cpu arch ready cp pressure used mine podnodes podtops
+    local tops name cap cpu arch ready cp pressure used mine podnodes podtops avail_b
     tops="$(kctl top nodes --no-headers 2>/dev/null || true)"
     # Memory held by an existing split deployment is freed when it is
     # replaced, so it doesn't count as "in use" (MiB per node).
@@ -116,6 +116,15 @@ split_node_table() {
             *Ki) used=$((${used%Ki} / 1024)) ;;
             *) used="" ;;
         esac
+        # No reading from the metrics service (a new node, or it can't scrape
+        # it yet): ask the node's own kubelet how much memory is really free.
+        if [[ -z "$used" ]]; then
+            avail_b="$(kctl get --raw "/api/v1/nodes/${name}/proxy/stats/summary" 2>/dev/null | jq -r '.node.memory.availableBytes // empty' 2>/dev/null || true)"
+            if [[ "$avail_b" =~ ^[0-9]+$ ]]; then
+                used=$((cap / 1024 - avail_b / 1048576))
+                ((used >= 0)) || used=0
+            fi
+        fi
         mine="$(awk -v n="$name" 'NR == FNR { if ($2 == n) on[$1] = 1; next }
             ($1 in on) { v = $3; m = 0
                 if (v ~ /Gi$/) m = v * 1024; else if (v ~ /Mi$/) m = v + 0; else if (v ~ /Ki$/) m = v / 1024
@@ -125,7 +134,9 @@ split_node_table() {
             used=$((used - mine))
         fi
         [[ "$cp" == "true" ]] || cp="false"
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$((cap / 1024))" "$used" "$cpu" "$cp" "$arch" "$ready"
+        # '|' not tab: read collapses empty tab-separated fields, which shifted
+        # every column left when "used" was empty and made nodes look not Ready.
+        printf '%s|%s|%s|%s|%s|%s|%s\n' "$name" "$((cap / 1024))" "$used" "$cpu" "$cp" "$arch" "$ready"
     done < <(kctl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.capacity.memory}{"\t"}{.status.capacity.cpu}{"\t"}{.status.nodeInfo.architecture}{"\t"}{.status.conditions[?(@.type=="Ready")].status}{"\t"}{.status.conditions[?(@.type=="DiskPressure")].status}{.status.conditions[?(@.type=="MemoryPressure")].status}{"\t"}{.metadata.labels.node-role\.kubernetes\.io/control-plane}{"\n"}{end}' 2>/dev/null)
     return 0
 }
@@ -142,7 +153,7 @@ split_plan() {
     local -a names=() avails=() cpus=() cps=() reserves=() frees=()
     local name cap used cpu cp arch ready reserve avail ov
 
-    while IFS=$'\t' read -r name cap used cpu cp arch ready; do
+    while IFS='|' read -r name cap used cpu cp arch ready; do
         [[ -n "$name" ]] || continue
         if [[ "${#SPLIT_NODES[@]}" -gt 0 ]] && ! ny_in_list "$name" "${SPLIT_NODES[@]}"; then
             continue
