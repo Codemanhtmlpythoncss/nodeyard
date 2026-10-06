@@ -7,6 +7,21 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ## [Unreleased]
 
+### Added
+
+- `add-node --become auto|sudo|su`: become root on the new machine with
+  sudo, or with su and the root password (for machines without sudo).
+  Automatic by default.
+
+### Fixed
+
+- `add-node` left root-owned files behind in `/tmp` on the new machine
+  ("Permission denied" while cleaning up), because it unpacked as root but
+  cleaned up as the SSH user. Everything now runs as root in one step in
+  its own directory, which removes itself.
+- `add-node` now checks that the `--interface` you gave exists on the new
+  machine before installing anything, and lists the ones it has.
+
 ## [0.1.0] - 2026-10-06
 
 The foundation release. nodeyard is the successor to the single-file

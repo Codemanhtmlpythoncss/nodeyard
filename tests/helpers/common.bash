@@ -20,6 +20,16 @@ ny_rule() {
     printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}" >>"${BATS_TEST_TMPDIR}/rules"
 }
 
+# ny_rule_first GLOB RC [OUTPUT] -- like ny_rule, but checked before all others.
+ny_rule_first() {
+    local f="${BATS_TEST_TMPDIR}/rules"
+    {
+        printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}"
+        cat "$f"
+    } >"${f}.new"
+    mv "${f}.new" "$f"
+}
+
 ny_shims() {
     local dir="${BATS_TEST_TMPDIR}/shims" c
     mkdir -p "$dir"

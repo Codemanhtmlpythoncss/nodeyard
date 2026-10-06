@@ -93,9 +93,16 @@ sudo nodeyard add-node master --ssh admin@192.168.1.12
 It checks the machine is reachable (and explains "no route to host"),
 shows you its SSH host key fingerprint to confirm (compare it with
 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on that machine's
-console), copies nodeyard and the token as root-only files, installs, and
-joins. For unattended runs pass `--host-key SHA256:...`. Running it again
-on a machine that's already set up is safe.
+console), checks that the `--interface` you named exists there, copies
+nodeyard and the token as private files, then becomes root once and
+installs, joins and cleans up. For unattended runs pass
+`--host-key SHA256:...`. Running it again on a machine that's already set
+up is safe.
+
+To become root it uses `sudo` when your SSH user is allowed to, and
+otherwise `su` (you type the root password, as on a Debian install
+without sudo). Choose explicitly with `--become sudo` or `--become su`.
+Logging in as `root@host` needs neither.
 
 A laptop-friendly installer that sets up several machines at once
 (including from macOS) is coming in 0.3.

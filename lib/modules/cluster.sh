@@ -21,9 +21,14 @@ copied as a root-only file; it never appears on a command line.
 
 Without --ssh it prints the commands to run on the other machine instead.
 
+After logging in, everything on the other machine runs as root in one
+step: through sudo if the user can use it, otherwise through su (you type
+the root password). Temporary files are removed afterwards either way.
+
 Options:
-  --ssh USER@HOST          The machine to set up (you'll be asked for its SSH and sudo passwords if needed)
+  --ssh USER@HOST          The machine to set up (you'll be asked for its SSH password if needed)
   --port N                 SSH port (default 22)
+  --become auto|sudo|su    How to become root there (default auto: sudo if this user may use it, else su)
   --interface IFACE        The other machine's cluster network interface (default: automatic)
   --version V              k3s version for a worker (default: this server's version)
   --host-key FINGERPRINT   Expected SSH host key (SHA256:...), for unattended runs
@@ -34,7 +39,7 @@ cluster_add_node_cmd() {
     ny_need_root
     local kind="${1:-}"
     [[ $# -gt 0 ]] && shift
-    local target="" port=22 iface="" version="" hostkey=""
+    local target="" port=22 iface="" version="" hostkey="" become="auto"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --ssh)
@@ -63,6 +68,12 @@ cluster_add_node_cmd() {
             --host-key)
                 ny_need_value "$1" $#
                 hostkey="$2"
+                shift 2
+                ;;
+            --become)
+                ny_need_value "$1" $#
+                ny_valid_enum "$2" auto sudo su || ny_usage_error "--become: ${NY_VALID_MSG}"
+                become="$2"
                 shift 2
                 ;;
             *) ny_usage_error "Unknown option for 'add-node': $1" ;;
@@ -123,30 +134,130 @@ cluster_add_node_cmd() {
 
     ny_step "Connecting to ${target} (enter its SSH password if asked)"
     ssh "${NY_SSH_OPTS[@]}" -fN "$target" || ny_die "Could not connect to ${target}." "Check the user name and password/key: ssh -p ${port} ${target}"
-    local rdir bundle
+
+    # Look before changing anything: who we are there, whether sudo is
+    # usable, and which network interfaces it has.
+    local probe
+    # shellcheck disable=SC2029 # the probe script is meant to run remotely
+    probe="$(ssh "${NY_SSH_OPTS[@]}" "$target" "$(cluster_probe_script)" 2>/dev/null || true)"
+    local remote_uid remote_sudo remote_ifaces
+    remote_uid="$(sed -n 1p <<<"$probe")"
+    remote_sudo="$(sed -n 2p <<<"$probe")"
+    remote_ifaces="$(sed -n '3,$p' <<<"$probe" | grep -v '^lo$' | paste -sd' ' -)"
+    if [[ -n "$iface" && -n "$remote_ifaces" && " ${remote_ifaces} " != *" ${iface} "* ]]; then
+        ny_ssh_close "$target"
+        ny_die "${host} has no network interface called '${iface}'. It has: ${remote_ifaces}." \
+            "Re-run with --interface set to one of those (usually the wired one), or leave it out to use the one that routes to this server." "$NY_E_USAGE"
+    fi
+    local method
+    method="$(cluster_become_method "$become" "$remote_uid" "$remote_sudo")"
+    if [[ "$become" == sudo && "$remote_sudo" == no-sudo ]]; then
+        ny_ssh_close "$target"
+        ny_die "sudo is not installed on ${host}." "Use --become su (you'll type the root password), or install sudo there." "$NY_E_PRECONDITION"
+    fi
+
+    local rdir bundle runner
     rdir="$(ssh "${NY_SSH_OPTS[@]}" "$target" 'umask 077; mktemp -d /tmp/nodeyard.XXXXXXXX')" ||
         ny_die "Could not create a private temporary directory on ${target}."
+    [[ "$rdir" =~ ^/tmp/nodeyard\.[A-Za-z0-9]+$ ]] || ny_die "Unexpected temporary directory name from ${target}: ${rdir}"
     bundle="$(ny_mktemp)"
     ny_self_bundle "$bundle"
+    runner="$(ny_mktemp)"
+    cluster_remote_script "${join[@]}" >"$runner"
     ny_step "Copying nodeyard and the join token to ${target}"
     scp "${NY_SSH_OPTS[@]}" -q "$bundle" "${target}:${rdir}/nodeyard.tar.gz" || ny_die "Copying nodeyard to ${target} failed."
+    scp "${NY_SSH_OPTS[@]}" -q "$runner" "${target}:${rdir}/run.sh" || ny_die "Copying the install script to ${target} failed."
     scp "${NY_SSH_OPTS[@]}" -q "$(ny_path "$NY_K3S_TOKEN_FILE")" "${target}:${rdir}/k3s-token" || ny_die "Copying the join token to ${target} failed."
 
-    local remote_join
-    remote_join="$(ny_quote_cmd "${join[@]}")"
-    remote_join="${remote_join//TOKENFILE/${rdir}/k3s-token}"
-    local script
-    script="set -e; chmod 600 '${rdir}/k3s-token'; mkdir -p '${rdir}/src'; tar -xzf '${rdir}/nodeyard.tar.gz' -C '${rdir}/src'; bash '${rdir}/src/install.sh' --from-dir '${rdir}/src' --yes; /usr/local/bin/nodeyard ${remote_join}"
-    ny_step "Installing and joining on ${target} (enter its sudo password if asked)"
+    case "$method" in
+        su) ny_step "Installing and joining on ${target} as root (enter ${host}'s ROOT password for su when asked)" ;;
+        sudo) ny_step "Installing and joining on ${target} as root (enter your sudo password on ${host} if asked)" ;;
+        *) ny_step "Installing and joining on ${target}" ;;
+    esac
+    # The runner does everything as root in its own directory and removes
+    # it; the files we copied are ours, so we remove them as ourselves.
     local rc=0
-    ssh "${NY_SSH_OPTS[@]}" -t "$target" "sudo bash -c $(printf '%q' "$script"); rc=\$?; rm -rf '${rdir}'; exit \$rc" || rc=$?
+    ssh "${NY_SSH_OPTS[@]}" -t "$target" "$(cluster_become_cmd "$method" "${rdir}/run.sh"); rc=\$?; rm -rf '${rdir}' 2>/dev/null; exit \$rc" || rc=$?
     ny_ssh_close "$target"
     if [[ "$rc" -eq 0 ]]; then
         ny_ok "${target} joined the cluster as a ${kind}."
+    elif [[ "$method" == su && "$rc" -eq 1 ]]; then
+        ny_die "Becoming root with su on ${host} failed (wrong root password, or root has no password)." \
+            "Try again, or use --become sudo if ${NY_SSH_USER:-that user} can use sudo there." "$NY_E_PRECONDITION"
     else
-        ny_die "Setting up ${target} failed (exit ${rc})." "Run 'sudo nodeyard doctor' on ${host} to see why; re-running add-node is safe."
+        ny_die "Setting up ${target} failed (exit ${rc}); the reason is in the output above." \
+            "Fix that, then run add-node again (it is safe to repeat). 'sudo nodeyard doctor' on ${host} checks the usual problems."
     fi
     return 0
+}
+
+# cluster_probe_script -- shell run (as the SSH user) on a new machine: prints
+# its uid, whether sudo is usable, then its network interfaces.
+cluster_probe_script() {
+    cat <<'PROBE'
+id -u
+if command -v sudo >/dev/null 2>&1; then
+    if sudo -n true 2>/dev/null; then echo sudo-nopass
+    elif id -nG | tr ' ' '\n' | grep -qxE 'sudo|wheel|admin'; then echo sudo
+    else echo sudo-not-allowed; fi
+else
+    echo no-sudo
+fi
+ls /sys/class/net 2>/dev/null
+PROBE
+}
+
+# cluster_become_method REQUESTED REMOTE_UID REMOTE_SUDO -- none, sudo or su.
+cluster_become_method() {
+    local want="$1" uid="$2" sudo_state="$3"
+    if [[ "$uid" == 0 ]]; then
+        echo none
+    elif [[ "$want" == sudo || "$want" == su ]]; then
+        echo "$want"
+    elif [[ "$sudo_state" == sudo-nopass || "$sudo_state" == sudo ]]; then
+        echo sudo
+    else
+        echo su
+    fi
+}
+
+# cluster_become_cmd METHOD SCRIPT -- the remote command that runs SCRIPT as root.
+cluster_become_cmd() {
+    local method="$1" script="$2"
+    case "$method" in
+        none) printf "bash '%s'" "$script" ;;
+        sudo) printf "sudo bash '%s'" "$script" ;;
+        su) printf "su - root -c \"bash '%s'\"" "$script" ;;
+    esac
+}
+
+# cluster_remote_script JOIN_ARG... -- the root script that runs on the new
+# machine: unpack nodeyard, install it, join, and clean up after itself. The
+# word TOKENFILE in the arguments becomes the path of the copied token.
+cluster_remote_script() {
+    local a args=""
+    for a in "$@"; do
+        if [[ "$a" == TOKENFILE ]]; then
+            # shellcheck disable=SC2016 # expanded by the remote script
+            args+=' "${work}/k3s-token"'
+        else
+            args+=" $(printf '%q' "$a")"
+        fi
+    done
+    cat <<SCRIPT
+#!/bin/bash
+# Written by 'nodeyard add-node'. Runs as root on the new machine, then
+# removes its working directory (and with it the copy of the join token).
+set -euo pipefail
+here="\$(cd "\$(dirname "\$0")" && pwd -P)"
+work="\$(mktemp -d /root/.nodeyard-join.XXXXXXXX 2>/dev/null || mktemp -d /tmp/nodeyard-join.XXXXXXXX)"
+trap 'rm -rf "\$work"' EXIT
+chmod 700 "\$work"
+install -m 600 "\$here/k3s-token" "\$work/k3s-token"
+tar --no-same-owner -xzf "\$here/nodeyard.tar.gz" -C "\$work"
+bash "\$work/install.sh" --from-dir "\$work" --yes
+/usr/local/bin/nodeyard${args}
+SCRIPT
 }
 
 # ny_self_bundle DEST -- a tarball of this nodeyard installation.
