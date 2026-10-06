@@ -68,7 +68,7 @@ ny_wait_service() {
     ny_simulating && return 0
     while ((tries < max)); do
         systemctl is-active --quiet "$unit" 2>/dev/null && return 0
-        sleep 2
+        sleep "${NODEYARD_WAIT_INTERVAL:-2}"
         tries=$((tries + 1))
     done
     return 1

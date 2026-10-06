@@ -197,6 +197,14 @@ k3s_start_service() {
     if [[ "$NY_INIT" == systemd ]]; then
         ny_run systemctl enable "$svc" >/dev/null 2>&1 || true
         if ! ny_run systemctl restart "$svc"; then
+            # k3s often fails its very first start for a moment (for example
+            # while the cluster still lists this node under its old address)
+            # and systemd restarts it by itself. Give it time before judging.
+            ny_warn "${svc} did not start on the first try. systemd retries it, so waiting up to 90 seconds before giving up..."
+            if ny_wait_service "$svc" 45; then
+                ny_ok "${svc} is running (it came up on a retry)."
+                return 0
+            fi
             k3s_diagnose "$svc"
             ny_die "${svc}.service failed to start." "Read the cause above and fix it, then run the same command again (it is safe to repeat)."
         fi
@@ -220,10 +228,12 @@ k3s_diagnose() {
     fi
     printf '\n' >&2
     ny_err "${svc}.service would not start. Its log says:"
-    shown="$(grep -iE 'level=(error|fatal)|error|fatal|failed|refused|denied|rejected|unauthorized|x509|cgroup|nm-cloud|exec format|no such|not found|unable|cannot|can.t' <<<"$log" | tail -n 12 || true)"
-    [[ -n "$shown" ]] || shown="$(tail -n 10 <<<"$log")"
+    # The decisive lines first; only if there are none, anything error-like.
+    shown="$(grep -E 'level=(error|fatal)|Shutdown request|Failed with result|Failed to start|Job for' <<<"$log" | tail -n 8 || true)"
+    [[ -n "$shown" ]] || shown="$(grep -iE 'error|fatal|failed|refused|denied|rejected|unauthorized|x509|nm-cloud|exec format|no such|not found|unable|cannot' <<<"$log" | tail -n 8 || true)"
+    [[ -n "$shown" ]] || shown="$(tail -n 8 <<<"$log")"
     while IFS= read -r line; do
-        [[ -n "$line" ]] && printf '    %s\n' "$(ny_redact "$line")" >&2
+        [[ -n "$line" ]] && printf '    %s\n' "$(ny_redact "${line:0:230}")" >&2
     done <<<"$shown"
 
     local found=0 server="${K3S_J_SERVER:-${K3S_SERVER_URL:-}}"
@@ -238,9 +248,14 @@ k3s_diagnose() {
         for fix in "$@"; do ny_hint "$fix"; done
         return 0
     }
+    k3s_cause 'failed to find interface with specified node ip' \
+        "the cluster has this node registered under a different address (its IP changed, or another machine had the same name)." \
+        "This normally fixes itself within a minute as k3s updates the node: check with 'sudo nodeyard status' on a server." \
+        "If it doesn't: on a server run 'sudo nodeyard remove-node NAME', then add this machine again." \
+        "If two machines share a hostname, give one a new name first (sudo hostnamectl set-hostname NEW-NAME)."
     k3s_cause 'nm-cloud-setup' "NetworkManager's cloud-setup service is enabled, and k3s refuses to run beside it." \
         "Fix: sudo systemctl disable --now nm-cloud-setup.service nm-cloud-setup.timer" "then reboot, and run the command again."
-    k3s_cause 'cgroup.*(memory|not found|controller)|memory.*cgroup|failed to find memory' "the kernel's memory cgroup is switched off (common on Raspberry Pi OS)." \
+    k3s_cause 'failed to find memory cgroup|memory cgroup (is |was )?(not|disabled|missing)|cgroup_memory=1|cgroup_enable=memory' "the kernel's memory cgroup is switched off (common on Raspberry Pi OS)." \
         "Fix: sudo nodeyard doctor --fix   (edits the boot command line)" "then: sudo reboot, and run the command again."
     k3s_cause 'node password rejected|duplicate hostname|password.*(does not match|rejected)' "the server already has a node with this machine's name, registered with a different password." \
         "Fix: give this machine a unique hostname: sudo hostnamectl set-hostname NEW-NAME" \

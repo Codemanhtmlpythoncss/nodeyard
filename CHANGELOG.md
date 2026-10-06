@@ -29,6 +29,12 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Fixed
 
+- A worker whose first start fails (for example because the cluster still
+  lists the node under its old address) is no longer reported as failed
+  while systemd is still retrying it: nodeyard waits up to 90 seconds for
+  the retry. The failure explanation now shows the decisive log lines
+  first, no longer mistakes ordinary cgroup log lines for a missing memory
+  cgroup, and recognises "failed to find interface with specified node ip".
 - SSH host keys in `add-node`: a saved key is now checked against the key the
   machine presents *now*. A changed key (for example after a reinstall) is
   explained with the old and new fingerprints and needs a deliberate yes;

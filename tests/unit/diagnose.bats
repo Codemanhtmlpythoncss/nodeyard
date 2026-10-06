@@ -4,6 +4,7 @@
 setup() {
     load ../helpers/common
     ny_lib_setup --demo-fs
+    export NODEYARD_WAIT_INTERVAL=0
 }
 
 diagnose_with() { # LOG_TEXT -> runs k3s_diagnose with that journal
@@ -79,4 +80,33 @@ diagnose_with() { # LOG_TEXT -> runs k3s_diagnose with that journal
     assert_failure 1
     assert_output --partial "did not accept the join token"
     assert_output --partial "k3s-agent.service failed to start"
+}
+
+@test "an address mismatch (the node's IP changed) is explained and says it usually fixes itself" {
+    diagnose_with 'level=error msg="Shutdown request received: \\"failed to start networking: unable to initialize network policy controller: error getting node subnet: failed to find interface with specified node ip\\""'
+    assert_output --partial "registered under a different address"
+    assert_output --partial "fixes itself within a minute"
+    assert_output --partial "nodeyard remove-node NAME"
+}
+
+@test "ordinary cgroup lines in a log do not trigger the memory-cgroup hint" {
+    diagnose_with 'I1006 container_manager_linux.go: Creating Container Manager object nodeConfig={"CgroupRoot":"/","CgroupDriver":"systemd","MemoryManagerPolicy":"None","CgroupVersion":2}\nlevel=error msg="boom"'
+    refute_output --partial "memory cgroup is switched off"
+}
+
+@test "the decisive error line is shown before the noise" {
+    diagnose_with 'I1006 factory.go: Registration of the crio container factory failed: dial unix /var/run/crio/crio.sock: no such file\nlevel=error msg="Shutdown request received: something decisive"'
+    assert_output --partial "Shutdown request received: something decisive"
+    refute_output --partial "crio container factory"
+}
+
+@test "a first start that fails but recovers on systemd's retry counts as success" {
+    ny_rule_first "systemctl is-active --quiet k3s-agent" 0
+    ny_rule_first "systemctl restart k3s-agent" 1
+    NY_INIT=systemd
+    run k3s_start_service k3s-agent
+    assert_success
+    assert_output --partial "did not start on the first try"
+    assert_output --partial "came up on a retry"
+    refute_output --partial "would not start"
 }
