@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # Input validation shared by commands, the config file and wizards.
 # Each validator returns 0 when valid; otherwise NY_VALID_MSG explains why in
 # plain English, with an example of a valid value.
@@ -27,7 +28,7 @@ ny_valid_cidr4() {
         NY_VALID_MSG="'${v}': ${NY_VALID_MSG}"
         return 1
     }
-    [[ "$len" =~ ^[0-9]{1,2}$ ]] && ((10#$len <= 32)) || {
+    { [[ "$len" =~ ^[0-9]{1,2}$ ]] && ((10#$len <= 32)); } || {
         NY_VALID_MSG="'${v}' has an invalid prefix length '${len}' (expected 0-32, usually 24)."
         return 1
     }
@@ -40,7 +41,7 @@ ny_valid_ipv4_range() {
     NY_VALID_MSG="'${v}' is not a valid address range (expected e.g. 192.168.1.100-192.168.1.199)."
     [[ "$v" == *-* ]] || return 1
     local a="${v%%-*}" b="${v#*-}"
-    ny_valid_ipv4 "$a" && ny_valid_ipv4 "$b" || {
+    { ny_valid_ipv4 "$a" && ny_valid_ipv4 "$b"; } || {
         NY_VALID_MSG="'${v}' is not a valid address range (expected e.g. 192.168.1.100-192.168.1.199)."
         return 1
     }
@@ -168,24 +169,24 @@ ny_validate() {
     NY_VALID_MSG=""
     case "$type" in
         list:*)
-                local item sub="${type#list:}"
-                while IFS= read -r item; do
-                    ny_validate "$sub" "$item" || return 1
-                done < <(ny_csv_split "$value")
-                return 0
-                ;;
+            local item sub="${type#list:}"
+            while IFS= read -r item; do
+                ny_validate "$sub" "$item" || return 1
+            done < <(ny_csv_split "$value")
+            return 0
+            ;;
         enum:*)
-                local -a choices=()
-                IFS=',' read -r -a choices <<<"${type#enum:}"
-                ny_valid_enum "$value" "${choices[@]}"
-                ;;
+            local -a choices=()
+            IFS=',' read -r -a choices <<<"${type#enum:}"
+            ny_valid_enum "$value" "${choices[@]}"
+            ;;
         int*)
-                local spec="${type#int}" min="" max=""
-                spec="${spec#:}"
-                min="${spec%%:*}"
-                [[ "$spec" == *:* ]] && max="${spec#*:}"
-                ny_valid_int "$value" "$min" "$max"
-                ;;
+            local spec="${type#int}" min="" max=""
+            spec="${spec#:}"
+            min="${spec%%:*}"
+            [[ "$spec" == *:* ]] && max="${spec#*:}"
+            ny_valid_int "$value" "$min" "$max"
+            ;;
         mac) ny_valid_mac "$value" ;;
         ipv4) ny_valid_ipv4 "$value" ;;
         cidr4) ny_valid_cidr4 "$value" ;;

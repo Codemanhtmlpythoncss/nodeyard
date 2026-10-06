@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # Terminal capabilities: colour (respecting NO_COLOR), width and symbols.
 
 NY_COLOR_MODE="${NODEYARD_COLOR:-auto}" # auto | always | never

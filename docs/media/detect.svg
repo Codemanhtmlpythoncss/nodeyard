@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="569" height="474" viewBox="0 0 569 474" role="img" aria-label="nodeyard detect">
+<rect width="569" height="474" rx="8" fill="#0d1117"/>
+<rect width="569" height="30" rx="8" fill="#161b22"/>
+<rect y="22" width="569" height="8" fill="#161b22"/>
+<circle cx="18" cy="15" r="5.5" fill="#ff5f57"/>
+<circle cx="36" cy="15" r="5.5" fill="#febc2e"/>
+<circle cx="54" cy="15" r="5.5" fill="#28c840"/>
+<text x="284.5" y="19.5" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" text-anchor="middle">nodeyard detect</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" xml:space="preserve">
+<text x="16.0" y="58" fill="#e6edf3" font-weight="bold">This&#160;machine</text>
+<text x="16.0" y="76" fill="#e6edf3">&#160;&#160;Hostname:&#160;&#160;&#160;&#160;&#160;&#160;yard-1</text>
+<text x="16.0" y="94" fill="#e6edf3">&#160;&#160;OS:&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;Raspberry&#160;Pi&#160;OS&#160;12&#160;(bookworm)&#160;(</text>
+<text x="419.2" y="94" fill="#7ee787">supported</text>
+<text x="494.8" y="94" fill="#e6edf3">)</text>
+<text x="16.0" y="112" fill="#e6edf3">&#160;&#160;Packages:&#160;&#160;&#160;&#160;&#160;&#160;apt</text>
+<text x="16.0" y="130" fill="#e6edf3">&#160;&#160;Init:&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;systemd</text>
+<text x="16.0" y="148" fill="#e6edf3">&#160;&#160;Architecture:&#160;&#160;arm64&#160;(aarch64)</text>
+<text x="16.0" y="166" fill="#e6edf3">&#160;&#160;Hardware:&#160;&#160;&#160;&#160;&#160;&#160;Raspberry&#160;Pi&#160;5&#160;Model&#160;B&#160;Rev&#160;1.0</text>
+<text x="16.0" y="184" fill="#e6edf3">&#160;&#160;CPU&#160;/&#160;RAM:&#160;&#160;&#160;&#160;&#160;4&#160;cores,&#160;7.9&#160;GiB</text>
+<text x="16.0" y="202" fill="#e6edf3">&#160;&#160;GPU:&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;none</text>
+<text x="16.0" y="220" fill="#e6edf3">&#160;&#160;Boot&#160;disk:&#160;&#160;&#160;&#160;&#160;nvme&#160;(Samsung&#160;SSD&#160;980&#160;500GB)</text>
+<text x="16.0" y="238" fill="#e6edf3">&#160;&#160;Time&#160;sync:&#160;&#160;&#160;&#160;&#160;yes</text>
+<text x="16.0" y="256" fill="#e6edf3">&#160;&#160;k3s:&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;installed&#160;(server)</text>
+<text x="16.0" y="292" fill="#e6edf3" font-weight="bold">Network</text>
+<text x="16.0" y="310" fill="#e6edf3">&#160;&#160;Default&#160;route:&#160;eth0&#160;(192.168.1.10)&#160;via&#160;192.168.1.1</text>
+<text x="16.0" y="328" fill="#e6edf3">&#160;&#160;Managed&#160;by:&#160;&#160;&#160;&#160;networkmanager</text>
+<text x="16.0" y="346" fill="#e6edf3">&#160;&#160;Firewall:&#160;&#160;&#160;&#160;&#160;&#160;none</text>
+<text x="16.0" y="382" fill="#e6edf3">INTERFACE&#160;&#160;TYPE&#160;&#160;&#160;&#160;&#160;&#160;STATE&#160;&#160;&#160;&#160;ADDRESS&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;MAC</text>
+<text x="16.0" y="400" fill="#e6edf3">eth0&#160;&#160;&#160;&#160;&#160;&#160;&#160;ethernet&#160;&#160;up&#160;&#160;&#160;&#160;&#160;&#160;&#160;192.168.1.10/24&#160;&#160;2c:cf:67:0a:1b:2c</text>
+<text x="16.0" y="418" fill="#e6edf3">wlan0&#160;&#160;&#160;&#160;&#160;&#160;wifi&#160;&#160;&#160;&#160;&#160;&#160;up&#160;&#160;&#160;&#160;&#160;&#160;&#160;192.168.1.53/24&#160;&#160;2c:cf:67:0a:1b:2d</text>
+<text x="16.0" y="436" fill="#e6edf3">flannel.1&#160;&#160;virtual&#160;&#160;&#160;unknown&#160;&#160;-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;-</text>
+<text x="16.0" y="454" fill="#e6edf3">cni0&#160;&#160;&#160;&#160;&#160;&#160;&#160;virtual&#160;&#160;&#160;unknown&#160;&#160;-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;-</text>
+</g></svg>

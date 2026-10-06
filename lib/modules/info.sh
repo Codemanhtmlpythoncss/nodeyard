@@ -144,7 +144,7 @@ info_iface_table() {
 info_network_cmd() {
     [[ $# -eq 0 ]] || ny_usage_error "Unexpected argument: $1"
     if [[ "$NY_JSON" -eq 1 ]]; then
-        info_detect_cmd
+        info_detect_cmd "$@"
         return 0
     fi
     info_iface_table

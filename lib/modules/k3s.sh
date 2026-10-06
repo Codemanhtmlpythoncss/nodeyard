@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # k3s on this machine: install (first server, extra server, agent), join
 # info, status, service control, logs, upgrade, kubeconfig and uninstall.
 # Ported from k3s-manager 3.2; every 3.2 command and flag still works.
@@ -150,9 +151,12 @@ k3s_tls_san_args() {
 }
 
 # k3s_store_token VALUE|"" FILE -- keep the join token in nodeyard's secret
-# store (0600) and print the path k3s should read it from.
+# store (0600) and set K3S_TOKEN_PATH to where k3s should read it from
+# (empty if no token was given). Runs in the main shell so the step shows
+# up in --dry-run plans.
 k3s_store_token() {
     local value="$1" file="$2"
+    K3S_TOKEN_PATH=""
     if [[ -n "$file" ]]; then
         [[ -r "$file" ]] || ny_die "Cannot read the token file ${file}." "Check the path and permissions (it should be readable by root only)." "$NY_E_USAGE"
         value="$(<"$file")"
@@ -160,7 +164,7 @@ k3s_store_token() {
     fi
     [[ -n "$value" ]] || return 0
     printf '%s' "$value" | ny_secret_set k3s-token
-    ny_secret_path k3s-token
+    K3S_TOKEN_PATH="$(ny_secret_path k3s-token)"
 }
 
 # k3s_read_token_stdin -- the join token from the first line of stdin.
@@ -220,24 +224,92 @@ k3s_install_server_cmd() {
     local -a disable=() labels=() taints=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --ha | --cluster-init) cluster_init=1; shift ;;
-            --worker | --allow-workloads) allow=1; shift ;;
-            --token) ny_need_value "$1" $#; token="$2"; ny_secret_register "$2"; shift 2 ;;
-            --token-file) ny_need_value "$1" $#; token_file="$2"; shift 2 ;;
-            --token-stdin) token="$(k3s_read_token_stdin)"; shift ;;
-            --interface) ny_need_value "$1" $#; iface="$2"; shift 2 ;;
-            --channel) ny_need_value "$1" $#; channel="$2"; shift 2 ;;
-            --version) ny_need_value "$1" $#; version="$2"; shift 2 ;;
-            --tls-san) ny_need_value "$1" $#; san_csv+="${san_csv:+,}$2"; shift 2 ;;
-            --no-auto-tls-san) no_auto_san=1; shift ;;
-            --disable) ny_need_value "$1" $#; disable+=(--disable "$2"); shift 2 ;;
-            --keep-ingress) keep_ingress=1; shift ;;
-            --cluster-cidr) ny_need_value "$1" $#; cluster_cidr="$2"; shift 2 ;;
-            --service-cidr) ny_need_value "$1" $#; service_cidr="$2"; shift 2 ;;
-            --datastore-endpoint) ny_need_value "$1" $#; datastore="$2"; ny_secret_register "$2"; shift 2 ;;
-            --node-label) ny_need_value "$1" $#; labels+=(--node-label "$2"); shift 2 ;;
-            --node-taint) ny_need_value "$1" $#; taints+=(--node-taint "$2"); shift 2 ;;
-            --) shift; break ;;
+            --ha | --cluster-init)
+                cluster_init=1
+                shift
+                ;;
+            --worker | --allow-workloads)
+                allow=1
+                shift
+                ;;
+            --token)
+                ny_need_value "$1" $#
+                token="$2"
+                ny_secret_register "$2"
+                shift 2
+                ;;
+            --token-file)
+                ny_need_value "$1" $#
+                token_file="$2"
+                shift 2
+                ;;
+            --token-stdin)
+                token="$(k3s_read_token_stdin)"
+                shift
+                ;;
+            --interface)
+                ny_need_value "$1" $#
+                iface="$2"
+                shift 2
+                ;;
+            --channel)
+                ny_need_value "$1" $#
+                channel="$2"
+                shift 2
+                ;;
+            --version)
+                ny_need_value "$1" $#
+                version="$2"
+                shift 2
+                ;;
+            --tls-san)
+                ny_need_value "$1" $#
+                san_csv+="${san_csv:+,}$2"
+                shift 2
+                ;;
+            --no-auto-tls-san)
+                no_auto_san=1
+                shift
+                ;;
+            --disable)
+                ny_need_value "$1" $#
+                disable+=(--disable "$2")
+                shift 2
+                ;;
+            --keep-ingress)
+                keep_ingress=1
+                shift
+                ;;
+            --cluster-cidr)
+                ny_need_value "$1" $#
+                cluster_cidr="$2"
+                shift 2
+                ;;
+            --service-cidr)
+                ny_need_value "$1" $#
+                service_cidr="$2"
+                shift 2
+                ;;
+            --datastore-endpoint)
+                ny_need_value "$1" $#
+                datastore="$2"
+                ny_secret_register "$2"
+                shift 2
+                ;;
+            --node-label)
+                ny_need_value "$1" $#
+                labels+=(--node-label "$2")
+                shift 2
+                ;;
+            --node-taint)
+                ny_need_value "$1" $#
+                taints+=(--node-taint "$2")
+                shift 2
+                ;;
+            --)
+                shift
+                break
+                ;;
             *) ny_usage_error "Unknown option for 'install master': $1" ;;
         esac
     done
@@ -271,7 +343,10 @@ k3s_install_server_cmd() {
 
     ny_info "About to install k3s here as the first server:"
     ny_hint "address:   ${node_ip}${iface:+ (interface ${iface})}"
-    ny_hint "datastore: $([[ $cluster_init -eq 1 ]] && echo 'embedded etcd (more servers can join)' || { [[ -n $datastore ]] && echo external || echo 'SQLite (single server)'; })"
+    local store="SQLite (single server)"
+    [[ -n "$datastore" ]] && store="external datastore"
+    [[ "$cluster_init" -eq 1 ]] && store="embedded etcd (more servers can join)"
+    ny_hint "datastore: ${store}"
     ny_hint "workloads: $([[ $allow -eq 1 ]] && echo 'allowed on this server' || echo 'not scheduled here (dedicated control plane)')"
     ny_hint "k3s:       ${version:-${channel:-stable} channel}"
     [[ "${#disable[@]}" -gt 0 ]] && ny_hint "disabled:  $(printf '%s ' "${disable[@]}" | sed 's/--disable //g')"
@@ -287,8 +362,8 @@ k3s_install_server_cmd() {
     k3s_network_args "$iface" server
     k3s_tls_san_args "$san_csv" "$((no_auto_san == 1 ? 0 : 1))"
 
-    local token_path
-    token_path="$(k3s_store_token "$token" "$token_file")"
+    k3s_store_token "$token" "$token_file"
+    local token_path="$K3S_TOKEN_PATH"
 
     local -a args=(server)
     [[ "$cluster_init" -eq 1 ]] && args+=(--cluster-init)
@@ -369,15 +444,53 @@ k3s_install_agent_cmd() {
     k3s_join_common_args
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --server) ny_need_value "$1" $#; K3S_J_SERVER="$2"; shift 2 ;;
-            --token) ny_need_value "$1" $#; K3S_J_TOKEN="$2"; ny_secret_register "$2"; shift 2 ;;
-            --token-file) ny_need_value "$1" $#; K3S_J_TOKEN_FILE="$2"; shift 2 ;;
-            --token-stdin) K3S_J_TOKEN="$(k3s_read_token_stdin)"; shift ;;
-            --interface) ny_need_value "$1" $#; K3S_J_IFACE="$2"; shift 2 ;;
-            --channel) ny_need_value "$1" $#; K3S_J_CHANNEL="$2"; shift 2 ;;
-            --version) ny_need_value "$1" $#; K3S_J_VERSION="$2"; shift 2 ;;
-            --node-label) ny_need_value "$1" $#; ny_valid_label "$2" || ny_usage_error "$NY_VALID_MSG"; K3S_J_LABELS+=(--node-label "$2"); shift 2 ;;
-            --node-taint) ny_need_value "$1" $#; ny_valid_taint "$2" || ny_usage_error "$NY_VALID_MSG"; K3S_J_TAINTS+=(--node-taint "$2"); shift 2 ;;
+            --server)
+                ny_need_value "$1" $#
+                K3S_J_SERVER="$2"
+                shift 2
+                ;;
+            --token)
+                ny_need_value "$1" $#
+                K3S_J_TOKEN="$2"
+                ny_secret_register "$2"
+                shift 2
+                ;;
+            --token-file)
+                ny_need_value "$1" $#
+                K3S_J_TOKEN_FILE="$2"
+                shift 2
+                ;;
+            --token-stdin)
+                K3S_J_TOKEN="$(k3s_read_token_stdin)"
+                shift
+                ;;
+            --interface)
+                ny_need_value "$1" $#
+                K3S_J_IFACE="$2"
+                shift 2
+                ;;
+            --channel)
+                ny_need_value "$1" $#
+                K3S_J_CHANNEL="$2"
+                shift 2
+                ;;
+            --version)
+                ny_need_value "$1" $#
+                K3S_J_VERSION="$2"
+                shift 2
+                ;;
+            --node-label)
+                ny_need_value "$1" $#
+                ny_valid_label "$2" || ny_usage_error "$NY_VALID_MSG"
+                K3S_J_LABELS+=(--node-label "$2")
+                shift 2
+                ;;
+            --node-taint)
+                ny_need_value "$1" $#
+                ny_valid_taint "$2" || ny_usage_error "$NY_VALID_MSG"
+                K3S_J_TAINTS+=(--node-taint "$2")
+                shift 2
+                ;;
             *) ny_usage_error "Unknown option for 'install worker': $1" ;;
         esac
     done
@@ -408,15 +521,50 @@ k3s_install_join_server_cmd() {
     k3s_join_common_args
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --server) ny_need_value "$1" $#; K3S_J_SERVER="$2"; shift 2 ;;
-            --token) ny_need_value "$1" $#; K3S_J_TOKEN="$2"; ny_secret_register "$2"; shift 2 ;;
-            --token-file) ny_need_value "$1" $#; K3S_J_TOKEN_FILE="$2"; shift 2 ;;
-            --token-stdin) K3S_J_TOKEN="$(k3s_read_token_stdin)"; shift ;;
-            --interface) ny_need_value "$1" $#; K3S_J_IFACE="$2"; shift 2 ;;
-            --tls-san) ny_need_value "$1" $#; K3S_J_SAN+="${K3S_J_SAN:+,}$2"; shift 2 ;;
-            --no-auto-tls-san) K3S_J_NOAUTO=1; shift ;;
-            --channel) ny_need_value "$1" $#; K3S_J_CHANNEL="$2"; shift 2 ;;
-            --version) ny_need_value "$1" $#; K3S_J_VERSION="$2"; shift 2 ;;
+            --server)
+                ny_need_value "$1" $#
+                K3S_J_SERVER="$2"
+                shift 2
+                ;;
+            --token)
+                ny_need_value "$1" $#
+                K3S_J_TOKEN="$2"
+                ny_secret_register "$2"
+                shift 2
+                ;;
+            --token-file)
+                ny_need_value "$1" $#
+                K3S_J_TOKEN_FILE="$2"
+                shift 2
+                ;;
+            --token-stdin)
+                K3S_J_TOKEN="$(k3s_read_token_stdin)"
+                shift
+                ;;
+            --interface)
+                ny_need_value "$1" $#
+                K3S_J_IFACE="$2"
+                shift 2
+                ;;
+            --tls-san)
+                ny_need_value "$1" $#
+                K3S_J_SAN+="${K3S_J_SAN:+,}$2"
+                shift 2
+                ;;
+            --no-auto-tls-san)
+                K3S_J_NOAUTO=1
+                shift
+                ;;
+            --channel)
+                ny_need_value "$1" $#
+                K3S_J_CHANNEL="$2"
+                shift 2
+                ;;
+            --version)
+                ny_need_value "$1" $#
+                K3S_J_VERSION="$2"
+                shift 2
+                ;;
             *) ny_usage_error "Unknown option for 'install join-master': $1" ;;
         esac
     done
@@ -462,8 +610,8 @@ k3s_join() {
 
     k3s_save_state "$mode" "$iface" "$node_ip" "$K3S_J_SERVER" "" "$K3S_J_SAN"
     host_install_prereqs
-    local token_path
-    token_path="$(k3s_store_token "$K3S_J_TOKEN" "$K3S_J_TOKEN_FILE")"
+    k3s_store_token "$K3S_J_TOKEN" "$K3S_J_TOKEN_FILE"
+    local token_path="$K3S_TOKEN_PATH"
 
     local -a args=() env=()
     if [[ "$mode" == agent ]]; then
@@ -537,7 +685,10 @@ k3s_token_cmd() {
     local reveal=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --reveal) reveal=1; shift ;;
+            --reveal)
+                reveal=1
+                shift
+                ;;
             *) ny_usage_error "Unknown option for 'token': $1" ;;
         esac
     done
@@ -637,7 +788,10 @@ k3s_status_cmd() {
         local bad
         bad="$(kctl get pods -A --no-headers 2>/dev/null | awk '$4 !~ /Running|Completed/' || true)"
         if [[ -n "$bad" ]]; then
-            { printf 'NAMESPACE\tPOD\tREADY\tSTATUS\n'; awk '{print $1"\t"$2"\t"$3"\t"$4}' <<<"$bad"; } | ny_table --status STATUS
+            {
+                printf 'NAMESPACE\tPOD\tREADY\tSTATUS\n'
+                awk '{print $1"\t"$2"\t"$3"\t"$4}' <<<"$bad"
+            } | ny_table --status STATUS
         else
             printf '  %s\n' "$(ny_color green "all pods are running")"
         fi
@@ -648,8 +802,9 @@ k3s_status_cmd() {
 }
 
 k3s_nodes_table() {
-    { printf 'NAME\tSTATUS\tROLES\tVERSION\tADDRESS\tOS\n'
-      kctl get nodes --no-headers -o wide 2>/dev/null | awk '{os=""; for(i=8;i<=NF-2;i++) os=os (os?" ":"") $i; print $1"\t"$2"\t"$3"\t"$5"\t"$6"\t"os}'
+    {
+        printf 'NAME\tSTATUS\tROLES\tVERSION\tADDRESS\tOS\n'
+        kctl get nodes --no-headers -o wide 2>/dev/null | awk '{os=""; for(i=8;i<=NF-2;i++) os=os (os?" ":"") $i; print $1"\t"$2"\t"$3"\t"$5"\t"$6"\t"os}'
     } | ny_table --status STATUS
 }
 
@@ -729,8 +884,16 @@ k3s_logs_cmd() {
     local lines=200 follow=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --follow | -f) follow=1; shift ;;
-            --lines) ny_need_value "$1" $#; ny_valid_int "$2" 1 100000 || ny_usage_error "$NY_VALID_MSG"; lines="$2"; shift 2 ;;
+            --follow | -f)
+                follow=1
+                shift
+                ;;
+            --lines)
+                ny_need_value "$1" $#
+                ny_valid_int "$2" 1 100000 || ny_usage_error "$NY_VALID_MSG"
+                lines="$2"
+                shift 2
+                ;;
             *) ny_usage_error "Unknown option for 'logs': $1" ;;
         esac
     done
@@ -764,8 +927,18 @@ k3s_upgrade_cmd() {
     local channel="" version=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --channel) ny_need_value "$1" $#; ny_valid_enum "$2" stable latest testing || ny_usage_error "$NY_VALID_MSG"; channel="$2"; shift 2 ;;
-            --version) ny_need_value "$1" $#; ny_valid_k3s_version "$2" || ny_usage_error "$NY_VALID_MSG"; version="$2"; shift 2 ;;
+            --channel)
+                ny_need_value "$1" $#
+                ny_valid_enum "$2" stable latest testing || ny_usage_error "$NY_VALID_MSG"
+                channel="$2"
+                shift 2
+                ;;
+            --version)
+                ny_need_value "$1" $#
+                ny_valid_k3s_version "$2" || ny_usage_error "$NY_VALID_MSG"
+                version="$2"
+                shift 2
+                ;;
             *) ny_usage_error "Unknown option for 'upgrade': $1" ;;
         esac
     done
@@ -843,10 +1016,25 @@ k3s_kubeconfig_cmd() {
     local target_ip="" user="${SUDO_USER:-}" merge=0 to_stdout=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --ip) ny_need_value "$1" $#; ny_valid_host "$2" || ny_usage_error "$NY_VALID_MSG"; target_ip="$2"; shift 2 ;;
-            --user) ny_need_value "$1" $#; user="$2"; shift 2 ;;
-            --merge) merge=1; shift ;;
-            --stdout) to_stdout=1; shift ;;
+            --ip)
+                ny_need_value "$1" $#
+                ny_valid_host "$2" || ny_usage_error "$NY_VALID_MSG"
+                target_ip="$2"
+                shift 2
+                ;;
+            --user)
+                ny_need_value "$1" $#
+                user="$2"
+                shift 2
+                ;;
+            --merge)
+                merge=1
+                shift
+                ;;
+            --stdout)
+                to_stdout=1
+                shift
+                ;;
             *) ny_usage_error "Unknown option for 'kubeconfig': $1" ;;
         esac
     done

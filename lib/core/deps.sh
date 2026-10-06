@@ -18,10 +18,11 @@ declare -gA NY_DEP_PKG=(
     [tar]="tar tar tar tar tar"
     [gzip]="gzip gzip gzip gzip gzip"
     [diff]="diffutils diffutils diffutils diffutils diffutils"
+    [find]="findutils findutils findutils findutils findutils"
     [ssh]="openssh-client openssh-clients openssh-clients openssh openssh-client"
     [scp]="openssh-client openssh-clients openssh-clients openssh openssh-client"
-    [ssh-keyscan]="openssh-client openssh-clients openssh-clients openssh openssh-client"
-    [ssh-keygen]="openssh-client openssh-clients openssh-clients openssh openssh-client"
+    [ssh - keyscan]="openssh-client openssh-clients openssh-clients openssh openssh-client"
+    [ssh - keygen]="openssh-client openssh-clients openssh-clients openssh openssh-client"
     [whiptail]="whiptail newt newt libnewt newt"
     [dialog]="dialog dialog dialog dialog dialog"
     [iptables]="iptables iptables iptables - iptables"
@@ -237,6 +238,7 @@ ny_fetch_pinned() {
 # ny_install_gum -- install the pinned gum release to /usr/local/bin/gum.
 ny_install_gum() {
     ny_need_root
+    ny_deps_ensure "installing gum" curl tar gzip find
     ny_lock_lookup gum || ny_die "gum is not available for $(ny_platform)." "nodeyard will use whiptail, dialog or plain prompts instead." "$NY_E_PRECONDITION"
     local tmp tarball
     tmp="$(ny_mktemp -d)"

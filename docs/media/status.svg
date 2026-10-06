@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="821" height="384" viewBox="0 0 821 384" role="img" aria-label="sudo nodeyard status">
+<rect width="821" height="384" rx="8" fill="#0d1117"/>
+<rect width="821" height="30" rx="8" fill="#161b22"/>
+<rect y="22" width="821" height="8" fill="#161b22"/>
+<circle cx="18" cy="15" r="5.5" fill="#ff5f57"/>
+<circle cx="36" cy="15" r="5.5" fill="#febc2e"/>
+<circle cx="54" cy="15" r="5.5" fill="#28c840"/>
+<text x="410.5" y="19.5" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" text-anchor="middle">sudo nodeyard status</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" xml:space="preserve">
+<text x="16.0" y="58" fill="#e6edf3" font-weight="bold">This&#160;node</text>
+<text x="16.0" y="76" fill="#e6edf3">&#160;&#160;Name:&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;yard-1</text>
+<text x="16.0" y="94" fill="#e6edf3">&#160;&#160;Role:&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;server</text>
+<text x="16.0" y="112" fill="#e6edf3">&#160;&#160;Address:&#160;&#160;&#160;&#160;&#160;192.168.1.10&#160;(eth0)</text>
+<text x="16.0" y="130" fill="#e6edf3">&#160;&#160;Joins:&#160;&#160;&#160;&#160;&#160;&#160;&#160;-</text>
+<text x="16.0" y="148" fill="#e6edf3">&#160;&#160;k3s:&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;v1.33.4+k3s1</text>
+<text x="16.0" y="166" fill="#e6edf3">&#160;&#160;Service:&#160;&#160;&#160;&#160;&#160;k3s&#160;</text>
+<text x="175.6" y="166" fill="#7ee787">active</text>
+<text x="16.0" y="184" fill="#e6edf3">&#160;&#160;nodeyard:&#160;&#160;&#160;&#160;0.1.0</text>
+<text x="16.0" y="220" fill="#e6edf3" font-weight="bold">Cluster&#160;nodes</text>
+<text x="125.2" y="220" fill="#e6edf3">&#160;(4/4&#160;Ready)</text>
+<text x="16.0" y="238" fill="#e6edf3">NAME&#160;&#160;&#160;&#160;STATUS&#160;&#160;ROLES&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;VERSION&#160;&#160;&#160;&#160;&#160;&#160;&#160;ADDRESS&#160;&#160;&#160;&#160;&#160;&#160;&#160;OS</text>
+<text x="16.0" y="256" fill="#e6edf3">yard-1&#160;&#160;Ready&#160;&#160;&#160;control-plane,etcd,mast…&#160;&#160;v1.33.4+k3s1&#160;&#160;192.168.1.10&#160;&#160;Debian&#160;GNU/Linux&#160;12&#160;(bo…</text>
+<text x="16.0" y="274" fill="#e6edf3">yard-2&#160;&#160;Ready&#160;&#160;&#160;control-plane,etcd,mast…&#160;&#160;v1.33.4+k3s1&#160;&#160;192.168.1.11&#160;&#160;Debian&#160;GNU/Linux&#160;12&#160;(bo…</text>
+<text x="16.0" y="292" fill="#e6edf3">yard-3&#160;&#160;Ready&#160;&#160;&#160;control-plane,etcd,mast…&#160;&#160;v1.33.4+k3s1&#160;&#160;192.168.1.12&#160;&#160;Ubuntu&#160;24.04.3&#160;LTS</text>
+<text x="16.0" y="310" fill="#e6edf3">yard-4&#160;&#160;Ready&#160;&#160;&#160;&lt;none&gt;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;v1.33.4+k3s1&#160;&#160;192.168.1.13&#160;&#160;Debian&#160;GNU/Linux&#160;12&#160;(bo…</text>
+<text x="16.0" y="346" fill="#e6edf3" font-weight="bold">Pods&#160;that&#160;are&#160;not&#160;running</text>
+<text x="16.0" y="364" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="364" fill="#7ee787">all&#160;pods&#160;are&#160;running</text>
+</g></svg>

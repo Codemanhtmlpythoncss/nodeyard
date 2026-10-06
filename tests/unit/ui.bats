@@ -30,21 +30,22 @@ setup() {
 @test "plain choose accepts a number, a value, or the default" {
     export NODEYARD_UI=plain NODEYARD_INTERACTIVE=1
     NY_UI=""
-    run ny_ui_choose "Pick" b $'a\tApple' $'b\tBanana' <<<"1"
+    run --separate-stderr ny_ui_choose "Pick" b $'a\tApple' $'b\tBanana' <<<"1"
     assert_output a
     NY_UI=""
-    run ny_ui_choose "Pick" b $'a\tApple' $'b\tBanana' <<<""
+    run --separate-stderr ny_ui_choose "Pick" b $'a\tApple' $'b\tBanana' <<<""
     assert_output b
     NY_UI=""
-    run ny_ui_choose "Pick" b $'a\tApple' $'b\tBanana' <<<$'9\nb'
-    assert_output --partial b
+    run --separate-stderr ny_ui_choose "Pick" b $'a\tApple' $'b\tBanana' <<<$'9\nb'
+    assert_output b
 }
 
 @test "plain input re-asks until the value is valid" {
     export NODEYARD_UI=plain NODEYARD_INTERACTIVE=1
     NY_UI=""
-    run ny_ui_input "Address" "" ipv4 <<<$'999.1.1.1\n10.0.0.5'
-    assert_output --partial "10.0.0.5"
+    run --separate-stderr ny_ui_input "Address" "" ipv4 <<<$'999.1.1.1\n10.0.0.5'
+    assert_output "10.0.0.5"
+    [[ "$stderr" == *"not a valid IPv4"* ]]
 }
 
 @test "q cancels and b goes back (in wizards)" {

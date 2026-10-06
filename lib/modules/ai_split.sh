@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # EXPERIMENTAL: one model too big for any single node, split across several
 # with llama.cpp RPC (ported unchanged in behaviour from k3s-manager 3.2).
 # Every generated token passes through every node over the network, so it
@@ -64,9 +65,13 @@ SPLIT_DEFAULT_MODEL_DIR="/var/lib/nodeyard/models"
 split_parse_model() {
     local spec="$1"
     if [[ "$spec" =~ ^https?://huggingface\.co/([^/]+/[^/]+)/(resolve|blob)/([^/]+)/(.+)$ ]]; then
-        SPLIT_REPO="${BASH_REMATCH[1]}"; SPLIT_REV="${BASH_REMATCH[3]}"; SPLIT_FILE="${BASH_REMATCH[4]}"
+        SPLIT_REPO="${BASH_REMATCH[1]}"
+        SPLIT_REV="${BASH_REMATCH[3]}"
+        SPLIT_FILE="${BASH_REMATCH[4]}"
     elif [[ "$spec" =~ ^([^/:]+/[^/:]+):(.+)$ ]]; then
-        SPLIT_REPO="${BASH_REMATCH[1]}"; SPLIT_REV="main"; SPLIT_FILE="${BASH_REMATCH[2]}"
+        SPLIT_REPO="${BASH_REMATCH[1]}"
+        SPLIT_REV="main"
+        SPLIT_FILE="${BASH_REMATCH[2]}"
     else
         ny_die "--model must be 'owner/repo:file.gguf' or a huggingface.co file URL (got: $spec)"
     fi
@@ -100,14 +105,15 @@ split_node_table() {
     # (the possibly-empty control-plane label must stay last: read merges empty tab fields)
     while IFS=$'\t' read -r name cap cpu arch ready pressure cp; do
         [[ -n "$name" ]] || continue
-        cap="${cap%Ki}"; [[ "$cap" =~ ^[0-9]+$ ]] || cap=0
+        cap="${cap%Ki}"
+        [[ "$cap" =~ ^[0-9]+$ ]] || cap=0
         # a node under disk/memory pressure rejects new pods: report it as not ready
         if [[ "$pressure" == *True* ]]; then ready="Pressure"; fi
         used="$(awk -v n="$name" '$1 == n {print $4}' <<<"$tops")"
         case "$used" in
             *Mi) used="${used%Mi}" ;;
-            *Gi) used=$(( ${used%Gi} * 1024 )) ;;
-            *Ki) used=$(( ${used%Ki} / 1024 )) ;;
+            *Gi) used=$((${used%Gi} * 1024)) ;;
+            *Ki) used=$((${used%Ki} / 1024)) ;;
             *) used="" ;;
         esac
         mine="$(awk -v n="$name" 'NR == FNR { if ($2 == n) on[$1] = 1; next }
@@ -115,11 +121,11 @@ split_node_table() {
                 if (v ~ /Gi$/) m = v * 1024; else if (v ~ /Mi$/) m = v + 0; else if (v ~ /Ki$/) m = v / 1024
                 s += m }
             END { printf "%d", s }' <(printf '%s\n' "$podnodes") <(printf '%s\n' "$podtops"))"
-        if [[ -n "$used" && "$mine" =~ ^[0-9]+$ ]] && (( mine > 0 && mine < used )); then
-            used=$(( used - mine ))
+        if [[ -n "$used" && "$mine" =~ ^[0-9]+$ ]] && ((mine > 0 && mine < used)); then
+            used=$((used - mine))
         fi
         [[ "$cp" == "true" ]] || cp="false"
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$(( cap / 1024 ))" "$used" "$cpu" "$cp" "$arch" "$ready"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$((cap / 1024))" "$used" "$cpu" "$cp" "$arch" "$ready"
     done < <(kctl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.capacity.memory}{"\t"}{.status.capacity.cpu}{"\t"}{.status.nodeInfo.architecture}{"\t"}{.status.conditions[?(@.type=="Ready")].status}{"\t"}{.status.conditions[?(@.type=="DiskPressure")].status}{.status.conditions[?(@.type=="MemoryPressure")].status}{"\t"}{.metadata.labels.node-role\.kubernetes\.io/control-plane}{"\n"}{end}' 2>/dev/null)
     return 0
 }
@@ -127,12 +133,12 @@ split_node_table() {
 # split_plan -- fills PLAN_* arrays (main node first) from SPLIT_SIZE,
 # SPLIT_NODES (optional filter), SPLIT_MAIN (optional) and SPLIT_RESERVE
 # (per-node overrides). Dies, saying by how much, if the model won't fit.
-SPLIT_RES_WORKER=1024     # MiB kept free on every node for the OS and k3s
-SPLIT_RES_CP=1536         # control-plane nodes also run the API server & co.
-SPLIT_RES_MAIN=1024       # extra on the main node: KV cache + prompt cache
-SPLIT_WORK=256            # compute buffers each RPC server allocates
+SPLIT_RES_WORKER=1024 # MiB kept free on every node for the OS and k3s
+SPLIT_RES_CP=1536     # control-plane nodes also run the API server & co.
+SPLIT_RES_MAIN=1024   # extra on the main node: KV cache + prompt cache
+SPLIT_WORK=256        # compute buffers each RPC server allocates
 split_plan() {
-    local size_mib=$(( SPLIT_SIZE / 1048576 ))
+    local size_mib=$((SPLIT_SIZE / 1048576))
     local -a names=() avails=() cpus=() cps=() reserves=() frees=()
     local name cap used cpu cp arch ready reserve avail ov
 
@@ -149,17 +155,26 @@ split_plan() {
             ny_warn "Skipping ${name}: not Ready."
             continue
         fi
-        case "$arch" in amd64|arm64) ;; *) ny_warn "Skipping ${name}: architecture ${arch} isn't supported."; continue ;; esac
+        case "$arch" in amd64 | arm64) ;; *)
+            ny_warn "Skipping ${name}: architecture ${arch} isn't supported."
+            continue
+            ;;
+        esac
         if [[ -z "$used" ]]; then
-            used=$(( cap * 30 / 100 ))
+            used=$((cap * 30 / 100))
             ny_warn "No live memory stats for ${name} (is metrics-server working? try 'nodeyard nettest'); assuming ${used} MiB in use."
         fi
         reserve=$SPLIT_RES_WORKER
         if [[ "$cp" == "true" ]]; then reserve=$SPLIT_RES_CP; fi
         ov="${SPLIT_RESERVE[$name]:-}"
         if [[ -n "$ov" ]]; then reserve="$ov"; fi
-        avail=$(( cap - used - reserve - SPLIT_WORK ))
-        names+=("$name"); avails+=("$avail"); cpus+=("${cpu%%m*}"); cps+=("$cp"); reserves+=("$reserve"); frees+=("$(( cap - used ))")
+        avail=$((cap - used - reserve - SPLIT_WORK))
+        names+=("$name")
+        avails+=("$avail")
+        cpus+=("${cpu%%m*}")
+        cps+=("$cp")
+        reserves+=("$reserve")
+        frees+=("$((cap - used))")
     done <<<"${SPLIT_NODE_CACHE:-$(split_node_table)}"
 
     [[ "${#names[@]}" -gt 0 ]] || ny_die "No usable nodes."
@@ -174,20 +189,20 @@ split_plan() {
     else
         for i in "${!names[@]}"; do
             [[ "${cps[i]}" == "true" ]] && continue
-            if [[ $best -lt 0 ]] || (( avails[i] > avails[best] )); then best=$i; fi
+            if [[ $best -lt 0 ]] || ((avails[i] > avails[best])); then best=$i; fi
         done
         [[ $best -ge 0 ]] || best=0
         SPLIT_MAIN="${names[best]}"
     fi
-    reserves[best]=$(( reserves[best] + SPLIT_RES_MAIN ))
-    avails[best]=$(( avails[best] - SPLIT_RES_MAIN ))
-    if (( frees[best] < SPLIT_RES_MAIN + 256 )); then
+    reserves[best]=$((reserves[best] + SPLIT_RES_MAIN))
+    avails[best]=$((avails[best] - SPLIT_RES_MAIN))
+    if ((frees[best] < SPLIT_RES_MAIN + 256)); then
         ny_die "The main node ${names[best]} doesn't have enough free memory even to coordinate (${frees[best]} MiB free)."
     fi
     # A main node short on memory (but with a good disk/network) can just
     # coordinate: it reads the model and sends every layer to the others.
     # (Under 1 GiB a slice isn't worth the extra network hop per token.)
-    if [[ "$SPLIT_MAIN_ONLY" -ne 1 ]] && (( avails[best] < 1024 )); then
+    if [[ "$SPLIT_MAIN_ONLY" -ne 1 ]] && ((avails[best] < 1024)); then
         ny_warn "${names[best]} is low on memory, so it will only coordinate and hold no part of the model."
         SPLIT_MAIN_ONLY=1
     fi
@@ -196,35 +211,44 @@ split_plan() {
     local total=0
     for i in "${!names[@]}"; do
         if [[ $i -eq $best && "$SPLIT_MAIN_ONLY" -eq 1 ]]; then continue; fi
-        if (( avails[i] < 512 )); then
+        if ((avails[i] < 512)); then
             if [[ $i -eq $best ]]; then ny_die "The main node ${names[i]} doesn't have enough free memory (${frees[i]} MiB free)."; fi
             ny_warn "Leaving out ${names[i]}: only ${frees[i]} MiB free and ${reserves[i]} MiB is kept in reserve."
             avails[i]=0
             continue
         fi
-        total=$(( total + avails[i] ))
+        total=$((total + avails[i]))
     done
 
-    local need=$(( size_mib * 103 / 100 ))
+    local need=$((size_mib * 103 / 100))
 
-    if (( total < need )); then
+    if ((total < need)); then
         [[ "${SPLIT_PROBE:-0}" -eq 1 ]] && return 1
         ny_die "This model needs ~$(awk -v m="$need" 'BEGIN{printf "%.1f", m/1024}') GiB but only ~$(awk -v m="$total" 'BEGIN{printf "%.1f", m/1024}') GiB is free across the nodes after reserves. Pick a smaller quant, add nodes, or lower a node's reserve (--reserve NODE=GiB)."
     fi
 
-    PLAN_NAMES=(); PLAN_SHARE=(); PLAN_CPU=(); PLAN_CP=(); PLAN_FREE=(); PLAN_RESERVE=()
+    PLAN_NAMES=()
+    PLAN_SHARE=()
+    PLAN_CPU=()
+    PLAN_CP=()
+    PLAN_FREE=()
+    PLAN_RESERVE=()
     local order=("$best") share
     for i in "${!names[@]}"; do
-        if [[ $i -ne $best ]] && (( avails[i] > 0 )); then order+=("$i"); fi
+        if [[ $i -ne $best ]] && ((avails[i] > 0)); then order+=("$i"); fi
     done
     for i in "${order[@]}"; do
         share=0
-        if (( avails[i] > 0 )); then
-            share=$(( size_mib * avails[i] / total ))
-            (( share < 1 )) && share=1
+        if ((avails[i] > 0)); then
+            share=$((size_mib * avails[i] / total))
+            ((share < 1)) && share=1
         fi
-        PLAN_NAMES+=("${names[i]}"); PLAN_SHARE+=("$share"); PLAN_CPU+=("${cpus[i]}")
-        PLAN_CP+=("${cps[i]}"); PLAN_FREE+=("${frees[i]}"); PLAN_RESERVE+=("${reserves[i]}")
+        PLAN_NAMES+=("${names[i]}")
+        PLAN_SHARE+=("$share")
+        PLAN_CPU+=("${cpus[i]}")
+        PLAN_CP+=("${cps[i]}")
+        PLAN_FREE+=("${frees[i]}")
+        PLAN_RESERVE+=("${reserves[i]}")
     done
     return 0
 }
@@ -235,9 +259,12 @@ split_plan() {
 split_threads() {
     local i="$1" t="${PLAN_CPU[$1]}" ov
     ov="${SPLIT_THREADS[${PLAN_NAMES[i]}]:-}"
-    if [[ -n "$ov" ]]; then printf '%s\n' "$ov"; return 0; fi
-    if (( t >= 8 )); then t=$(( t / 2 )); fi
-    if [[ "${PLAN_CP[i]}" == "true" ]]; then t=$(( t > 1 ? t - 1 : 1 )); fi
+    if [[ -n "$ov" ]]; then
+        printf '%s\n' "$ov"
+        return 0
+    fi
+    if ((t >= 8)); then t=$((t / 2)); fi
+    if [[ "${PLAN_CP[i]}" == "true" ]]; then t=$((t > 1 ? t - 1 : 1)); fi
     printf '%s\n' "$t"
     return 0
 }
@@ -252,13 +279,13 @@ split_print_plan() {
         threads="$(split_threads "$i")"
         extra=$SPLIT_WORK
         if [[ "${PLAN_SHARE[i]}" -eq 0 ]]; then extra=0; fi
-        if [[ $i -eq 0 ]]; then extra=$(( extra + SPLIT_RES_MAIN )); fi
-        left=$(( PLAN_FREE[i] - PLAN_SHARE[i] - extra ))
+        if [[ $i -eq 0 ]]; then extra=$((extra + SPLIT_RES_MAIN)); fi
+        left=$((PLAN_FREE[i] - PLAN_SHARE[i] - extra))
         printf '  %-18s %-13s %8.1fG %7.1fG %2d%% %9.1fG %8s\n' "${PLAN_NAMES[i]}" \
             "$(if [[ $i -eq 0 && "${PLAN_SHARE[i]}" -eq 0 ]]; then echo 'main only'; elif [[ $i -eq 0 ]]; then echo 'main + share'; else echo 'share'; fi)" \
             "$(awk -v m="${PLAN_FREE[i]}" 'BEGIN{print m/1024}')" \
             "$(awk -v m="${PLAN_SHARE[i]}" 'BEGIN{print m/1024}')" \
-            "$(( PLAN_SHARE[i] * 100 * 1048576 / SPLIT_SIZE ))" \
+            "$((PLAN_SHARE[i] * 100 * 1048576 / SPLIT_SIZE))" \
             "$(awk -v m="$left" 'BEGIN{print m/1024}')" "$threads"
     done
     echo
@@ -274,14 +301,15 @@ split_print_plan() {
 split_manifest() {
     local out="$1" i n share mem_req mem_lim threads cache_arg rpc_list="" ts_list=""
     local fetch_script
-    fetch_script="$(cat <<FETCH
+    fetch_script="$(
+        cat <<FETCH
           set -e
           [ -x /opt/llama/ggml-rpc-server ] && [ -x /opt/llama/llama-server ] && exit 0
           case "\$(uname -m)" in x86_64) P=x64;; aarch64) P=arm64;; *) echo "unsupported arch"; exit 1;; esac
           curl -fsSL --retry 5 -o /tmp/l.tgz "https://github.com/ggml-org/llama.cpp/releases/download/${SPLIT_LLAMA_BUILD}/llama-${SPLIT_LLAMA_BUILD}-bin-ubuntu-\$P.tar.gz"
           tar -xzf /tmp/l.tgz -C /opt/llama --strip-components=1
 FETCH
-)"
+    )"
 
     {
         cat <<YAML
@@ -388,11 +416,11 @@ YAML
         for i in "${!PLAN_NAMES[@]}"; do
             n="rpc-$(ny_k8s_name "${PLAN_NAMES[i]}")"
             share="${PLAN_SHARE[i]}"
-            [[ "$share" -gt 0 ]] || continue    # a main-only coordinator runs no RPC server
+            [[ "$share" -gt 0 ]] || continue # a main-only coordinator runs no RPC server
             cache_arg=', "-c"'
             if [[ "${#SPLIT_NO_CACHE[@]}" -gt 0 ]] && ny_in_list "${PLAN_NAMES[i]}" "${SPLIT_NO_CACHE[@]}"; then cache_arg=""; fi
-            mem_req=$(( share + 256 ))
-            mem_lim=$(( share + share * 15 / 100 + 512 ))
+            mem_req=$((share + 256))
+            mem_lim=$((share + share * 15 / 100 + 512))
             threads="$(split_threads "$i")"
             rpc_list+="${rpc_list:+,}${n}.${SPLIT_NS}.svc.cluster.local:50052"
             ts_list+="${ts_list:+,}${share}"
@@ -441,7 +469,10 @@ YAML
         local think_args="" key_args="" svc_type="NodePort" np_line="    nodePort: ${SPLIT_NODEPORT}"
         if [[ "$SPLIT_THINK" != "on" ]]; then think_args=$'\n        - --reasoning-budget\n        - "0"'; fi
         if [[ -n "$SPLIT_API_KEY" ]]; then key_args=$'\n        - --api-key-file\n        - /secrets/api-key'; fi
-        if [[ "$SPLIT_NODEPORT" == "0" ]]; then svc_type="ClusterIP"; np_line=""; fi
+        if [[ "$SPLIT_NODEPORT" == "0" ]]; then
+            svc_type="ClusterIP"
+            np_line=""
+        fi
         if [[ -n "$SPLIT_API_KEY" ]]; then
             cat <<YAML
 ---
@@ -514,10 +545,10 @@ ${fetch_script}
           periodSeconds: 10
         volumeMounts:
         - {name: bin, mountPath: /opt/llama}
-        - {name: models, mountPath: /models}$( [[ -n "$SPLIT_API_KEY" ]] && printf '\n        - {name: api-key, mountPath: /secrets, readOnly: true}' || true )
+        - {name: models, mountPath: /models}$([[ -n "$SPLIT_API_KEY" ]] && printf '\n        - {name: api-key, mountPath: /secrets, readOnly: true}' || true)
       volumes:
       - {name: bin, hostPath: {path: /var/lib/nodeyard/llama.cpp/${SPLIT_LLAMA_BUILD}, type: DirectoryOrCreate}}
-      - {name: models, hostPath: {path: ${SPLIT_MODEL_DIR}, type: DirectoryOrCreate}}$( [[ -n "$SPLIT_API_KEY" ]] && printf '\n      - {name: api-key, secret: {secretName: llama-api-key}}' || true )
+      - {name: models, hostPath: {path: ${SPLIT_MODEL_DIR}, type: DirectoryOrCreate}}$([[ -n "$SPLIT_API_KEY" ]] && printf '\n      - {name: api-key, secret: {secretName: llama-api-key}}' || true)
 ---
 apiVersion: v1
 kind: Service
@@ -530,14 +561,22 @@ spec:
     targetPort: 8080
 ${np_line}
 YAML
-    } > "$out"
+    } >"$out"
     return 0
 }
 
 split_parse_flags() {
-    SPLIT_MODEL_SPEC="$SPLIT_DEFAULT_MODEL"; SPLIT_MAIN=""; SPLIT_NODES=(); SPLIT_NODEPORT=31435
-    SPLIT_CTX=16384; SPLIT_THINK="off"; SPLIT_API_KEY=""; SPLIT_ALIAS=""
-    SPLIT_MODEL_DIR="$SPLIT_DEFAULT_MODEL_DIR"; SPLIT_MAIN_ONLY=0; SPLIT_NO_CACHE=()
+    SPLIT_MODEL_SPEC="$SPLIT_DEFAULT_MODEL"
+    SPLIT_MAIN=""
+    SPLIT_NODES=()
+    SPLIT_NODEPORT=31435
+    SPLIT_CTX=16384
+    SPLIT_THINK="off"
+    SPLIT_API_KEY=""
+    SPLIT_ALIAS=""
+    SPLIT_MODEL_DIR="$SPLIT_DEFAULT_MODEL_DIR"
+    SPLIT_MAIN_ONLY=0
+    SPLIT_NO_CACHE=()
     declare -gA SPLIT_RESERVE=()
     declare -gA SPLIT_THREADS=()
     local rn rg
@@ -545,32 +584,83 @@ split_parse_flags() {
         case "$1" in
             --reserve)
                 [[ $# -ge 2 && "$2" == *=* ]] || ny_usage_error "--reserve needs NODE=GiB (e.g. --reserve archlinux=4)"
-                rn="${2%%=*}"; rg="${2#*=}"
+                rn="${2%%=*}"
+                rg="${2#*=}"
                 [[ "$rg" =~ ^[0-9]+([.][0-9]+)?$ ]] || ny_usage_error "--reserve ${2}: the amount must be a number of GiB"
                 SPLIT_RESERVE[$rn]="$(awk -v g="$rg" 'BEGIN{printf "%d", g*1024}')"
-                shift 2 ;;
+                shift 2
+                ;;
             --threads)
                 [[ $# -ge 2 && "$2" =~ ^[^=]+=[0-9]+$ ]] || ny_usage_error "--threads needs NODE=N (e.g. --threads archlinux=6)"
                 SPLIT_THREADS[${2%%=*}]="${2#*=}"
-                shift 2 ;;
-            --model) [[ $# -ge 2 ]] || ny_usage_error "--model needs owner/repo:file.gguf"; SPLIT_MODEL_SPEC="$2"; shift 2 ;;
-            --main) [[ $# -ge 2 ]] || ny_usage_error "--main needs a node name"; SPLIT_MAIN="$2"; shift 2 ;;
-            --nodes) [[ $# -ge 2 ]] || ny_usage_error "--nodes needs a comma-separated list"; IFS=',' read -r -a SPLIT_NODES <<<"$2"; shift 2 ;;
-            --nodeport) [[ $# -ge 2 ]] || ny_usage_error "--nodeport needs a port (0 = cluster-only)"; SPLIT_NODEPORT="$2"; shift 2 ;;
-            --ctx) [[ $# -ge 2 ]] || ny_usage_error "--ctx needs a number of tokens"; SPLIT_CTX="$2"; shift 2 ;;
-            --think) [[ $# -ge 2 ]] || ny_usage_error "--think needs on|off"; SPLIT_THINK="$2"; shift 2 ;;
-            --api-key) [[ $# -ge 2 ]] || ny_usage_error "--api-key needs a value"; SPLIT_API_KEY="$2"; ny_secret_register "$2"
-                ny_warn "--api-key puts the key in your shell history; next time use --api-key-file."; shift 2 ;;
+                shift 2
+                ;;
+            --model)
+                [[ $# -ge 2 ]] || ny_usage_error "--model needs owner/repo:file.gguf"
+                SPLIT_MODEL_SPEC="$2"
+                shift 2
+                ;;
+            --main)
+                [[ $# -ge 2 ]] || ny_usage_error "--main needs a node name"
+                SPLIT_MAIN="$2"
+                shift 2
+                ;;
+            --nodes)
+                [[ $# -ge 2 ]] || ny_usage_error "--nodes needs a comma-separated list"
+                IFS=',' read -r -a SPLIT_NODES <<<"$2"
+                shift 2
+                ;;
+            --nodeport)
+                [[ $# -ge 2 ]] || ny_usage_error "--nodeport needs a port (0 = cluster-only)"
+                SPLIT_NODEPORT="$2"
+                shift 2
+                ;;
+            --ctx)
+                [[ $# -ge 2 ]] || ny_usage_error "--ctx needs a number of tokens"
+                SPLIT_CTX="$2"
+                shift 2
+                ;;
+            --think)
+                [[ $# -ge 2 ]] || ny_usage_error "--think needs on|off"
+                SPLIT_THINK="$2"
+                shift 2
+                ;;
+            --api-key)
+                [[ $# -ge 2 ]] || ny_usage_error "--api-key needs a value"
+                SPLIT_API_KEY="$2"
+                ny_secret_register "$2"
+                ny_warn "--api-key puts the key in your shell history; next time use --api-key-file."
+                shift 2
+                ;;
             --api-key-file)
                 [[ $# -ge 2 && -r "$2" ]] || ny_usage_error "--api-key-file needs a readable file"
-                SPLIT_API_KEY="$(ny_trim "$(<"$2")")"; ny_secret_register "$SPLIT_API_KEY"; shift 2 ;;
-            --alias) [[ $# -ge 2 ]] || ny_usage_error "--alias needs a name"; SPLIT_ALIAS="$2"; shift 2 ;;
+                SPLIT_API_KEY="$(ny_trim "$(<"$2")")"
+                ny_secret_register "$SPLIT_API_KEY"
+                shift 2
+                ;;
+            --alias)
+                [[ $# -ge 2 ]] || ny_usage_error "--alias needs a name"
+                SPLIT_ALIAS="$2"
+                shift 2
+                ;;
             --model-dir)
                 [[ $# -ge 2 && "$2" =~ ^/[A-Za-z0-9._/-]+$ && "$2" != *..* ]] || ny_usage_error "--model-dir needs an absolute path on the main node (e.g. /srv/models)"
-                SPLIT_MODEL_DIR="${2%/}"; shift 2 ;;
-            --main-only) SPLIT_MAIN_ONLY=1; shift ;;
-            --no-cache) [[ $# -ge 2 ]] || ny_usage_error "--no-cache needs a comma-separated list of nodes"; IFS=',' read -r -a SPLIT_NO_CACHE <<<"$2"; shift 2 ;;
-            --yes|-y) NY_YES=1; shift ;;
+                SPLIT_MODEL_DIR="${2%/}"
+                shift 2
+                ;;
+            --main-only)
+                SPLIT_MAIN_ONLY=1
+                shift
+                ;;
+            --no-cache)
+                [[ $# -ge 2 ]] || ny_usage_error "--no-cache needs a comma-separated list of nodes"
+                IFS=',' read -r -a SPLIT_NO_CACHE <<<"$2"
+                shift 2
+                ;;
+            --yes | -y)
+                NY_YES=1
+                shift
+                ;;
             *) ny_usage_error "Unknown option: $1" ;;
         esac
     done
@@ -597,10 +687,16 @@ split_pick_model() {
         for q in "${SPLIT_AUTO_QUANTS[@]}"; do
             split_parse_model "${SPLIT_AUTO_REPO}:${SPLIT_AUTO_PREFIX}${q}.gguf"
             split_model_info
-            if ( SPLIT_PROBE=1 split_plan >/dev/null 2>&1 ); then picked="$q"; break; fi
+            if (SPLIT_PROBE=1 split_plan >/dev/null 2>&1); then
+                picked="$q"
+                break
+            fi
             skipped+="${skipped:+, }${q} ($(awk -v b="$SPLIT_SIZE" 'BEGIN{printf "%.1f", b/1073741824}') GiB)"
         done
-        [[ -n "$picked" ]] || { split_plan; ny_die "Not even the smallest version fits."; }
+        [[ -n "$picked" ]] || {
+            split_plan
+            ny_die "Not even the smallest version fits."
+        }
         ny_ok "Picked ${SPLIT_FILE}: the biggest version of Qwen3.6-35B-A3B that fits in the free memory right now."
         [[ -z "$skipped" ]] || echo "   Too big right now: ${skipped}"
         SPLIT_MODEL_SPEC="${SPLIT_REPO}:${SPLIT_FILE}"
@@ -617,7 +713,7 @@ ai_split_plan() {
     split_parse_flags "$@"
     split_pick_model
     split_print_plan
-    echo "Deploy it with: nodeyard ai split deploy --model ${SPLIT_MODEL_SPEC} --main ${SPLIT_MAIN}$( [[ "$SPLIT_MODEL_DIR" != "$SPLIT_DEFAULT_MODEL_DIR" ]] && printf ' --model-dir %q' "$SPLIT_MODEL_DIR" || true )"
+    echo "Deploy it with: nodeyard ai split deploy --model ${SPLIT_MODEL_SPEC} --main ${SPLIT_MAIN}$([[ "$SPLIT_MODEL_DIR" != "$SPLIT_DEFAULT_MODEL_DIR" ]] && printf ' --model-dir %q' "$SPLIT_MODEL_DIR" || true)"
     return 0
 }
 
@@ -634,12 +730,12 @@ split_disk_check() {
     avail="$(printf '%s' "$fs" | grep -o '"availableBytes":[0-9]*' | cut -d: -f2 || true)"
     cap="$(printf '%s' "$fs" | grep -o '"capacityBytes":[0-9]*' | cut -d: -f2 || true)"
     [[ "$avail" =~ ^[0-9]+$ && "$cap" =~ ^[0-9]+$ ]] || return 0
-    need=$(( SPLIT_SIZE + SPLIT_SIZE / 4 + cap * 12 / 100 ))
-    if (( avail < need )); then
-        ny_warn "${node} has $(( avail / 1073741824 )) GiB free disk; downloading needs about $(( need / 1073741824 )) GiB (model + one part + 12% the kubelet keeps free)."
+    need=$((SPLIT_SIZE + SPLIT_SIZE / 4 + cap * 12 / 100))
+    if ((avail < need)); then
+        ny_warn "${node} has $((avail / 1073741824)) GiB free disk; downloading needs about $((need / 1073741824)) GiB (model + one part + 12% the kubelet keeps free)."
         ny_warn "Fine if the model is already downloaded there; otherwise free space or use --main <node with more disk>."
     else
-        ny_ok "Disk on ${node}: $(( avail / 1073741824 )) GiB free (needs about $(( need / 1073741824 )) GiB)."
+        ny_ok "Disk on ${node}: $((avail / 1073741824)) GiB free (needs about $((need / 1073741824)) GiB)."
     fi
     return 0
 }
@@ -653,22 +749,34 @@ ai_split_deploy() {
     if kctl get namespace "$SPLIT_NS" >/dev/null 2>&1; then
         ny_warn "A split model is already deployed; this replaces it (the downloaded model file and weight caches are kept)."
     fi
-    ny_confirm "Deploy this?" y || { echo "Cancelled."; return 0; }
+    ny_confirm "Deploy this?" y || {
+        echo "Cancelled."
+        return 0
+    }
 
     local manifest
     manifest="$(ny_mktemp)"
     split_manifest "$manifest"
     if [[ "$NY_DRY_RUN" -eq 1 ]]; then
         ny_plan_add apply "Apply the split-model deployment (main node ${PLAN_NAMES[0]})"
-        ny_info "[dry-run] would apply:"; ny_redact "$(cat "$manifest")" >&2; printf '\n' >&2; return 0
+        ny_info "[dry-run] would apply:"
+        ny_redact "$(cat "$manifest")" >&2
+        printf '\n' >&2
+        return 0
     fi
     if kctl get namespace "$SPLIT_NS" >/dev/null 2>&1; then
         # Jobs are immutable, so replace the download Job too; the download
         # resumes from the part files already on disk.
         kctl -n "$SPLIT_NS" delete job,deployment,service,networkpolicy,secret --all --wait=true >/dev/null 2>&1 || true
     fi
-    kctl apply --dry-run=server -f "$manifest" >/dev/null || { rm -f "$manifest"; ny_die "Kubernetes rejected the generated manifest."; }
-    kctl apply -f "$manifest" || { rm -f "$manifest"; ny_die "Applying the manifest failed."; }
+    kctl apply --dry-run=server -f "$manifest" >/dev/null || {
+        rm -f "$manifest"
+        ny_die "Kubernetes rejected the generated manifest."
+    }
+    kctl apply -f "$manifest" || {
+        rm -f "$manifest"
+        ny_die "Applying the manifest failed."
+    }
     rm -f "$manifest"
 
     ny_ok "Deployed. The main node (${PLAN_NAMES[0]}) downloads the model, then loads it and sends each node its share."
@@ -694,6 +802,7 @@ ai_split_status() {
     phase="$(kctl -n "$SPLIT_NS" get pods -l job-name=model-download -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)"
     if [[ "$phase" == "Running" ]]; then
         size="$(kctl -n "$SPLIT_NS" get job model-download -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SIZE")].value}' 2>/dev/null || true)"
+        # shellcheck disable=SC2016 # runs in the pod's shell
         got="$(kctl -n "$SPLIT_NS" exec "$dl" -- sh -c 'n=0; for f in /models/*.part* /models/*.joining; do [ -f "$f" ] && n=$((n + $(stat -c %s "$f"))); done; echo $n' 2>/dev/null || true)"
         local step
         step="$(kctl -n "$SPLIT_NS" logs "$dl" --tail=1 2>/dev/null || kctl -n "$SPLIT_NS" logs "$dl" --previous --tail=1 2>/dev/null || true)"
@@ -702,7 +811,7 @@ ai_split_status() {
         elif [[ "$step" == *"NOT ENOUGH DISK"* ]]; then
             ny_warn "$step"
         elif [[ "$got" =~ ^[0-9]+$ && "$size" =~ ^[0-9]+$ && "$size" -gt 0 ]]; then
-            echo "Model download: $(( got * 100 / size ))%  ($(( got / 1048576 )) of $(( size / 1048576 )) MiB)"
+            echo "Model download: $((got * 100 / size))%  ($((got / 1048576)) of $((size / 1048576)) MiB)"
         else
             echo "Model download: running"
         fi
@@ -732,9 +841,23 @@ ai_split_test() {
     local prompt="Explain in two sentences what a Raspberry Pi is." key=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --prompt) [[ $# -ge 2 ]] || ny_usage_error "--prompt needs text"; prompt="$2"; shift 2 ;;
-            --api-key) [[ $# -ge 2 ]] || ny_usage_error "--api-key needs a value"; key="$2"; ny_secret_register "$2"; shift 2 ;;
-            --api-key-file) [[ $# -ge 2 && -r "$2" ]] || ny_usage_error "--api-key-file needs a readable file"; key="$(ny_trim "$(<"$2")")"; ny_secret_register "$key"; shift 2 ;;
+            --prompt)
+                [[ $# -ge 2 ]] || ny_usage_error "--prompt needs text"
+                prompt="$2"
+                shift 2
+                ;;
+            --api-key)
+                [[ $# -ge 2 ]] || ny_usage_error "--api-key needs a value"
+                key="$2"
+                ny_secret_register "$2"
+                shift 2
+                ;;
+            --api-key-file)
+                [[ $# -ge 2 && -r "$2" ]] || ny_usage_error "--api-key-file needs a readable file"
+                key="$(ny_trim "$(<"$2")")"
+                ny_secret_register "$key"
+                shift 2
+                ;;
             *) ny_usage_error "Unknown option: $1" "nodeyard ai split test [--prompt TEXT] [--api-key-file PATH]" ;;
         esac
     done
@@ -764,13 +887,25 @@ ai_split_undeploy() {
     local purge=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --purge) purge=1; shift ;;
-            --yes|-y) NY_YES=1; shift ;;
+            --purge)
+                purge=1
+                shift
+                ;;
+            --yes | -y)
+                NY_YES=1
+                shift
+                ;;
             *) ny_usage_error "Unknown option: $1" "nodeyard ai split undeploy [--purge]" ;;
         esac
     done
-    kctl get namespace "$SPLIT_NS" >/dev/null 2>&1 || { echo "No split model is deployed."; return 0; }
-    ny_confirm "Remove the split model$( [[ $purge -eq 1 ]] && echo ' AND delete the downloaded model + caches from every node' || true )?" n || { echo "Cancelled."; return 0; }
+    kctl get namespace "$SPLIT_NS" >/dev/null 2>&1 || {
+        echo "No split model is deployed."
+        return 0
+    }
+    ny_confirm "Remove the split model$([[ $purge -eq 1 ]] && echo ' AND delete the downloaded model + caches from every node' || true)?" n || {
+        echo "Cancelled."
+        return 0
+    }
 
     local -a nodes=()
     local n main mdir
@@ -798,7 +933,7 @@ spec:
     volumeMounts: [{name: d, mountPath: /data}, {name: m, mountPath: /models}]
   volumes:
   - {name: d, hostPath: {path: /var/lib/nodeyard}}
-  - {name: m, hostPath: {path: $( [[ "$n" == "$main" ]] && echo "$mdir" || echo "$SPLIT_DEFAULT_MODEL_DIR" ), type: DirectoryOrCreate}}
+  - {name: m, hostPath: {path: $([[ "$n" == "$main" ]] && echo "$mdir" || echo "$SPLIT_DEFAULT_MODEL_DIR"), type: DirectoryOrCreate}}
 YAML
         done
         kctl -n nodeyard-cleanup wait --for=jsonpath='{.status.phase}'=Succeeded pod --all --timeout=180s >/dev/null 2>&1 || ny_warn "Some cleanup pods didn't finish; check: kubectl -n nodeyard-cleanup get pods"
@@ -808,4 +943,3 @@ YAML
     ny_ok "Split model removed."
     return 0
 }
-

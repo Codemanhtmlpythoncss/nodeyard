@@ -1,13 +1,14 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # Errors: plain-English messages with a suggested fix, stable exit codes, and
 # a machine-readable form for --json (used by the dashboard agent).
 
-NY_E_FAIL=1          # the action failed
-NY_E_USAGE=2         # bad command line
-NY_E_PRECONDITION=3  # missing dependency, not root, wrong kind of node...
-NY_E_PARTIAL=4       # some targets succeeded, some failed
-NY_E_CONFIRM=10      # needs confirmation: re-run with --yes
-NY_E_CANCELLED=130   # the user cancelled
+NY_E_FAIL=1         # the action failed
+NY_E_USAGE=2        # bad command line
+NY_E_PRECONDITION=3 # missing dependency, not root, wrong kind of node...
+NY_E_PARTIAL=4      # some targets succeeded, some failed
+NY_E_CONFIRM=10     # needs confirmation: re-run with --yes
+NY_E_CANCELLED=130  # the user cancelled
 
 # ny_die MESSAGE [FIX] [EXIT_CODE] -- stop with a clear error and a fix.
 ny_die() {
@@ -70,6 +71,8 @@ ny_on_err() {
     # A command deliberately returning an exit code (e.g. 130 = cancelled)
     # is not an unexpected failure.
     [[ "$cmd" == *'NY_CMD_FN['* ]] && return 0
+    # So is a function's explicit "return N", or a cancellation.
+    [[ "$cmd" == return* || "$code" -eq "$NY_E_CANCELLED" ]] && return 0
     NY_ERR_REPORTED=1
     ny_log ERROR "unexpected failure (exit ${code}) at ${BASH_SOURCE[1]:-?}:${line}: ${cmd}"
     printf '%s %s\n' "$(ny_color red "$NY_SYM_FAIL A step failed unexpectedly:")" "$(ny_redact "$cmd") (exit ${code})" >&2

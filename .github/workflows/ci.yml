@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (shellcheck, shfmt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: make deps
+      - run: make lint
+
+  test:
+    name: Unit tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install bash 4.3+ and jq (macOS)
+        if: runner.os == 'macOS'
+        run: brew install bash jq
+      - run: make deps
+      - run: make test
+
+  harness:
+    name: Harness ${{ matrix.distro }} (${{ matrix.arch }})
+    needs: [lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [debian-12, debian-13, ubuntu-22.04, ubuntu-24.04, fedora-42, rocky-9, almalinux-10, opensuse-leap-15.6, opensuse-tumbleweed, arch]
+        arch: [amd64, arm64]
+        exclude:
+          - distro: arch
+            arch: arm64
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: tests/harness/run.sh ${{ matrix.distro }}
+      - name: Keep the log if it failed
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: harness-${{ matrix.distro }}-${{ matrix.arch }}
+          path: tests/harness/logs/

@@ -47,7 +47,10 @@ ai_install_cmd() {
     local force=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --force) force=1; shift ;;
+            --force)
+                force=1
+                shift
+                ;;
             *) ny_usage_error "Unknown option for 'ai install': $1" ;;
         esac
     done
@@ -80,7 +83,10 @@ ai_uninstall_cmd() {
     local purge=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --purge-models) purge=1; shift ;;
+            --purge-models)
+                purge=1
+                shift
+                ;;
             *) ny_usage_error "Unknown option for 'ai uninstall': $1" ;;
         esac
     done
@@ -125,12 +131,39 @@ ai_deploy_cmd() {
     local min_gb=0 mem_limit="" nodeport="" image="ollama/ollama:latest"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --only) ny_need_value "$1" $#; only+=("$2"); shift 2 ;;
-            --exclude) ny_need_value "$1" $#; exclude+=("$2"); shift 2 ;;
-            --min-memory-gb) ny_need_value "$1" $#; ny_valid_int "$2" 0 4096 || ny_usage_error "$NY_VALID_MSG"; min_gb="$2"; shift 2 ;;
-            --memory-limit) ny_need_value "$1" $#; [[ "$2" =~ ^[0-9]+(Mi|Gi)$ ]] || ny_usage_error "--memory-limit must look like 6Gi or 512Mi."; mem_limit="$2"; shift 2 ;;
-            --nodeport) ny_need_value "$1" $#; ny_valid_int "$2" 30000 32767 || ny_usage_error "--nodeport must be between 30000 and 32767."; nodeport="$2"; shift 2 ;;
-            --image) ny_need_value "$1" $#; image="$2"; shift 2 ;;
+            --only)
+                ny_need_value "$1" $#
+                only+=("$2")
+                shift 2
+                ;;
+            --exclude)
+                ny_need_value "$1" $#
+                exclude+=("$2")
+                shift 2
+                ;;
+            --min-memory-gb)
+                ny_need_value "$1" $#
+                ny_valid_int "$2" 0 4096 || ny_usage_error "$NY_VALID_MSG"
+                min_gb="$2"
+                shift 2
+                ;;
+            --memory-limit)
+                ny_need_value "$1" $#
+                [[ "$2" =~ ^[0-9]+(Mi|Gi)$ ]] || ny_usage_error "--memory-limit must look like 6Gi or 512Mi."
+                mem_limit="$2"
+                shift 2
+                ;;
+            --nodeport)
+                ny_need_value "$1" $#
+                ny_valid_int "$2" 30000 32767 || ny_usage_error "--nodeport must be between 30000 and 32767."
+                nodeport="$2"
+                shift 2
+                ;;
+            --image)
+                ny_need_value "$1" $#
+                image="$2"
+                shift 2
+                ;;
             *) ny_usage_error "Unknown option for 'ai deploy': $1" ;;
         esac
     done
@@ -171,7 +204,8 @@ ai_deploy_cmd() {
         np_line=$'\n    nodePort: '"${nodeport}"
     fi
     local manifest
-    manifest="$(cat <<YAML
+    manifest="$(
+        cat <<YAML
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -222,7 +256,7 @@ spec:
     targetPort: ${AI_OLLAMA_PORT}
     protocol: TCP${np_line}
 YAML
-)"
+    )"
     if [[ "$NY_DRY_RUN" -eq 1 ]]; then
         ny_plan_add apply "Label $(ny_join ', ' "${selected[@]}") and apply the Ollama DaemonSet/Service"
         ny_info "[dry-run] would label the nodes and apply:"
@@ -258,8 +292,14 @@ ai_undeploy_cmd() {
     local keep_labels=0 keep_data=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --keep-labels) keep_labels=1; shift ;;
-            --keep-data) keep_data=1; shift ;;
+            --keep-labels)
+                keep_labels=1
+                shift
+                ;;
+            --keep-data)
+                keep_data=1
+                shift
+                ;;
             *) ny_usage_error "Unknown option for 'ai undeploy': $1" ;;
         esac
     done
@@ -337,12 +377,12 @@ ai_nodes_cmd() {
 
 # ai_model_targets NODE -- fills AI_T_PODS / AI_T_NODES.
 ai_model_targets() {
-    local only="$1" pod node
+    local want_node="$1" pod node
     AI_T_PODS=()
     AI_T_NODES=()
     while IFS=$'\t' read -r pod node; do
         [[ -n "$pod" ]] || continue
-        [[ -n "$only" && "$node" != "$only" ]] && continue
+        [[ -n "$want_node" && "$node" != "$want_node" ]] && continue
         AI_T_PODS+=("$pod")
         AI_T_NODES+=("$node")
     done < <(ai_pods)
@@ -353,7 +393,11 @@ ai_model_parse() {
     AI_M_NAME="" AI_M_NODE=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --node) ny_need_value "$1" $#; AI_M_NODE="$2"; shift 2 ;;
+            --node)
+                ny_need_value "$1" $#
+                AI_M_NODE="$2"
+                shift 2
+                ;;
             -*) ny_usage_error "Unknown option: $1" ;;
             *)
                 [[ -z "$AI_M_NAME" ]] || ny_usage_error "Unexpected argument: $1"

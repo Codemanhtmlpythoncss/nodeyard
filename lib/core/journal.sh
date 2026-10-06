@@ -75,8 +75,14 @@ ny_journal_entries() {
     local txn="" feature=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --txn) txn="$2"; shift 2 ;;
-            --feature) feature="$2"; shift 2 ;;
+            --txn)
+                txn="$2"
+                shift 2
+                ;;
+            --feature)
+                feature="$2"
+                shift 2
+                ;;
             *) shift ;;
         esac
     done

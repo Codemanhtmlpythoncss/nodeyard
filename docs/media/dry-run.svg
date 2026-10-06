@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="872" height="636" viewBox="0 0 872 636" role="img" aria-label="sudo nodeyard install master --ha --worker --interface eth0 --dry-run">
+<rect width="872" height="636" rx="8" fill="#0d1117"/>
+<rect width="872" height="30" rx="8" fill="#161b22"/>
+<rect y="22" width="872" height="8" fill="#161b22"/>
+<circle cx="18" cy="15" r="5.5" fill="#ff5f57"/>
+<circle cx="36" cy="15" r="5.5" fill="#febc2e"/>
+<circle cx="54" cy="15" r="5.5" fill="#28c840"/>
+<text x="436.0" y="19.5" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" text-anchor="middle">sudo nodeyard install master --ha --worker --interface eth0 --dry-run</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" xml:space="preserve">
+<text x="16.0" y="58" fill="#e6edf3">About&#160;to&#160;install&#160;k3s&#160;here&#160;as&#160;the&#160;first&#160;server:</text>
+<text x="16.0" y="76" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="76" fill="#8b949e" opacity="0.8">address:&#160;&#160;&#160;192.168.1.10&#160;(interface&#160;eth0)</text>
+<text x="16.0" y="94" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="94" fill="#8b949e" opacity="0.8">datastore:&#160;embedded&#160;etcd&#160;(more&#160;servers&#160;can&#160;join)</text>
+<text x="16.0" y="112" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="112" fill="#8b949e" opacity="0.8">workloads:&#160;allowed&#160;on&#160;this&#160;server</text>
+<text x="16.0" y="130" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="130" fill="#8b949e" opacity="0.8">k3s:&#160;&#160;&#160;&#160;&#160;&#160;&#160;stable&#160;channel</text>
+<text x="16.0" y="148" fill="#56d4dd">[dry-run]&#160;would&#160;set&#160;permissions&#160;of</text>
+<text x="301.6" y="148" fill="#e6edf3">&#160;/etc/nodeyard/cluster.conf&#160;to&#160;0640</text>
+<text x="16.0" y="166" fill="#e6edf3">Detected&#160;Raspberry&#160;Pi&#160;OS&#160;12&#160;(bookworm)&#160;(arm64,&#160;package&#160;manager:&#160;apt,&#160;init:&#160;systemd)</text>
+<text x="16.0" y="184" fill="#79c0ff">▸</text>
+<text x="24.4" y="184" fill="#e6edf3">&#160;</text>
+<text x="32.8" y="184" fill="#e6edf3" font-weight="bold">Installing&#160;prerequisites</text>
+<text x="16.0" y="202" fill="#56d4dd">[dry-run]&#160;would&#160;run:</text>
+<text x="184.0" y="202" fill="#e6edf3">&#160;apt-get&#160;update&#160;-q</text>
+<text x="16.0" y="220" fill="#56d4dd">[dry-run]&#160;would&#160;run:</text>
+<text x="184.0" y="220" fill="#e6edf3">&#160;apt-get&#160;install&#160;-y&#160;-q&#160;curl&#160;ca-certificates&#160;open-iscsi&#160;nfs-common&#160;apparmor&#160;appa…</text>
+<text x="16.0" y="238" fill="#56d4dd">[dry-run]&#160;would&#160;create</text>
+<text x="200.8" y="238" fill="#e6edf3">&#160;/etc/modules-load.d/nodeyard.conf&#160;(mode&#160;0644)</text>
+<text x="16.0" y="256" fill="#e6edf3">&#160;&#160;&#160;&#160;---&#160;/etc/modules-load.d/nodeyard.conf&#160;(current)</text>
+<text x="16.0" y="274" fill="#e6edf3">&#160;&#160;&#160;&#160;+++&#160;/etc/modules-load.d/nodeyard.conf&#160;(new)</text>
+<text x="16.0" y="292" fill="#e6edf3">&#160;&#160;&#160;&#160;@@&#160;-0,0&#160;+1,2&#160;@@</text>
+<text x="16.0" y="310" fill="#e6edf3">&#160;&#160;&#160;&#160;+overlay</text>
+<text x="16.0" y="328" fill="#e6edf3">&#160;&#160;&#160;&#160;+br_netfilter</text>
+<text x="16.0" y="346" fill="#56d4dd">[dry-run]&#160;would&#160;create</text>
+<text x="200.8" y="346" fill="#e6edf3">&#160;/etc/sysctl.d/90-nodeyard.conf&#160;(mode&#160;0644)</text>
+<text x="16.0" y="364" fill="#e6edf3">&#160;&#160;&#160;&#160;---&#160;/etc/sysctl.d/90-nodeyard.conf&#160;(current)</text>
+<text x="16.0" y="382" fill="#e6edf3">&#160;&#160;&#160;&#160;+++&#160;/etc/sysctl.d/90-nodeyard.conf&#160;(new)</text>
+<text x="16.0" y="400" fill="#e6edf3">&#160;&#160;&#160;&#160;@@&#160;-0,0&#160;+1,4&#160;@@</text>
+<text x="16.0" y="418" fill="#e6edf3">&#160;&#160;&#160;&#160;+#&#160;Written&#160;by&#160;nodeyard:&#160;settings&#160;k3s&#160;networking&#160;needs.</text>
+<text x="16.0" y="436" fill="#e6edf3">&#160;&#160;&#160;&#160;+net.ipv4.ip_forward&#160;=&#160;1</text>
+<text x="16.0" y="454" fill="#e6edf3">&#160;&#160;&#160;&#160;+net.bridge.bridge-nf-call-iptables&#160;=&#160;1</text>
+<text x="16.0" y="472" fill="#e6edf3">&#160;&#160;&#160;&#160;+net.bridge.bridge-nf-call-ip6tables&#160;=&#160;1</text>
+<text x="16.0" y="490" fill="#e6edf3">Swap&#160;is&#160;on.&#160;k3s&#160;runs&#160;fine&#160;with&#160;swap,&#160;so&#160;it&#160;is&#160;left&#160;alone.</text>
+<text x="16.0" y="508" fill="#e6edf3">k3s&#160;is&#160;already&#160;installed;&#160;the&#160;installer&#160;will&#160;reconcile&#160;its&#160;settings&#160;(safe&#160;to&#160;repeat).</text>
+<text x="16.0" y="526" fill="#79c0ff">▸</text>
+<text x="24.4" y="526" fill="#e6edf3">&#160;</text>
+<text x="32.8" y="526" fill="#e6edf3" font-weight="bold">Running&#160;the&#160;official&#160;k3s&#160;installer&#160;(https://get.k3s.io)</text>
+<text x="16.0" y="544" fill="#56d4dd">[dry-run]&#160;would&#160;download</text>
+<text x="217.6" y="544" fill="#e6edf3">&#160;https://get.k3s.io</text>
+<text x="16.0" y="562" fill="#56d4dd">[dry-run]&#160;would&#160;run:</text>
+<text x="184.0" y="562" fill="#e6edf3">&#160;env&#160;INSTALL_K3S_EXEC=server\&#160;--cluster-init\&#160;--node-ip\&#160;192.168.1.10\&#160;--flanne…</text>
+<text x="16.0" y="580" fill="#56d4dd">[dry-run]&#160;would&#160;run:</text>
+<text x="184.0" y="580" fill="#e6edf3">&#160;systemctl&#160;restart&#160;k3s</text>
+<text x="16.0" y="616" fill="#56d4dd">Dry&#160;run:&#160;nothing&#160;was&#160;changed.&#160;Run&#160;the&#160;same&#160;command&#160;without&#160;--dry-run&#160;to&#160;apply&#160;11&#160;step(s).</text>
+</g></svg>

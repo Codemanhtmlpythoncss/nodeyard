@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # Host preparation for k3s: packages, kernel modules, sysctls, swap, time
 # sync, the memory cgroup, and the fixes for things that commonly break k3s
 # on homelab machines (ported from k3s-manager 3.2).

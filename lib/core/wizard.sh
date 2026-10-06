@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # Guided wizards. A wizard is a JSON spec (share/nodeyard/wizards/ID.json)
 # listing steps; each answer becomes a flag of ONE nodeyard command. The
 # summary shows that command's own --dry-run plan, and applying runs the

@@ -1,0 +1,44 @@
+name: Bug report
+description: Something in nodeyard doesn't work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Security problems: please don't file them here; see SECURITY.md.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you ran, what you expected, and what happened instead.
+      placeholder: "I ran `sudo nodeyard install worker ...` and it said ..."
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The full output, ideally with `--verbose`. Check it contains no secrets (nodeyard redacts known ones).
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: nodeyard version
+      description: Output of `nodeyard --version`
+      placeholder: nodeyard 0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: machine
+    attributes:
+      label: Machine
+      description: Output of `nodeyard detect` on the affected machine.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor
+      description: Output of `sudo nodeyard doctor`, if it's relevant.
+      render: text

@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # The cluster config file: one git-config-style INI file that describes the
 # whole cluster (nodes, roles, IP plan, and later sites, AI and backups).
 #
@@ -15,10 +16,10 @@
 # Plain bash can read this format, including bash 3.2 on a macOS laptop.
 # Secrets never go in this file.
 
-declare -gA NY_CFG=()       # "section<US>sub<US>key" -> value (repeats joined by newline)
-declare -gA NY_CFG_LINE=()  # same key -> line of first occurrence
+declare -gA NY_CFG=()      # "section<US>sub<US>key" -> value (repeats joined by newline)
+declare -gA NY_CFG_LINE=() # same key -> line of first occurrence
 declare -gA NY_CFG_SECTION_LINE=()
-NY_CFG_ORDER=()             # "section<US>sub" in file order
+NY_CFG_ORDER=() # "section<US>sub" in file order
 NY_CFG_ERRORS=()
 NY_CFG_WARNINGS=()
 NY_CFG_LOADED_FROM=""
@@ -107,6 +108,7 @@ ny_cfg_unquote() {
         local i=1 c out=""
         while ((i < ${#raw})); do
             c="${raw:i:1}"
+            # shellcheck disable=SC1003 # comparing with a literal backslash
             if [[ "$c" == '\' ]]; then
                 i=$((i + 1))
                 case "${raw:i:1}" in
@@ -519,7 +521,7 @@ ny_cfg_validate_cross() {
             init_count=$((init_count + 1))
         fi
         addr="$(ny_cfg_get node "$node" address)"
-        [[ -n "$addr" ]] && ny_valid_cidr4 "$addr" || continue
+        { [[ -n "$addr" ]] && ny_valid_cidr4 "$addr"; } || continue
         ip="${addr%/*}"
         if [[ -n "${seen_ip[$ip]:-}" ]]; then
             NY_CFG_ERRORS+=("nodes '${seen_ip[$ip]}' and '${node}' both use address ${ip}. Fix: give each node its own address.")
@@ -548,7 +550,7 @@ ny_cfg_validate_cross() {
     local a b ra rb a1 a2 b1 b2
     for a in "${names[@]}"; do
         ra="$(ny_cfg_get network "" "$a")"
-        [[ -n "$ra" ]] && ny_valid_ipv4_range "$ra" || continue
+        { [[ -n "$ra" ]] && ny_valid_ipv4_range "$ra"; } || continue
         if [[ -n "$subnet" ]] && ny_valid_cidr4 "$subnet"; then
             if ! ny_cidr_contains "$subnet" "${ra%%-*}" || ! ny_cidr_contains "$subnet" "${ra#*-}"; then
                 NY_CFG_ERRORS+=("network ${a} ${ra} is not inside the subnet ${subnet}.")
@@ -557,7 +559,7 @@ ny_cfg_validate_cross() {
         for b in "${names[@]}"; do
             [[ "$a" < "$b" ]] || continue
             rb="$(ny_cfg_get network "" "$b")"
-            [[ -n "$rb" ]] && ny_valid_ipv4_range "$rb" || continue
+            { [[ -n "$rb" ]] && ny_valid_ipv4_range "$rb"; } || continue
             a1="$(ny_ip_to_int "${ra%%-*}")"
             a2="$(ny_ip_to_int "${ra#*-}")"
             b1="$(ny_ip_to_int "${rb%%-*}")"

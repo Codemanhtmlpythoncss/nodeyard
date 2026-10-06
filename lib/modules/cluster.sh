@@ -37,11 +37,34 @@ cluster_add_node_cmd() {
     local target="" port=22 iface="" version="" hostkey=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --ssh) ny_need_value "$1" $#; target="$2"; shift 2 ;;
-            --port) ny_need_value "$1" $#; ny_valid_port "$2" || ny_usage_error "$NY_VALID_MSG"; port="$2"; shift 2 ;;
-            --interface) ny_need_value "$1" $#; ny_valid_iface "$2" || ny_usage_error "$NY_VALID_MSG"; iface="$2"; shift 2 ;;
-            --version) ny_need_value "$1" $#; ny_valid_k3s_version "$2" || ny_usage_error "$NY_VALID_MSG"; version="$2"; shift 2 ;;
-            --host-key) ny_need_value "$1" $#; hostkey="$2"; shift 2 ;;
+            --ssh)
+                ny_need_value "$1" $#
+                target="$2"
+                shift 2
+                ;;
+            --port)
+                ny_need_value "$1" $#
+                ny_valid_port "$2" || ny_usage_error "$NY_VALID_MSG"
+                port="$2"
+                shift 2
+                ;;
+            --interface)
+                ny_need_value "$1" $#
+                ny_valid_iface "$2" || ny_usage_error "$NY_VALID_MSG"
+                iface="$2"
+                shift 2
+                ;;
+            --version)
+                ny_need_value "$1" $#
+                ny_valid_k3s_version "$2" || ny_usage_error "$NY_VALID_MSG"
+                version="$2"
+                shift 2
+                ;;
+            --host-key)
+                ny_need_value "$1" $#
+                hostkey="$2"
+                shift 2
+                ;;
             *) ny_usage_error "Unknown option for 'add-node': $1" ;;
         esac
     done
@@ -151,7 +174,10 @@ cluster_remove_node_cmd() {
     local node="" purge=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --purge) purge=1; shift ;;
+            --purge)
+                purge=1
+                shift
+                ;;
             -*) ny_usage_error "Unknown option for 'remove-node': $1" ;;
             *)
                 [[ -z "$node" ]] || ny_usage_error "Unexpected argument: $1"
@@ -194,9 +220,24 @@ cluster_watchdog_install_cmd() {
     local master="" interval=15 threshold=8
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --master) ny_need_value "$1" $#; ny_valid_host "$2" || ny_usage_error "$NY_VALID_MSG"; master="$2"; shift 2 ;;
-            --check-interval) ny_need_value "$1" $#; ny_valid_int "$2" 5 3600 || ny_usage_error "$NY_VALID_MSG"; interval="$2"; shift 2 ;;
-            --fail-threshold) ny_need_value "$1" $#; ny_valid_int "$2" 1 1000 || ny_usage_error "$NY_VALID_MSG"; threshold="$2"; shift 2 ;;
+            --master)
+                ny_need_value "$1" $#
+                ny_valid_host "$2" || ny_usage_error "$NY_VALID_MSG"
+                master="$2"
+                shift 2
+                ;;
+            --check-interval)
+                ny_need_value "$1" $#
+                ny_valid_int "$2" 5 3600 || ny_usage_error "$NY_VALID_MSG"
+                interval="$2"
+                shift 2
+                ;;
+            --fail-threshold)
+                ny_need_value "$1" $#
+                ny_valid_int "$2" 1 1000 || ny_usage_error "$NY_VALID_MSG"
+                threshold="$2"
+                shift 2
+                ;;
             *) ny_usage_error "Unknown option for 'watchdog-install': $1" ;;
         esac
     done

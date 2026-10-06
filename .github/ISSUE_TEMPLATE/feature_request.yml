@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest something nodeyard should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The problem or situation, not just the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help?
+      description: How you'd like nodeyard to handle it (a command, a menu option, a setting...).
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Your setup
+      description: Machines, distro and network, if it matters for this.
+  - type: checkboxes
+    id: roadmap
+    attributes:
+      label: Checked
+      options:
+        - label: I looked at the roadmap in docs/STATUS.md and this isn't already planned.

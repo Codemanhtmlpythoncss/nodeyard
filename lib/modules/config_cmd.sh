@@ -91,8 +91,14 @@ config_set_cmd() {
     local -a pos=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --add) add=1; shift ;;
-            *) pos+=("$1"); shift ;;
+            --add)
+                add=1
+                shift
+                ;;
+            *)
+                pos+=("$1")
+                shift
+                ;;
         esac
     done
     [[ "${#pos[@]}" -eq 2 ]] || ny_usage_error "Give a key and a value." "nodeyard config set section.key VALUE"
@@ -198,7 +204,11 @@ config_export_cmd() {
     local out=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --out) ny_need_value "$1" $#; out="$2"; shift 2 ;;
+            --out)
+                ny_need_value "$1" $#
+                out="$2"
+                shift 2
+                ;;
             *) ny_usage_error "Unknown option for 'config export': $1" ;;
         esac
     done
@@ -209,7 +219,10 @@ config_export_cmd() {
         return 0
     fi
     [[ ! -e "$out" ]] || ny_confirm "Overwrite ${out}?" n || return 0
-    { printf '# Exported from %s by nodeyard %s on %s\n' "$(ny_self_name)" "$NY_VERSION" "$(ny_now)"; cat "$NY_CONFIG"; } >"$out"
+    {
+        printf '# Exported from %s by nodeyard %s on %s\n' "$(ny_self_name)" "$NY_VERSION" "$(ny_now)"
+        cat "$NY_CONFIG"
+    } >"$out"
     ny_ok "Exported to ${out}"
 }
 
@@ -262,7 +275,10 @@ config_drift_cmd() {
     local fix=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --fix) fix=1; shift ;;
+            --fix)
+                fix=1
+                shift
+                ;;
             *) ny_usage_error "Unknown option for 'config drift': $1" ;;
         esac
     done
@@ -290,7 +306,7 @@ config_drift_cmd() {
         return 0
     fi
     k3s_load_state
-    local want_role have_role="" iface addr want_addr have_addr=""
+    local want_role have_role="" iface want_addr have_addr=""
     want_role="$(ny_role_normalize "$(ny_cfg_get node "$self" role)")"
     if [[ -f "$(ny_path /etc/systemd/system/k3s-agent.service)" ]]; then
         have_role="agent"

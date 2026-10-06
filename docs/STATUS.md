@@ -1,64 +1,88 @@
-# nodeyard status
+# Status and roadmap
 
-Successor to k3s-manager 3.2.0. Built in phases; see the plan in the
-project conversation. Decisions: name nodeyard, MIT, repo
-Codemanhtmlpythoncss/nodeyard, versions 0.N.0 per phase (1.0.0 once
-verified on hardware), config = git-config-style INI, Go agent + no-build
-web UI (phase 5), built-in AI router (phase 7), default site exposure =
-Tailscale Funnel (custom free names also supported).
+nodeyard is built in phases; each minor release completes one. This page
+says what's done, what's next, and what is known not to work yet, so work
+can pick up cleanly at any point.
 
-## Phase 1 (foundation): IN PROGRESS
+**Current release: 0.1.0 (Phase 1, foundation).**
 
-Done (written, syntax-checked; `nodeyard help` / `--version` / command
-`--help` work):
-- lib/core: base (paths, sandbox root), term (NO_COLOR, width), log
-  (secret redaction), json, errors (fix hints, exit codes, --json errors),
-  journal (backup + undo per change/feature), run (dry-run plan, atomic
-  file writes, services), validate (+ IPv4 math), config (INI parse/edit/
-  validate/schema), detect (distro/pkg/init/arch/hw/boot disk/net backend/
-  firewall), deps (+ pinned verified downloads, versions.lock), secrets,
-  ui (gum/whiptail/dialog/plain, spinner, progress, tables), registry
-  (dispatch, help, completion, --json wrapping), wizard (JSON specs),
-  kube, ssh (host-key verification), demo (sandbox + command shim)
-- lib/modules: menu (header, quick-start), info, host, firewall, k3s,
-  cluster, ai, ai_split, doctor, backup, config_cmd, changes, tool
-- share/nodeyard: wizards/*.json, demo/shim.sh, versions.lock (gum pinned)
-- bin/nodeyard, lib/nodeyard.sh
-- Legacy fixes: dry-run honoured, tokens via files/stdin (never argv),
-  real SSH host-key checks, no /tmp kubeconfig, agent upgrade no longer
-  reinstalls as server, watchdog treats 401 as reachable.
+## Roadmap
 
-Not done yet (next steps, in order):
-1. Demo fixtures: share/nodeyard/demo/{rules,data/,fs/} (simulated
-   3-node cluster) and run every command under --demo.
-2. completions/nodeyard.bash and completions/_nodeyard (call
-   `nodeyard __complete`).
-3. install.sh (--from-dir, release download + SHA256SUMS, k3s-manager
-   alias, /usr/bin link when sudo secure_path lacks /usr/local/bin),
-   uninstall.sh.
-4. tests: helpers + shim rules; bats for redaction, json, config,
-   detection per distro (os-release fixtures), journal/undo, dry-run,
-   registry, k3s command construction, doctor, wizard (plain UI);
-   tests/harness (systemd containers per distro); tests/tools.lock with
-   pins (bats 1.14.0 / support 0.3.0 / assert 2.2.4, shellcheck 0.11.0,
-   shfmt 3.14.1; sha256s are in the session log).
-5. shellcheck + shfmt -i 4 -ci across everything; fix findings.
-6. Repo files: README, LICENSE (MIT), CHANGELOG, CONTRIBUTING, SECURITY,
-   CODE_OF_CONDUCT (original text), .gitignore, .editorconfig,
-   .shellcheckrc, Makefile (lint/test/build/release/deps/harness/demo),
-   .github (ci.yml, release.yml, issue/PR templates; actions pinned by
-   SHA: checkout 3d3c42e5..., upload-artifact 043fb46d...,
-   download-artifact 3e5f45b2..., setup-go b7ad1dad...,
-   cosign-installer 6f9f1778...), examples/cluster.conf, docs pages.
-7. Commit "Phase 1: foundation" and tag v0.1.0.
+| Phase | Release | Scope | State |
+|---|---|---|---|
+| 1 | 0.1.0 | Foundation: modules, config, detection, logging, UI and wizards, doctor, demo mode, journal/undo, tests, CI | **done** |
+| 2 | 0.2.0 | IP management (static IPs via each network backend with automatic rollback, cluster IP plan, hostnames, mDNS, local DNS, speed tests) and the network device view (ARP/mDNS discovery, history, problem flags, LLDP/SNMP switch ports) | next |
+| 3 | 0.3.0 | Remote installer: `remote-install.sh` from a Linux or macOS laptop (bash 3.2), inventory files, preflight table, parallel installs, IP-change reconnect, retry failed | planned |
+| 4 | 0.4.0 | High availability: pinned and verified k3s, kube-vip virtual IP, add/remove/promote/maintenance/replace, rolling upgrades, shared storage (Longhorn or NFS), MetalLB, registry mirror, node groups | planned |
+| 5 | 0.5.0 | Node agent (Go, mutual TLS) and dashboards: per-node and cluster dashboards with full control, metric history, logins/2FA/audit log, API tokens, `nodeyard top` | planned |
+| 6 | 0.6.0 | Website hosting: from a folder, git or an image; Caddy standalone or cluster ingress; Let's Encrypt and a local CA; Tailscale Funnel, Cloudflare Tunnel, port forwarding; uptime checks; app catalogue | planned |
+| 7 | 0.7.0 | AI: GPU drivers and detection, OpenAI-compatible router with API keys and usage, model placement and sync, Open WebUI, benchmarks | planned |
+| 8 | 0.8.0 | Operations: cluster-wide doctor, scheduled and verified backups with restore wizard, rolling OS updates, alerts, power management, support bundle | planned |
+| 9 | 0.9.0 | Security review of everything, with a written report | planned |
+| 10 | 1.0.0+ | Extras, once everything above works on real hardware | planned |
 
-## Known limitations (so far)
-- k3s installer (get.k3s.io) and Ollama installer are not yet pinned or
-  checksum-verified; planned for phases 4 and 7.
-- Firewall: ufw/firewalld only; custom nftables/iptables are reported, not
-  changed (phase 9 reconcile).
-- Nothing is verified on real hardware yet.
+## Done in 0.1.0
 
-## Dev machine notes
-Homebrew tools installed for this project, to remove when done:
-go, bats-core, gum, shfmt (bash was already installed; keep it).
+- Modular layout: `bin/nodeyard`, `lib/core` (shared machinery),
+  `lib/modules` (one file per feature), `share/nodeyard` (wizards, pins,
+  demo data). See [architecture](architecture.md).
+- Every k3s-manager 3.2 command ported, plus `k3s-manager` alias.
+- Command registry with `--help`, `--yes`, `--dry-run`, `--json` for all
+  commands, and bash/zsh completion.
+- Change journal with undo by change, last change, or feature.
+- INI cluster config with schema validation, comment-preserving edits,
+  export/import, and a drift check for this node.
+- Detection: 22 distro releases tested, Raspberry Pi, boot disk type,
+  network backend (NetworkManager, netplan, networkd, ifupdown, dhcpcd,
+  wicked), firewall.
+- Terminal UI with gum/whiptail/dialog/plain backends, wizards (8),
+  quick-start, status header.
+- doctor with 24 checks and undoable fixes.
+- Secret redaction in logs, output and plans; secrets store.
+- Demo mode with a simulated four-node cluster.
+- install.sh / uninstall.sh, self-update from verified releases.
+- 122 bats unit tests, passing on macOS and Linux; multi-distro harness
+  passing on Debian 12/13, Ubuntu 22.04/24.04, Fedora 42, Rocky 9,
+  AlmaLinux 10, openSUSE Leap 15.6 and Tumbleweed, and Arch (run locally
+  on arm64, Arch under amd64 emulation; CI runs every distro on amd64 and
+  arm64); shellcheck- and shfmt-clean; CI and signed release workflows.
+
+## Known limitations
+
+- **Not yet verified on real hardware.** Everything above is tested with
+  simulated system commands and in containers. Installing k3s, joining
+  nodes and the AI commands keep k3s-manager 3.2's tested behaviour, but
+  nodeyard 0.1.0 itself hasn't been run against real machines yet. See the
+  checklist below.
+- The k3s and Ollama installer scripts are downloaded from their official
+  URLs but not pinned to a checksum (k3s in 0.4, Ollama in 0.7).
+- The firewall helper handles ufw and firewalld; custom nftables/iptables
+  rulesets are reported, not changed (0.9).
+- `config drift` checks only this node (all nodes in 0.5).
+- Snapshot restore is single-server only (full backups in 0.8).
+- The interactive menu and wizards are tested with plain prompts; the gum
+  and whiptail/dialog backends are exercised only by hand.
+- The containers in the harness don't run systemd or k3s, so service
+  management and k3s installs are covered only by unit tests with
+  simulated commands.
+
+## Verified on hardware
+
+Nothing yet. To help, run this on a spare machine or VM and report back:
+
+1. `curl -fsSL .../install.sh | sudo bash`, then `nodeyard detect`: is
+   everything right?
+2. `sudo nodeyard doctor`: anything wrong or misleading?
+3. `sudo nodeyard install master --worker --dry-run`, then without
+   `--dry-run`; `sudo nodeyard status` shows the node Ready.
+4. On a second machine, `sudo nodeyard add-node worker --ssh user@host`
+   from the first; check both appear in `status`, then run `nettest`.
+5. `sudo nodeyard changes`, `sudo nodeyard undo --last`.
+6. `sudo nodeyard uninstall everything` leaves the machines as they were.
+
+## Picking up work
+
+- Next phase: 2 (IP management and the network device view).
+- Development setup: [development.md](development.md).
+- Dev tools used in this repo are pinned in `tests/tools.lock`; runtime
+  downloads in `share/nodeyard/versions.lock`.

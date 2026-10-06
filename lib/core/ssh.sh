@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # SSH to other machines with real host-key verification: a host's key is
 # trusted only if you already trust it, you confirm its fingerprint, or you
 # pass the expected fingerprint. Host-key checking is never turned off.
@@ -106,9 +107,9 @@ ny_ssh_trust_host() {
 ny_ssh_opts() {
     local port="${2:-22}"
     NY_SSH_OPTS=(-o "UserKnownHostsFile=$(ny_ssh_known_hosts)" -o StrictHostKeyChecking=yes
-        -o ConnectTimeout=10 -o ServerAliveInterval=15
-        -o ControlMaster=auto -o "ControlPath=$(ny_ssh_dir)/cm-%C" -o ControlPersist=300
-        -o "Port=${port}")
+    -o ConnectTimeout=10 -o ServerAliveInterval=15
+    -o ControlMaster=auto -o "ControlPath=$(ny_ssh_dir)/cm-%C" -o ControlPersist=300
+    -o "Port=${port}")
 }
 
 # ny_ssh_close TARGET -- close a shared connection.

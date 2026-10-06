@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # Demo mode: run nodeyard against a simulated cluster so it can be tried,
 # tested and screenshotted without hardware.
 #

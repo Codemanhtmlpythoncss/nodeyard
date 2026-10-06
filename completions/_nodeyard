@@ -1,0 +1,8 @@
+#compdef nodeyard k3s-manager
+# zsh completion for nodeyard. nodeyard answers the candidates itself.
+_nodeyard() {
+    local -a candidates
+    candidates=("${(@f)$(${words[1]} __complete ${words[2,CURRENT-1]} -- ${words[CURRENT]} 2>/dev/null)}")
+    compadd -a candidates
+}
+_nodeyard "$@"

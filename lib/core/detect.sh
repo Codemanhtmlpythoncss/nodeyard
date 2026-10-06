@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # Runtime detection: distro, package manager, init system, architecture,
 # hardware, boot disk, network backend and firewall. Nothing is assumed;
 # every value comes from the machine (or a test/demo fixture).

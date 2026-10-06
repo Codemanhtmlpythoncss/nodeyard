@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="872" height="438" viewBox="0 0 872 438" role="img" aria-label="sudo nodeyard wizard k3s-upgrade">
+<rect width="872" height="438" rx="8" fill="#0d1117"/>
+<rect width="872" height="30" rx="8" fill="#161b22"/>
+<rect y="22" width="872" height="8" fill="#161b22"/>
+<circle cx="18" cy="15" r="5.5" fill="#ff5f57"/>
+<circle cx="36" cy="15" r="5.5" fill="#febc2e"/>
+<circle cx="54" cy="15" r="5.5" fill="#28c840"/>
+<text x="436.0" y="19.5" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" text-anchor="middle">sudo nodeyard wizard k3s-upgrade</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" xml:space="preserve">
+<text x="16.0" y="76" fill="#e6edf3" font-weight="bold">Upgrade&#160;k3s&#160;on&#160;this&#160;node</text>
+<text x="16.0" y="94" fill="#e6edf3">Upgrade&#160;servers&#160;before&#160;workers;&#160;a&#160;worker&#160;must&#160;never&#160;run&#160;a&#160;newer&#160;k3s&#160;than&#160;the&#160;servers.&#160;Workloads&#160;on&#160;…</text>
+<text x="16.0" y="130" fill="#e6edf3" font-weight="bold">[1]&#160;Upgrade&#160;to</text>
+<text x="16.0" y="148" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="148" fill="#56d4dd">&#160;1)</text>
+<text x="58.0" y="148" fill="#e6edf3">&#160;The&#160;latest&#160;stable&#160;release</text>
+<text x="16.0" y="166" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="166" fill="#56d4dd">&#160;2)</text>
+<text x="58.0" y="166" fill="#e6edf3">&#160;The&#160;latest&#160;release</text>
+<text x="16.0" y="184" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="184" fill="#56d4dd">&#160;3)</text>
+<text x="58.0" y="184" fill="#e6edf3">&#160;A&#160;specific&#160;version</text>
+<text x="16.0" y="202" fill="#e6edf3">Choice</text>
+<text x="66.4" y="202" fill="#8b949e" opacity="0.8">&#160;(b&#160;=&#160;back,&#160;q&#160;=&#160;quit)</text>
+<text x="242.8" y="202" fill="#e6edf3">&#160;[1]:&#160;</text>
+<text x="16.0" y="220" fill="#e6edf3" font-weight="bold">Summary</text>
+<text x="16.0" y="238" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="238" fill="#8b949e" opacity="0.8">Command:</text>
+<text x="100.0" y="238" fill="#e6edf3">&#160;nodeyard&#160;upgrade&#160;--channel&#160;stable</text>
+<text x="16.0" y="256" fill="#e6edf3">&#160;&#160;This&#160;will:</text>
+<text x="16.0" y="274" fill="#e6edf3">&#160;&#160;&#160;&#160;</text>
+<text x="49.6" y="274" fill="#56d4dd">•</text>
+<text x="58.0" y="274" fill="#e6edf3">&#160;Download&#160;https://get.k3s.io</text>
+<text x="16.0" y="292" fill="#e6edf3">&#160;&#160;&#160;&#160;</text>
+<text x="49.6" y="292" fill="#56d4dd">•</text>
+<text x="58.0" y="292" fill="#e6edf3">&#160;Run:&#160;env&#160;INSTALL_K3S_EXEC=server\&#160;--cluster-init\&#160;--node-ip\&#160;192.168.1.10\&#160;--flannel-iface\&#160;e…</text>
+<text x="16.0" y="310" fill="#e6edf3">&#160;&#160;&#160;&#160;</text>
+<text x="49.6" y="310" fill="#56d4dd">•</text>
+<text x="58.0" y="310" fill="#e6edf3">&#160;Run:&#160;systemctl&#160;restart&#160;k3s</text>
+<text x="16.0" y="346" fill="#e6edf3" font-weight="bold">What&#160;next?</text>
+<text x="16.0" y="364" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="364" fill="#56d4dd">&#160;1)</text>
+<text x="58.0" y="364" fill="#e6edf3">&#160;Apply&#160;these&#160;changes</text>
+<text x="16.0" y="382" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="382" fill="#56d4dd">&#160;2)</text>
+<text x="58.0" y="382" fill="#e6edf3">&#160;Go&#160;back&#160;and&#160;change&#160;answers</text>
+<text x="16.0" y="400" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="400" fill="#56d4dd">&#160;3)</text>
+<text x="58.0" y="400" fill="#e6edf3">&#160;Cancel&#160;(nothing&#160;is&#160;changed)</text>
+<text x="16.0" y="418" fill="#e6edf3">Choice</text>
+<text x="66.4" y="418" fill="#8b949e" opacity="0.8">&#160;(q&#160;=&#160;quit)</text>
+<text x="158.8" y="418" fill="#e6edf3">&#160;[1]:&#160;Cancelled.&#160;Nothing&#160;was&#160;changed.</text>
+</g></svg>

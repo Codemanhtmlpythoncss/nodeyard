@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="653" height="600" viewBox="0 0 653 600" role="img" aria-label="sudo nodeyard doctor">
+<rect width="653" height="600" rx="8" fill="#0d1117"/>
+<rect width="653" height="30" rx="8" fill="#161b22"/>
+<rect y="22" width="653" height="8" fill="#161b22"/>
+<circle cx="18" cy="15" r="5.5" fill="#ff5f57"/>
+<circle cx="36" cy="15" r="5.5" fill="#febc2e"/>
+<circle cx="54" cy="15" r="5.5" fill="#28c840"/>
+<text x="326.5" y="19.5" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" text-anchor="middle">sudo nodeyard doctor</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" xml:space="preserve">
+<text x="16.0" y="58" fill="#e6edf3" font-weight="bold">nodeyard&#160;doctor</text>
+<text x="142.0" y="58" fill="#e6edf3">&#160;</text>
+<text x="150.4" y="58" fill="#8b949e" opacity="0.8">(yard-1,&#160;role:&#160;server)</text>
+<text x="16.0" y="94" fill="#8b949e" opacity="0.8">Nodeyard</text>
+<text x="16.0" y="112" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="112" fill="#7ee787">✓</text>
+<text x="41.2" y="112" fill="#e6edf3">&#160;nodeyard&#x27;s&#160;required&#160;tools&#160;are&#160;installed</text>
+<text x="16.0" y="130" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="130" fill="#7ee787">✓</text>
+<text x="41.2" y="130" fill="#e6edf3">&#160;cluster&#160;config&#160;is&#160;valid</text>
+<text x="16.0" y="148" fill="#8b949e" opacity="0.8">K3s</text>
+<text x="16.0" y="166" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="166" fill="#7ee787">✓</text>
+<text x="41.2" y="166" fill="#e6edf3">&#160;k3s&#160;is&#160;installed</text>
+<text x="16.0" y="184" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="184" fill="#7ee787">✓</text>
+<text x="41.2" y="184" fill="#e6edf3">&#160;k3s&#160;service&#160;starts&#160;at&#160;boot</text>
+<text x="16.0" y="202" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="202" fill="#7ee787">✓</text>
+<text x="41.2" y="202" fill="#e6edf3">&#160;k3s&#160;service&#160;is&#160;running</text>
+<text x="16.0" y="220" fill="#8b949e" opacity="0.8">Host</text>
+<text x="16.0" y="238" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="238" fill="#7ee787">✓</text>
+<text x="41.2" y="238" fill="#e6edf3">&#160;swap&#160;</text>
+<text x="91.6" y="238" fill="#8b949e" opacity="0.8">-&#160;swap&#160;is&#160;on&#160;(fine:&#160;k3s&#160;runs&#160;the&#160;kubelet&#160;with&#160;fail-swap-on=false)</text>
+<text x="16.0" y="256" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="256" fill="#7ee787">✓</text>
+<text x="41.2" y="256" fill="#e6edf3">&#160;br_netfilter&#160;kernel&#160;module&#160;loaded</text>
+<text x="16.0" y="274" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="274" fill="#7ee787">✓</text>
+<text x="41.2" y="274" fill="#e6edf3">&#160;overlay&#160;kernel&#160;module&#160;loaded</text>
+<text x="16.0" y="292" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="292" fill="#7ee787">✓</text>
+<text x="41.2" y="292" fill="#e6edf3">&#160;IP&#160;forwarding&#160;enabled</text>
+<text x="16.0" y="310" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="310" fill="#7ee787">✓</text>
+<text x="41.2" y="310" fill="#e6edf3">&#160;clock&#160;is&#160;kept&#160;in&#160;sync</text>
+<text x="16.0" y="328" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="328" fill="#7ee787">✓</text>
+<text x="41.2" y="328" fill="#e6edf3">&#160;more&#160;than&#160;1&#160;GiB&#160;free&#160;in&#160;/var</text>
+<text x="16.0" y="346" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="346" fill="#7ee787">✓</text>
+<text x="41.2" y="346" fill="#e6edf3">&#160;a&#160;full-disk&#160;scare&#160;can&#x27;t&#160;lock&#160;this&#160;node&#160;out</text>
+<text x="16.0" y="364" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="364" fill="#7ee787">✓</text>
+<text x="41.2" y="364" fill="#e6edf3">&#160;system&#160;disk</text>
+<text x="16.0" y="382" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="382" fill="#7ee787">✓</text>
+<text x="41.2" y="382" fill="#e6edf3">&#160;memory&#160;cgroup&#160;available</text>
+<text x="16.0" y="400" fill="#8b949e" opacity="0.8">Network</text>
+<text x="16.0" y="418" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="418" fill="#7ee787">✓</text>
+<text x="41.2" y="418" fill="#e6edf3">&#160;cluster&#160;interface&#160;is&#160;up&#160;with&#160;an&#160;address</text>
+<text x="16.0" y="436" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="436" fill="#7ee787">✓</text>
+<text x="41.2" y="436" fill="#e6edf3">&#160;iptables&#160;FORWARD&#160;policy&#160;lets&#160;traffic&#160;through</text>
+<text x="16.0" y="454" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="454" fill="#7ee787">✓</text>
+<text x="41.2" y="454" fill="#e6edf3">&#160;no&#160;other&#160;nftables&#160;table&#160;drops&#160;pod&#160;traffic</text>
+<text x="16.0" y="472" fill="#8b949e" opacity="0.8">Cluster</text>
+<text x="16.0" y="490" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="490" fill="#7ee787">✓</text>
+<text x="41.2" y="490" fill="#e6edf3">&#160;Kubernetes&#160;API&#160;responds</text>
+<text x="16.0" y="508" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="508" fill="#7ee787">✓</text>
+<text x="41.2" y="508" fill="#e6edf3">&#160;this&#160;node&#160;is&#160;Ready</text>
+<text x="16.0" y="526" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="526" fill="#7ee787">✓</text>
+<text x="41.2" y="526" fill="#e6edf3">&#160;all&#160;nodes&#160;Ready,&#160;none&#160;under&#160;pressure</text>
+<text x="16.0" y="544" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="544" fill="#7ee787">✓</text>
+<text x="41.2" y="544" fill="#e6edf3">&#160;all&#160;pods&#160;running</text>
+<text x="16.0" y="580" fill="#7ee787">✓</text>
+<text x="24.4" y="580" fill="#e6edf3">&#160;No&#160;problems&#160;found.</text>
+</g></svg>

@@ -2,7 +2,7 @@
 # Fetch the pinned test and lint tools listed in tests/tools.lock into
 # .tools/, verifying each download's SHA-256. Safe to re-run.
 #   bats, bats-support, bats-assert: every platform
-#   shellcheck, shfmt: Linux amd64/arm64 (on macOS: brew install shellcheck shfmt)
+#   the shell linter and formatter: Linux amd64/arm64 (macOS: brew install shellcheck shfmt)
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd -P)"

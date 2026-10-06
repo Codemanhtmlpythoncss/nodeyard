@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # Command registry and dispatcher. Every action is one registered command;
 # the menu, wizards, dashboard and shell completion all go through here, so
 # no interface can do something the command line can't.
@@ -14,13 +15,13 @@ NY_RESULT_PRINTED=0
 #   json = the command prints its own --json output (others get a generic
 #   {"ok":..,"dry_run":..,"plan":[..]} result and their text goes to stderr).
 ny_cmd() {
-    local path="$1" flags=",${6:-},"
+    local path="$1" opts=",${6:-},"
     NY_CMD_FN["$path"]="$2"
     NY_CMD_GROUP["$path"]="$3"
     NY_CMD_SUM["$path"]="$4"
     NY_CMD_FEATURE["$path"]="${5:-${path%% *}}"
-    [[ "$flags" == *,hidden,* ]] && NY_CMD_HIDDEN["$path"]=1
-    [[ "$flags" == *,json,* ]] && NY_CMD_JSON["$path"]=1
+    [[ "$opts" == *,hidden,* ]] && NY_CMD_HIDDEN["$path"]=1
+    [[ "$opts" == *,json,* ]] && NY_CMD_JSON["$path"]=1
     NY_CMD_ORDER+=("$path")
 }
 
@@ -31,6 +32,7 @@ ny_json_out() {
 }
 
 # ny_json_result [FIELD...] -- the standard result object.
+# shellcheck disable=SC2120 # extra fields are optional
 ny_json_result() {
     ny_json_obj ok:=true "dry_run:=$(ny_json_bool "$NY_DRY_RUN")" "plan:=$(ny_plan_json)" "$@"
 }
@@ -97,7 +99,7 @@ ny_help_group() {
 }
 
 ny_help_main() {
-    printf '%s %s - manage a homelab cluster: k3s, networking, AI, websites and day-to-day operations.\n\n' "$(ny_color bold nodeyard)" "$NY_VERSION"
+    printf '%s %s - set up and run a homelab cluster of Linux machines.\n\n' "$(ny_color bold nodeyard)" "$NY_VERSION"
     printf 'Usage: nodeyard [command] [options]\n'
     printf 'Run nodeyard with no command for the interactive menu.\n'
     local g p
@@ -256,7 +258,18 @@ ny_main() {
             continue
         fi
         case "$arg" in
-            --) passthrough=1; args+=("$arg") ;;
+            --)
+                passthrough=1
+                args+=("$arg")
+                ;;
+            # Only as the first word: 'install master --version V' is a k3s version.
+            --version | -V)
+                if [[ "${#args[@]}" -eq 0 ]]; then
+                    printf 'nodeyard %s\n' "$NY_VERSION"
+                    return 0
+                fi
+                args+=("$arg")
+                ;;
             --yes | -y) NY_YES=1 ;;
             --dry-run) NY_DRY_RUN=1 ;;
             --verbose | -v | --debug) NY_VERBOSE=1 ;;

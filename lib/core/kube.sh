@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # Talking to Kubernetes: the k3s admin kubeconfig when readable (root on a
 # server), otherwise the caller's own, so read-only commands work without
 # sudo for a user with kubectl access.
@@ -97,5 +98,6 @@ ny_k8s_name() {
 # ny_tcp_check HOST PORT [TIMEOUT] -- can we open a TCP connection?
 ny_tcp_check() {
     local host="$1" port="$2" t="${3:-4}"
+    # shellcheck disable=SC2016 # expanded by the inner bash, on purpose
     timeout "$t" bash -c 'cat </dev/null >"/dev/tcp/$1/$2"' _ "$host" "$port" 2>/dev/null
 }

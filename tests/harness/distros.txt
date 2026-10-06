@@ -1,0 +1,11 @@
+# Distros the harness tests: NAME  IMAGE  EXPECTED_PACKAGE_MANAGER  PLATFORMS
+debian-12            debian:12                         apt     amd64,arm64
+debian-13            debian:13                         apt     amd64,arm64
+ubuntu-22.04         ubuntu:22.04                      apt     amd64,arm64
+ubuntu-24.04         ubuntu:24.04                      apt     amd64,arm64
+fedora-42            fedora:42                         dnf     amd64,arm64
+rocky-9              rockylinux/rockylinux:9           dnf     amd64,arm64
+almalinux-10         almalinux:10                      dnf     amd64,arm64
+opensuse-leap-15.6   opensuse/leap:15.6                zypper  amd64,arm64
+opensuse-tumbleweed  opensuse/tumbleweed               zypper  amd64,arm64
+arch                 archlinux:latest                  pacman  amd64

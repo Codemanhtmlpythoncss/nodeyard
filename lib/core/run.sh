@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # The only ways nodeyard changes a system: running a command, writing or
 # removing a file, creating a directory. Each one honours --dry-run (prints
 # and records the step instead of doing it), never runs real commands in demo
@@ -23,11 +24,24 @@ ny_simulating() {
     [[ "$NY_DRY_RUN" -eq 1 || "$NY_DEMO" -eq 1 ]]
 }
 
+# ny_json_cmd_redacted ARG... -- a command as a JSON array with secrets redacted.
+ny_json_cmd_redacted() {
+    local -a redacted=()
+    local a
+    for a in "$@"; do
+        redacted+=("$(ny_redact "$a")")
+    done
+    ny_json_arr_str "${redacted[@]+"${redacted[@]}"}"
+}
+
 ny_quote_cmd() {
     local out="" a
     for a in "$@"; do
         if [[ "$a" =~ ^[A-Za-z0-9_./:=@%+,-]+$ ]]; then
             out+="${out:+ }$a"
+        elif [[ "$a" != *"'"* ]]; then
+            # Single quotes read better than %q's backslashes.
+            out+="${out:+ }'${a}'"
         else
             out+="${out:+ }$(printf '%q' "$a")"
         fi
@@ -40,7 +54,7 @@ ny_run() {
     local shown
     shown="$(ny_quote_cmd "$@")"
     if ny_simulating; then
-        ny_plan_add run "Run: ${shown}" "command:=$(ny_json_arr_str "$@")"
+        ny_plan_add run "Run: ${shown}" "command:=$(ny_json_cmd_redacted "$@")"
         if [[ "$NY_DRY_RUN" -eq 1 ]]; then
             printf '%s %s\n' "$(ny_color cyan "[dry-run] would run:")" "$(ny_redact "$shown")" >&2
         else
@@ -64,7 +78,7 @@ ny_run_undoable() {
     [[ "${1:-}" == "--" ]] && shift
     ny_run "$@" || return $?
     ny_simulating && return 0
-    ny_journal_append "$(ny_json_obj op=run "command:=$(ny_json_arr_str "$@")" "undo:=$(ny_json_arr_str "${undo[@]+"${undo[@]}"}")")"
+    ny_journal_append "$(ny_json_obj op=run "command:=$(ny_json_cmd_redacted "$@")" "undo:=$(ny_json_arr_str "${undo[@]+"${undo[@]}"}")")"
 }
 
 # ny_ensure_dir PATH [MODE] -- create a directory (recorded for undo).

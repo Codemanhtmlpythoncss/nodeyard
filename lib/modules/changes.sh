@@ -20,8 +20,15 @@ changes_list_cmd() {
     local feature="" all=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --feature) ny_need_value "$1" $#; feature="$2"; shift 2 ;;
-            --all) all=1; shift ;;
+            --feature)
+                ny_need_value "$1" $#
+                feature="$2"
+                shift 2
+                ;;
+            --all)
+                all=1
+                shift
+                ;;
             *) ny_usage_error "Unknown option for 'changes': $1" ;;
         esac
     done
@@ -85,11 +92,24 @@ changes_undo_cmd() {
     local txn="" last=0 feature="" force=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --last) last=1; shift ;;
-            --feature) ny_need_value "$1" $#; feature="$2"; shift 2 ;;
-            --force) force=1; shift ;;
+            --last)
+                last=1
+                shift
+                ;;
+            --feature)
+                ny_need_value "$1" $#
+                feature="$2"
+                shift 2
+                ;;
+            --force)
+                force=1
+                shift
+                ;;
             -*) ny_usage_error "Unknown option for 'undo': $1" ;;
-            *) txn="$1"; shift ;;
+            *)
+                txn="$1"
+                shift
+                ;;
         esac
     done
     ny_deps_ensure "the change journal" jq

@@ -27,6 +27,22 @@ setup() {
     assert_output "Password=[REDACTED] user=bob"
 }
 
+@test "secrets given as separate command-line words are redacted" {
+    run ny_redact "nodeyard install master --token Sup3rS3cret --interface eth0"
+    assert_output "nodeyard install master --token [REDACTED] --interface eth0"
+    run ny_redact "--datastore-endpoint postgres://u:pw@db/k3s"
+    assert_output "--datastore-endpoint [REDACTED]"
+    run ny_redact "--token-file /root/k3s-token"
+    assert_output "--token-file /root/k3s-token"
+}
+
+@test "settings that name a file or path are not redacted" {
+    run ny_redact "K3S_TOKEN_FILE=/etc/nodeyard/secrets/k3s-token"
+    assert_output "K3S_TOKEN_FILE=/etc/nodeyard/secrets/k3s-token"
+    run ny_redact "api_key_path: /etc/x"
+    assert_output "api_key_path: /etc/x"
+}
+
 @test "bearer tokens are redacted including the token itself" {
     run ny_redact "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig"
     refute_output --partial "eyJhbGci"

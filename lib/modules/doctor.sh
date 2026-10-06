@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # doctor: check this node for common problems and offer to fix each one.
 # Each check is a function returning 0 (ok), 1 (problem), 2 (not relevant
 # here) or 3 (warning: worth knowing, nothing to fix). Fixes are ordinary
@@ -84,8 +85,14 @@ doctor_check_module() {
     DOCTOR_DETAIL="kernel module $1 is not loaded"
     return 1
 }
-doctor_check_br_netfilter() { doctor_k3s_relevant || return 2; doctor_check_module br_netfilter; }
-doctor_check_overlay() { doctor_k3s_relevant || return 2; doctor_check_module overlay; }
+doctor_check_br_netfilter() {
+    doctor_k3s_relevant || return 2
+    doctor_check_module br_netfilter
+}
+doctor_check_overlay() {
+    doctor_k3s_relevant || return 2
+    doctor_check_module overlay
+}
 doctor_fix_modules() { host_fix_kernel_modules; }
 
 doctor_check_ip_forward() {
@@ -308,9 +315,19 @@ doctor_cmd() {
     local fix=0 strict=0 only=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --fix) fix=1; shift ;;
-            --strict) strict=1; shift ;;
-            --only) ny_need_value "$1" $#; only=",$2,"; shift 2 ;;
+            --fix)
+                fix=1
+                shift
+                ;;
+            --strict)
+                strict=1
+                shift
+                ;;
+            --only)
+                ny_need_value "$1" $#
+                only=",$2,"
+                shift 2
+                ;;
             *) ny_usage_error "Unknown option for 'doctor': $1" ;;
         esac
     done
@@ -330,8 +347,14 @@ doctor_cmd() {
         case "$rc" in
             0) status="ok" ;;
             2) status="skip" ;;
-            3) status="warn"; warnings=$((warnings + 1)) ;;
-            *) status="issue"; issues=$((issues + 1)) ;;
+            3)
+                status="warn"
+                warnings=$((warnings + 1))
+                ;;
+            *)
+                status="issue"
+                issues=$((issues + 1))
+                ;;
         esac
         local was_fixed=0
         if [[ "$status" == issue && -n "$fixfn" && "$fix" -eq 1 ]]; then
@@ -347,7 +370,9 @@ doctor_cmd() {
         [[ "$NY_JSON" -eq 1 ]] && continue
         [[ "$status" == skip ]] && continue
         if [[ "$cat" != "$last_cat" ]]; then
-            printf '%s\n' "$(ny_color dim "${cat^}")"
+            local label="${cat^}"
+            [[ "$cat" == nodeyard || "$cat" == k3s ]] && label="$cat"
+            printf '%s\n' "$(ny_color dim "$label")"
             last_cat="$cat"
         fi
         case "$status" in

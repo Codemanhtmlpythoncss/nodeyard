@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # The interactive terminal menu, its status header, and the first-run
 # quick-start wizard. Every menu entry runs a registered command or a wizard
 # for one, so the menu can never behave differently from the command line.

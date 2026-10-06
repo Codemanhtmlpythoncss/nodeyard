@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # Terminal UI primitives with four backends, best first: gum, whiptail,
 # dialog, plain prompts. Anything that works over a bare SSH session works
 # here. Prompts draw on stderr/the terminal; chosen values go to stdout.
@@ -299,7 +300,7 @@ ny_ui_yesno() {
             local hint="y/N" reply
             [[ "$default" == y ]] && hint="Y/n"
             while true; do
-                printf '%s [%s]%s ' "$(ny_color bold "$prompt")" "$hint" "$( [[ "$NY_UI_BACK" -eq 1 ]] && ny_color dim " (b = back)")" >&2
+                printf '%s [%s]%s ' "$(ny_color bold "$prompt")" "$hint" "$([[ "$NY_UI_BACK" -eq 1 ]] && ny_color dim " (b = back)")" >&2
                 IFS= read -r reply || return 1
                 reply="$(ny_trim "${reply,,}")"
                 [[ -z "$reply" ]] && reply="$default"
@@ -393,6 +394,7 @@ ny_spin() {
     out="$(ny_mktemp)"
     ("$@") >"$out" 2>&1 &
     pid=$!
+    # shellcheck disable=SC1003 # a literal backslash frame
     local -a frames=('|' '/' '-' '\')
     [[ "$NY_UTF8" -eq 1 ]] && frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
     printf '\033[?25l' >&2
@@ -464,7 +466,10 @@ ny_table() {
     local -a status_cols=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --status) status_cols+=("$2"); shift 2 ;;
+            --status)
+                status_cols+=("$2")
+                shift 2
+                ;;
             *) shift ;;
         esac
     done

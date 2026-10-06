@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # The tool itself: dependencies, the terminal UI, secrets, demo mode,
 # self-update and uninstalling.
 
@@ -7,7 +8,7 @@ ny_cmd "ui install-gum" tool_ui_install_gum_cmd "Settings" "Install gum for a ni
 ny_cmd "secrets list" tool_secrets_list_cmd "Settings" "List stored secrets (names and dates only, never values)" secrets json
 ny_cmd "demo reset" tool_demo_reset_cmd "Tool" "Reset the demo sandbox to its starting state" tool
 ny_cmd "update" tool_update_cmd "Updates" "Update nodeyard itself (shows what changed first)" tool
-ny_cmd "uninstall" tool_uninstall_cmd "Settings" "Remove k3s, AI, or everything nodeyard set up" uninstall
+ny_cmd "uninstall" tool_uninstall_cmd "Settings" "Remove k3s, or everything nodeyard set up" uninstall
 ny_cmd "uninstall everything" tool_uninstall_everything_cmd "Settings" "Undo every change nodeyard made and remove nodeyard" uninstall
 
 tool_deps_cmd_help() {
@@ -27,8 +28,16 @@ tool_deps_cmd() {
     local -a features=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --feature) ny_need_value "$1" $#; [[ -n "${NY_DEP_FEATURE[$2]:-}" ]] || ny_usage_error "Unknown feature '$2'." "Features: $(printf '%s ' "${!NY_DEP_FEATURE[@]}")"; features+=("$2"); shift 2 ;;
-            --install) install=1; shift ;;
+            --feature)
+                ny_need_value "$1" $#
+                [[ -n "${NY_DEP_FEATURE[$2]:-}" ]] || ny_usage_error "Unknown feature '$2'." "Features: $(printf '%s ' "${!NY_DEP_FEATURE[@]}")"
+                features+=("$2")
+                shift 2
+                ;;
+            --install)
+                install=1
+                shift
+                ;;
             *) ny_usage_error "Unknown option for 'deps': $1" ;;
         esac
     done
@@ -53,11 +62,17 @@ tool_deps_cmd() {
         ny_json_out "$(ny_json_obj ok:=true "package_manager?=$NY_PKG" "dependencies:=$(ny_json_arr "${items[@]}")")"
         return 0
     fi
-    { printf 'FEATURE\tCOMMAND\tSTATUS\tPACKAGE\n'; printf '%s\n' "${rows[@]}"; } | ny_table --status STATUS
+    {
+        printf 'FEATURE\tCOMMAND\tSTATUS\tPACKAGE\n'
+        printf '%s\n' "${rows[@]}"
+    } | ny_table --status STATUS
     if printf '%s\n' "${rows[@]}" | grep -q $'\tmissing\t' && [[ "$install" -eq 0 ]]; then
         ny_hint "Install what's missing: sudo nodeyard deps --install"
     fi
-    printf '\n%s %s\n' "Terminal UI:" "$(ny_ui_init; printf '%s' "$NY_UI")$(have gum || printf ' (sudo nodeyard ui install-gum for the nicest interface)')"
+    printf '\n%s %s\n' "Terminal UI:" "$(
+        ny_ui_init
+        printf '%s' "$NY_UI"
+    )$(have gum || printf ' (sudo nodeyard ui install-gum for the nicest interface)')"
 }
 
 tool_ui_install_gum_cmd() {
@@ -87,7 +102,10 @@ tool_secrets_list_cmd() {
         ny_info "No secrets are stored on this node."
         return 0
     fi
-    { printf 'SECRET\tLAST CHANGED\n'; printf '%s\n' "${rows[@]}"; } | ny_table
+    {
+        printf 'SECRET\tLAST CHANGED\n'
+        printf '%s\n' "${rows[@]}"
+    } | ny_table
     ny_hint "Values are never shown. They live in $(ny_unroot "$NY_SECRETS_DIR") (root only)."
 }
 
@@ -135,9 +153,20 @@ tool_update_cmd() {
     local check=0 version="" force=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --check) check=1; shift ;;
-            --version) ny_need_value "$1" $#; [[ "${2#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || ny_usage_error "--version must look like 1.2.3"; version="${2#v}"; shift 2 ;;
-            --force) force=1; shift ;;
+            --check)
+                check=1
+                shift
+                ;;
+            --version)
+                ny_need_value "$1" $#
+                [[ "${2#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || ny_usage_error "--version must look like 1.2.3"
+                version="${2#v}"
+                shift 2
+                ;;
+            --force)
+                force=1
+                shift
+                ;;
             *) ny_usage_error "Unknown option for 'update': $1" ;;
         esac
     done
@@ -158,7 +187,7 @@ tool_update_cmd() {
         return 0
     fi
 
-    ny_deps_ensure "updating" curl tar gzip
+    ny_deps_ensure "updating" curl tar gzip find
     if [[ -z "$version" ]]; then
         version="$(tool_latest_version)" || ny_die "Could not find the latest release of ${NY_REPO}." \
             "Check this machine's internet connection, or see https://github.com/${NY_REPO}/releases"
@@ -178,7 +207,7 @@ tool_update_cmd() {
     ny_detect_arch
     local base="https://github.com/${NY_REPO}/releases/download/v${version}"
     local name="nodeyard-${version}-linux-${NY_ARCH}.tar.gz"
-    local tmp sums sha
+    local tmp sha
     tmp="$(ny_mktemp -d)"
     ny_download "${base}/SHA256SUMS" "${tmp}/SHA256SUMS"
     if ny_simulating; then
@@ -219,6 +248,7 @@ To undo a single change instead: nodeyard changes / nodeyard undo ID
 HELP
 }
 
+# shellcheck disable=SC2119 # the picker passes no options
 tool_uninstall_cmd() {
     [[ $# -eq 0 ]] || ny_usage_error "Unknown thing to uninstall: $1" "nodeyard uninstall k3s|everything"
     if ! ny_ui_interactive; then
@@ -247,12 +277,16 @@ nodeyard's own files. With --keep-config, /etc/nodeyard stays.
 HELP
 }
 
+# shellcheck disable=SC2120 # options come from the command line, not callers
 tool_uninstall_everything_cmd() {
     ny_need_root
     local keep=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --keep-config) keep=1; shift ;;
+            --keep-config)
+                keep=1
+                shift
+                ;;
             *) ny_usage_error "Unknown option: $1" ;;
         esac
     done

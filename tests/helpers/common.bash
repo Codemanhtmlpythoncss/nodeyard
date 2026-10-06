@@ -71,6 +71,7 @@ ny_cmd_run() {
 }
 
 # assert_json -- the last command's output is one valid JSON document.
+# shellcheck disable=SC2154 # $output is set by bats' run
 assert_json() {
     printf '%s' "$output" | jq -e . >/dev/null || fail "output is not valid JSON: $output"
 }

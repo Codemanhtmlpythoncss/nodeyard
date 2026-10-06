@@ -21,6 +21,8 @@ ny_secret_register() {
 NY_REDACT_KV_RE='((token|password|passwd|secret|api[_-]?key|apikey|private[_-]?key|credential|auth)[A-Za-z0-9_-]*["'\'']?[[:space:]]*[=:][[:space:]]*["'\'']?)([^[:space:]"'\'',;&]+)'
 NY_REDACT_BEARER_RE='((bearer|basic)[[:space:]]+)([A-Za-z0-9._~+/=-]{8,})'
 NY_REDACT_K3S_RE='()(K10[0-9a-f]{20,}::[A-Za-z0-9._-]+:[A-Za-z0-9._-]+)'
+# Command-line flags whose next word is a secret: "--token VALUE".
+NY_REDACT_FLAG_RE='((--)(token|password|passwd|secret|api-key|apikey|datastore-endpoint)[[:space:]]+)([^[:space:]]+)'
 
 # ny_redact TEXT -- TEXT with known and likely secrets replaced.
 ny_redact() {
@@ -28,22 +30,25 @@ ny_redact() {
     for v in "${NY_SECRET_VALUES[@]+"${NY_SECRET_VALUES[@]}"}"; do
         s="${s//"$v"/[REDACTED]}"
     done
-    local re out rest match
+    local re out rest match prefix value
     local restore_nocase=0
     shopt -q nocasematch || {
         shopt -s nocasematch
         restore_nocase=1
     }
     # Bearer first: "Authorization: Bearer X" must lose X, not just "Bearer".
-    for re in "$NY_REDACT_BEARER_RE" "$NY_REDACT_KV_RE" "$NY_REDACT_K3S_RE"; do
+    for re in "$NY_REDACT_FLAG_RE" "$NY_REDACT_BEARER_RE" "$NY_REDACT_KV_RE" "$NY_REDACT_K3S_RE"; do
         out=""
         rest="$s"
         while [[ "$rest" =~ $re ]]; do
             match="${BASH_REMATCH[0]}"
-            if [[ "${BASH_REMATCH[${#BASH_REMATCH[@]} - 1]}" == "[REDACTED]"* ]]; then
+            prefix="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[${#BASH_REMATCH[@]} - 1]}"
+            # Keys naming a file or path (K3S_TOKEN_FILE=/x) hold no secret.
+            if [[ "$value" == "[REDACTED]"* ]] || [[ "$prefix" =~ [_-](file|path|dir)[\"\']?[[:space:]]*[=:] ]]; then
                 out+="${rest%%"$match"*}${match}"
             else
-                out+="${rest%%"$match"*}${BASH_REMATCH[1]}[REDACTED]"
+                out+="${rest%%"$match"*}${prefix}[REDACTED]"
             fi
             rest="${rest#*"$match"}"
         done

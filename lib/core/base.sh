@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # globals here are read by other files
 # Base layer: version, paths, global flags and small helpers used everywhere.
 #
 # Every path that points into the real system goes through ny_path, so tests
