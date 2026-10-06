@@ -88,7 +88,10 @@ menu_cmd() {
             items+=($'create\tCreate a cluster (this machine becomes the first server)')
             items+=($'join\tJoin this machine to an existing cluster')
         fi
-        [[ "$K3S_ROLE" == server ]] && items+=($'add\tInstall on other machines (add a node over SSH)')
+        if [[ "$K3S_ROLE" == server ]]; then
+            items+=($'workerinfo\tWhat a worker needs to join (address, ports, commands)')
+            items+=($'add\tInstall on other machines (add a node over SSH)')
+        fi
         [[ -n "$K3S_ROLE" ]] && items+=($'status\tCluster status')
         items+=($'ai\tAI workloads' $'health\tHealth check (doctor)' $'backups\tBackups' $'updates\tUpdates' $'settings\tSettings')
         items+=($'uninstall\tUninstall' $'quit\tExit')
@@ -99,6 +102,7 @@ menu_cmd() {
         case "$choice" in
             create) menu_wizard install-master ;;
             join) menu_join ;;
+            workerinfo) menu_worker_info ;;
             add) menu_wizard add-node ;;
             status) menu_run status ;;
             ai) menu_ai ;;
@@ -111,6 +115,14 @@ menu_cmd() {
         esac
     done
     return 0
+}
+
+menu_worker_info() {
+    ny_nodeyard worker-info || true
+    if ny_ui_yesno "Show the join token too? (anyone who has it can add machines to your cluster)" n; then
+        ny_nodeyard token --reveal || true
+    fi
+    ny_ui_pause
 }
 
 menu_join() {

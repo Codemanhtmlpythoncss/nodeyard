@@ -9,6 +9,13 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- `nodeyard worker-info` and a menu entry, **What a worker needs to join**
+  (on servers): shows the join address and port (6443), this server's k3s
+  version, where the join token is (hidden, with an offer to reveal it in
+  the menu), every network port that must be open with whether each is
+  open on this server's firewall, what the worker machine needs, and the
+  exact commands to add it from here over SSH or on the worker itself.
+  `--json` output included.
 - When a k3s service won't start after `install` or `upgrade`, nodeyard
   now reads its log, shows the lines that matter and names the likely
   cause with a fix (cloud-setup service, memory cgroup, duplicate node

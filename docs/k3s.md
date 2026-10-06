@@ -81,6 +81,21 @@ agent must never be newer than the servers.
 its addresses (plus Tailscale). It hides the token itself; add `--reveal`
 to print it.
 
+### What a new worker needs
+
+```bash
+sudo nodeyard worker-info          # or: sudo nodeyard, then "What a worker needs to join"
+```
+
+![worker-info](media/worker-info.svg)
+
+On a server it shows the join address and port (`https://ADDRESS:6443`),
+any other addresses the worker could use, this server's k3s version, where
+the join token is (hidden; the menu offers to reveal it), every port that
+must be open and whether each is open on this server's firewall, what the
+worker machine needs, and the commands to add it, both from here over SSH
+and on the worker itself.
+
 ### Adding a machine over SSH
 
 From a server:

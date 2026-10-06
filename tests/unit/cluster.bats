@@ -79,3 +79,75 @@ remote_cmd() { grep -E '^ssh .* -t ' "$NODEYARD_SHIM_LOG" | tail -n1; }
     assert_failure
     assert_output --partial "su on 10.50.0.2 failed"
 }
+
+# --- worker-info ------------------------------------------------------------
+
+demo_cmd() { # run nodeyard in a demo sandbox (own setup: this file's setup is lib-based)
+    export NODEYARD_DEMO_DIR="${BATS_TEST_TMPDIR}/demo"
+    export NODEYARD_SHIM_RULES_EXTRA="${BATS_TEST_TMPDIR}/rules"
+    "${NY_REPO_ROOT}/bin/nodeyard" --demo "$@"
+}
+
+@test "worker-info shows the join address, port, ports table and both ways to add a worker" {
+    run demo_cmd worker-info
+    assert_success
+    assert_output --partial "https://192.168.1.10:6443"
+    assert_output --partial "port 6443"
+    assert_output --partial "6443/tcp"
+    assert_output --partial "10250/tcp"
+    assert_output --partial "8472/udp"
+    assert_output --partial "v1.33.4+k3s1"
+    assert_output --partial "nodeyard add-node worker --ssh"
+    assert_output --partial "nodeyard install worker --server https://192.168.1.10:6443 --token-file /root/k3s-token"
+}
+
+@test "worker-info never prints the token" {
+    run demo_cmd worker-info
+    refute_output --partial "K10demo"
+    run demo_cmd worker-info --json
+    refute_output --partial "K10demo"
+}
+
+@test "worker-info --json is complete" {
+    run --separate-stderr demo_cmd worker-info --json
+    assert_success
+    printf '%s' "$output" | jq -e '.server == "https://192.168.1.10:6443" and .port == 6443 and .token_hidden == true
+        and (.ports | map(.port) | index("6443/tcp")) != null and (.commands.join | contains("install worker"))
+        and (.other_addresses | length) >= 1' >/dev/null
+}
+
+@test "worker-info reports ports closed on a ufw firewall" {
+    ny_rule "ufw status*" 0 'Status: active\n10250/tcp    ALLOW    Anywhere'
+    run demo_cmd worker-info
+    assert_success
+    assert_output --partial "closed"
+    assert_output --partial "nodeyard firewall open"
+    run --separate-stderr demo_cmd worker-info --json
+    printf '%s' "$output" | jq -e '(.ports[] | select(.port == "6443/tcp") | .open_on_this_server) == "closed"
+        and (.ports[] | select(.port == "10250/tcp") | .open_on_this_server) == "open"' >/dev/null
+}
+
+@test "worker-info says so on a machine that is not a server" {
+    export NODEYARD_DEMO_DIR="${BATS_TEST_TMPDIR}/demo"
+    "${NY_REPO_ROOT}/bin/nodeyard" --demo version >/dev/null 2>&1
+    rm -f "${NODEYARD_DEMO_DIR}/fs/var/lib/rancher/k3s/server/node-token"
+    run demo_cmd worker-info
+    assert_failure 3
+    assert_output --partial "not a k3s server"
+}
+
+@test "the menu offers it on a server and shows it without revealing the token" {
+    export NODEYARD_DEMO_DIR="${BATS_TEST_TMPDIR}/demo"
+    run bash -c 'printf "workerinfo\nn\n\nq\n" | NODEYARD_INTERACTIVE=1 NODEYARD_UI=plain NODEYARD_COLOR=never "$0" --demo menu' "${NY_REPO_ROOT}/bin/nodeyard"
+    assert_success
+    assert_output --partial "What a worker needs to join"
+    assert_output --partial "Adding a worker to this cluster"
+    refute_output --partial "K10demo"
+}
+
+@test "the menu can reveal the token on request" {
+    export NODEYARD_DEMO_DIR="${BATS_TEST_TMPDIR}/demo"
+    run bash -c 'printf "workerinfo\ny\n\nq\n" | NODEYARD_INTERACTIVE=1 NODEYARD_UI=plain NODEYARD_COLOR=never "$0" --demo menu' "${NY_REPO_ROOT}/bin/nodeyard"
+    assert_success
+    assert_output --partial "K10demo"
+}

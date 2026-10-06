@@ -2,6 +2,7 @@
 # Multi-node operations: adding a machine over SSH, removing a node, the
 # control-plane watchdog, and the pod network test (ported from k3s-manager).
 
+ny_cmd "worker-info" cluster_worker_info_cmd "Nodes" "Show the address, ports and commands needed to add a worker" nodes json
 ny_cmd "add-node" cluster_add_node_cmd "Nodes" "Install nodeyard on another machine over SSH and join it to this cluster" nodes
 ny_cmd "remove-node" cluster_remove_node_cmd "Nodes" "Drain a node and remove it from the cluster" nodes
 ny_cmd "nettest" cluster_nettest_cmd "Health" "Test pod-to-pod, DNS and pod-to-node traffic on every node" nettest
@@ -10,6 +11,157 @@ ny_cmd "watchdog-install" cluster_watchdog_install_cmd "Health" "Check the contr
 ny_cmd "watchdog-uninstall" cluster_watchdog_uninstall_cmd "Health" "Remove the control-plane watchdog" watchdog
 ny_cmd "watchdog-check" cluster_watchdog_check_cmd "Health" "Run one watchdog check (used by the timer)" watchdog hidden
 ny_cmd "promote" cluster_promote_cmd "Health" "Explain what to do when the control plane is down" watchdog
+
+# --- what a new worker needs ---------------------------------------------------
+
+# cluster_port_state PORT/PROTO -- is this port open on THIS server's firewall?
+# Prints open, closed, or unknown (a custom nftables/iptables ruleset).
+cluster_port_state() {
+    local p="$1" fw
+    fw="$(ny_detect_firewall)"
+    case "$fw" in
+        none) echo open ;;
+        ufw)
+            if ufw status 2>/dev/null | awk -v p="$p" '$1 == p && /ALLOW/ {f = 1} END {exit !f}'; then
+                echo open
+            else
+                echo closed
+            fi
+            ;;
+        firewalld)
+            if firewall-cmd --list-ports 2>/dev/null | tr ' ' '\n' | grep -qxF "${p//:/-}"; then
+                echo open
+            else
+                echo closed
+            fi
+            ;;
+        *) echo unknown ;;
+    esac
+    return 0
+}
+
+cluster_worker_info_cmd_help() {
+    cat <<'HELP'
+Usage: nodeyard worker-info [--json]
+
+Run on a server. Shows everything needed to add a worker to this cluster:
+
+  - the address and port a worker joins (the --server value),
+  - this server's k3s version (a worker must not be newer),
+  - where the join token is (it is hidden; see 'nodeyard token --reveal'),
+  - the network ports that must be open, and whether they are open on
+    this server's firewall,
+  - the commands to run: from here over SSH, or on the worker itself.
+HELP
+}
+
+cluster_worker_info_cmd() {
+    ny_need_root
+    [[ $# -eq 0 ]] || ny_usage_error "Unexpected argument: $1"
+    [[ -r "$(ny_path "$NY_K3S_TOKEN_FILE")" ]] ||
+        ny_die "This machine is not a k3s server, so it can't add workers." \
+            "Run this on the server (the machine where you ran 'install master')." "$NY_E_PRECONDITION"
+    k3s_load_state
+    ny_detect_all
+
+    local main_ip="$K3S_NODE_IP" iface="$K3S_IFACE"
+    [[ -n "$main_ip" ]] || main_ip="$(ny_best_ip)"
+    [[ -n "$main_ip" ]] || ny_die "Could not work out this server's address." \
+        "Set it: sudo nodeyard config set node.$(ny_self_name).node-ip ADDRESS"
+    local version server="https://${main_ip}:6443" fw
+    version="$(k3s_version)"
+    fw="$(ny_detect_firewall)"
+
+    # Other addresses a worker could use: other wired/wifi cards and Tailscale.
+    local -a others=()
+    local name kind cidr ip
+    while IFS=$'\t' read -r name kind _ cidr; do
+        [[ -n "$cidr" && "$kind" != virtual ]] || continue
+        ip="${cidr%%/*}"
+        [[ "$ip" == "$main_ip" ]] || others+=("${ip}	${name}")
+    done < <(ny_list_ifaces)
+    ip="$(ny_tailscale_ip || true)"
+    [[ -n "$ip" && "$ip" != "$main_ip" ]] && others+=("${ip}	tailscale")
+
+    # The ports: PORT/PROTO <tab> who talks <tab> why <tab> needed on workers
+    local -a ports=(
+        $'6443/tcp\tworker -> server\tKubernetes API (the join address)'
+        $'10250/tcp\tserver <-> worker\tkubelet: logs, exec, metrics'
+        $'8472/udp\tall nodes\tpod network (flannel VXLAN)'
+        $'51820/udp\tall nodes\tWireGuard pod network, if enabled'
+        $'2379:2380/tcp\tservers\tetcd (HA servers only)'
+    )
+    local row port who why st
+    local -a port_json=() port_rows=()
+    for row in "${ports[@]}"; do
+        IFS=$'\t' read -r port who why <<<"$row"
+        st="$(cluster_port_state "$port")"
+        port_json+=("$(ny_json_obj "port=${port/:/-}" "between=$who" "why=$why" "open_on_this_server=$st")")
+        port_rows+=("${port/:/-}"$'\t'"${who}"$'\t'"${why}"$'\t'"${st}")
+    done
+
+    local join_iface="${iface:-eth0}"
+    local ssh_cmd="sudo nodeyard add-node worker --ssh USER@WORKER_ADDRESS --interface ${join_iface}"
+    local manual_install="curl -fsSL https://raw.githubusercontent.com/${NY_REPO}/main/install.sh | sudo bash"
+    local manual_token="sudo install -m 600 /dev/stdin /root/k3s-token    # paste the token, then Ctrl-D"
+    local manual_join="sudo nodeyard install worker --server ${server} --token-file /root/k3s-token --interface ${join_iface}${version:+ --version ${version}}"
+
+    if [[ "$NY_JSON" -eq 1 ]]; then
+        local -a other_json=()
+        local o
+        for o in "${others[@]+"${others[@]}"}"; do
+            other_json+=("$(ny_json_obj "address=${o%%$'\t'*}" "interface=${o#*$'\t'}" "server=https://${o%%$'\t'*}:6443")")
+        done
+        ny_json_out "$(ny_json_obj ok:=true "server=$server" "address=$main_ip" port:=6443 \
+            "other_addresses:=$(ny_json_arr "${other_json[@]+"${other_json[@]}"}")" \
+            "k3s_version?=$version" "token_file=$NY_K3S_TOKEN_FILE" token_hidden:=true \
+            "firewall=$fw" "ports:=$(ny_json_arr "${port_json[@]}")" \
+            "commands:=$(ny_json_obj "ssh=$ssh_cmd" "install=$manual_install" "token=$manual_token" "join=$manual_join")")"
+        return 0
+    fi
+
+    printf '%s\n\n' "$(ny_color bold "Adding a worker to this cluster")"
+    printf '  %-16s %s   %s\n' "Join address:" "$(ny_color bold "$server")" "$(ny_color dim "(the worker's --server value; port 6443)")"
+    local o
+    for o in "${others[@]+"${others[@]}"}"; do
+        printf '  %-16s https://%s:6443   %s\n' "Also reachable:" "${o%%$'\t'*}" "$(ny_color dim "(${o#*$'\t'})")"
+    done
+    printf '  %-16s %s\n' "k3s version:" "${version:-unknown}   $(ny_color dim "(a worker must not be newer: pass --version)")"
+    printf '  %-16s %s\n' "Join token:" "hidden; show it with: sudo nodeyard token --reveal"
+    printf '  %-16s %s\n' "" "$(ny_color dim "stored in ${NY_K3S_TOKEN_FILE}")"
+    printf '  %-16s %s\n' "Firewall here:" "$fw"
+
+    printf '\n%s\n' "$(ny_color bold "Ports that must be open")"
+    {
+        printf 'PORT\tBETWEEN\tWHAT FOR\tOPEN HERE\n'
+        printf '%s\n' "${port_rows[@]}"
+    } | ny_table --status "OPEN HERE"
+    if printf '%s\n' "${port_rows[@]}" | awk -F'\t' '($1 == "6443/tcp" || $1 == "10250/tcp" || $1 == "8472/udp") && $4 == "closed" {f = 1} END {exit !f}'; then
+        printf '\n'
+        ny_warn "Some needed ports are closed on this server's ${fw} firewall."
+        ny_hint "Open them with: sudo nodeyard firewall open"
+    elif [[ "$fw" == nftables || "$fw" == iptables ]]; then
+        printf '\n'
+        ny_info "This server has a custom ${fw} ruleset; nodeyard can't tell which ports it allows. Allow the ports above yourself."
+    fi
+    printf '%s\n' "$(ny_color dim "A worker's own firewall must allow 10250/tcp and 8472/udp from the other nodes.")"
+    printf '%s\n' "$(ny_color dim "Test from the worker:  curl -k ${server}/ping   (should print: pong)")"
+
+    printf '\n%s\n' "$(ny_color bold "The worker machine needs")"
+    printf '  - a supported Linux distro (nodeyard detect shows this), systemd, and sudo or root\n'
+    printf '  - 1 GB+ of RAM, and a hostname no other node in the cluster uses\n'
+    printf '  - a working clock (time sync), and a network route to %s\n' "$main_ip"
+
+    printf '\n%s\n' "$(ny_color bold "To add it")"
+    printf '  %s\n' "$(ny_color bold "From here, over SSH (easiest):")"
+    printf '    %s\n' "$ssh_cmd"
+    printf '  %s\n' "$(ny_color bold "Or on the worker itself:")"
+    printf '    1. %s\n' "$manual_install"
+    printf '    2. %s\n' "$manual_token"
+    printf '    3. %s\n' "$manual_join"
+    printf '  %s\n' "$(ny_color dim "Replace eth0 with the worker's wired interface (ip -br addr shows it).")"
+    return 0
+}
 
 cluster_add_node_cmd_help() {
     cat <<'HELP'

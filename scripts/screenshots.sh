@@ -28,6 +28,7 @@ printf 'q\n' | NODEYARD_INTERACTIVE=1 NODEYARD_UI=plain ny menu | sed '$d' |
 
 ny status | shot status "sudo nodeyard status"
 ny doctor | shot doctor "sudo nodeyard doctor"
+ny worker-info | shot worker-info "sudo nodeyard worker-info"
 ny detect | shot detect "nodeyard detect"
 
 # A wizard: pick a k3s version, read the summary, then cancel.

@@ -41,7 +41,7 @@ can pick up cleanly at any point.
 - Secret redaction in logs, output and plans; secrets store.
 - Demo mode with a simulated four-node cluster.
 - install.sh / uninstall.sh, self-update from verified releases.
-- 139 bats unit tests, passing on macOS and Linux; multi-distro harness
+- 146 bats unit tests, passing on macOS and Linux; multi-distro harness
   passing on Debian 12/13, Ubuntu 22.04/24.04, Fedora 42, Rocky 9,
   AlmaLinux 10, openSUSE Leap 15.6 and Tumbleweed, and Arch (run locally
   on arm64, Arch under amd64 emulation; CI runs every distro on amd64 and
