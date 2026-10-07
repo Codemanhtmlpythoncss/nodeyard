@@ -942,7 +942,9 @@ ${main_fetch}
         - -t
         - "2"
         - -cram
-        - "512"${think_args}${key_args}
+        - "512"
+        # lets the model call tools (OpenAI-style tool calls: yardcode and other agents need it)
+        - --jinja${think_args}${key_args}
         - --host
         - 0.0.0.0
         - --port

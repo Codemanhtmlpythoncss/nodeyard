@@ -779,7 +779,8 @@ def register(ctx, args):
             return h._json({"ok": False, "error": "That conversation (with its files) is too long to send."}, 413)
         try:
             temp = min(2.0, max(0.0, float(body.get("temperature", 0.7))))
-            max_tokens = min(8192, max(1, int(body.get("max_tokens", 1024))))
+            raw_max = body.get("max_tokens", 1024)
+            max_tokens = 0 if raw_max in (None, 0, "0", "", "none") else min(65536, max(1, int(raw_max)))   # 0 = no limit
         except (TypeError, ValueError):
             return h._json({"ok": False, "error": "Bad temperature or token limit."}, 400)
         sid = str(body.get("stream_id") or "")[:64] or secrets.token_hex(8)
@@ -792,7 +793,7 @@ def register(ctx, args):
             threading.Thread(target=watch, args=(h, conn, done), daemon=True).start()
         try:
             try:
-                conn, resp = backend.open_chat(str(body.get("target", "")), {"messages": clean, "temperature": temp, "max_tokens": max_tokens}, on_conn=on_conn)
+                conn, resp = backend.open_chat(str(body.get("target", "")), dict({"messages": clean, "temperature": temp}, **({"max_tokens": max_tokens} if max_tokens else {})), on_conn=on_conn)
             except AIError as e:
                 return fail(h, e)
             try:
@@ -815,6 +816,14 @@ def register(ctx, args):
                 streams.pop(sid, None)
 
 
+    def web(h, body):
+        import webtools
+        try:
+            h._json(webtools.research(body.get("query"), demo=bool(getattr(args, "demo", False))))
+        except webtools.WebError as e:
+            h._json({"ok": False, "error": str(e)}, 502)
+
+    ctx.post_routes["/api/ai/web"] = web
     ctx.get_routes.update({"/api/ai/targets": targets, "/api/ai/search": search, "/api/ai/files": files, "/api/job": job, "/api/ai/ollama": ollama,
                            "/api/ai/models": disk_models})
     ctx.post_routes.update({"/api/ai/chat": chat, "/api/ai/stop": stop, "/api/run": run, "/api/ai/ollama-load": ollama_load, "/api/ai/reveal-key": reveal})

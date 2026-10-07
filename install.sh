@@ -204,12 +204,13 @@ new="${DEST}.new.$$"
 run mkdir -p "${PREFIX}/lib" "$BIN"
 run rm -rf "$new"
 run mkdir -p "$new"
-for item in bin lib share completions install.sh uninstall.sh remote-install.sh LICENSE CHANGELOG.md README.md; do
+for item in bin lib share completions yardcode install.sh uninstall.sh remote-install.sh LICENSE CHANGELOG.md README.md; do
     [[ -e "${SRC}/${item}" ]] && run cp -R "${SRC}/${item}" "${new}/"
 done
 run chmod -R u=rwX,go=rX "$new"
 run chmod 0755 "${new}/bin/nodeyard"
 [[ -f "${new}/share/nodeyard/demo/shim.sh" || "$DRY_RUN" -eq 1 ]] && run chmod 0755 "${new}/share/nodeyard/demo/shim.sh"
+[[ -f "${new}/yardcode/bin/yardcode" ]] && run chmod 0755 "${new}/yardcode/bin/yardcode"
 # Keep the record of what earlier installs linked, so uninstall still finds it.
 if [[ -f "$MANIFEST" ]]; then run cp "$MANIFEST" "${new}/.install-manifest"; fi
 if [[ -d "$DEST" ]]; then
@@ -248,11 +249,17 @@ if [[ -f "${BIN}/k3s-manager" && ! -L "${BIN}/k3s-manager" ]] && grep -q 'k3s-ma
 fi
 link "${DEST}/bin/nodeyard" "${BIN}/k3s-manager" || say "Left ${BIN}/k3s-manager alone (not ours)."
 
+# The terminal AI agent (also installable on its own: yardcode/install.sh).
+if [[ -f "${DEST}/yardcode/bin/yardcode" || "$DRY_RUN" -eq 1 ]]; then
+    link "${DEST}/yardcode/bin/yardcode" "${BIN}/yardcode" || say "Left ${BIN}/yardcode alone (not ours)."
+fi
+
 # Some distros' sudo (e.g. RHEL/Rocky/Alma) don't search /usr/local/bin, so
 # 'sudo nodeyard' would fail; give those a /usr/bin link too.
 if [[ "$PREFIX" == /usr/local ]] && grep -hqsE '^[^#]*secure_path' /etc/sudoers /etc/sudoers.d/* &&
     ! grep -hsE '^[^#]*secure_path' /etc/sudoers /etc/sudoers.d/* | grep -q '/usr/local/bin'; then
     link "${DEST}/bin/nodeyard" /usr/bin/nodeyard || true
+    [[ -f "${DEST}/yardcode/bin/yardcode" ]] && { link "${DEST}/yardcode/bin/yardcode" /usr/bin/yardcode || true; }
 fi
 
 # Shell completion, where the system has a place for it.
@@ -283,4 +290,5 @@ else
     say "  Start the guided menu:   sudo nodeyard"
     say "  Check this machine:      sudo nodeyard doctor"
     say "  Try it without hardware: nodeyard --demo"
+    say "  Terminal AI agent:       yardcode login   (then: yardcode)"
 fi

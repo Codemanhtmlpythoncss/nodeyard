@@ -253,10 +253,78 @@
     reset();
   }
 
+
+  // ---- context size, compression and web research
+  const estTokens = (msgs) => Math.round(msgs.reduce((n, m) => n + (m.content || "").length + 16, 0) / 3.5);
+  const chatCtx = (t) => (t && t.id === "split" ? +((S.d.ai && S.d.ai.split && S.d.ai.split.ctx) || 0) : 0);
+  const SUMMARY_PROMPT = "Summarize the conversation so far so it can continue without the original messages. Use these sections and leave out empty ones: ## Request (what the user wants and any preferences), ## Done so far, ## Files and facts (exact names, numbers, errors), ## Decisions, ## Open questions and next steps. Be concise (under 350 words) but keep every detail needed to carry on. Never invent anything.";
+  const WEB_PROMPT = "Some user messages include <web_results>: search results and page excerpts fetched from the internet for that question. Use them for current facts, quote carefully, and mention the source addresses you relied on. If they don't answer the question, say so.";
+  // the messages the model gets: system prompt, a summary of what was compressed away, then the rest
+  function chatMessages(c, extra, prune) {
+    const sys = [c.files !== false ? FILES_PROMPT : "", c.system || "", c.web ? WEB_PROMPT : ""].filter(Boolean).join("\n\n");
+    const from = Math.min(c.summaryUpTo || 0, c.messages.length), out = sys ? [{ role: "system", content: sys }] : [];
+    if (c.summary && from > 0) out.push({ role: "user", content: "[Summary of the earlier part of our conversation, compressed to save space]\n\n" + c.summary }, { role: "assistant", content: "Understood. I'll continue from that summary." });
+    const rest = c.messages.slice(from).concat(extra ? [extra] : []).filter((m) => !m.error && !m.pending);
+    const keepFrom = prune ? Math.max(0, rest.length - 4) : 0;   // pruning: old attached files and web pages are left out of what is sent
+    return out.concat(rest.map((m, i) => ({ role: m.role, content: apiContent(m, i < keepFrom) })));
+  }
+  async function streamText(target, messages, maxTok, signal) {
+    const r = await fetch("/api/ai/chat", { method: "POST", cache: "no-store", signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ target, messages, temperature: 0.2, max_tokens: maxTok, stream_id: uid() + uid() }) });
+    if (r.status === 401) { location.href = "/login"; return ""; }
+    if (!r.ok) { let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ } throw new Error(j.error || "The model didn't answer (HTTP " + r.status + ").") ; }
+    const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "", text = "";
+    for (;;) {
+      const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim(); if (payload === "[DONE]") continue;
+        let j; try { j = JSON.parse(payload); } catch (e) { continue; }
+        if (j.error) throw new Error(typeof j.error === "string" ? j.error : j.error.message || "The model reported an error.");
+        const d = j.choices && j.choices[0] && j.choices[0].delta;
+        if (d && d.content) text += d.content;
+      }
+    }
+    return text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+  }
+  // Replace the older messages by a summary the model writes. Returns true if it compressed something.
+  async function compressChat(c, opts) {
+    const t = findTarget(c.target);
+    if (!t || !t.ready) { if (opts && opts.manual) toast("That model isn't ready."); return false; }
+    const from = Math.min(c.summaryUpTo || 0, c.messages.length);
+    let cut = c.messages.length - 4;
+    while (cut > from && c.messages[cut].role !== "user") cut--;      // never cut between a question and its answer
+    if (cut - from < 2) { if (opts && opts.manual) toast("There isn't enough earlier conversation to compress yet."); return false; }
+    const old = c.messages.slice(from, cut).filter((m) => !m.error && !m.pending);
+    let transcript = old.map((m) => (m.role === "user" ? "USER: " : "ASSISTANT: ") + (apiContent(m, true) || "").slice(0, 2500)).join("\n\n");
+    const budget = Math.max(2000, Math.floor(((chatCtx(t) || 8192) * 3.5) / 2));
+    if (transcript.length > budget) transcript = transcript.slice(0, budget >> 1) + "\n... [middle left out] ...\n" + transcript.slice(-(budget >> 1));
+    const prompt = (c.summary && from > 0 ? "Summary so far:\n" + c.summary + "\n\nMore of the conversation follows. Update the summary to include it.\n\n" : "") + "<conversation>\n" + transcript + "\n</conversation>\n\n" + SUMMARY_PROMPT;
+    A.compressing = c.id; refreshChat();
+    const ctrl = new AbortController(); A.sumCtrl = ctrl;
+    try {
+      const summary = await streamText(c.target, [{ role: "system", content: "You write precise summaries of conversations between a user and an AI assistant." }, { role: "user", content: prompt }], 700, ctrl.signal);
+      if (!summary) throw new Error("The model returned an empty summary.");
+      c.summary = summary; c.summaryUpTo = cut; saveChats();
+      toast("Compressed " + (cut - from) + " earlier messages into a summary.");
+      return true;
+    } catch (e) {
+      if (e.name !== "AbortError") toast("Couldn't compress: " + (e.message || e));
+      return false;
+    } finally { A.compressing = null; A.sumCtrl = null; renderThread(); refreshChat(); }
+  }
+  async function webResearch(query) {
+    const r = await postJSON("/api/ai/web", { query: query.slice(0, 300) });
+    if (!r.ok) throw new Error(r.error || "Web search failed.");
+    return r;
+  }
+
   // ------------------------------------------------------------------ chat
   const curChat = () => A.chats.find((c) => c.id === A.cur);
   function newChat(target) {
-    const c = { id: uid(), title: "New chat", target: target || (targetList().find((t) => t.ready) || {}).id || "", messages: [], system: "", temperature: 0.7, max_tokens: 1024, created: Date.now() };
+    const c = { id: uid(), title: "New chat", target: target || (targetList().find((t) => t.ready) || {}).id || "", messages: [], system: "", temperature: 0.7, max_tokens: 1024, compress: "auto", web: false, created: Date.now() };
     A.chats.unshift(c); A.cur = c.id; saveChats();
     return c;
   }
@@ -291,7 +359,10 @@
     if (force || (!A.stream && A.threadSig !== (c ? c.id + ":" + c.messages.length : ""))) renderThread();
     const t = c && findTarget(c.target);
     paintSend();
-    setHTML($("#chat-note"), !list.length && A.targets ? html`Nothing to chat with yet. <a href="#" data-ai-tab-link="models">Run a model</a> on the Models tab, or find one under <a href="#" data-ai-tab-link="search">Find models</a>.` : t && !t.ready ? html`${t.name} isn't loaded yet.` : "");
+    const cx = c && t ? chatCtx(t) : 0, used = c && t && cx ? estTokens(chatMessages(c, null)) : 0;
+    setHTML($("#chat-note"), !list.length && A.targets ? html`Nothing to chat with yet. <a href="#" data-ai-tab-link="models">Run a model</a> on the Models tab, or find one under <a href="#" data-ai-tab-link="search">Find models</a>.` : t && !t.ready ? html`${t.name} isn't loaded yet.` :
+      A.compressing && c && A.compressing === c.id ? html`Compressing the earlier messages… <button class="btn small" type="button" data-ai="stop-compress">Stop</button>` : A.searching && c && A.searching === c.id ? html`Searching the web…` :
+      cx ? html`Context: about ${used.toLocaleString()} of ${cx.toLocaleString()} tokens (${Math.min(100, Math.round((100 * used) / cx))}%)${c.summary ? " · earlier messages compressed" : ""}${c.max_tokens ? "" : " · no reply limit"}` : "");
   }
   // Send turns into Stop while an answer is coming, wherever you are (another chat, back from another page),
   // and Stop always works: it ends the request and tells the model to stop working on it.
@@ -326,13 +397,21 @@
       '</span><button type="button" class="x" data-ai="att-rm" data-i="' + i + '" aria-label="Remove ' + esc(f.name) + '">×</button></span>')));
   }
   // what the model gets for a message: its text, then each attached file as a <file> block
-  const apiContent = (m) => (m.role === "user" && m.files && m.files.length ? (m.content ? m.content + "\n\n" : "") + m.files.map((f) => '<file path="' + f.name.replace(/"/g, "'") + '">\n' +
-    (f.text == null ? "(not kept by the browser: attach it again)\n" : f.text + (f.text.endsWith("\n") ? "" : "\n")) + "</file>").join("\n\n") : m.content);
+  const apiContent = (m, prune) => {
+    if (m.role !== "user") return m.content;
+    let out = m.content || "";
+    if (m.files && m.files.length) out = (out ? out + "\n\n" : "") + m.files.map((f) => prune ? '<file path="' + f.name.replace(/"/g, "'") + '">(omitted to save space)</file>' : '<file path="' + f.name.replace(/"/g, "'") + '">\n' +
+      (f.text == null ? "(not kept by the browser: attach it again)\n" : f.text + (f.text.endsWith("\n") ? "" : "\n")) + "</file>").join("\n\n");
+    if (m.web && m.web.text && !prune) out += "\n\n<web_results query=\"" + m.web.query.replace(/"/g, "'") + "\">\n" + m.web.text + "\n</web_results>";
+    return out;
+  };
   function renderChatList() {
     setHTML($("#chat-list"), A.chats.map((c) => raw('<div class="chat-item' + (c.id === A.cur ? " on" : "") + '" data-ai="open-chat" data-id="' + esc(c.id) + '"><span>' + esc(c.title) + '</span><button class="x" data-ai="del-chat" data-id="' + esc(c.id) + '" aria-label="Delete chat">×</button></div>')));
   }
+  const webChips = (m) => m.web && m.web.sources && m.web.sources.length ? '<details class="srcs"><summary>Searched the web · ' + m.web.sources.length + " source" + (m.web.sources.length === 1 ? "" : "s") + "</summary>" +
+    m.web.sources.map((x) => '<a href="' + esc(x.url) + '" target="_blank" rel="noopener noreferrer nofollow">' + esc(x.title || x.url) + '</a>').join("") + "</details>" : "";
   const msgHTML = (m, i, last) => {
-    if (m.role === "user") return '<div class="msg user"><div class="bubble">' + esc(m.content || "").replace(/\n/g, "<br>") + (m.files && m.files.length ? '<div class="att-chips">' + m.files.map((f, k) =>
+    if (m.role === "user") return '<div class="msg user"><div class="bubble">' + esc(m.content || "").replace(/\n/g, "<br>") + webChips(m) + (m.files && m.files.length ? '<div class="att-chips">' + m.files.map((f, k) =>
       '<button class="att" data-ai="att-dl" data-mi="' + i + '" data-fi="' + k + '" title="Download"><svg class="icon"><use href="#i-file"/></svg><span>' + esc(f.name) + '</span><span class="dim">' + fmt.bytes(f.size) + "</span></button>").join("") + "</div>" : "") + "</div></div>";
     const body = m.error ? (m.content ? md(m.content, i, false) : "") + '<div class="err">' + esc(m.error) + '</div><button class="btn small" data-ai="retry">Try again</button>' : (m.content || m.thinking ? md((m.thinking ? "<think>" + m.thinking + "</think>" : "") + m.content, i, !!m.pending) : '<span class="typing"><i></i><i></i><i></i></span>');
     const meta = m.meta ? '<div class="meta">' + esc(m.meta) + "</div>" : "";
@@ -347,7 +426,8 @@
         ["Explain how a model is split across several machines", "Write a Python function that parses a log file", "What is the binary value 1010100101 << 2 in decimal?", "Give me a one-paragraph summary of what Kubernetes does"].map((s) => '<button class="chip btnlike" data-ai="suggest">' + esc(s) + "</button>").join("") + "</div></div>";
       return;
     }
-    el.innerHTML = c.messages.map((m, i) => msgHTML(m, i, i === c.messages.length - 1)).join("");
+    el.innerHTML = c.messages.map((m, i) => (c.summary && i === c.summaryUpTo && i > 0 ? '<div class="compress-note"><span>Earlier messages were compressed into a summary to save the model\'s memory</span><details><summary>Show the summary</summary><div class="md">' + md(c.summary, -1, false) + "</div></details></div>" : "") +
+      msgHTML(m, i, i === c.messages.length - 1)).join("");
     el.scrollTop = el.scrollHeight;
   }
   function paintLast() {
@@ -363,8 +443,13 @@
     const p = $("#chat-settings");
     if (!p.classList.toggle("hide")) {
       setHTML(p, html`<label>System prompt<textarea id="cs-system" rows="2" placeholder="e.g. You are a concise assistant.">${c.system}</textarea></label>
-        <div class="row" style="gap:18px"><label>Creativity <b id="cs-t-v">${c.temperature}</b><input type="range" id="cs-temp" min="0" max="2" step="0.1" value="${c.temperature}"></label>
-        <label>Max reply length (tokens)<input class="input" id="cs-max" type="number" min="16" max="8192" step="16" value="${c.max_tokens}" style="width:110px"></label></div>
+        <div class="row" style="gap:18px;flex-wrap:wrap"><label>Creativity <b id="cs-t-v">${c.temperature}</b><input type="range" id="cs-temp" min="0" max="2" step="0.1" value="${c.temperature}"></label>
+        <label>Max reply length (tokens)<span class="row" style="gap:10px"><input class="input" id="cs-max" type="number" min="16" max="65536" step="16" value="${c.max_tokens || 1024}" style="width:110px" ${c.max_tokens ? "" : raw("disabled")}>
+          <span class="check"><input type="checkbox" id="cs-nolimit" ${c.max_tokens ? "" : raw("checked")}> <span>No limit</span></span></span></label></div>
+        <div class="row" style="gap:18px;align-items:flex-end"><label>Context compression<select class="select" id="cs-compress"><option value="auto" ${c.compress !== "off" ? raw("selected") : ""}>Automatic (when it gets full)</option><option value="off" ${c.compress === "off" ? raw("selected") : ""}>Off</option></select></label>
+          <button class="btn small" data-ai="compress-now" type="button" title="Summarise the earlier messages now to free up the model's memory">Compress now</button></div>
+        <p class="muted small" style="margin:4px 0 0">Near the model's context length, older messages are replaced by a short summary the model writes, so the chat can go on.</p>
+        <label class="check"><input type="checkbox" id="cs-web" ${c.web ? raw("checked") : ""}> <span><b>Web search</b>: look each question up on the internet and give the model what it finds (with sources)</span></label>
         <label class="check"><input type="checkbox" id="cs-files" ${c.files !== false ? raw("checked") : ""}> <span><b>Make files</b>: scripts, pages and documents the AI writes come as files to download (a .zip for folders)</span></label>`);
     }
   }
@@ -377,13 +462,24 @@
       text = (text || "").trim(); if (!text && !A.attach.length) return;
       mine = { role: "user", content: text, files: A.attach.length ? A.attach.slice() : undefined };
     }
-    const sys = [c.files !== false ? FILES_PROMPT : "", c.system || ""].filter(Boolean).join("\n\n");
-    const msgs = (sys ? [{ role: "system", content: sys }] : []).concat(c.messages.concat(mine ? [mine] : []).filter((m) => !m.error && !m.pending).map((m) => ({ role: m.role, content: apiContent(m) })));
+    const noLimit = !c.max_tokens;
+    if (mine && c.web && text) {   // look things up first, so the model answers with what it found
+      A.searching = c.id; refreshChat();
+      try { const w = await webResearch(text); mine.web = { query: text.slice(0, 300), text: w.text, sources: w.sources || [] }; }
+      catch (e) { toast("Web search didn't work: " + (e.message || e)); }
+      finally { A.searching = null; refreshChat(); }
+    }
+    let msgs = chatMessages(c, mine);
+    const ctx = chatCtx(t);
+    let est = estTokens(msgs);
+    if (ctx && c.compress !== "off" && est + Math.min(c.max_tokens || 512, 512) > ctx * 0.75) {   // nearly full: shorten it first
+      msgs = chatMessages(c, mine, true); est = estTokens(msgs);                                    // cheap step: drop old attached files and pages
+      if (est + Math.min(c.max_tokens || 512, 512) > ctx * 0.75 && await compressChat(c)) { msgs = chatMessages(c, mine); est = estTokens(msgs); }
+    }
     // the model only remembers its context length: say so instead of sending something it can't read
-    const ctx = t.id === "split" ? +((S.d.ai && S.d.ai.split && S.d.ai.split.ctx) || 0) : 0, est = Math.round(msgs.reduce((n, m) => n + m.content.length, 0) / 3.5);
-    if (ctx && est + Math.min(c.max_tokens, 512) > ctx) {
+    if (ctx && est + Math.min(c.max_tokens || 512, 512) > ctx) {
       await dialog("Too much for the model", html`<p style="margin-top:0">This would be about <b>${est.toLocaleString()}</b> tokens, but the model only remembers <b>${(+ctx).toLocaleString()}</b> (its context length).</p>
-        <p>Attach a smaller file or fewer files, start a new chat, or run the model with a longer context (pick it again in the <b>AI model</b> menu and raise the context length).</p>`, "OK");
+        <p>Attach a smaller file or fewer files, start a new chat, turn on <b>context compression</b> in the chat's Settings, or run the model with a longer context (pick it again in the <b>AI model</b> menu and raise the context length).</p>`, "OK");
       return;
     }
     if (mine) {
@@ -399,7 +495,7 @@
     const t0 = performance.now(); let first = 0, chunks = 0, timings = null, raf = 0;
     const paint = () => { raf = 0; paintLast(); };
     try {
-      const r = await fetch("/api/ai/chat", { method: "POST", cache: "no-store", signal: ctrl.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ target: c.target, messages: msgs, temperature: c.temperature, max_tokens: c.max_tokens, stream_id: sid }) });
+      const r = await fetch("/api/ai/chat", { method: "POST", cache: "no-store", signal: ctrl.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ target: c.target, messages: msgs, temperature: c.temperature, max_tokens: noLimit ? 0 : c.max_tokens, stream_id: sid }) });
       if (r.status === 401) { location.href = "/login"; return; }
       if (!r.ok) { let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ } throw new Error(j.error || "The model didn't answer (HTTP " + r.status + ").") ; }
       const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "";
@@ -690,7 +786,9 @@
     if (a === "new-chat") { newChat(); buildChat(); }
     else if (a === "open-chat") { A.cur = el.dataset.id; saveChats(); buildChat(); }
     else if (a === "del-chat") { e.stopPropagation(); A.chats = A.chats.filter((x) => x.id !== el.dataset.id); if (A.cur === el.dataset.id) A.cur = (A.chats[0] || {}).id || ""; saveChats(); buildChat(); }
-    else if (a === "clear-chat" && c) { if (A.stream) A.stream.ctrl.abort(); c.messages = []; c.title = "New chat"; saveChats(); renderThread(); renderChatList(); }
+    else if (a === "clear-chat" && c) { if (A.stream) A.stream.ctrl.abort(); c.messages = []; c.summary = ""; c.summaryUpTo = 0; c.title = "New chat"; saveChats(); renderThread(); renderChatList(); refreshChat(); }
+    else if (a === "compress-now" && c) { compressChat(c, { manual: true }); }
+    else if (a === "stop-compress") { if (A.sumCtrl) A.sumCtrl.abort(); }
     else if (a === "chat-settings") settingsPanel();
     else if (a === "suggest") { send(el.textContent); }
     else if (a === "stop") stopStream();
@@ -773,7 +871,10 @@
     if (t.id === "prompt") { t.style.height = "auto"; t.style.height = Math.min(220, t.scrollHeight) + "px"; }
     else if (t.id === "cs-system" && c) { c.system = t.value; saveChats(); }
     else if (t.id === "cs-temp" && c) { c.temperature = +t.value; $("#cs-t-v").textContent = t.value; saveChats(); }
-    else if (t.id === "cs-max" && c) { c.max_tokens = Math.max(16, Math.min(8192, +t.value || 1024)); saveChats(); }
+    else if (t.id === "cs-max" && c) { c.max_tokens = Math.max(16, Math.min(65536, +t.value || 1024)); saveChats(); }
+    else if (t.id === "cs-nolimit" && c) { c.max_tokens = t.checked ? 0 : (+($("#cs-max").value) || 1024); $("#cs-max").disabled = t.checked; saveChats(); }
+    else if (t.id === "cs-compress" && c) { c.compress = t.value; saveChats(); refreshChat(); }
+    else if (t.id === "cs-web" && c) { c.web = t.checked; saveChats(); }
   });
   document.addEventListener("change", (e) => {
     const c = curChat();

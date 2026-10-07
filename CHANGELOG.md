@@ -9,6 +9,18 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **yardcode**, a terminal AI agent (like Codex or Claude Code) for your own model API, on macOS and Linux (Python 3.8+, no
+  packages): file, shell, Python and web tools (search, fetch, Wikipedia, arXiv, weather; no API keys), permissions with plan and
+  accept-edits modes, sessions with `/rewind`, hooks, MCP servers, plugins, sub-agents, `YARDCODE.md` instructions, and automatic
+  **context compression**. `--max-tokens none` removes the reply limit. Installs with nodeyard, or alone with
+  `yardcode/install.sh` or the single-file `make yardcode`. See [yardcode/README.md](yardcode/README.md).
+- **Control API** (`/api/v1` on the dashboard, protected by the model's API key from any network): list, load, unload and download
+  models remotely (`yardcode models load NAME`, or curl). Key-guessing is rate limited; deleting models and running commands stay
+  behind the dashboard password.
+- Dashboard chat: **No limit** for the reply length, **context compression** (automatic near the model's context length, or
+  Compress now), a **Web search** switch (searches the internet and gives the model the results with sources), and a context meter.
+- The model server now gets `--jinja`, so tool calls work with models that support them.
+
 - **Speed-aware split planner**: `ai split plan|deploy` now tries every set
   of nodes, shares layers by speed (capped by free memory), counts a network
   hop per extra node and picks the fastest plan; it prints the estimated

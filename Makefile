@@ -7,7 +7,7 @@ BATS := .tools/bin/bats
 export PATH := $(CURDIR)/.tools/bin:$(PATH)
 
 .DEFAULT_GOAL := help
-.PHONY: help deps lint fmt test harness demo build release screenshots clean
+.PHONY: help deps lint fmt test test-py harness demo build yardcode release screenshots clean
 
 help: ## Show this list
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-12s %s\n", $$1, $$2}'
@@ -30,6 +30,10 @@ test: ## Run the bats unit tests (no root or hardware needed)
 	@test -x $(BATS) || { echo "bats not found: run 'make deps' first"; exit 1; }
 	$(BATS) tests/unit
 
+test-py: ## Run the Python tests (dashboard, node agent, model gate, yardcode)
+	python3 -W ignore -m unittest discover -s tests/dashboard -p 'test_*.py'
+	cd tests/yardcode && python3 -W ignore -m unittest discover -s . -p 'test_*.py'
+
 harness: ## Install and exercise nodeyard in a container per supported distro (needs Docker)
 	tests/harness/run.sh $(DISTROS)
 
@@ -38,6 +42,9 @@ demo: ## Try nodeyard against a simulated cluster (changes nothing)
 
 build: ## Build release tarballs and SHA256SUMS into dist/
 	scripts/build-release.sh $(VERSION)
+
+yardcode: ## Build the single-file yardcode program into dist/yardcode
+	scripts/build-yardcode.sh dist/yardcode
 
 release: ## Tag a release: make release VERSION=X.Y.Z (then push the tag)
 	scripts/release.sh $(VERSION)

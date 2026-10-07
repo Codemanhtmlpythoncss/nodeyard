@@ -34,6 +34,7 @@ jobs:
         run: brew install bash jq
       - run: make deps
       - run: make test
+      - run: make test-py
 
   harness:
     name: Harness ${{ matrix.distro }} (${{ matrix.arch }})

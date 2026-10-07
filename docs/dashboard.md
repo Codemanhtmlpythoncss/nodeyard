@@ -183,3 +183,37 @@ kubelet through the API; check `sudo nodeyard doctor` on it.
 downloading, loading, or unloaded (press Load).
 
 **Port 9092 is taken**: `sudo nodeyard dashboard start --port 9093`.
+
+## Control API
+
+Other programs can see and switch the model with the model's API key (Settings > Model API key). It works from any network the dashboard
+answers on (also through public access) and the key is always needed. Deleting models, running commands and changing settings are not
+in it: those need the dashboard's password.
+
+```sh
+KEY=...   # the model API key
+curl -H "Authorization: Bearer $KEY" http://DASHBOARD:9092/api/v1/status
+curl -H "Authorization: Bearer $KEY" http://DASHBOARD:9092/api/v1/models
+curl -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"model":"qwen2.5-coder-7b.gguf"}' \
+     http://DASHBOARD:9092/api/v1/models/load          # -> {"job": "ab12..."}
+curl -H "Authorization: Bearer $KEY" 'http://DASHBOARD:9092/api/v1/jobs?id=ab12...&since=0'
+```
+
+| Endpoint | |
+|---|---|
+| `GET /api/v1/status` | what is loaded and whether it is ready |
+| `GET /api/v1/models` | downloaded models and Ollama's, which is loaded, running downloads |
+| `POST /api/v1/models/load` `{"model": "file.gguf"}` | switch to a downloaded model (old files are kept) |
+| `POST /api/v1/models/unload` | free the cluster's memory |
+| `POST /api/v1/models/download` `{"repo": "owner/name", "file": "x.gguf"}` | download a GGUF file |
+| `GET /api/v1/search?q=words`, `GET /api/v1/files?repo=owner/name` | find models on Hugging Face |
+| `GET /api/v1/jobs?id=ID&since=N` | progress of a task |
+
+`yardcode models ...` uses it ([yardcode/README.md](../yardcode/README.md)).
+
+## Chat settings
+
+Each chat has Settings: the reply length (**No limit** removes the cap), **context compression** (when the conversation nears the
+model's context length, older messages become a short summary the model writes; **Compress now** does it at once), and **Web search**
+(each question is searched on the internet, the best pages are read, and the model gets the text with its sources; needs yardcode
+next to nodeyard on the server and never fetches private network addresses).

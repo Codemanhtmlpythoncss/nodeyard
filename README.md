@@ -19,6 +19,8 @@ undo for every change it makes.
 > [roadmap](docs/STATUS.md). nodeyard is the successor to
 > `k3s-manager`; every k3s-manager command still works.
 
+**New:** [`yardcode`](yardcode/README.md) is a terminal AI agent (like Codex or Claude Code) for your own model API: it edits files, runs commands, searches the web, and can load models on your cluster. It installs with nodeyard and on its own, on macOS and Linux.
+
 ## Features
 
 **Today (0.1.0)**

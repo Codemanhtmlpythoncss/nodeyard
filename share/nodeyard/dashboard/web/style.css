@@ -469,3 +469,9 @@ body.term-full .tbox { flex: 1; height: auto; }
 .cmd-item { display: flex; flex-direction: column; gap: 1px; width: 100%; text-align: left; background: none; border: 0; border-radius: 8px; padding: 6px 8px; color: var(--text); cursor: pointer; font: inherit; }
 .cmd-item:hover { background: var(--panel2); } .cmd-item.on { background: var(--panel2); box-shadow: inset 2px 0 0 var(--accent); }
 @media (max-width: 760px) { .cmd-grid { grid-template-columns: 1fr; } .cmd-grid > .card:first-child { position: static; max-height: 300px; } }
+
+/* chat: compression notes and web sources */
+.compress-note { margin: 14px auto; max-width: 560px; text-align: center; font-size: 12.5px; color: var(--muted); border-top: 1px dashed var(--line2); border-bottom: 1px dashed var(--line2); padding: 8px 0; }
+.compress-note details { margin-top: 6px; text-align: left; } .compress-note summary { cursor: pointer; text-align: center; color: var(--accent); }
+.srcs { margin-top: 8px; font-size: 12.5px; } .srcs summary { cursor: pointer; color: var(--muted); }
+.srcs a { display: block; margin: 3px 0 0 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

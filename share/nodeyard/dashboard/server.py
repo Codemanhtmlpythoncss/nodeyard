@@ -202,6 +202,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _gate(self, public=False):
         """True if the request may go on; otherwise the answer has been sent."""
+        v1 = getattr(self.ctx, "v1_gate", None)
+        if v1 is not None and self.path.startswith("/api/v1/"):
+            return v1(self)    # the control API: the model's API key (or a signed-in session)
         if self.ctx.auth is None:
             if not self._host_ok():
                 self._json({"ok": False, "error": "This dashboard only answers on localhost."}, 403)
@@ -379,7 +382,7 @@ class Handler(BaseHTTPRequestHandler):
         fn = srv.post_routes.get(path)
         if fn is None:
             return self._json({"ok": False, "error": "Nothing here accepts that kind of request."}, 405, {"Allow": "GET, HEAD"})
-        if not self._csrf_ok():
+        if not (getattr(self, "v1_bearer", False) or self._csrf_ok()):   # (a key in the header can't be forged by another site)
             return
         body = self._body(srv.post_limits.get(path, MAX_BODY))
         if body is None:
@@ -532,6 +535,8 @@ def main():
     if importlib.util.find_spec("aiapi"):
         import aiapi
         aiapi.register(ctx, a)
+        import controlapi
+        controlapi.register(ctx, a)
     import settings
     settings.register(ctx, a)
     import terminal

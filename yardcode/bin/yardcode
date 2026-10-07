@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""yardcode launcher: finds its package next to this file (or one folder up, under src/) and runs it."""
+import os
+import sys
+
+if sys.version_info < (3, 8):
+    sys.exit("yardcode needs Python 3.8 or newer (this is %d.%d)." % sys.version_info[:2])
+
+here = os.path.dirname(os.path.realpath(__file__))
+for cand in (os.path.join(here, "..", "src"), os.path.join(here, "..", "lib"), here):
+    cand = os.path.abspath(cand)
+    if os.path.isdir(os.path.join(cand, "yardcode")):
+        sys.path.insert(0, cand)
+        break
+
+from yardcode.cli import main  # noqa: E402
+
+sys.exit(main())

@@ -25,6 +25,33 @@ install_it() {
     assert_output --regexp '^nodeyard [0-9]'
 }
 
+@test "the terminal AI agent (yardcode) is installed with nodeyard and works on its own" {
+    command -v python3 >/dev/null || skip "python3 not installed"
+    run install_it
+    assert_success
+    [ -L "${PREFIX}/bin/yardcode" ]
+    [ -x "${PREFIX}/lib/nodeyard/yardcode/bin/yardcode" ]
+    run "${PREFIX}/bin/yardcode" --version
+    assert_output --regexp '^yardcode [0-9]'
+    # removing nodeyard removes it too
+    run bash "${NY_REPO_ROOT}/uninstall.sh" --prefix "$PREFIX" --yes --force
+    assert_success
+    [ ! -e "${PREFIX}/bin/yardcode" ]
+}
+
+@test "yardcode installs on its own (plain sh, no nodeyard needed) and uninstalls cleanly" {
+    command -v python3 >/dev/null || skip "python3 not installed"
+    run sh "${NY_REPO_ROOT}/yardcode/install.sh" --from-dir "$NY_REPO_ROOT" --prefix "${BATS_TEST_TMPDIR}/solo"
+    assert_success
+    run "${BATS_TEST_TMPDIR}/solo/bin/yardcode" --version
+    assert_output --regexp '^yardcode [0-9]'
+    run sh "${NY_REPO_ROOT}/yardcode/install.sh" --from-dir "$NY_REPO_ROOT" --prefix "${BATS_TEST_TMPDIR}/solo"
+    assert_output --partial "already installed"
+    run sh "${NY_REPO_ROOT}/yardcode/install.sh" --prefix "${BATS_TEST_TMPDIR}/solo" --uninstall
+    assert_success
+    [ ! -e "${BATS_TEST_TMPDIR}/solo/bin/yardcode" ]
+}
+
 @test "installing the same version again changes nothing" {
     install_it
     run install_it

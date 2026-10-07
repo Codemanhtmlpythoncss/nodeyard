@@ -27,7 +27,7 @@ mkdir -p dist/stage
 stage="dist/stage/nodeyard-${version}"
 mkdir -p "$stage"
 # Only tracked files go into a release: nothing generated or local.
-git archive --format=tar HEAD bin lib share completions install.sh uninstall.sh LICENSE README.md CHANGELOG.md |
+git archive --format=tar HEAD bin lib share completions yardcode install.sh uninstall.sh LICENSE README.md CHANGELOG.md |
     tar -x -C "$stage"
 [[ -f remote-install.sh ]] && git archive --format=tar HEAD remote-install.sh | tar -x -C "$stage"
 
@@ -38,10 +38,13 @@ for arch in amd64 arm64; do
         tar "${tar_opts[@]+"${tar_opts[@]}"}" -czf "dist/nodeyard-${version}-linux-${arch}.tar.gz" -C dist/stage "nodeyard-${version}"
 done
 cp install.sh dist/install.sh
+# yardcode on its own: one executable file (needs only Python 3.8+) and its installer.
+scripts/build-yardcode.sh dist/yardcode
+cp yardcode/install.sh dist/install-yardcode.sh
 rm -rf dist/stage
 (
     cd dist
-    if command -v sha256sum >/dev/null; then sha256sum ./*.tar.gz install.sh; else shasum -a 256 ./*.tar.gz install.sh; fi |
+    if command -v sha256sum >/dev/null; then sha256sum ./*.tar.gz install.sh install-yardcode.sh yardcode; else shasum -a 256 ./*.tar.gz install.sh install-yardcode.sh yardcode; fi |
         sed 's#  \./#  #' >SHA256SUMS
 )
 echo "Built:"
