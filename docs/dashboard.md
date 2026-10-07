@@ -217,3 +217,23 @@ Each chat has Settings: the reply length (**No limit** removes the cap), **conte
 model's context length, older messages become a short summary the model writes; **Compress now** does it at once), and **Web search**
 (each question is searched on the internet, the best pages are read, and the model gets the text with its sources; needs yardcode
 next to nodeyard on the server and never fetches private network addresses).
+
+## Chat: commands, plugins and running code
+
+- **`/` commands**: type `/` in the message box for a menu: `/help`, `/new`, `/compact`, `/model`, `/models`, `/unload`, `/max`
+  (`/max none` = no reply limit), `/web`, `/plugins`, `/system`, `/temp`, `/run`, `/fix`, `/autofix`, `/retry`, `/stop`, `/copy`,
+  `/export`, `/context`. A message that really starts with a slash: type `//`.
+- **Plugins** (chat Settings): the AI decides when to search the web and read pages, look things up on Wikipedia or arXiv, get the
+  weather, calculate, keep a task list, run Python (code interpreter) or use files and shell. Every tool call shows as a card;
+  anything that runs code or changes things asks first (Allow / Allow for this chat / Deny). Python, files and shell run as the
+  terminal user (never root), and never through public access. Needs yardcode next to nodeyard (the installer does that).
+- **Run the AI's code**: python, bash and javascript blocks have a ▶ Run button. The code runs on the server as the terminal user
+  (30 second limit, never through public access) and its output shows under the block; "Ask the AI to fix it" sends the error back.
+  **Run and fix code automatically** (chat Settings, off by default) does that after every answer, up to 3 tries.
+
+## Choosing the model in the AI tab
+
+The **AI model** menu lists the models downloaded on your machines. Picking one only selects it: the page says it will be loaded when
+you send your next message, and sending does the rest (switches to it, keeps the old model's files, shows the progress, and sends
+your message once the model answers). If the running model was unloaded, sending loads it again. For the machines and context length,
+use the Models tab.

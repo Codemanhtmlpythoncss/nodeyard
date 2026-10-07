@@ -11,6 +11,8 @@
 - [The menu and wizards](menu-and-wizards.md)
 - [k3s clusters and nodes](k3s.md)
 - [AI workloads](ai.md)
+- [The web dashboard](dashboard.md): live view, chat with plugins, running code, model loading
+- [yardcode](../yardcode/README.md): the terminal AI agent that uses your model API and can load models on the cluster
 - [Health checks: doctor](doctor.md)
 - [Snapshots and backups](backups.md)
 - [Changes and undo](changes-and-undo.md)
@@ -32,3 +34,4 @@
 - [Architecture](architecture.md)
 - [Development and testing](development.md)
 - [Project status and roadmap](STATUS.md)
+

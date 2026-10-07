@@ -13,3 +13,7 @@ dist/
 
 # Harness logs
 tests/harness/logs/
+
+# Python
+__pycache__/
+*.pyc

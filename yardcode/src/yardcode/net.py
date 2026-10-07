@@ -51,25 +51,23 @@ def ssl_context(verify=True):
         ctx = ssl.create_default_context()
         if named and os.path.exists(named):
             ctx.load_verify_locations(named)
-        elif ctx.cert_store_stats().get("x509_ca", 0) == 0:
-            for p in BUNDLES:
-                if os.path.exists(p):
-                    try:
-                        ctx.load_verify_locations(p)
-                        break
-                    except (ssl.SSLError, OSError):
-                        continue
-            if ctx.cert_store_stats().get("x509_ca", 0) == 0 and sys.platform == "darwin":
+        else:
+            if ctx.cert_store_stats().get("x509_ca", 0) == 0:
+                for p in BUNDLES:
+                    if os.path.exists(p):
+                        try:
+                            ctx.load_verify_locations(p)
+                            break
+                        except (ssl.SSLError, OSError):
+                            continue
+            if sys.platform == "darwin":
+                # A school or company web filter re-signs HTTPS with its own certificate, which macOS trusts through the
+                # keychain only: always add what the keychains hold, or every https request fails.
                 p = _keychain_bundle()
                 if p:
-                    ctx.load_verify_locations(p)
-        elif sys.platform == "darwin":
-            # even with a bundle, a proxy's own certificate may only be in the keychain: add it too
-            p = _keychain_bundle()
-            if p:
-                try:
-                    ctx.load_verify_locations(p)
-                except (ssl.SSLError, OSError):
-                    pass
+                    try:
+                        ctx.load_verify_locations(p)
+                    except (ssl.SSLError, OSError):
+                        pass
     _cache[key] = ctx
     return ctx

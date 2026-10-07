@@ -4,7 +4,8 @@ nodeyard is built in phases; each minor release completes one. This page
 says what's done, what's next, and what is known not to work yet, so work
 can pick up cleanly at any point.
 
-**Current release: 0.1.0 (Phase 1, foundation).**
+**Current release: 0.1.0 (Phase 1, foundation).** The main branch is ahead of it: see
+[Done since 0.1.0](#done-since-010-unreleased) for what is built but not released yet.
 
 ## Roadmap
 
@@ -20,6 +21,28 @@ can pick up cleanly at any point.
 | 8 | 0.8.0 | Operations: cluster-wide doctor, scheduled and verified backups with restore wizard, rolling OS updates, alerts, power management, support bundle | planned |
 | 9 | 0.9.0 | Security review of everything, with a written report | planned |
 | 10 | 1.0.0+ | Extras, once everything above works on real hardware | planned |
+
+## Done since 0.1.0 (unreleased)
+
+Built ahead of the roadmap, in Python and Bash (the Go agent of phase 5 is not started):
+
+- **Web dashboard** (`nodeyard dashboard`, port 9092): live cluster view over Tailscale or your network, node agents (processes,
+  clocks, temperatures, GPUs, speed tests), Doctor, Settings, themes, a terminal, a command runner, and public access through
+  Tailscale Funnel. See [dashboard](dashboard.md).
+- **AI** (a taste of phases 7 and 8): `ai split` runs one model across several machines (speed-aware planner, parallel
+  downloads, disk limits and cleaning, NVIDIA GPU use, switching models), the model gate (no key needed on your own network, put back
+  automatically after a redeploy), and a key-protected control API to load models remotely.
+- **Dashboard chat**: attachments and generated files, reply length with a "no limit" option, context compression, web search,
+  plugins (Wikipedia, arXiv, weather, calculator, Python, files and shell), `/` commands, and a Run button on code the AI writes,
+  with the output sent back so the AI can fix it.
+- **yardcode** (`yardcode/`): a terminal AI agent for any OpenAI-compatible model API on macOS and Linux. Installs with nodeyard or alone.
+  See [yardcode/README.md](../yardcode/README.md).
+
+Tests: 251 bats tests (`make test`) and the Python tests for the dashboard, node agent, model gate and yardcode (`make test-py`;
+macOS and Linux, Python 3.8 to 3.13).
+
+Known gaps: web search and the macOS certificate lookup are only exercised on Linux in CI; switching models through the API is
+tested against the demo and read-only against a real cluster; no screenshots of the dashboard in the docs yet.
 
 ## Done in 0.1.0
 

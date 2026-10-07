@@ -99,3 +99,7 @@ day to day with `--reserve laptop=4`.
 
 Protect the API with a key: `--api-key-file PATH` (the key is read from a
 file and stored as a Kubernetes Secret).
+
+## Terminal AI agent
+
+[yardcode](../yardcode/README.md) is a coding agent for your terminal that uses this model API (and any OpenAI-compatible one). It can also load models on the cluster: `yardcode models load NAME`. It installs with nodeyard.

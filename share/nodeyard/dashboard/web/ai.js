@@ -10,7 +10,7 @@
   const num = (n) => (n == null ? "–" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "k" : String(n));
 
   const A = {
-    blocks: {}, 
+    blocks: {}, wanted: (() => { try { return JSON.parse(store.get("ai.wanted", "") || "null"); } catch (e) { return null; } })(), loadingModel: null, 
     tab: store.get("ai.tab", "chat"), targets: null, targetsAt: 0, ollama: null, ollamaAt: 0, disk: null, diskAt: 0, diskErr: "", chats: [], cur: null, stream: null,
     search: { q: "", sort: "downloads", results: null, loading: false, error: "", files: {}, open: "" }, key: "", useKey: false, locked: false,
     attach: [],
@@ -247,24 +247,56 @@
   }
   function refreshModelPick() {
     const sel = $("#ai-model"); if (!sel || document.activeElement === sel) return;
-    const sp = S.d && S.d.ai && S.d.ai.split, running = (sp && sp.model) || "", list = installed(), busy = A.targets && A.targets.busy;
+    const sp = S.d && S.d.ai && S.d.ai.split, running = (sp && sp.model) || "", shown = (A.wanted && A.wanted.file) || running, list = installed(), busy = A.targets && A.targets.busy;
     A.pick = {};
     const state = sp && sp.loaded === false ? "unloaded" : sp && sp.ready ? "running" : "loading";
-    const opts = list.map((m) => { A.pick[m.file] = m; return '<option value="' + esc(m.file) + '"' + (m.file === running ? " selected" : "") + ">" + esc(m.file.replace(/\.gguf$/i, "") + " · " + fmt.bytes(m.size, 1) + " · " + m.node + (m.file === running ? " · " + state : "")) + "</option>"; });
+    const opts = list.map((m) => { A.pick[m.file] = m; return '<option value="' + esc(m.file) + '"' + (m.file === shown ? " selected" : "") + ">" + esc(m.file.replace(/\.gguf$/i, "") + " · " + fmt.bytes(m.size, 1) + " · " + m.node + (m.file === running ? " · " + state : "")) + "</option>"; });
+    if (A.wanted && A.disk && !A.pick[A.wanted.file]) { A.wanted = null; store.set("ai.wanted", ""); }
     const none = !A.disk ? "Looking at the disks…" : !list.length ? "No models downloaded" : "No model running: pick one";
-    const htmlStr = (running && A.pick[running] ? "" : '<option value="" selected>' + esc(running ? running.replace(/\.gguf$/i, "") + " · " + state : none) + "</option>") + opts.join("");
+    const htmlStr = (shown && A.pick[shown] ? "" : '<option value="" selected>' + esc(running ? running.replace(/\.gguf$/i, "") + " · " + state : none) + "</option>") + opts.join("");
     if (sel.dataset.sig !== htmlStr) { sel.dataset.sig = htmlStr; sel.innerHTML = htmlStr; }
     sel.disabled = !!busy || !list.length;
     sel.title = busy ? "A change to the model is still running" : "";
   }
+  // Picking a model only selects it: it is loaded (and waited for) when you send your next message.
   async function pickModel(sel) {
     const m = A.pick && A.pick[sel.value], sp = S.d.ai && S.d.ai.split;
-    const reset = () => { sel.dataset.sig = ""; sel.blur(); refreshModelPick(); };
-    if (!m || (sp && sp.model === m.file)) { reset(); return; }
-    await runModel("", m.file, m.size, m.node);
-    reset();
+    sel.dataset.sig = ""; sel.blur();
+    if (!m || (sp && sp.model === m.file && sp.loaded !== false)) { A.wanted = null; store.set("ai.wanted", ""); refreshModelPick(); refreshChat(); return; }
+    A.wanted = { file: m.file, size: m.size, node: m.node }; store.set("ai.wanted", JSON.stringify(A.wanted));
+    toast(m.file.replace(/\.gguf$/i, "") + " will load when you send your next message.");
+    refreshModelPick(); refreshChat();
   }
-
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const aliasFor = (file) => file.replace(/\.gguf$/i, "").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[-.]+/, "").slice(0, 40) || "model";
+  // does sending need to load the selected model first?
+  const pendingLoad = (c) => { const sp = S.d && S.d.ai && S.d.ai.split, t = c && findTarget(c.target); if (c && c.target && c.target !== "split" && t) return null;
+    if (A.wanted && (!sp || sp.model !== A.wanted.file || sp.loaded === false)) return A.wanted; if (sp && sp.loaded === false) return { file: sp.model, same: true }; return null; };
+  async function autoLoad(c, want) {
+    const sp = S.d.ai && S.d.ai.split, same = !want || want.same || (sp && sp.model === want.file), name = ((want && want.file) || (sp && sp.model) || "the model").replace(/\.gguf$/i, "");
+    A.loadingModel = { chat: c.id, name, t0: Date.now(), cancelled: false, line: "" }; paintSend(); refreshChat();
+    try {
+      const r = same ? await postJSON("/api/run", { action: "split-load" }) : await postJSON("/api/run", { action: sp ? "switch" : "deploy", local: true, file: want.file, ctx: (sp && +sp.ctx) || 8192, alias: aliasFor(want.file), nodes: [], keep_old: true });
+      if (!r.ok) { toast(r.error || "Couldn't start loading the model."); return false; }
+      let status = "running";
+      while (status === "running") {
+        await sleep(1500); if (A.loadingModel.cancelled) return false;
+        const j = await getJSON("/api/job?id=" + encodeURIComponent(r.job) + "&since=0"); status = j.status || "failed";
+        A.loadingModel.line = ((j.lines || []).slice(-1)[0] || "").trim(); refreshChat();
+        if (status === "failed") { toast("Loading failed: " + A.loadingModel.line); return false; }
+      }
+      const end = Date.now() + 25 * 60 * 1000;      // the model server loads in the background: wait until it answers
+      for (;;) {
+        await loadTargets(true); const t = findTarget("split"); if (t && t.ready) break;
+        if (A.loadingModel.cancelled) return false;
+        if (Date.now() > end) { toast("The model is still loading. Send again in a minute."); return false; }
+        await sleep(3000); refreshChat();
+      }
+      c.target = "split"; A.wanted = null; store.set("ai.wanted", ""); saveChats(); refreshModelPick();
+      return true;
+    } catch (e) { toast("Couldn't load the model."); return false; }
+    finally { A.loadingModel = null; paintSend(); refreshChat(); loadDisk(true); }
+  }
 
   // ---- context size, compression and web research
   const estTokens = (msgs) => Math.round(msgs.reduce((n, m) => n + (m.content || "").length + 16, 0) / 3.5);
@@ -468,7 +500,9 @@
         const list = targetList();
         if (!arg) { await dialog("Models to chat with", raw("<p>" + (list.length ? list.map((t) => esc(t.name) + (t.ready ? "" : " (not ready)")).join("<br>") : "No model is running.") + "</p><p class=\"muted small\">Switch with /model NAME.</p>"), "OK"); break; }
         const hit = list.find((t) => t.name.toLowerCase().includes(arg.toLowerCase()) || t.id === arg);
-        if (!hit) toast("No model matches “" + arg + "”."); else { c.target = hit.id; saveChats(); refreshChat(true); toast("Using " + hit.name); } break;
+        const dl = !hit && installed().find((m) => m.file.toLowerCase().includes(arg.toLowerCase()));
+        if (dl) { A.wanted = { file: dl.file, size: dl.size, node: dl.node }; store.set("ai.wanted", JSON.stringify(A.wanted)); refreshModelPick(); refreshChat(); toast(dl.file.replace(/\.gguf$/i, "") + " will load when you send your next message."); }
+        else if (!hit) toast("No model matches “" + arg + "”."); else { c.target = hit.id; saveChats(); refreshChat(true); toast("Using " + hit.name); } break;
       }
       case "unload": { const v = await dialog("Unload the model?", raw("<p>Nothing can answer until you load one again. Its memory is freed on every machine.</p>"), "Unload"); if (v) { const r = await postJSON("/api/run", { action: "split-unload" }); toast(r.ok ? "Unloading…" : (r.error || "Couldn't unload.")); } break; }
       case "max": if (!arg) toast(c.max_tokens ? "Replies stop at " + c.max_tokens + " tokens." : "No limit on the reply length."); else if (/^(none|no|off|unlimited|0)$/i.test(arg)) { c.max_tokens = 0; saveChats(); toast("No limit on the reply length."); } else if (+arg > 0) { c.max_tokens = Math.min(65536, Math.max(16, +arg | 0)); saveChats(); toast("Replies stop at " + c.max_tokens + " tokens."); } else toast("Give a number, or none."); refreshChat(); break;
@@ -552,7 +586,10 @@
     const t = c && findTarget(c.target);
     paintSend();
     const cx = c && t ? chatCtx(t) : 0, used = c && t && cx ? estTokens(chatMessages(c, null)) : 0;
-    setHTML($("#chat-note"), !list.length && A.targets ? html`Nothing to chat with yet. <a href="#" data-ai-tab-link="models">Run a model</a> on the Models tab, or find one under <a href="#" data-ai-tab-link="search">Find models</a>.` : t && !t.ready ? html`${t.name} isn't loaded yet.` :
+    const ld = A.loadingModel && c && A.loadingModel.chat === c.id ? A.loadingModel : null, sl = S.d && S.d.ai && S.d.ai.split && S.d.ai.split.load;
+    const loadNote = ld ? html`Loading <b>${ld.name}</b>… ${sl && sl.pct != null && sl.phase === "loading" ? Math.round(sl.pct) + "%" : ld.line ? "(" + ld.line.slice(0, 70) + ")" : ""} · ${Math.round((Date.now() - ld.t0) / 1000)} s. Your message goes out when it is ready. <button class="btn small" type="button" data-ai="stop-load">Don't wait</button>` :
+      A.wanted && (!findTarget("split") || findTarget("split").ready === false || (S.d.ai.split && S.d.ai.split.model !== A.wanted.file)) ? html`<b>${A.wanted.file.replace(/\.gguf$/i, "")}</b> will be loaded when you send your message.` : null;
+    setHTML($("#chat-note"), loadNote ? loadNote : !list.length && A.targets && !A.wanted ? html`Nothing to chat with yet. <a href="#" data-ai-tab-link="models">Run a model</a> on the Models tab, or find one under <a href="#" data-ai-tab-link="search">Find models</a>.` : t && !t.ready ? html`${t.name} isn't loaded yet.` :
       A.compressing && c && A.compressing === c.id ? html`Compressing the earlier messages… <button class="btn small" type="button" data-ai="stop-compress">Stop</button>` : A.searching && c && A.searching === c.id ? html`Searching the web…` :
       cx ? html`Context: about ${used.toLocaleString()} of ${cx.toLocaleString()} tokens (${Math.min(100, Math.round((100 * used) / cx))}%)${c.summary ? " · earlier messages compressed" : ""}${c.max_tokens ? "" : " · no reply limit"}` : "");
   }
@@ -561,8 +598,9 @@
   function paintSend() {
     const b = $("#send"); if (!b) return;
     const c = curChat(), t = c && findTarget(c.target);
+    if (A.loadingModel) { b.type = "button"; delete b.dataset.ai; b.textContent = "Loading…"; b.classList.remove("danger"); b.disabled = true; b.title = "The model is loading; your message goes out when it is ready"; return; }
     if (A.stream) { b.type = "button"; b.dataset.ai = "stop"; b.textContent = "Stop"; b.classList.remove("primary"); b.classList.add("danger"); b.disabled = false; b.title = "Stop the answer"; }
-    else { b.type = "submit"; delete b.dataset.ai; b.textContent = "Send"; b.classList.add("primary"); b.classList.remove("danger"); b.disabled = !t || !t.ready; b.title = ""; }
+    else { b.type = "submit"; delete b.dataset.ai; b.textContent = "Send"; b.classList.add("primary"); b.classList.remove("danger"); b.disabled = !((t && t.ready) || pendingLoad(c) || (A.wanted && c && !t)); b.title = A.wanted ? "Loads " + A.wanted.file.replace(/\.gguf$/i, "") + " first" : ""; }
   }
   function stopStream() {
     const st = A.stream; if (!st) return;
@@ -650,7 +688,9 @@
   }
   async function send(text, regen) {
     const c = curChat(); if (!c || A.stream) return;
-    const t = findTarget(c.target);
+    let t = findTarget(c.target);
+    const want = pendingLoad(c);
+    if (want || !t) { if (want || A.wanted) { if (!(await autoLoad(c, want || A.wanted))) return; t = findTarget("split") || findTarget(c.target); } }
     if (!t || !t.ready) { toast("That model isn't ready."); return; }
     let mine = null;
     if (!A.autoSend) c.fixRounds = 0;
@@ -988,6 +1028,7 @@
     else if (a === "clear-chat" && c) { if (A.stream) A.stream.ctrl.abort(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); c.messages = []; c.summary = ""; c.summaryUpTo = 0; c.title = "New chat"; saveChats(); renderThread(); renderChatList(); refreshChat(); }
     else if (a === "compress-now" && c) { compressChat(c, { manual: true }); }
     else if (a === "agent-allow" || a === "agent-always" || a === "agent-deny") { agentReply(c, a); }
+    else if (a === "stop-load") { if (A.loadingModel) A.loadingModel.cancelled = true; }
     else if (a === "stop-compress") { if (A.sumCtrl) A.sumCtrl.abort(); }
     else if (a === "chat-settings") settingsPanel();
     else if (a === "suggest") { send(el.textContent); }

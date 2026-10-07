@@ -84,7 +84,11 @@ def http_fetch(url, method="GET", data=None, headers=None, timeout=20, max_bytes
             body = resp.read(max_bytes + 1)
             rh = {k.lower(): v for k, v in resp.getheaders()}
         except (OSError, http.client.HTTPException, ssl.SSLError) as e:
-            raise ToolError("Couldn't fetch %s: %s" % (url[:100], e))
+            hint = ""
+            if isinstance(e, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(e):
+                hint = (" (Something on this network may be re-signing HTTPS, like a school or company web filter. Trust its certificate on this machine, "
+                        "or point YARDCODE_CA_BUNDLE at a file holding it.)")
+            raise ToolError("Couldn't fetch %s: %s%s" % (url[:100], e, hint))
         finally:
             conn.close()
         if resp.status in (301, 302, 303, 307, 308) and rh.get("location"):

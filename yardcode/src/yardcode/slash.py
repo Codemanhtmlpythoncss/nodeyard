@@ -939,7 +939,8 @@ def c_status(app, arg):
             ("Health", app.client.health() if app.client.base_url else "-"), ("Folder", ag.ctx.cwd), ("Mode", MODE_LABEL[ag.perms.mode]),
             ("Context", "%s of %s" % (util.human_tokens(ag.context_used()), util.human_tokens(ag.context_window) if ag.context_window else "?")),
             ("Max reply", "no limit" if not int(st.get("max_tokens", 0) or 0) else "%s tokens" % st.get("max_tokens")),
-            ("Tool calls", "text format" if ag.text_mode else "native"), ("Session", app.session.id), ("Project trusted", "yes" if st.trusted else "no")]
+            ("Tool calls", "text format" if ag.text_mode else "native"), ("Session", app.session.id),
+            ("Project settings", ("trusted" if st.trusted else "not trusted yet: /trust to use its hooks and rules") if os.path.isdir(st.project_dir) else "none in this folder")]
     for k, v in rows:
         app.tui.w("  %s %s" % (S.bold(k.ljust(16)), v))
 

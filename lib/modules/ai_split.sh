@@ -104,6 +104,9 @@ SPLIT_NS="ai-split"
 SPLIT_GATE_DS="llama-gate"
 SPLIT_GATE_IMAGE="python:3.12-alpine"
 SPLIT_GATE_PUBLIC_PORT=31436 # on 127.0.0.1 only; the key is always needed there (Tailscale Funnel's target)
+ny_cfg_section_add ai single
+ny_cfg_schema_add ai.gate bool "" "Keep the model gate installed: nodeyard puts it back after the model is redeployed"
+ny_cfg_schema_add ai.gate-trusted string "" "Networks that need no API key (set by 'nodeyard ai gate install')"
 SPLIT_GATE_TRUSTED="127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,::1/128,fc00::/7,fd7a:115c:a1e0::/48"
 SPLIT_LLAMA_BUILD="${NODEYARD_LLAMA_BUILD:-b11160}"
 # NVIDIA GPUs run llama.cpp's Vulkan build, not its CUDA one: the CUDA builds need
@@ -1273,6 +1276,11 @@ split_apply() {
     rm -f "$manifest"
     if kctl -n "$SPLIT_NS" get daemonset "$SPLIT_GATE_DS" >/dev/null 2>&1; then
         kctl -n "$SPLIT_NS" rollout restart "daemonset/${SPLIT_GATE_DS}" >/dev/null 2>&1 || true
+    elif ! ny_simulating && ny_bool "$(ny_cfg_get ai "" gate false)"; then
+        # the gate was installed before but went with the namespace: without it the model needs its key even on your own network
+        ny_step "Putting the model gate back (you had installed it before)"
+        ai_gate_install --trusted "$(ny_cfg_get ai "" gate-trusted "$SPLIT_GATE_TRUSTED")" ||
+            ny_warn "Couldn't put the gate back. Run: sudo nodeyard ai gate install"
     fi
 
     ny_ok "Deployed. The main node (${PLAN_NAMES[0]}) downloads the model, then loads it and sends each node its share."
@@ -1579,6 +1587,8 @@ ai_gate_install() {
     if ny_simulating; then
         ny_info "Nothing was installed (dry run or demo)."
     else
+        ny_cfg_set ai "" gate true
+        ny_cfg_set ai "" gate-trusted "$trusted"
         ny_ok "The gate is running. From your own network: http://<node address>:${port}/v1 with no API key; from anywhere else the key is required."
         ny_hint "Machines running their own firewall (ufw, firewalld) need TCP port ${port} open to be reachable on that node."
     fi
@@ -1600,6 +1610,7 @@ ai_gate_remove() {
     ny_run "$(ny_path "$NY_K3S_BIN")" kubectl -n "$SPLIT_NS" delete "daemonset/${SPLIT_GATE_DS}" configmap/llama-gate-script --ignore-not-found >/dev/null || true
     ny_run "$(ny_path "$NY_K3S_BIN")" kubectl -n "$SPLIT_NS" patch service llama --type=json \
         -p '[{"op":"replace","path":"/spec/type","value":"NodePort"},{"op":"add","path":"/spec/ports/0/nodePort","value":'"${port}"'}]' >/dev/null 2>&1 || true
+    ny_cfg_set ai "" gate false
     ny_ok "The gate is removed; the model is on NodePort ${port} again and needs its API key from everywhere."
     return 0
 }

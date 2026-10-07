@@ -97,3 +97,7 @@ sudo nodeyard kubeconfig   # set up kubectl for your user
 - Coming next: static IPs and a view of every device on your network,
   a remote installer for your laptop, a floating virtual IP, dashboards,
   website hosting. See the [roadmap](STATUS.md).
+
+## The terminal AI agent
+
+nodeyard installs `yardcode` too: `yardcode login`, then `yardcode`. See [yardcode](../yardcode/README.md).

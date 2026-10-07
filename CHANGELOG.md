@@ -9,6 +9,13 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- AI tab: **the selected model loads when you send a message**. Picking a model in the AI model menu only selects it; sending
+  switches to it, shows the loading progress ("Don't wait" gives up waiting) and sends your message when the model answers. The same
+  happens when the running model was unloaded. `/model NAME` picks a downloaded model too.
+- `ai gate install` remembers the gate (`ai.gate` in the config), and `ai split deploy` puts it back when it went missing (it
+  went with the namespace when the AI namespace was deleted and recreated, which made the model ask for its key on your own network).
+- yardcode: on macOS it also trusts the certificates in your keychains, and a web filter that re-signs HTTPS now gets a clear message.
+
 - Dashboard chat **/ commands** (type `/` for a menu): /help, /new, /compact, /model, /models, /unload, /max, /web, /plugins,
   /system, /temp, /run, /fix, /autofix, /retry, /stop, /copy, /export, /context.
 - **Run the AI's code**: every python, bash and javascript block has a ▶ Run button (runs on the server as your terminal user, 30 s

@@ -423,3 +423,50 @@ switch_stubs() {
     split_manifest "$out"
     grep -A1 -- "- --load-mode" "$out" | grep -q -- "- dio"
 }
+
+@test "deploy puts the model gate back when it was installed before and went with the namespace" {
+    split_parse_flags() { NY_YES=1; }
+    split_pick_model() { :; }
+    split_print_plan() { :; }
+    split_disk_check() { :; }
+    split_manifest() { echo "kind: Namespace" >"$1"; }
+    PLAN_NAMES=(debian-1)
+    SPLIT_NODEPORT=0
+    ny_cfg_get() { if [[ "$1" == ai && "$3" == gate ]]; then echo true; elif [[ "$3" == gate-trusted ]]; then echo "10.0.0.0/8,100.64.0.0/10"; else echo "${4:-}"; fi; }
+    ai_gate_install() { echo "GATE $*" >>"$KLOG"; }
+    kctl() {
+        echo "$*" >>"$KLOG"
+        case "$*" in
+            "get namespace ai-split") return 0 ;;
+            *"get daemonset llama-gate"*) return 1 ;;
+            *) return 0 ;;
+        esac
+    }
+    run ai_split_deploy
+    assert_success
+    run grep "^GATE" "$KLOG"
+    assert_output "GATE --trusted 10.0.0.0/8,100.64.0.0/10"
+}
+
+@test "deploy leaves the gate alone when you never installed one" {
+    split_parse_flags() { NY_YES=1; }
+    split_pick_model() { :; }
+    split_print_plan() { :; }
+    split_disk_check() { :; }
+    split_manifest() { echo "kind: Namespace" >"$1"; }
+    PLAN_NAMES=(debian-1)
+    SPLIT_NODEPORT=0
+    ny_cfg_get() { echo "${4:-}"; }
+    ai_gate_install() { echo "GATE $*" >>"$KLOG"; }
+    kctl() {
+        echo "$*" >>"$KLOG"
+        case "$*" in
+            *"get daemonset llama-gate"*) return 1 ;;
+            *) return 0 ;;
+        esac
+    }
+    run ai_split_deploy
+    assert_success
+    run grep -c "^GATE" "$KLOG"
+    assert_output "0"
+}
