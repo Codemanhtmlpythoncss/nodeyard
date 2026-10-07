@@ -66,7 +66,9 @@ class ModelAPI:
         except ValueError:
             raise ModelAPIError("The dashboard answered with something that isn't JSON (is %s really the nodeyard dashboard?)." % self.base, resp.status)
         if resp.status in (401, 403):
-            raise ModelAPIError("The dashboard refused the key. Use the model API key: yardcode login", resp.status)
+            if not self.key:
+                raise ModelAPIError("Loading models needs the model's API key. Run: yardcode login   (the dashboard's Settings page shows the key)", resp.status)
+            raise ModelAPIError("The dashboard refused the key. Use the model's API key: yardcode login", resp.status)
         if resp.status == 404 and not data.get("error"):
             raise ModelAPIError("That nodeyard dashboard has no /api/v1 control API yet (update nodeyard on the server).", 404)
         if resp.status >= 400 or data.get("ok") is False:
