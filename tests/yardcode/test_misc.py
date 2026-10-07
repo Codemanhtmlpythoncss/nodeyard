@@ -217,7 +217,7 @@ class CommandLine(Base):
         r = self.run_cli(["doctor"], srv, env_extra={"YARDCODE_CONTROL_URL": "http://127.0.0.1:1"})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Model API answers", r.stdout)
-        self.assertIn("Context window", r.stdout)
+        self.assertIn("Context window: 12k", r.stdout)
         self.assertNotIn("Traceback", r.stdout + r.stderr)
 
     def test_slash_commands_all_run_without_crashing(self):

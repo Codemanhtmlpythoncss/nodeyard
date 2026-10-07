@@ -262,7 +262,7 @@ def run_subcommand(name, rest):
     elif name == "config":
         slash.c_config(app, " ".join(rest))
     elif name == "doctor":
-        app.discover()
+        app.agent.context_window = app.discover() or app.agent.context_window
         slash.c_doctor(app, "")
     elif name == "sessions":
         slash.c_sessions(app, "")
@@ -270,7 +270,7 @@ def run_subcommand(name, rest):
         app.mcp_servers = []
         slash.c_mcp(app, " ".join(rest))
     elif name == "models":
-        app.discover()
+        app.agent.context_window = app.discover() or app.agent.context_window
         sub = rest[0] if rest else "list"
         arg = " ".join(rest[1:])
         try:
