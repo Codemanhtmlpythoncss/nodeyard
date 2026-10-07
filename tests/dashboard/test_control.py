@@ -235,3 +235,23 @@ class Plugins(ChatAndWeb):
         self.assertTrue(any(e["type"] == "tool_result" and e["name"] == "Python" and e["ok"] for e in ev))
         ev = self.stream("x", {"chat": "c3", "text": "please run some python", "plugins": ["web", "python"]}, reply_after="deny")
         self.assertTrue(any(e["type"] == "tool_result" and e["name"] == "Python" and not e["ok"] for e in ev))
+
+
+class RunCode(ChatAndWeb):
+    """The Run button: the server runs the code (the demo only pretends), with limits."""
+
+    def test_the_demo_pretends_to_run_code(self):
+        s, raw = self.post_session("/api/ai/run-code", {"lang": "python", "code": "print(6 * 7)"})
+        j = json.loads(raw)
+        self.assertEqual(s, 200)
+        self.assertEqual(j["rc"], 0)
+        self.assertIn("demo", j["out"])
+
+    def test_only_python_bash_and_javascript_and_sane_sizes(self):
+        for body in ({"lang": "ruby", "code": "puts 1"}, {"lang": "python", "code": "   "}, {"lang": "python", "code": "x" * 70000}, {"lang": "../sh", "code": "ls"}):
+            s, _ = self.post_session("/api/ai/run-code", body)
+            self.assertEqual(s, 400, body.get("lang"))
+
+    def test_it_needs_a_sign_in(self):
+        s, j = self.call("POST", "/api/ai/run-code", {"lang": "python", "code": "1"}, key=None, headers={"X-Nodeyard": "1"})
+        self.assertEqual(s, 401)

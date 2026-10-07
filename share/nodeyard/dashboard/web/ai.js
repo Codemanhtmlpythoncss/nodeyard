@@ -10,6 +10,7 @@
   const num = (n) => (n == null ? "–" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "k" : String(n));
 
   const A = {
+    blocks: {}, 
     tab: store.get("ai.tab", "chat"), targets: null, targetsAt: 0, ollama: null, ollamaAt: 0, disk: null, diskAt: 0, diskErr: "", chats: [], cur: null, stream: null,
     search: { q: "", sort: "downloads", results: null, loading: false, error: "", files: {}, open: "" }, key: "", useKey: false, locked: false,
     attach: [],
@@ -53,8 +54,19 @@
   const inline = (t) => t.split(/(`[^`]+`)/).map((seg) => (/^`[^`]+`$/.test(seg) ? "<code>" + esc(seg.slice(1, -1)) + "</code>" : esc(seg)
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/(^|[^*\w])\*([^*\s][^*]*)\*(?!\w)/g, "$1<em>$2</em>")
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'))).join("");
-  const codeBlock = (lang, text) => '<div class="code"><div class="code-head"><span>' + esc(lang || "text") + '</span><span><button class="btn small" data-ai="copy-code">Copy</button> <button class="btn small" data-ai="dl-code">Download</button></span></div><pre><code>' + esc(text) + "</code></pre></div>";
+  const RUNNABLE = { python: "python", py: "python", python3: "python", bash: "bash", sh: "bash", shell: "bash", zsh: "bash", javascript: "node", js: "node", node: "node" };
+  const runOut = (r) => r.running ? '<div class="runout running"><span class="spin small"></span> Running…</div>' :
+    '<div class="runout ' + (r.rc === 0 ? "ok" : "bad") + '"><div class="runhead"><b>' + (r.rc === 0 ? "✓ ran" : r.failed ? "✗ couldn't run" : "✗ failed (exit " + r.rc + ")") + "</b>" + (r.secs != null ? ' <span class="faint">' + r.secs + " s</span>" : "") +
+    '<span class="grow"></span><button class="btn small ' + (r.rc === 0 ? "" : "primary") + '" data-ai="fix-code">' + (r.rc === 0 ? "Tell the AI the result" : "Ask the AI to fix it") + '</button></div><pre>' + esc(r.out || "(no output)") + "</pre></div>";
+  const codeBlock = (lang, text, mi, bi) => {
+    const run = RUNNABLE[(lang || "").toLowerCase()], c = curChat(), m = c && mi != null && mi >= 0 ? c.messages[mi] : null, r = m && m.runs && m.runs[bi];
+    if (m && mi >= 0) { (A.blocks[mi] = A.blocks[mi] || [])[bi] = { lang: run || "", code: text }; }
+    return '<div class="code" data-mi="' + mi + '" data-bi="' + bi + '" data-lang="' + esc(run || "") + '"><div class="code-head"><span>' + esc(lang || "text") + "</span><span>" + (run && mi != null && mi >= 0 ? '<button class="btn small primary" data-ai="run-code" title="Run it on the server and see what happens">▶ Run</button> ' : "") +
+      '<button class="btn small" data-ai="copy-code">Copy</button> <button class="btn small" data-ai="dl-code">Download</button></span></div><pre><code>' + esc(text) + "</code></pre>" + (r ? runOut(r) : "") + "</div>";
+  };
   function md(src, mi, pending) {
+    if (mi != null && mi >= 0) A.blocks[mi] = [];
+    let bi = 0;
     let think = "";
     src = (src || "").replace(/<think>([\s\S]*?)(<\/think>|$)/g, (m, t) => { think += t; return ""; });
     // files the model made: taken out first, put back as file cards after the markdown
@@ -65,7 +77,7 @@
     const flushPara = () => { if (para.length) { out.push("<p>" + inline(para.join(" ")) + "</p>"); para = []; } };
     const flushList = () => { if (list) { out.push("<" + list.t + ">" + list.items.map((x) => "<li>" + inline(x) + "</li>").join("") + "</" + list.t + ">"); list = null; } };
     for (const line of src.replace(/\r/g, "").split("\n")) {
-      if (inCode) { if (/^\s*```/.test(line)) { out.push(codeBlock(lang, code.join("\n"))); inCode = false; code = []; } else code.push(line); continue; }
+      if (inCode) { if (/^\s*```/.test(line)) { out.push(codeBlock(lang, code.join("\n"), mi, bi++)); inCode = false; code = []; } else code.push(line); continue; }
       let m;
       if ((m = line.match(/^\s*```\s*([\w+#.-]*)/))) { flushPara(); flushList(); inCode = true; lang = m[1]; continue; }
       if ((m = line.match(/^(#{1,4})\s+(.*)$/))) { flushPara(); flushList(); out.push("<h" + (m[1].length + 2) + ">" + inline(m[2]) + "</h" + (m[1].length + 2) + ">"); continue; }
@@ -76,7 +88,7 @@
       if (!line.trim()) { flushPara(); flushList(); continue; }
       flushList(); para.push(line.trim());
     }
-    if (inCode) out.push(codeBlock(lang, code.join("\n")));
+    if (inCode) out.push(codeBlock(lang, code.join("\n"), -1, bi++));   // (still being written: no Run yet)
     flushPara(); flushList();
     const body = out.join("").replace(/<p>\u0001F(\d+)\u0001<\/p>/g, (m, k) => fileCard(pf.files[+k], mi, +k, pending)).replace(/\u0001F(\d+)\u0001/g, (m, k) => fileCard(pf.files[+k], mi, +k, pending));
     return (think.trim() ? '<details class="think"><summary>Thinking</summary><div>' + esc(think.trim()).replace(/\n/g, "<br>") + "</div></details>" : "") + body + filesBar(pf, mi, pending);
@@ -386,8 +398,120 @@
       if (msg.error === "Stopped." && (msg.content || msg.tools.length)) msg.error = "";
       msg.meta = [usage && usage.tok_s ? usage.tok_s + " tokens/s" : "", msg.tools.length ? msg.tools.length + " tool call" + (msg.tools.length === 1 ? "" : "s") : "", ((performance.now() - t0) / 1000).toFixed(1) + " s", t.name].filter(Boolean).join(" · ");
       A.stream = null; paintSend(); saveChats(); paintLast(); refreshChat();
+      setTimeout(() => autoRun(c, msg), 50);
     }
   }
+
+
+  // ---- running the code the AI wrote, and telling the AI what happened
+  const msgNode = (i) => { const el = $("#thread"); return el && el.querySelector('.msg.assistant[data-i="' + i + '"]'); };
+  function repaintMsg(i) {
+    const c = curChat(), m = c && c.messages[i], node = msgNode(i); if (!m || !node) return;
+    const near = $("#thread").scrollHeight - $("#thread").scrollTop - $("#thread").clientHeight < 120;
+    node.outerHTML = msgHTML(m, i, i === c.messages.length - 1);
+    if (near) $("#thread").scrollTop = $("#thread").scrollHeight;
+  }
+  async function runCode(c, mi, bi, lang, code) {
+    const m = c.messages[mi]; if (!m) return null;
+    m.runs = m.runs || {}; m.runs[bi] = { running: true }; repaintMsg(mi);
+    let res;
+    try { const r = await postJSON("/api/ai/run-code", { lang, code }); res = r.ok ? { rc: r.rc, out: r.out, secs: r.seconds, lang, code } : { rc: -1, failed: true, out: r.error || "Couldn't run it.", lang, code }; }
+    catch (e) { res = { rc: -1, failed: true, out: "Couldn't reach the dashboard.", lang, code }; }
+    m.runs[bi] = res; saveChats(); repaintMsg(mi);
+    return res;
+  }
+  function runCodeBlock(el) {
+    const box = el.closest(".code"), c = curChat(); if (!box || !c) return;
+    runCode(c, +box.dataset.mi, +box.dataset.bi, box.dataset.lang, box.querySelector("pre").textContent);
+  }
+  const fixPrompt = (r) => "I ran this " + r.lang + " code:\n```" + (r.lang === "node" ? "javascript" : r.lang) + "\n" + r.code + "\n```\n" + (r.rc === 0 ? "It printed:\n```\n" + (r.out || "(nothing)") + "\n```\nIs that right? If something is wrong, fix it and give me the complete corrected code." :
+    "It failed" + (r.failed ? "" : " (exit code " + r.rc + ")") + ":\n```\n" + (r.out || "(no output)") + "\n```\nPlease find the problem and give me the complete corrected code.");
+  function fixCode(el) {
+    const box = el.closest(".code"), c = curChat(); if (!box || !c) return;
+    const r = (c.messages[+box.dataset.mi] || {}).runs && c.messages[+box.dataset.mi].runs[+box.dataset.bi]; if (!r) return;
+    send(fixPrompt(r));
+  }
+  // opt-in: after an answer, run its last code block; if it fails, send the error back (up to 3 times)
+  async function autoRun(c, msg) {
+    if (!c || !c.autofix || !msg || msg.error || !msg.content) return;
+    const mi = c.messages.indexOf(msg); if (mi < 0) return;
+    md(msg.content, mi, false);
+    const blocks = (A.blocks[mi] || []).map((b, i) => [b, i]).filter(([b]) => b && b.lang);
+    if (!blocks.length) return;
+    const [b, bi] = blocks[blocks.length - 1];
+    const r = await runCode(c, mi, bi, b.lang, b.code);
+    if (r && r.rc !== 0 && (c.fixRounds || 0) < 3) { c.fixRounds = (c.fixRounds || 0) + 1; A.autoSend = true; send(fixPrompt(r)); }
+  }
+
+
+  // ---- / commands in the message box
+  const esc2 = (t) => esc(String(t));
+  const COMMANDS = [
+    ["help", "", "Show every command"], ["new", "", "Start a new chat (also /clear)"], ["clear", "", "Start a new chat"], ["compact", "", "Compress the earlier messages to free up the model's memory"],
+    ["model", "[name]", "Pick the model for this chat"], ["models", "", "Open the Models tab (load, download, delete)"], ["unload", "", "Unload the model to free memory"], ["max", "[tokens|none]", "Set the longest reply (none = no limit)"],
+    ["web", "[on|off]", "Always search the web first"], ["plugins", "[on|off NAME]", "Show or switch plugins (search, Wikipedia, Python...)"], ["system", "[text]", "Set the system prompt"],
+    ["temp", "[0-2]", "Set creativity"], ["run", "", "Run the last code block the AI wrote"], ["fix", "", "Ask the AI to fix the last code that failed"], ["autofix", "[on|off]", "Run code automatically and let the AI fix errors"],
+    ["retry", "", "Answer the last message again"], ["stop", "", "Stop the answer"], ["copy", "", "Copy the last answer"], ["export", "", "Download this chat as a file"], ["context", "", "How full the model's memory is"],
+  ];
+  const lastBlock = (c) => { for (let i = c.messages.length - 1; i >= 0; i--) { const m = c.messages[i]; if (m.role !== "assistant" || !m.content || m.error) continue; md(m.content, i, false); const bl = (A.blocks[i] || []).map((b, k) => [b, k]).filter(([b]) => b && b.lang); if (bl.length) return { i, b: bl[bl.length - 1][0], k: bl[bl.length - 1][1] }; } return null; };
+  async function slash(line) {
+    const c = curChat(); if (!c) return true;
+    const [cmd0, ...rest] = line.slice(1).trim().split(/\s+/), cmd = (cmd0 || "").toLowerCase(), arg = rest.join(" ");
+    const on = (v) => !/^(off|no|false|0)$/i.test(v || "on");
+    switch (cmd) {
+      case "": case "help": case "?":
+        await dialog("Chat commands", raw('<table class="cmds">' + COMMANDS.map((x) => "<tr><td><code>/" + esc(x[0]) + " " + esc(x[1]) + "</code></td><td>" + esc(x[2]) + "</td></tr>").join("") + "</table>"), "OK"); break;
+      case "new": case "clear": newChat(); refreshChat(true); break;
+      case "compact": await compressChat(c, { manual: true }); break;
+      case "models": selectTab("models"); break;
+      case "model": {
+        const list = targetList();
+        if (!arg) { await dialog("Models to chat with", raw("<p>" + (list.length ? list.map((t) => esc(t.name) + (t.ready ? "" : " (not ready)")).join("<br>") : "No model is running.") + "</p><p class=\"muted small\">Switch with /model NAME.</p>"), "OK"); break; }
+        const hit = list.find((t) => t.name.toLowerCase().includes(arg.toLowerCase()) || t.id === arg);
+        if (!hit) toast("No model matches “" + arg + "”."); else { c.target = hit.id; saveChats(); refreshChat(true); toast("Using " + hit.name); } break;
+      }
+      case "unload": { const v = await dialog("Unload the model?", raw("<p>Nothing can answer until you load one again. Its memory is freed on every machine.</p>"), "Unload"); if (v) { const r = await postJSON("/api/run", { action: "split-unload" }); toast(r.ok ? "Unloading…" : (r.error || "Couldn't unload.")); } break; }
+      case "max": if (!arg) toast(c.max_tokens ? "Replies stop at " + c.max_tokens + " tokens." : "No limit on the reply length."); else if (/^(none|no|off|unlimited|0)$/i.test(arg)) { c.max_tokens = 0; saveChats(); toast("No limit on the reply length."); } else if (+arg > 0) { c.max_tokens = Math.min(65536, Math.max(16, +arg | 0)); saveChats(); toast("Replies stop at " + c.max_tokens + " tokens."); } else toast("Give a number, or none."); refreshChat(); break;
+      case "web": c.web = on(arg); saveChats(); toast("Web search first: " + (c.web ? "on" : "off")); break;
+      case "autofix": c.autofix = on(arg); saveChats(); toast("Run and fix code automatically: " + (c.autofix ? "on" : "off")); break;
+      case "plugins": case "plugin": {
+        if (!A.plugins) { try { A.plugins = (await (await fetch("/api/ai/plugins", { cache: "no-store" })).json()).plugins || []; } catch (e) { A.plugins = []; } }
+        const [verb, name] = rest;
+        if (verb === "on" || verb === "off") {
+          const p = A.plugins.find((x) => x.id === (name || "").toLowerCase() || x.label.toLowerCase() === (name || "").toLowerCase());
+          if (!p) { toast("No plugin called “" + (name || "") + "”."); break; } if (verb === "on" && !p.available) { toast(p.label + ": " + p.why); break; }
+          c.plugins = (c.plugins || []).filter((x) => x !== p.id).concat(verb === "on" ? [p.id] : []); saveChats(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); toast(p.label + " " + verb);
+        } else await dialog("Plugins", raw("<p>" + A.plugins.map((p) => ((c.plugins || []).includes(p.id) ? "● " : "○ ") + "<b>" + esc(p.label) + "</b> <span class=\"muted small\">/plugins on " + esc(p.id) + (p.available ? "" : " (" + esc(p.why) + ")") + "</span>").join("<br>") + "</p>"), "OK");
+        break;
+      }
+      case "system": c.system = arg; saveChats(); toast(arg ? "System prompt set." : "System prompt cleared."); break;
+      case "temp": if (arg && !isNaN(+arg)) { c.temperature = Math.min(2, Math.max(0, +arg)); saveChats(); toast("Creativity " + c.temperature); } else toast("Creativity is " + c.temperature + ". Give a number from 0 to 2."); break;
+      case "run": { const lb = lastBlock(c); if (!lb) { toast("No code the AI wrote can be run (python, bash or javascript)."); break; } await runCode(c, lb.i, lb.k, lb.b.lang, lb.b.code); break; }
+      case "fix": { const lb = lastBlock(c); const r = lb && c.messages[lb.i].runs && c.messages[lb.i].runs[lb.k]; if (!r || r.running) { toast("Run the code first (▶ Run, or /run)."); break; } send(fixPrompt(r)); break; }
+      case "retry": send("", true); break;
+      case "stop": stopStream(); break;
+      case "copy": { const m = c.messages.slice().reverse().find((x) => x.role === "assistant" && x.content); if (m) copyText(m.content); else toast("Nothing to copy."); break; }
+      case "export": { const md = c.messages.filter((m) => m.content).map((m) => (m.role === "user" ? "## You\n\n" : "## AI\n\n") + m.content).join("\n\n"); const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([md], { type: "text/markdown" })); a.download = (c.title || "chat").replace(/[^\w.-]+/g, "-").slice(0, 40) + ".md"; a.click(); break; }
+      case "context": { const t = findTarget(c.target), cx = chatCtx(t), used = estTokens(chatMessages(c, null)); toast(cx ? "About " + used.toLocaleString() + " of " + cx.toLocaleString() + " tokens used (" + Math.round((100 * used) / cx) + "%)." : "About " + used.toLocaleString() + " tokens so far."); break; }
+      default: toast("Unknown command /" + cmd + ". Type /help."); break;
+    }
+    return true;
+  }
+  // the pop-up list while typing a /command
+  function slashMenu() {
+    const ta = $("#prompt"), host = $(".chat-main"); if (!ta || !host) return;
+    let m = $("#slash-menu");
+    const v = ta.value;
+    if (!/^\/[a-z?]*$/i.test(v)) { if (m) m.remove(); return; }
+    const q = v.slice(1).toLowerCase(), items = COMMANDS.filter((x) => x[0].startsWith(q));
+    if (!items.length) { if (m) m.remove(); return; }
+    if (!m) { m = document.createElement("div"); m.id = "slash-menu"; m.className = "slash-menu"; host.appendChild(m); }
+    const sel = Math.min(+m.dataset.sel || 0, items.length - 1);
+    m.dataset.sel = sel; m.dataset.items = items.map((x) => x[0]).join(",");
+    m.innerHTML = items.map((x, i) => '<div class="slash-item' + (i === sel ? " on" : "") + '" data-ai="slash-pick" data-cmd="' + esc(x[0]) + '"><b>/' + esc(x[0]) + '</b> <span class="faint">' + esc(x[1]) + "</span><span class=\"grow\"></span><span class=\"muted\">" + esc(x[2]) + "</span></div>").join("");
+  }
+  function slashMenuRedraw() { const m = $("#slash-menu"); if (!m) return; [...m.children].forEach((c, i) => c.classList.toggle("on", i === +m.dataset.sel)); }
+  function slashPick(name) { const ta = $("#prompt"); if (!ta) return; ta.value = "/" + name + " "; const m = $("#slash-menu"); if (m) m.remove(); ta.focus(); }
 
   // ------------------------------------------------------------------ chat
   const curChat = () => A.chats.find((c) => c.id === A.cur);
@@ -520,6 +644,7 @@
         <label class="check"><input type="checkbox" id="cs-web" ${c.web ? raw("checked") : ""}> <span><b>Web search</b>: look each question up on the internet and give the model what it finds (with sources)</span></label>
         <div class="plugins"><b>Plugins</b> <span class="muted small">the AI decides when to use them. Slower: every question carries the tool list, so a small cluster model takes a while.</span>
           <div id="plugin-list">${pluginList(c)}</div></div>
+        <label class="check"><input type="checkbox" id="cs-autofix" ${c.autofix ? raw("checked") : ""}> <span><b>Run and fix code automatically</b>: runs the code the AI writes on the server (as your user) and sends errors back so it fixes them, up to 3 tries. Off by default; code only runs when you press ▶ Run.</span></label>
         <label class="check"><input type="checkbox" id="cs-files" ${c.files !== false ? raw("checked") : ""}> <span><b>Make files</b>: scripts, pages and documents the AI writes come as files to download (a .zip for folders)</span></label>`);
     }
   }
@@ -528,6 +653,8 @@
     const t = findTarget(c.target);
     if (!t || !t.ready) { toast("That model isn't ready."); return; }
     let mine = null;
+    if (!A.autoSend) c.fixRounds = 0;
+    A.autoSend = false;
     if (!regen) {
       text = (text || "").trim(); if (!text && !A.attach.length) return;
       mine = { role: "user", content: text, files: A.attach.length ? A.attach.slice() : undefined };
@@ -602,6 +729,7 @@
       A.stream = null;
       paintSend();
       saveChats(); paintLast(); refreshChat();
+      setTimeout(() => autoRun(c, msg), 50);
     }
   }
 
@@ -864,6 +992,9 @@
     else if (a === "chat-settings") settingsPanel();
     else if (a === "suggest") { send(el.textContent); }
     else if (a === "stop") stopStream();
+    else if (a === "slash-pick") { slashPick(el.dataset.cmd); }
+    else if (a === "run-code") { runCodeBlock(el); }
+    else if (a === "fix-code") { fixCode(el); }
     else if (a === "copy-code") { const pre = el.closest(".code").querySelector("pre"); copyText(pre.textContent); }
     else if (a === "dl-code") { const box = el.closest(".code"), text = box.querySelector("pre").textContent; saveText(text.endsWith("\n") ? text : text + "\n", codeName(box.querySelector(".code-head span").textContent, text)); }
     else if (a === "file-dl" || a === "file-copy") {
@@ -918,9 +1049,19 @@
     if (e.target.id !== "composer") return;
     e.preventDefault();
     const ta = $("#prompt"), text = ta.value; ta.value = ""; ta.style.height = "auto";
-    send(text);
+    const mm = $("#slash-menu"); if (mm) mm.remove();
+    if (/^\/[a-z?]*(\s|$)/i.test(text.trim()) && !/^\/\//.test(text.trim())) { slash(text.trim()); return; }
+    send(text.replace(/^\/\//, "/"));
   });
+  document.addEventListener("input", (e) => { if (e.target.id === "prompt") slashMenu(); });
   document.addEventListener("keydown", (e) => {
+    const sm = $("#slash-menu");
+    if (sm && e.target.id === "prompt") {
+      const names = (sm.dataset.items || "").split(","), n = names.length, sel = +sm.dataset.sel || 0;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); sm.dataset.sel = (sel + (e.key === "ArrowDown" ? 1 : n - 1)) % n; slashMenuRedraw(); return; }
+      if (e.key === "Tab" || (e.key === "Enter" && $("#prompt").value.slice(1).toLowerCase() !== names[sel])) { e.preventDefault(); slashPick(names[sel]); return; }
+      if (e.key === "Escape") { sm.remove(); return; }
+    }
     if (e.target.id === "prompt" && e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#composer").requestSubmit(); }
     if (e.target.id === "s-q" && e.key === "Enter") { A.search.q = e.target.value; A.search.results = null; runSearch(); }
     if (e.key === "Escape" && $("#confirmm").classList.contains("on")) $("#confirmcancel").click();
@@ -947,6 +1088,7 @@
     else if (t.id === "cs-nolimit" && c) { c.max_tokens = t.checked ? 0 : (+($("#cs-max").value) || 1024); $("#cs-max").disabled = t.checked; saveChats(); }
     else if (t.id === "cs-compress" && c) { c.compress = t.value; saveChats(); refreshChat(); }
     else if (t.id === "cs-web" && c) { c.web = t.checked; saveChats(); }
+    else if (t.id === "cs-autofix" && c) { c.autofix = t.checked; saveChats(); }
     else if (t.id && t.id.startsWith("cp-") && c) { const id = t.id.slice(3); c.plugins = (c.plugins || []).filter((x) => x !== id).concat(t.checked ? [id] : []); saveChats(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); }
   });
   document.addEventListener("change", (e) => {

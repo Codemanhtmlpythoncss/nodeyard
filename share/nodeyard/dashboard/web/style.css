@@ -487,3 +487,12 @@ body.term-full .tbox { flex: 1; height: auto; }
 .toolcard.todo { padding: 8px 10px; } .toolcard.todo .completed { color: var(--muted); text-decoration: line-through; } .toolcard.todo .in_progress { font-weight: 600; }
 .permcard { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--warn); border-radius: 10px; background: var(--panel2); }
 .permcard pre { margin: 6px 0 0; padding: 8px; max-height: 220px; overflow: auto; white-space: pre-wrap; font: 12px var(--mono); background: var(--bg2); border-radius: 8px; }
+
+/* chat: running code, the / menu */
+.runout { margin-top: 0; border-top: 1px solid var(--line); padding: 8px 12px; font-size: 12.5px; }
+.runout.ok { background: rgba(52, 211, 153, .08); } .runout.bad { background: rgba(248, 113, 113, .09); } .runout.running { color: var(--muted); }
+.runout .runhead { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; } .runout pre { margin: 0; padding: 6px 0 0; max-height: 280px; overflow: auto; white-space: pre-wrap; font: 12px var(--mono); }
+.slash-menu { position: absolute; left: 16px; right: 16px; bottom: 74px; max-height: 260px; overflow: auto; background: var(--solid, var(--bg2)); border: 1px solid var(--line2); border-radius: 12px; box-shadow: var(--shadow); z-index: 20; padding: 4px; }
+.slash-item { display: flex; gap: 10px; align-items: center; padding: 7px 10px; border-radius: 8px; cursor: pointer; font-size: 13px; } .slash-item.on, .slash-item:hover { background: var(--panel2); }
+.cmds { width: 100%; border-collapse: collapse; } .cmds td { padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; } .cmds code { white-space: nowrap; }
+.chat-main { position: relative; }

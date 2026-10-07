@@ -9,6 +9,12 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- Dashboard chat **/ commands** (type `/` for a menu): /help, /new, /compact, /model, /models, /unload, /max, /web, /plugins,
+  /system, /temp, /run, /fix, /autofix, /retry, /stop, /copy, /export, /context.
+- **Run the AI's code**: every python, bash and javascript block has a ▶ Run button (runs on the server as your terminal user, 30 s
+  limit, never through public access). The output shows under the block and "Ask the AI to fix it" sends the error back. With
+  **Run and fix code automatically** on, the AI's last code block runs after each answer and failures go back to it, up to 3 tries.
+
 - Dashboard chat **plugins** (Chat > Settings > Plugins): the AI can search the web and read pages, look things up on Wikipedia and
   arXiv, get the weather, calculate, keep a task list, run Python (code interpreter) and use files and shell in a work folder. Tool
   cards show in the conversation, and anything that runs code or changes things asks first (Allow / Allow for this chat / Deny); code

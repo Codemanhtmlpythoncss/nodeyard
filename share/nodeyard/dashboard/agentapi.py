@@ -238,6 +238,49 @@ class Agents:
         finally:
             pr.busy = False
 
+    # ---- running the code the AI wrote (the Run button on code blocks) -------------------------------------------------------
+    RUNNERS = {"python": ["python3", "-u", "-c"], "bash": ["bash", "-c"], "node": ["node", "-e"]}
+    run_slots = threading.BoundedSemaphore(2)
+
+    def run_code(self, h, body):
+        lang, code = str(body.get("lang") or ""), str(body.get("code") or "")
+        if lang not in self.RUNNERS:
+            return h._json({"ok": False, "error": "I can run python, bash and javascript."}, 400)
+        if not code.strip() or len(code) > 60000:
+            return h._json({"ok": False, "error": "Send between 1 and 60,000 characters of code."}, 400)
+        ok, why = self.code_ok(h)
+        if not ok:
+            return h._json({"ok": False, "error": "Running code is off: %s." % why}, 403)
+        if not self.run_slots.acquire(blocking=False):
+            return h._json({"ok": False, "error": "Two programs are running already. Wait for one to finish."}, 429)
+        t0 = time.time()
+        try:
+            if self.demo:   # nothing runs in the demo
+                time.sleep(0.3)
+                return h._json({"ok": True, "rc": 0, "out": "(demo) the %s code was not run.\n42" % lang, "seconds": 0.3, "truncated": False})
+            cmd = ["systemd-run", "--quiet", "--collect", "--pipe", "--wait", "--uid=" + self.user, "-p", "WorkingDirectory=~", "-p", "RuntimeMaxSec=30",
+                   "--setenv=PYTHONUNBUFFERED=1", "--setenv=NO_COLOR=1", "--setenv=LANG=C.UTF-8", "--description=nodeyard dashboard: code from the chat"] + self.RUNNERS[lang] + [code]
+            try:
+                p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", start_new_session=True)
+                try:
+                    out, _ = p.communicate(timeout=40)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    out, _ = p.communicate()
+                    out = (out or "") + "\n[stopped: it ran for more than 30 seconds]"
+            except OSError as e:
+                return h._json({"ok": False, "error": "Couldn't start it: %s" % e}, 500)
+            out = out or ""
+            truncated = len(out) > 20000
+            if truncated:
+                out = out[:12000] + "\n... [output cut] ...\n" + out[-6000:]
+            rc = p.returncode
+            if "Failed to execute" in out and rc not in (0, None) and lang == "node":
+                out += "\n(node isn't installed on this machine)"
+            h._json({"ok": True, "rc": rc, "out": out, "seconds": round(time.time() - t0, 1), "truncated": truncated})
+        finally:
+            self.run_slots.release()
+
     def reply(self, h, body):
         pr, _ = self.get(h, str(body.get("chat") or "")[:64], [], 0, create=False) if False else (self.procs.get(str(body.get("chat") or "")[:64]), None)
         if pr is None or pr.owner != (h._token() or "local"):
@@ -330,5 +373,5 @@ def register(ctx, args):
         h._json({"ok": True, "plugins": ag.listing(h)})
 
     ctx.get_routes["/api/ai/plugins"] = plugins
-    ctx.post_routes.update({"/api/ai/agent": ag.run, "/api/ai/agent/reply": ag.reply, "/api/ai/agent/stop": ag.stop, "/api/ai/agent/reset": ag.reset})
+    ctx.post_routes.update({"/api/ai/run-code": ag.run_code, "/api/ai/agent": ag.run, "/api/ai/agent/reply": ag.reply, "/api/ai/agent/stop": ag.stop, "/api/ai/agent/reset": ag.reset})
     ctx.post_limits["/api/ai/agent"] = 400000
