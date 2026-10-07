@@ -62,8 +62,14 @@ shopt -s lastpipe
 . "${NY_HOME}/lib/modules/ai.sh"
 # shellcheck source=modules/ai_split.sh
 . "${NY_HOME}/lib/modules/ai_split.sh"
+# shellcheck source=modules/hw.sh
+. "${NY_HOME}/lib/modules/hw.sh"
 # shellcheck source=modules/doctor.sh
 . "${NY_HOME}/lib/modules/doctor.sh"
+# shellcheck source=modules/dashboard.sh
+. "${NY_HOME}/lib/modules/dashboard.sh"
+# shellcheck source=modules/public.sh
+. "${NY_HOME}/lib/modules/public.sh"
 # shellcheck source=modules/backup.sh
 . "${NY_HOME}/lib/modules/backup.sh"
 # shellcheck source=modules/config_cmd.sh

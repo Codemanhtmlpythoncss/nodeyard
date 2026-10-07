@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="872" height="456" viewBox="0 0 872 456" role="img" aria-label="sudo nodeyard wizard k3s-upgrade">
-<rect width="872" height="456" rx="8" fill="#0d1117"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="872" height="438" viewBox="0 0 872 438" role="img" aria-label="sudo nodeyard wizard k3s-upgrade">
+<rect width="872" height="438" rx="8" fill="#0d1117"/>
 <rect width="872" height="30" rx="8" fill="#161b22"/>
 <rect y="22" width="872" height="8" fill="#161b22"/>
 <circle cx="18" cy="15" r="5.5" fill="#ff5f57"/>
@@ -32,24 +32,21 @@
 <text x="58.0" y="274" fill="#e6edf3">&#160;Download&#160;https://get.k3s.io</text>
 <text x="16.0" y="292" fill="#e6edf3">&#160;&#160;&#160;&#160;</text>
 <text x="49.6" y="292" fill="#56d4dd">•</text>
-<text x="58.0" y="292" fill="#e6edf3">&#160;Run:&#160;env&#160;INSTALL_K3S_SKIP_START=true&#160;&#x27;INSTALL_K3S_EXEC=server&#160;--cluster-init&#160;--node-ip&#160;192.16…</text>
+<text x="58.0" y="292" fill="#e6edf3">&#160;Run:&#160;env&#160;INSTALL_K3S_EXEC=server\&#160;--cluster-init\&#160;--node-ip\&#160;192.168.1.10\&#160;--flannel-iface\&#160;e…</text>
 <text x="16.0" y="310" fill="#e6edf3">&#160;&#160;&#160;&#160;</text>
 <text x="49.6" y="310" fill="#56d4dd">•</text>
-<text x="58.0" y="310" fill="#e6edf3">&#160;Run:&#160;systemctl&#160;enable&#160;k3s</text>
-<text x="16.0" y="328" fill="#e6edf3">&#160;&#160;&#160;&#160;</text>
-<text x="49.6" y="328" fill="#56d4dd">•</text>
-<text x="58.0" y="328" fill="#e6edf3">&#160;Run:&#160;systemctl&#160;restart&#160;k3s</text>
-<text x="16.0" y="364" fill="#e6edf3" font-weight="bold">What&#160;next?</text>
+<text x="58.0" y="310" fill="#e6edf3">&#160;Run:&#160;systemctl&#160;restart&#160;k3s</text>
+<text x="16.0" y="346" fill="#e6edf3" font-weight="bold">What&#160;next?</text>
+<text x="16.0" y="364" fill="#e6edf3">&#160;&#160;</text>
+<text x="32.8" y="364" fill="#56d4dd">&#160;1)</text>
+<text x="58.0" y="364" fill="#e6edf3">&#160;Apply&#160;these&#160;changes</text>
 <text x="16.0" y="382" fill="#e6edf3">&#160;&#160;</text>
-<text x="32.8" y="382" fill="#56d4dd">&#160;1)</text>
-<text x="58.0" y="382" fill="#e6edf3">&#160;Apply&#160;these&#160;changes</text>
+<text x="32.8" y="382" fill="#56d4dd">&#160;2)</text>
+<text x="58.0" y="382" fill="#e6edf3">&#160;Go&#160;back&#160;and&#160;change&#160;answers</text>
 <text x="16.0" y="400" fill="#e6edf3">&#160;&#160;</text>
-<text x="32.8" y="400" fill="#56d4dd">&#160;2)</text>
-<text x="58.0" y="400" fill="#e6edf3">&#160;Go&#160;back&#160;and&#160;change&#160;answers</text>
-<text x="16.0" y="418" fill="#e6edf3">&#160;&#160;</text>
-<text x="32.8" y="418" fill="#56d4dd">&#160;3)</text>
-<text x="58.0" y="418" fill="#e6edf3">&#160;Cancel&#160;(nothing&#160;is&#160;changed)</text>
-<text x="16.0" y="436" fill="#e6edf3">Choice</text>
-<text x="66.4" y="436" fill="#8b949e" opacity="0.8">&#160;(q&#160;=&#160;quit)</text>
-<text x="158.8" y="436" fill="#e6edf3">&#160;[1]:&#160;Cancelled.&#160;Nothing&#160;was&#160;changed.</text>
+<text x="32.8" y="400" fill="#56d4dd">&#160;3)</text>
+<text x="58.0" y="400" fill="#e6edf3">&#160;Cancel&#160;(nothing&#160;is&#160;changed)</text>
+<text x="16.0" y="418" fill="#e6edf3">Choice</text>
+<text x="66.4" y="418" fill="#8b949e" opacity="0.8">&#160;(q&#160;=&#160;quit)</text>
+<text x="158.8" y="418" fill="#e6edf3">&#160;[1]:&#160;Cancelled.&#160;Nothing&#160;was&#160;changed.</text>
 </g></svg>

@@ -7,6 +7,7 @@ ny_cmd "sysinfo" info_detect_cmd "Health" "Hardware, OS and network summary (sam
 ny_cmd "network-info" info_network_cmd "Network" "List network interfaces, addresses and the default route" info json
 ny_cmd "version" info_version_cmd "Tool" "Show the nodeyard version" info json
 ny_cmd "help" info_help_cmd "Tool" "List every command" info
+ny_cmd "commands" info_commands_cmd "Tool" "Every command with its help, as JSON (the dashboard's Commands page uses it)" info hidden,json
 ny_cmd "completion" info_completion_cmd "Tool" "Print a shell completion script (bash or zsh)" info
 
 info_version_cmd() {
@@ -25,6 +26,29 @@ info_help_cmd() {
         ny_help_group "$1"
     else
         ny_help_main
+    fi
+    return 0
+}
+
+# info_commands_cmd -- [{path, group, summary, help}] for every listed command
+info_commands_cmd() {
+    local g p first=1
+    {
+        printf '{"ok":true,"commands":['
+        for g in "${NY_GROUP_ORDER[@]}"; do
+            for p in "${NY_CMD_ORDER[@]}"; do
+                [[ -n "${NY_CMD_HIDDEN[$p]:-}" || "${NY_CMD_GROUP[$p]}" != "$g" ]] && continue
+                [[ $first -eq 1 ]] || printf ','
+                first=0
+                jq -cn --arg p "$p" --arg g "$g" --arg s "${NY_CMD_SUM[$p]}" --arg h "$(NY_COLOR=never ny_help_command "$p" 2>/dev/null || true)" \
+                    '{path: $p, group: $g, summary: $s, help: $h}'
+            done
+        done
+        printf ']}'
+    } | if [[ "$NY_JSON" -eq 1 ]]; then
+        ny_json_out "$(jq -c .)"
+    else
+        jq -r '.commands[] | "\(.group): \(.path)  \(.summary)"'
     fi
     return 0
 }

@@ -59,8 +59,26 @@ nodeyard ai split deploy [same options] [--ctx 16384] [--think on|off]
                          [--nodeport 31435 | --nodeport 0] [--api-key-file PATH] [--alias NAME]
 nodeyard ai split status
 nodeyard ai split test [--prompt TEXT] [--api-key-file PATH]
+nodeyard ai split switch --model owner/repo:file.gguf [--keep-old] [deploy options]
+nodeyard ai split unload | load
 nodeyard ai split undeploy [--purge]
 ```
+
+**NVIDIA graphics cards** speed it up. On the machine with the card (its
+NVIDIA driver must already work: `nvidia-smi`), run `sudo nodeyard ai gpu
+setup`; then on the server `sudo nodeyard ai gpu enable NODE`. When that node
+is the main node, the plan puts the fastest share of the model on its card
+(the card's video memory minus 1 GiB), and the main server runs llama.cpp's
+Vulkan build. `--no-gpu` leaves the card out.
+
+`switch` changes the running model and cleans up after the old one: it
+unloads it (every node gets its memory back), deletes its file and weight
+caches from every node (`--keep-old` keeps them), then downloads the new
+model if needed and loads it. `--model local:FILE.gguf` (or just the file
+name) runs a model that is already downloaded on a node, from that node.
+`undeploy` always unloads first, so nothing is left running while it removes
+the model. The dashboard's **AI model** menu (top of the AI page) lists the
+models downloaded on your nodes and switches between them the same way.
 
 It uses [llama.cpp RPC](https://github.com/ggml-org/llama.cpp/tree/master/tools/rpc):
 each node runs an RPC server holding a share of the model's layers, sized

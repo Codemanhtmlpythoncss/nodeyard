@@ -118,6 +118,9 @@ Options:
   --only NODE           Only this node (repeatable)
   --exclude NODE        Skip this node (repeatable)
   --min-memory-gb N     Skip nodes with less allocatable memory
+  --min-disk-gb N       Skip nodes with less free space on their root
+                        partition (default 10: the image unpacks to ~5 GB
+                        and models need room too; 0 = don't check)
   --memory-limit 6Gi    Memory limit per Ollama pod
   --nodeport PORT       Also expose the API on PORT of every node's address
   --image IMAGE         Ollama image (default ollama/ollama:latest)
@@ -128,7 +131,7 @@ ai_deploy_cmd() {
     ny_need_root
     ny_need_kube
     local -a only=() exclude=()
-    local min_gb=0 mem_limit="" nodeport="" image="ollama/ollama:latest"
+    local min_gb=0 min_disk_gb=10 mem_limit="" nodeport="" image="ollama/ollama:latest"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --only)
@@ -145,6 +148,12 @@ ai_deploy_cmd() {
                 ny_need_value "$1" $#
                 ny_valid_int "$2" 0 4096 || ny_usage_error "$NY_VALID_MSG"
                 min_gb="$2"
+                shift 2
+                ;;
+            --min-disk-gb)
+                ny_need_value "$1" $#
+                ny_valid_int "$2" 0 100000 || ny_usage_error "$NY_VALID_MSG"
+                min_disk_gb="$2"
                 shift 2
                 ;;
             --memory-limit)
@@ -169,7 +178,7 @@ ai_deploy_cmd() {
     done
 
     local -a candidates=() selected=()
-    local name arch mem_ki mem_gb skip
+    local name arch mem_ki mem_gb skip disk_b disk_cap disk_lim disk_room running
     mapfile -t candidates < <(kctl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
     [[ "${#candidates[@]}" -gt 0 ]] || ny_die "No cluster nodes found." "Is k3s running? sudo nodeyard status"
     for name in "${candidates[@]}"; do
@@ -190,6 +199,24 @@ ai_deploy_cmd() {
                     ny_warn "Skipping ${name}: about ${mem_gb} GiB allocatable, below --min-memory-gb ${min_gb}."
                     skip=1
                 fi
+            fi
+        fi
+        # A node whose root partition can't hold the image fails the pull
+        # with "no space left on device" and goes into DiskPressure, so skip
+        # it, unless Ollama already runs there (its image is already on disk).
+        if [[ "$skip" -eq 0 && "$min_disk_gb" != 0 ]] && ! ny_simulating; then
+            read -r disk_b disk_cap <<<"$(kctl get --raw "/api/v1/nodes/${name}/proxy/stats/summary" 2>/dev/null | jq -r '"\(.node.fs.availableBytes // "") \(.node.fs.capacityBytes // "")"' 2>/dev/null || true)"
+            # `nodeyard ai disk limit`: only the room under the node's limit counts
+            disk_lim="$(kctl get node "$name" -o jsonpath='{.metadata.annotations.nodeyard/disk-limit-gib}' 2>/dev/null || true)"
+            if [[ "$disk_b" =~ ^[0-9]+$ && "$disk_cap" =~ ^[0-9]+$ && "$disk_lim" =~ ^[0-9]+$ ]]; then
+                disk_room=$((disk_lim * 1073741824 - (disk_cap - disk_b)))
+                ((disk_room > 0)) || disk_room=0
+                ((disk_room < disk_b)) && disk_b=$disk_room
+            fi
+            running="$(kctl -n "$AI_NAMESPACE" get pods -l app=ollama --field-selector "spec.nodeName=${name},status.phase=Running" -o name 2>/dev/null || true)"
+            if [[ "$disk_b" =~ ^[0-9]+$ && -z "$running" ]] && ((disk_b / 1073741824 < min_disk_gb)); then
+                ny_warn "Skipping ${name}: only $((disk_b / 1073741824)) GiB free on its root partition (needs ${min_disk_gb}, within any 'ai disk limit'; free space with 'nodeyard ai split clean' or lower --min-disk-gb)."
+                skip=1
             fi
         fi
         [[ "$skip" -eq 0 ]] && selected+=("$name")

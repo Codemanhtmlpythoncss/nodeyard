@@ -100,6 +100,7 @@ menu_cmd() {
             items+=($'add\tInstall on other machines (add a node over SSH)')
         fi
         [[ -n "$K3S_ROLE" ]] && items+=($'status\tCluster status')
+        [[ "$K3S_ROLE" == server ]] && items+=($'dashboard\tWeb dashboard (resources, IP addresses, pods, logs, AI; port 9092)')
         items+=($'ai\tAI workloads' $'health\tHealth check (doctor)' $'backups\tBackups' $'updates\tUpdates' $'settings\tSettings')
         items+=($'uninstall\tUninstall' $'quit\tExit')
         local choice
@@ -112,6 +113,7 @@ menu_cmd() {
             workerinfo) menu_worker_info ;;
             add) menu_wizard add-node ;;
             status) menu_run status ;;
+            dashboard) menu_dashboard ;;
             ai) menu_ai ;;
             health) menu_run doctor ;;
             backups) menu_backups ;;
@@ -142,6 +144,28 @@ menu_join() {
         worker) menu_wizard install-worker ;;
         server) menu_wizard install-join-master ;;
     esac
+    return 0
+}
+
+menu_dashboard() {
+    while true; do
+        local c
+        c="$(ny_ui_choose "Web dashboard (port 9092)" "start" \
+            $'start\tStart it as a service (keeps running, starts at boot)' \
+            $'status\tIs it running? How do I open it?' \
+            $'password\tChange the sign-in password' \
+            $'run\tRun it in this terminal (Ctrl-C stops it)' \
+            $'stop\tStop it and remove the service' \
+            $'back\tBack')" || return 0
+        case "$c" in
+            start) menu_run dashboard start ;;
+            status) menu_run dashboard status ;;
+            password) menu_run dashboard password ;;
+            run) menu_run dashboard run ;;
+            stop) menu_run dashboard stop ;;
+            *) return 0 ;;
+        esac
+    done
     return 0
 }
 

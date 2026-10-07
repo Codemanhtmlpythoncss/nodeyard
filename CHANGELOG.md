@@ -9,6 +9,149 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Speed-aware split planner**: `ai split plan|deploy` now tries every set
+  of nodes, shares layers by speed (capped by free memory), counts a network
+  hop per extra node and picks the fastest plan; it prints the estimated
+  tokens/s and which nodes it left out. `--nodes auto` is the default;
+  `--model auto` picks the biggest quant reaching `--min-speed` (default 10).
+  The main node is the one with the most free space on its root partition.
+- **Disk care**: `ai split clean [--models]` (free up space: old weight
+  caches, abandoned downloads, unused models), `ai split models` (what is on
+  every node's disk), `ai split rm FILE`, and `ai disk limit NODE GiB` (nodeyard
+  never fills a node past it). Each model gets its own weight-cache folder and
+  nodes delete other models' caches when a new model deploys.
+- **Parallel downloads**: `ai split download`; one resumable, sha256-checked
+  Job per file with progress lines. Deploys reuse a finished download.
+- `ai split key --rotate|--stdin` and `ai hf token` (gated models).
+- **Dashboard**: Doctor page (checks + one-click fixes), Settings page
+  (password, sign out everywhere, model API key, Hugging Face token,
+  listen/port/refresh, model gate networks, node agents, disk limits, cluster
+  name, theme) and a custom background picture with blur and darken.
+  AI > Models has a Downloaded models card with per-file download progress,
+  delete buttons (split and Ollama) and Free up space. Downloads and plans no
+  longer wait for the single-task lock.
+
+- **Hardware page** (dashboard) and `nodeyard hw bench|show`: CPU model, cores,
+  clock range, caches, instruction sets, board, disks (NVMe/SSD/HDD/SD, USB),
+  network link speeds and GPUs from the node agents, plus a measured speed
+  test per node (memory copy GB/s, CPU score, disk read/write MB/s and IOPS).
+  Control-plane nodes skip the disk test (it stalls etcd on an SD card).
+- Model downloads show their speed and an ETA (`ai split status` and the
+  dashboard). `ai split plan --nodes all` uses every supported node.
+- **Themes**: 13 in Settings > Themes (Midnight, Daylight, Nord, Dracula,
+  Solarized dark/light, Forest, Sunset, Ocean, Rose, Paper, High contrast).
+
+- **Public access** (`nodeyard public on|off|status`, Settings > Public
+  access): the dashboard (https://NAME.ts.net:8443) and the model API
+  (https://NAME.ts.net:10000/v1) through Tailscale Funnel, reachable from any
+  device without Tailscale. The dashboard needs a strong password first;
+  internet sign-in failures can't lock you out on your own network; the model
+  gate has a loopback-only port where the API key is always required.
+- **Terminal page**: a shell on the server in the dashboard (built-in
+  terminal emulator), as the user who started the dashboard (never root), only
+  over Tailscale/LAN, with the password asked again.
+- **Commands page**: every nodeyard command with its help, runnable from the
+  dashboard (`nodeyard commands --json` lists them), never through public access.
+- **Model loading progress and ETA** (dashboard and `ai split status`): how much
+  of each node's share has arrived, how much of the file has been read, time left.
+  Download ETA also shows in the Split model card.
+- The dashboard warns when a node's cluster network link runs slower than its
+  hardware can (a cable or switch problem); the node agent now runs on the
+  host network so it sees the real links.
+
+- `dashboard.weak-password` setting (Settings > Sign-in, or `nodeyard config
+  set dashboard.weak-password true`): no minimum length or strength for the
+  dashboard password, also for `public on`. Off by default; the sign-in
+  lockout still applies.
+- GPUs: every graphics device on the PCI bus with its real name (NVIDIA's
+  driver info, the PCI ID list) and driver; a GPU column on the Hardware page.
+- **Model menu** on the dashboard's AI page and `ai split switch`: the menu
+  lists exactly the model files downloaded on your nodes; picking one unloads
+  the old model, deletes its file and weight caches on every node (unless you
+  keep them) and runs the new one. `--model local:FILE.gguf` (or just the file
+  name) runs a model already on a node's disk from there: no download, no
+  Hugging Face lookup, and that node coordinates.
+- **NVIDIA GPUs for models**: `ai gpu setup` (on the machine with the card:
+  NVIDIA's container toolkit, also without gpg), `ai gpu enable NODE` (checks
+  a container really sees the card, then marks the node with its video
+  memory) and `ai gpu status`. The planner gives the main node's GPU the
+  fastest share; the main server then runs llama.cpp's Vulkan build, which
+  works with older NVIDIA drivers than its CUDA builds. GPU nodes get a node
+  agent with NVIDIA's tools, so the dashboard shows GPU use, video memory,
+  temperature and power, with charts.
+- **Faster model loading** by default: the main server reads the model file
+  with direct I/O (big sequential reads, `--load-mode dio`) instead of memory
+  mapping, and weight caches are only kept on nodes whose disk is faster than
+  gigabit ethernet (`nodeyard hw bench` measures it), never on the main node,
+  where the cache fought the main server for the disk the model is on. A
+  17.3 GiB model on a laptop hard drive went from about 22 to 7.5 minutes.
+  The plan says which nodes have no cache and why. While loading, the GPU's
+  share is measured on the card (its video memory in use).
+- The Overview's **GPU card** is always there: live use, video memory,
+  temperature and power for NVIDIA cards that are set up, otherwise which
+  cards were found and that they aren't set up yet.
+- **Chat files**: the model is asked to deliver scripts, pages and documents
+  as files; each shows as a card to view, copy or download, and several (with
+  folders) download as one .zip. Every code block has a Download button too.
+  You can attach text files (button, drag and drop, or paste); they are sent
+  as `<file>` blocks and kept with the chat. The page warns before sending
+  more than the model's context length. "Make files" can be turned off per
+  chat in its settings.
+
+### Fixed
+
+- Chat: **Stop** works at any time. The page's regular refresh disabled it
+  while an answer was coming; now it stays live (also after switching chats
+  or pages), and it tells the dashboard to cut the model's request, so
+  llama.cpp stops working on it even while it is still reading the prompt
+  (a closed tab does the same).
+- Split models with a GPU share put it on the wrong device: llama.cpp orders
+  its devices RPC servers first and the local GPU last, but the GPU's share
+  was listed first, so the GPU and an RPC server got each other's share (a
+  4 GiB card was asked for 4.6 GiB and the load failed). The GPU's share is
+  now last, and the dashboard labels it "<node> GPU" instead of "?".
+- Disk scans (`ai split models`, `clean`, `rm`, the dashboard's Downloaded
+  models) running at the same time deleted each other's helper pods, so one of
+  them could see no files ("isn't downloaded on any node"). Each scan now has
+  its own pods.
+- `ai split undeploy` (and Remove on the dashboard) unloads the model first
+  and waits until every server pod has gone (forcing any that hang), so no
+  model server is left running; Remove can also delete the model's files.
+
+- `ai gate install` hung when the model's Service still held the port as a
+  NodePort; the Service now gives the port up before the gate is waited for.
+- Changing the agent or gate program now restarts their pods (a checksum in
+  the pod template); before, pods kept running the old program.
+- The dashboard no longer jolts on every refresh: pages are patched in place,
+  so scroll position, focus, typed filters and open menus survive updates.
+- Cards were almost transparent, so dark-theme text could land on a light
+  surface; every theme now paints its own background and solid cards.
+- `ai split clean` said it freed space even when the helper pods were refused
+  (the helper namespace was still being deleted); it now reports what the
+  disks really freed and fails if a node couldn't be cleaned.
+- `ai split deploy` failed with `namespaces "ai-split" not found` (printed
+  once per object) after an undeploy: the namespace is now created first.
+- The disk check said a 17 GiB model "needs about 129 GiB": it now shows the
+  real download size and the kubelet's 10% headroom separately.
+- `ai split undeploy --purge` did nothing once the namespace was gone, leaving
+  model files and caches behind; it now cleans every node.
+- `ai deploy` (Ollama) skips nodes whose root partition can't hold the image
+  (`--min-disk-gb`, default 10) instead of failing with "no space left on device".
+- The dashboard no longer shows replaced evicted pods as warnings, and the
+  "Machines to use" checkboxes in the Run split dialog lined up wrong.
+
+- **Web dashboard**: `nodeyard dashboard start|stop|status|run` and a
+  **Web dashboard** entry in the main menu. A polished, read-only page on
+  `localhost:9092` (reach it with an SSH tunnel) with total resources and
+  usage over time, every node's IP address, load and details, pods with
+  live usage and logs (filter, follow, save), workloads, an address book of
+  every node/service/ingress/pod IP with copy-ready NodePort addresses,
+  storage, AI model status, events, computed alerts, search (Ctrl K),
+  keyboard shortcuts, dark/light themes, and a JSON snapshot download. It
+  is Python 3 standard library only, loads nothing from the internet,
+  refuses to listen anywhere but 127.0.0.1, rejects other `Host` names,
+  and runs as a hardened systemd service. `--demo dashboard run` shows a
+  simulated cluster. See docs/dashboard.md.
 - `nodeyard worker-info` and a menu entry, **What a worker needs to join**
   (on servers): shows the join address and port (6443), this server's k3s
   version, where the join token is (hidden, with an offer to reveal it in
@@ -29,6 +172,11 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Fixed
 
+- `ai split plan` skipped nodes whose metrics reading was `<unknown>` (a
+  tab-separated read collapsed empty fields, shifting every column), so the
+  largest machines could be left out of the plan. Fields are now separated
+  by `|`, and a node without a metrics reading is asked for its free
+  memory through its own kubelet.
 - `add-node` skipped installing nodeyard on a machine that already had the
   same version number ("already installed; nothing to do"), so a leftover
   copy from an earlier attempt kept running, without any later fixes. It

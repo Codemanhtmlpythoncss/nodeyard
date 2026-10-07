@@ -61,10 +61,6 @@ is more reliable, and three servers can lose one.
 
 ## 4. Join the other machines
 
-`sudo nodeyard worker-info` (or **What a worker needs to join** in the
-menu) shows the address, port and firewall ports a new worker needs, and
-the exact commands.
-
 From the first server, nodeyard can set up the others over SSH:
 
 ```bash

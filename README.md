@@ -42,6 +42,10 @@ undo for every change it makes.
 - **AI workloads**: Ollama on one node or across the cluster, model
   management on every node at once, and (experimental) one large model
   split across several machines.
+- **A web dashboard** on `localhost:9092` (through an SSH tunnel): total
+  resources and usage over time, every node's IP address and load, pods
+  with live usage and logs, services and the addresses to reach them,
+  storage, events, alerts and AI models. Read-only.
 - **One config file** for the whole cluster, validated with clear errors,
   exportable and importable, with a drift check.
 - **Safe with secrets**: tokens and passwords never appear in logs,
@@ -116,6 +120,7 @@ Read [getting started](docs/getting-started.md) for the full walk-through.
 - [The menu and wizards](docs/menu-and-wizards.md)
 - [k3s clusters and nodes](docs/k3s.md)
 - [AI workloads](docs/ai.md)
+- [The web dashboard](docs/dashboard.md)
 - [doctor](docs/doctor.md)
 - [Snapshots and backups](docs/backups.md)
 - [Changes and undo](docs/changes-and-undo.md)

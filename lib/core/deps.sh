@@ -28,6 +28,7 @@ declare -gA NY_DEP_PKG=(
     [iptables]="iptables iptables iptables - iptables"
     [nft]="nftables nftables nftables nftables nftables"
     [ping]="iputils-ping iputils iputils iputils iputils"
+    [python3]="python3 python3 python3 python python3"
 )
 
 # Commands each feature needs.

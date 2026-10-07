@@ -6,7 +6,7 @@
 
 declare -gA NY_CMD_FN=() NY_CMD_SUM=() NY_CMD_GROUP=() NY_CMD_FEATURE=() NY_CMD_ALIAS=() NY_CMD_HIDDEN=() NY_CMD_JSON=()
 NY_CMD_ORDER=()
-NY_GROUP_ORDER=("Start here" "Cluster" "Nodes" "AI" "Network" "Health" "Backups" "Updates" "Settings" "Tool")
+NY_GROUP_ORDER=("Start here" "Cluster" "Nodes" "AI" "Network" "Health" "Dashboard" "Backups" "Updates" "Settings" "Tool")
 NY_HELP=0
 NY_RESULT_PRINTED=0
 

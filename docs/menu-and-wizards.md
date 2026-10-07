@@ -8,8 +8,7 @@ The status line at the top shows this machine's hostname, address,
 cluster role and the cluster's health. The menu lists only what makes sense
 on this machine: a machine that isn't in a cluster yet is offered
 **Create a cluster** and **Join a cluster**; a server is offered
-**What a worker needs to join** (address, ports and commands for adding
-a worker) and **Install on other machines**.
+**Install on other machines**.
 
 ## The first run
 

@@ -47,7 +47,6 @@ done, 10 needs confirmation (re-run with `--yes`), 130 cancelled.
 | Command | |
 |---|---|
 | `list-nodes [--json]` | The cluster's nodes |
-| `worker-info [--json]` | What a worker needs to join: address, port 6443, ports to open, commands |
 | `add-node worker\|master --ssh USER@HOST` | Set up another machine over SSH |
 | `remove-node NODE` | Drain and remove a node |
 

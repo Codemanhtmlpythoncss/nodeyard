@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="762" height="348" viewBox="0 0 762 348" role="img" aria-label="sudo nodeyard">
-<rect width="762" height="348" rx="8" fill="#0d1117"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="762" height="330" viewBox="0 0 762 330" role="img" aria-label="sudo nodeyard">
+<rect width="762" height="330" rx="8" fill="#0d1117"/>
 <rect width="762" height="30" rx="8" fill="#161b22"/>
 <rect y="22" width="762" height="8" fill="#161b22"/>
 <circle cx="18" cy="15" r="5.5" fill="#ff5f57"/>
@@ -21,33 +21,30 @@
 <text x="16.0" y="130" fill="#e6edf3" font-weight="bold">What&#160;do&#160;you&#160;want&#160;to&#160;do?</text>
 <text x="16.0" y="148" fill="#e6edf3">&#160;&#160;</text>
 <text x="32.8" y="148" fill="#56d4dd">&#160;1)</text>
-<text x="58.0" y="148" fill="#e6edf3">&#160;What&#160;a&#160;worker&#160;needs&#160;to&#160;join&#160;(address,&#160;ports,&#160;commands)</text>
+<text x="58.0" y="148" fill="#e6edf3">&#160;Install&#160;on&#160;other&#160;machines&#160;(add&#160;a&#160;node&#160;over&#160;SSH)</text>
 <text x="16.0" y="166" fill="#e6edf3">&#160;&#160;</text>
 <text x="32.8" y="166" fill="#56d4dd">&#160;2)</text>
-<text x="58.0" y="166" fill="#e6edf3">&#160;Install&#160;on&#160;other&#160;machines&#160;(add&#160;a&#160;node&#160;over&#160;SSH)</text>
+<text x="58.0" y="166" fill="#e6edf3">&#160;Cluster&#160;status</text>
 <text x="16.0" y="184" fill="#e6edf3">&#160;&#160;</text>
 <text x="32.8" y="184" fill="#56d4dd">&#160;3)</text>
-<text x="58.0" y="184" fill="#e6edf3">&#160;Cluster&#160;status</text>
+<text x="58.0" y="184" fill="#e6edf3">&#160;AI&#160;workloads</text>
 <text x="16.0" y="202" fill="#e6edf3">&#160;&#160;</text>
 <text x="32.8" y="202" fill="#56d4dd">&#160;4)</text>
-<text x="58.0" y="202" fill="#e6edf3">&#160;AI&#160;workloads</text>
+<text x="58.0" y="202" fill="#e6edf3">&#160;Health&#160;check&#160;(doctor)</text>
 <text x="16.0" y="220" fill="#e6edf3">&#160;&#160;</text>
 <text x="32.8" y="220" fill="#56d4dd">&#160;5)</text>
-<text x="58.0" y="220" fill="#e6edf3">&#160;Health&#160;check&#160;(doctor)</text>
+<text x="58.0" y="220" fill="#e6edf3">&#160;Backups</text>
 <text x="16.0" y="238" fill="#e6edf3">&#160;&#160;</text>
 <text x="32.8" y="238" fill="#56d4dd">&#160;6)</text>
-<text x="58.0" y="238" fill="#e6edf3">&#160;Backups</text>
+<text x="58.0" y="238" fill="#e6edf3">&#160;Updates</text>
 <text x="16.0" y="256" fill="#e6edf3">&#160;&#160;</text>
 <text x="32.8" y="256" fill="#56d4dd">&#160;7)</text>
-<text x="58.0" y="256" fill="#e6edf3">&#160;Updates</text>
+<text x="58.0" y="256" fill="#e6edf3">&#160;Settings</text>
 <text x="16.0" y="274" fill="#e6edf3">&#160;&#160;</text>
 <text x="32.8" y="274" fill="#56d4dd">&#160;8)</text>
-<text x="58.0" y="274" fill="#e6edf3">&#160;Settings</text>
+<text x="58.0" y="274" fill="#e6edf3">&#160;Uninstall</text>
 <text x="16.0" y="292" fill="#e6edf3">&#160;&#160;</text>
 <text x="32.8" y="292" fill="#56d4dd">&#160;9)</text>
-<text x="58.0" y="292" fill="#e6edf3">&#160;Uninstall</text>
-<text x="16.0" y="310" fill="#e6edf3">&#160;&#160;</text>
-<text x="32.8" y="310" fill="#56d4dd">10)</text>
-<text x="58.0" y="310" fill="#e6edf3">&#160;Exit</text>
-<text x="16.0" y="328" fill="#e6edf3">Choice&#160;(q&#160;=&#160;quit)&#160;[1]:&#160;</text>
+<text x="58.0" y="292" fill="#e6edf3">&#160;Exit</text>
+<text x="16.0" y="310" fill="#e6edf3">Choice&#160;(q&#160;=&#160;quit)&#160;[1]:&#160;</text>
 </g></svg>

@@ -81,21 +81,6 @@ agent must never be newer than the servers.
 its addresses (plus Tailscale). It hides the token itself; add `--reveal`
 to print it.
 
-### What a new worker needs
-
-```bash
-sudo nodeyard worker-info          # or: sudo nodeyard, then "What a worker needs to join"
-```
-
-![worker-info](media/worker-info.svg)
-
-On a server it shows the join address and port (`https://ADDRESS:6443`),
-any other addresses the worker could use, this server's k3s version, where
-the join token is (hidden; the menu offers to reveal it), every port that
-must be open and whether each is open on this server's firewall, what the
-worker machine needs, and the commands to add it, both from here over SSH
-and on the worker itself.
-
 ### Adding a machine over SSH
 
 From a server:
@@ -108,16 +93,9 @@ sudo nodeyard add-node master --ssh admin@192.168.1.12
 It checks the machine is reachable (and explains "no route to host"),
 shows you its SSH host key fingerprint to confirm (compare it with
 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on that machine's
-console), checks that the `--interface` you named exists there, copies
-nodeyard and the token as private files, then becomes root once and
-installs, joins and cleans up. For unattended runs pass
-`--host-key SHA256:...`. Running it again on a machine that's already set
-up is safe.
-
-To become root it uses `sudo` when your SSH user is allowed to, and
-otherwise `su` (you type the root password, as on a Debian install
-without sudo). Choose explicitly with `--become sudo` or `--become su`.
-Logging in as `root@host` needs neither.
+console), copies nodeyard and the token as root-only files, installs, and
+joins. For unattended runs pass `--host-key SHA256:...`. Running it again
+on a machine that's already set up is safe.
 
 A laptop-friendly installer that sets up several machines at once
 (including from macOS) is coming in 0.3.

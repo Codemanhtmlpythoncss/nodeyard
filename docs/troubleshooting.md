@@ -42,18 +42,6 @@ first (`sudo nodeyard uninstall k3s`).
 changing command from a script or without a terminal. Add `--yes` (and try
 `--dry-run` first).
 
-**"The SSH host key of X has CHANGED"** (while adding a machine): the
-machine presents a different key than the one nodeyard saved, which is
-normal after a reinstall or a replaced disk. nodeyard shows the old and
-new fingerprints and asks; compare the new one with what the machine
-itself shows (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`) and
-answer `y`.
-
-**A machine is refused with "duplicate hostname" / "node password
-rejected"**: the cluster remembers the old machine of that name. Run
-`sudo nodeyard remove-node NAME` (it also clears the stored password),
-then add the machine again.
-
 ## A node is NotReady, or pods can't reach each other
 
 **A node never becomes Ready**: run `sudo nodeyard doctor` on it. It checks

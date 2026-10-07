@@ -1,0 +1,821 @@
+"""The dashboard's AI features: chat with running models, search for models, run them.
+
+Everything here sits behind the sign-in. Chat goes straight from this server to the model's own API
+(the model's API key never reaches the browser). Model search asks Hugging Face. Running or removing a
+model starts one of a short list of nodeyard commands; nothing else can be started from the page.
+"""
+import http.client
+import ipaddress
+import json
+import os
+import re
+import secrets
+import select
+import shlex
+import socket
+import ssl
+import subprocess
+import threading
+import time
+import urllib.parse
+
+UA = "nodeyard-dashboard"
+HF_HOST = "huggingface.co"
+SPLIT_NS, SPLIT_SVC, SPLIT_PORT = "ai-split", "llama", 8080
+OLLAMA_NS, OLLAMA_PORT = "ai-inference", 11434
+SPLIT_KEY_NAME = "ai-split-api-key"
+MAX_CHAT_CHARS = 2000000  # a whole conversation, attached files included (the model's context is the real limit)
+
+REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
+FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._()+=/-]{0,250}\.gguf$")
+CHECK_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
+CLUSTER_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
+LOCAL_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,250}\.gguf$")  # a file on a node (no folders)
+ALIAS_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+NODE_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
+MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
+PART_RE = re.compile(r"^(.*)-(\d{5})-of-(\d{5})\.gguf$")
+QUANT_RE = re.compile(r"(?:^|[-_.])((?:UD-)?(?:IQ\d(?:_[A-Z0-9]+)*|Q\d(?:_[A-Z0-9]+)+|Q\d_\d|BF16|F16|F32|MXFP4))(?=[-_.]|$)", re.I)
+SORTS = {"downloads": "downloads", "likes": "likes", "trending": "trendingScore", "recent": "lastModified"}
+
+
+class AIError(Exception):
+    def __init__(self, message, code=400):
+        super().__init__(message)
+        self.code = code
+
+
+# --------------------------------------------------------------------------- Hugging Face
+
+class HuggingFace:
+    TOKEN_FILE = "/etc/nodeyard/secrets/hf-token"
+
+    def __init__(self):
+        self.cache = {}
+        self.lock = threading.Lock()
+        self.token = ""
+        self.reload_token()
+
+    def reload_token(self):
+        """The optional access token (`nodeyard ai hf token`), for gated models."""
+        try:
+            with open(self.TOKEN_FILE, "r", encoding="utf-8") as f:
+                tok = f.read().strip()
+        except OSError:
+            tok = ""
+        with self.lock:
+            self.token = tok if re.match(r"^hf_[A-Za-z0-9]{20,100}$", tok) else ""
+            self.cache.clear()
+
+    def _get(self, path, ttl=300):
+        now = time.time()
+        with self.lock:
+            hit = self.cache.get(path)
+            if hit and now - hit[0] < ttl:
+                return hit[1]
+        conn = http.client.HTTPSConnection(HF_HOST, timeout=15)
+        try:
+            headers = {"User-Agent": UA, "Accept": "application/json"}
+            if self.token:
+                headers["Authorization"] = "Bearer " + self.token
+            conn.request("GET", path, headers=headers)
+            resp = conn.getresponse()
+            raw = resp.read(8 * 1024 * 1024)
+        except (OSError, http.client.HTTPException) as e:
+            raise AIError("Couldn't reach Hugging Face from this server: %s" % (getattr(e, "strerror", None) or e), 502)
+        finally:
+            conn.close()
+        if resp.status == 404:
+            raise AIError("Hugging Face doesn't have that.", 404)
+        if resp.status != 200:
+            raise AIError("Hugging Face answered HTTP %d." % resp.status, 502)
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            raise AIError("Hugging Face sent something unreadable.", 502)
+        with self.lock:
+            if len(self.cache) > 200:
+                self.cache.clear()
+            self.cache[path] = (now, data)
+        return data
+
+    def search(self, q, sort, limit):
+        q = (q or "").strip()[:100]
+        params = {"filter": "gguf", "sort": SORTS.get(sort, "downloads"), "direction": "-1", "limit": str(max(1, min(40, limit)))}
+        if q:
+            params["search"] = q
+        data = self._get("/api/models?" + urllib.parse.urlencode(params))
+        out = []
+        for m in data if isinstance(data, list) else []:
+            mid = m.get("id") or m.get("modelId") or ""
+            if not REPO_RE.match(mid):
+                continue
+            out.append({"id": mid, "downloads": m.get("downloads", 0), "likes": m.get("likes", 0),
+                        "updated": m.get("lastModified") or m.get("createdAt") or "", "pipeline": m.get("pipeline_tag") or "",
+                        "tags": [t for t in (m.get("tags") or []) if ":" not in t and t not in ("gguf", "endpoints_compatible", "region:us")][:8]})
+        return out
+
+    def files(self, repo):
+        if not REPO_RE.match(repo or ""):
+            raise AIError("That isn't a Hugging Face repository name (owner/name).")
+        data = self._get("/api/models/%s/tree/main?recursive=true" % urllib.parse.quote(repo, safe="/"))
+        grouped = {}
+        for e in data if isinstance(data, list) else []:
+            path = e.get("path", "")
+            if e.get("type") != "file" or not path.lower().endswith(".gguf") or ".." in path or not FILE_RE.match(path):
+                continue
+            size = (e.get("lfs") or {}).get("size") or e.get("size") or 0
+            m = PART_RE.match(path)
+            key = m.group(1) if m else path
+            g = grouped.setdefault(key, {"file": path, "size": 0, "parts": 0})
+            g["size"] += size
+            g["parts"] += 1
+            if m and m.group(2) == "00001":
+                g["file"] = path
+        out = []
+        for g in grouped.values():
+            qm = QUANT_RE.search(os.path.basename(g["file"]))
+            quant = qm.group(1).upper() if qm else ""
+            out.append({"file": g["file"], "size": g["size"], "parts": g["parts"], "quant": quant,
+                        "split_ok": g["parts"] == 1, "ollama": ("hf.co/%s:%s" % (repo, quant)) if quant else ""})
+        out.sort(key=lambda f: f["size"])
+        return out
+
+
+# --------------------------------------------------------------------------- jobs
+
+# Actions that may run next to anything else: they only read, or (downloads)
+# write a separate file. Everything else changes the running model, so only
+# one of those runs at a time.
+# Actions that change system files, so they run outside the dashboard's sandbox.
+OUTSIDE_ACTIONS = {"doctor-fix", "cli"}
+# Commands the Commands page may run: filled from `nodeyard commands --json` (settings.py).
+# Interactive ones need a real terminal (use the Terminal page for those).
+COMMAND_PATHS = None
+NOT_FROM_PAGE = {"menu", "wizard", "dashboard run", "completion"}
+SHARED_ACTIONS = {"plan", "status", "test", "download", "models", "cluster-name", "disk-limit", "hw-bench"}
+
+
+class Jobs:
+    """nodeyard commands run for the page, with their output kept for it to show.
+    Commands that change the running model run one at a time; downloads and
+    read-only ones run alongside them."""
+
+    MAX_LINES = 4000
+
+    def __init__(self, nodeyard_bin):
+        self.bin = nodeyard_bin
+        self.lock = threading.Lock()
+        self.jobs = {}
+        self.order = []
+
+    def running(self):
+        with self.lock:
+            return next((j for j in self.jobs.values() if j["status"] == "running" and j["exclusive"]), None)
+
+    def start(self, title, argv, exclusive=True, outside=False, stdin=None):
+        if not self.bin or not os.access(self.bin, os.X_OK):
+            raise AIError("This dashboard can't run nodeyard commands (nodeyard wasn't found).", 501)
+        with self.lock:
+            running = [j for j in self.jobs.values() if j["status"] == "running"]
+            if exclusive and any(j["exclusive"] for j in running):
+                raise AIError("Another change to the model is still running (%s). Wait for it to finish." %
+                              next(j["title"] for j in running if j["exclusive"]), 409)
+            if len(running) >= 8:
+                raise AIError("Eight tasks are already running. Wait for one to finish.", 409)
+            if any(j["status"] == "running" and j["cmd"] == "nodeyard " + " ".join(argv) for j in running):
+                raise AIError("That is already running.", 409)
+            jid = secrets.token_hex(6)
+            job = {"id": jid, "title": title, "status": "running", "rc": None, "lines": [], "started": time.time(),
+                   "cmd": "nodeyard " + " ".join(argv), "exclusive": exclusive, "outside": outside, "stdin": stdin}
+            self.jobs[jid] = job
+            self.order.append(jid)
+            # forget old finished tasks, never running ones
+            while len(self.order) > 25:
+                old = next((j for j in self.order if self.jobs.get(j, {}).get("status") != "running"), None)
+                if old is None:
+                    break
+                self.order.remove(old)
+                self.jobs.pop(old, None)
+        threading.Thread(target=self._run, args=(job, argv), daemon=True).start()
+        return jid
+
+    def _add(self, job, line):
+        with self.lock:
+            job["lines"].append(line.rstrip("\n")[:2000])
+            del job["lines"][:-self.MAX_LINES]
+
+    def _run(self, job, argv):
+        env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/tmp", "LANG": "C.UTF-8", "NODEYARD_COLOR": "never"}
+        try:
+            cmd = [self.bin, "--no-color"] + argv
+            if job.get("outside"):
+                # Outside the dashboard's own sandbox (it may only write a few
+                # folders): doctor's fixes change system files.
+                cmd = ["systemd-run", "--quiet", "--collect", "--wait", "--pipe", "--service-type=exec", "--setenv=HOME=/root",
+                       "--setenv=NODEYARD_COLOR=never"] + cmd
+            p = subprocess.Popen(cmd, stdin=subprocess.PIPE if job.get("stdin") else subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 env=env, text=True, errors="replace", bufsize=1, start_new_session=True)
+        except OSError as e:
+            self._add(job, "Couldn't start nodeyard: %s" % e)
+            with self.lock:
+                job["status"], job["rc"] = "failed", -1
+            return
+        if job.get("stdin"):
+            try:
+                p.stdin.write(job["stdin"])
+                p.stdin.close()
+            except OSError:
+                pass
+            job["stdin"] = None  # don't keep secrets around
+        killer = threading.Timer(40 * 60, p.kill)
+        killer.start()
+        try:
+            for line in p.stdout:
+                self._add(job, line)
+            rc = p.wait()
+        finally:
+            killer.cancel()
+            p.stdout.close()
+        with self.lock:
+            job["status"], job["rc"] = ("ok" if rc == 0 else "failed"), rc
+
+    def view(self, jid, since):
+        with self.lock:
+            job = self.jobs.get(jid)
+            if not job:
+                return None
+            total = len(job["lines"])
+            return {"id": jid, "title": job["title"], "status": job["status"], "rc": job["rc"], "cmd": job["cmd"], "started": job["started"],
+                    "lines": job["lines"][since:], "next": total}
+
+    def recent(self):
+        with self.lock:
+            return [{"id": j, "title": self.jobs[j]["title"], "status": self.jobs[j]["status"], "started": self.jobs[j]["started"]}
+                    for j in reversed(self.order) if j in self.jobs]
+
+
+def build_command(action, p, nodes, key_path):
+    """The nodeyard arguments for an allowed action, or an AIError."""
+    def need(name, rx):
+        v = str(p.get(name, "")).strip()
+        if not rx.match(v):
+            raise AIError("Bad or missing %s." % name)
+        return v
+
+    if action in ("plan", "deploy", "switch"):
+        if p.get("local") is True:  # already downloaded on a node: run it from there
+            file = need("file", LOCAL_FILE_RE)
+            spec = "local:" + file
+        else:
+            repo, file = need("repo", REPO_RE), need("file", FILE_RE)
+            if ".." in file or file.startswith("/"):
+                raise AIError("Bad file name.")
+            spec = "%s:%s" % (repo, file)
+        try:
+            ctx = int(p.get("ctx", 8192))
+        except (TypeError, ValueError):
+            raise AIError("Bad context length.")
+        if not 512 <= ctx <= 131072:
+            raise AIError("The context length must be between 512 and 131072.")
+        argv = ["ai", "split", action, "--model", spec, "--ctx", str(ctx)]
+        if action == "switch" and p.get("keep_old") is True:
+            argv.append("--keep-old")
+        chosen = p.get("nodes") or []
+        if chosen:
+            if not isinstance(chosen, list) or len(chosen) > 30 or not all(isinstance(n, str) and NODE_RE.match(n) and n in nodes for n in chosen):
+                raise AIError("Unknown node in the list.")
+            argv += ["--nodes", ",".join(chosen)]
+        if action in ("deploy", "switch"):
+            alias = str(p.get("alias") or "").strip() or re.sub(r"[^a-z0-9._-]+", "-", os.path.basename(file)[:-5].lower()).strip("-.")[:60]
+            if not ALIAS_RE.match(alias):
+                raise AIError("Bad model name.")
+            argv += ["--alias", alias, "--api-key-file", key_path, "--yes"]
+        title = {"plan": "Check fit: ", "deploy": "Run: ", "switch": "Switch to: "}[action] + os.path.basename(file)
+        return title, argv
+    if action == "download":
+        repo, file = need("repo", REPO_RE), need("file", FILE_RE)
+        if ".." in file or file.startswith("/"):
+            raise AIError("Bad file name.")
+        return "Download: " + os.path.basename(file), ["ai", "split", "download", "--model", "%s:%s" % (repo, file)]
+    if action == "split-rm":
+        file = need("file", LOCAL_FILE_RE)
+        return "Delete %s from every node" % file, ["ai", "split", "rm", file, "--yes"]
+    if action == "clean":
+        return ("Free up space (models too)" if p.get("models") is True else "Free up space"), \
+            ["ai", "split", "clean", "--yes"] + (["--models"] if p.get("models") is True else [])
+    if action == "undeploy":
+        return "Stop and remove the split model", ["ai", "split", "undeploy", "--yes"]
+    if action == "status":
+        return "Model status", ["ai", "split", "status"]
+    if action == "test":
+        return "Speed test", ["ai", "split", "test", "--api-key-file", key_path]
+    if action == "split-unload":
+        return "Unload the split model (free its memory)", ["ai", "split", "unload", "--yes"]
+    if action == "split-load":
+        return "Load the split model", ["ai", "split", "load", "--yes"]
+    if action == "ollama-rm":
+        name = need("name", MODEL_RE)
+        return "Delete %s from every Ollama node" % name, ["ai", "model", "rm", name, "--yes"]
+    if action == "agent-install":
+        return "Install the node agents", ["dashboard", "agent", "install", "--yes"]
+    if action == "agent-remove":
+        return "Remove the node agents", ["dashboard", "agent", "remove", "--yes"]
+    if action == "pull":
+        name = need("name", MODEL_RE)
+        return "Download %s to every Ollama node" % name, ["ai", "model", "install", name]
+    if action == "ollama-deploy":
+        return "Set up Ollama on the cluster", ["ai", "deploy", "--yes"]
+    # -- settings and doctor -------------------------------------------------
+    if action == "cli":
+        path = str(p.get("path", "")).strip()
+        known = COMMAND_PATHS() if callable(COMMAND_PATHS) else set()
+        if path not in known:
+            raise AIError("Unknown command.")
+        if path in NOT_FROM_PAGE:
+            raise AIError("'%s' is interactive: use the Terminal page for it." % path)
+        try:
+            extra = shlex.split(str(p.get("args") or ""))
+        except ValueError as e:
+            raise AIError("Couldn't read the options: %s" % e)
+        if len(extra) > 60 or any(len(a) > 1000 for a in extra):
+            raise AIError("Too many or too long options.")
+        flags = (["--yes"] if p.get("yes") is True else []) + (["--dry-run"] if p.get("dry_run") is True else []) + (["--json"] if p.get("json") is True else [])
+        return "nodeyard " + " ".join([path] + extra + flags), path.split() + extra + flags
+    if action == "doctor-fix":
+        only = str(p.get("only") or "").strip()
+        if only and not CHECK_RE.match(only):
+            raise AIError("Bad check name.")
+        return ("Fix: " + only if only else "Fix every problem doctor found"), ["doctor", "--fix", "--yes"] + (["--only", only] if only else [])
+    if action == "gate-install":
+        nets = p.get("trusted") or []
+        if not isinstance(nets, list) or not 1 <= len(nets) <= 20:
+            raise AIError("Give between 1 and 20 networks.")
+        clean = []
+        for n in nets:
+            try:
+                clean.append(str(ipaddress.ip_network(str(n).strip(), strict=False)))
+            except ValueError:
+                raise AIError("%s isn't a network (like 192.168.1.0/24)." % str(n)[:60])
+        return "Model gate: no key needed from %d network(s)" % len(clean), ["ai", "gate", "install", "--trusted", ",".join(clean), "--yes"]
+    if action == "hw-bench":
+        node = str(p.get("node") or "").strip()
+        if node and (not NODE_RE.match(node) or node not in nodes):
+            raise AIError("Unknown node.")
+        return ("Speed test: " + node if node else "Speed test on every node"), ["hw", "bench"] + (["--node", node] if node else [])
+    if action in ("public-on", "public-off"):
+        what = str(p.get("what") or "both")
+        if what not in ("dashboard", "api", "both"):
+            raise AIError("Say dashboard, api or both.")
+        flags = [] if what == "both" else ["--" + what]
+        verb = "on" if action == "public-on" else "off"
+        title = ("Public access on: " if verb == "on" else "Public access off: ") + {"both": "dashboard and model API", "dashboard": "dashboard", "api": "model API"}[what]
+        return title, ["public", verb, "--yes"] + flags
+    if action == "gate-remove":
+        return "Remove the model gate", ["ai", "gate", "remove", "--yes"]
+    if action == "key-rotate":
+        return "New API key for the model", ["ai", "split", "key", "--rotate", "--yes"]
+    if action == "cluster-name":
+        name = need("name", CLUSTER_RE)
+        return "Rename the cluster to " + name, ["config", "set", "cluster.name", name]
+    if action == "disk-limit":
+        node = need("node", NODE_RE)
+        if node not in nodes:
+            raise AIError("Unknown node.")
+        gib = str(p.get("gib", "")).strip()
+        if gib != "off" and not (gib.isdigit() and 1 <= int(gib) <= 100000):
+            raise AIError("The limit is a number of GiB, or off.")
+        return "Disk limit for %s: %s" % (node, gib + (" GiB" if gib != "off" else "")), ["ai", "disk", "limit", node, gib]
+    raise AIError("Unknown action.")
+
+
+# --------------------------------------------------------------------------- live backend
+
+class Live:
+    def __init__(self, store, ai_key_file, nodeyard_bin):
+        self.store = store
+        self.ai_key_file = ai_key_file or ""
+        self.jobs = Jobs(nodeyard_bin)
+        self.hf = HuggingFace()
+        self.tags_cache = {}
+        self.tags_lock = threading.Lock()
+        self.models_lock = threading.Lock()
+        self.models_cache = None
+
+    def _state(self):
+        st = self.store.snapshot()["state"]
+        if not st:
+            raise AIError("The dashboard hasn't read the cluster yet. Try again in a few seconds.", 503)
+        return st
+
+    def api_key(self):
+        """The model's API key, read fresh from its root-only file (empty if none)."""
+        if not self.ai_key_file:
+            return ""
+        try:
+            with open(self.ai_key_file, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+
+    def ensure_key_file(self):
+        if not self.ai_key_file:
+            raise AIError("This dashboard doesn't know where the model's API key lives.", 501)
+        if not os.path.exists(self.ai_key_file):
+            os.makedirs(os.path.dirname(self.ai_key_file), mode=0o700, exist_ok=True)
+            fd = os.open(self.ai_key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(secrets.token_hex(24))
+        return self.ai_key_file
+
+    # -- what can be chatted with --------------------------------------------
+
+    def _ollama_models(self, pod):
+        now = time.time()
+        with self.tags_lock:
+            hit = self.tags_cache.get(pod["name"])
+            if hit and now - hit[0] < 20:
+                return hit[1]
+        models = []
+        try:
+            conn = http.client.HTTPConnection(pod["ip"], OLLAMA_PORT, timeout=4)
+            conn.request("GET", "/api/tags")
+            resp = conn.getresponse()
+            data = json.loads(resp.read(1024 * 1024))
+            models = [{"name": m.get("name", ""), "size": m.get("size", 0)} for m in data.get("models", []) if MODEL_RE.match(m.get("name", ""))]
+            conn.close()
+        except (OSError, ValueError, http.client.HTTPException):
+            models = []
+        with self.tags_lock:
+            self.tags_cache[pod["name"]] = (now, models)
+        return models
+
+    def _ollama_json(self, pod, method, path, body=None, timeout=5):
+        conn = http.client.HTTPConnection(pod["ip"], OLLAMA_PORT, timeout=timeout)
+        try:
+            conn.request(method, path, body=json.dumps(body) if body is not None else None, headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            data = resp.read(2 * 1024 * 1024)
+            return resp.status, (json.loads(data) if data else {})
+        finally:
+            conn.close()
+
+    def _ollama_pods(self):
+        return [p for p in self._state()["pods"] if p["namespace"] == OLLAMA_NS and p["name"].startswith("ollama") and p["status"] == "Running" and p["ip"]]
+
+    def ollama_overview(self):
+        """Every Ollama pod with the models on its disk and which are loaded in memory right now."""
+        out = []
+        for p in self._ollama_pods():
+            entry = {"pod": p["name"], "node": p["node"], "models": [], "error": ""}
+            try:
+                _, tags = self._ollama_json(p, "GET", "/api/tags")
+                _, ps = self._ollama_json(p, "GET", "/api/ps")
+                loaded = {m.get("name"): m for m in ps.get("models", [])}
+                for m in tags.get("models", []):
+                    name = m.get("name", "")
+                    if MODEL_RE.match(name):
+                        lm = loaded.get(name)
+                        entry["models"].append({"name": name, "size": m.get("size", 0), "loaded": bool(lm), "memory": (lm or {}).get("size_vram") or (lm or {}).get("size") or 0,
+                                                "expires": (lm or {}).get("expires_at", ""), "params": (m.get("details") or {}).get("parameter_size", ""),
+                                                "quant": (m.get("details") or {}).get("quantization_level", "")})
+            except (OSError, ValueError, http.client.HTTPException) as e:
+                entry["error"] = "Couldn't ask this Ollama: %s" % (getattr(e, "strerror", None) or e)
+            out.append(entry)
+        return out
+
+    def ollama_load(self, pod_name, model, on):
+        if not MODEL_RE.match(model or ""):
+            raise AIError("Bad model name.")
+        pod = next((p for p in self._ollama_pods() if p["name"] == pod_name), None)
+        if not pod:
+            raise AIError("No such Ollama pod.", 404)
+        try:
+            status, data = self._ollama_json(pod, "POST", "/api/generate", {"model": model, "prompt": "", "stream": False, "keep_alive": "30m" if on else 0}, timeout=600 if on else 30)
+        except (OSError, ValueError, http.client.HTTPException) as e:
+            raise AIError("Couldn't reach Ollama: %s" % (getattr(e, "strerror", None) or e), 502)
+        if status >= 400:
+            raise AIError("Ollama said: %s" % (data.get("error") if isinstance(data, dict) else status), 502)
+
+    def reveal_key(self):
+        key = self.api_key()
+        if not key:
+            raise AIError("There's no API key file for the model (looked in %s)." % (self.ai_key_file or "nowhere"), 404)
+        return key
+
+    def targets(self):
+        st = self._state()
+        out = []
+        sp = (st.get("ai") or {}).get("split")
+        if sp:
+            out.append({"id": "split", "kind": "split", "name": sp.get("alias") or "split model", "model": sp.get("model", ""),
+                        "detail": "split across %d machine%s" % (len(sp.get("shares", [])), "" if len(sp.get("shares", [])) == 1 else "s"),
+                        "ready": bool(sp.get("ready"))})
+        for p in st["pods"]:
+            if p["namespace"] == OLLAMA_NS and p["name"].startswith("ollama") and p["status"] == "Running" and p["ip"]:
+                for m in self._ollama_models(p):
+                    out.append({"id": "ollama:%s:%s" % (p["name"], m["name"]), "kind": "ollama", "name": m["name"], "model": m["name"],
+                                "detail": "Ollama on %s" % (p["node"] or p["name"]), "ready": True, "size": m["size"]})
+        busy = self.jobs.running()
+        return {"targets": out, "can_run": bool(self.jobs.bin and os.access(self.jobs.bin, os.X_OK)), "busy": busy["id"] if busy else None,
+                "has_key": bool(self.api_key()), "recent": self.jobs.recent()}
+
+    def _resolve(self, target):
+        st = self._state()
+        if target == "split":
+            sp = (st.get("ai") or {}).get("split")
+            svc = next((s for s in st["services"] if s["namespace"] == SPLIT_NS and s["name"] == SPLIT_SVC), None)
+            if not sp or not svc or not svc["cluster_ip"]:
+                raise AIError("No split model is deployed.", 404)
+            if not sp.get("ready"):
+                raise AIError("The model isn't loaded yet. Check its progress on the Models tab.", 503)
+            headers = {}
+            key = self.api_key()
+            if sp.get("auth"):
+                if not key:
+                    raise AIError("The model needs an API key, and the dashboard can't read it (looked in %s)." % (self.ai_key_file or "nowhere"), 500)
+                headers["Authorization"] = "Bearer " + key
+            return svc["cluster_ip"], SPLIT_PORT, headers, sp.get("alias") or "model"
+        m = re.match(r"^ollama:([a-z0-9-]+):(.+)$", target or "")
+        if m and MODEL_RE.match(m.group(2)):
+            pod = next((p for p in st["pods"] if p["namespace"] == OLLAMA_NS and p["name"] == m.group(1) and p["status"] == "Running" and p["ip"]), None)
+            if pod:
+                return pod["ip"], OLLAMA_PORT, {}, m.group(2)
+        raise AIError("Unknown model.", 404)
+
+    def open_chat(self, target, payload, on_conn=None):
+        host, port, headers, model = self._resolve(target)
+        body = dict(payload, model=model, stream=True)
+        headers = dict(headers, **{"Content-Type": "application/json", "Accept": "text/event-stream", "User-Agent": UA})
+        conn = http.client.HTTPConnection(host, port, timeout=900)
+        if on_conn:
+            on_conn(conn)  # so Stop can cut it, even while the model still reads the prompt
+        try:
+            conn.request("POST", "/v1/chat/completions", body=json.dumps(body), headers=headers)
+            resp = conn.getresponse()
+        except (OSError, http.client.HTTPException) as e:
+            conn.close()
+            raise AIError("Couldn't reach the model: %s" % (getattr(e, "strerror", None) or e), 502)
+        if resp.status >= 400:
+            raw = resp.read(4096)
+            conn.close()
+            msg = ""
+            try:
+                err = json.loads(raw).get("error", "")
+                msg = err.get("message", "") if isinstance(err, dict) else str(err)
+            except ValueError:
+                pass
+            raise AIError("The model answered HTTP %d%s" % (resp.status, (": " + msg) if msg else "."), 502)
+        return conn, resp
+
+    # -- running models ----------------------------------------------------------
+
+    def run(self, action, p):
+        st = self._state()
+        key_path = ""
+        if action in ("deploy", "switch", "test"):
+            key_path = self.ensure_key_file()
+        title, argv = build_command(action, p, {n["name"] for n in st["nodes"]}, key_path)
+        stdin = p.get("stdin") if action == "cli" and isinstance(p.get("stdin"), str) and p.get("stdin") else None
+        if stdin is not None and len(stdin) > 65536:
+            raise AIError("The input is too long.")
+        exclusive = action not in SHARED_ACTIONS and not (action == "cli" and p.get("dry_run") is True)
+        return self.jobs.start(title, argv, exclusive=exclusive, outside=action in OUTSIDE_ACTIONS, stdin=stdin)
+
+    # -- what is on each node's disk ------------------------------------------------
+
+    def disk_models(self):
+        """`nodeyard ai split models --json`: model files, unfinished downloads,
+        weight caches and free disk per node. Cached for 15 s (it starts a small
+        pod on every node)."""
+        now = time.time()
+        with self.models_lock:
+            if self.models_cache and now - self.models_cache[0] < 15:
+                return dict(self.models_cache[1], downloads=self._downloads())
+            if not self.jobs.bin or not os.access(self.jobs.bin, os.X_OK):
+                raise AIError("This dashboard can't run nodeyard commands (nodeyard wasn't found).", 501)
+            env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/tmp", "LANG": "C.UTF-8", "NODEYARD_COLOR": "never"}
+            try:
+                out = subprocess.run([self.jobs.bin, "--no-color", "ai", "split", "models", "--json"], stdin=subprocess.DEVNULL,
+                                     capture_output=True, text=True, timeout=240, env=env)
+                data = json.loads(out.stdout.strip().splitlines()[-1]) if out.stdout.strip() else None
+            except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+                data = None
+            if not isinstance(data, dict) or not data.get("ok"):
+                raise AIError("Couldn't look at the nodes' disks.", 502)
+            self.models_cache = (now, data)
+            return dict(data, downloads=self._downloads())
+
+    def _downloads(self):
+        """Download Jobs with their progress (from their last log line)."""
+        try:
+            jobs = self.store.source.client.get("/apis/batch/v1/namespaces/ai-split/jobs?labelSelector=app.kubernetes.io%2Fcomponent%3Dmodel-download", timeout=5)
+        except Exception:  # noqa: BLE001 -- no namespace yet, or the API is busy
+            return []
+        out = []
+        for j in (jobs or {}).get("items", []):
+            ann = j["metadata"].get("annotations", {}) or {}
+            st = j.get("status", {})
+            d = {"job": j["metadata"]["name"], "file": ann.get("nodeyard/file", ""), "node": ann.get("nodeyard/node", ""),
+                 "size": int(ann.get("nodeyard/size", "0") or 0), "got": 0, "state": "done" if st.get("succeeded") else ("running" if st.get("active") else "failed")}
+            if d["state"] == "running":
+                try:
+                    pods = self.store.source.client.get("/api/v1/namespaces/ai-split/pods?labelSelector=job-name%3D" + urllib.parse.quote(d["job"]), timeout=5)
+                    name = pods["items"][-1]["metadata"]["name"]
+                    text = self.store.source.client.get("/api/v1/namespaces/ai-split/pods/%s/log?tailLines=8" % urllib.parse.quote(name), timeout=5, raw=True)
+                    lines = (text.decode("utf-8", "replace") if isinstance(text, bytes) else str(text)).strip().splitlines()
+                    last = lines[-1] if lines else ""
+                    prog = [x.split() for x in lines if x.startswith("progress ") and len(x.split()) >= 4]
+                    if last.startswith("progress "):
+                        d["got"] = int(last.split()[1])
+                    if len(prog) >= 2 and int(prog[-1][3]) > int(prog[0][3]):
+                        # speed over the last ~70 s, and the time left at that speed
+                        d["rate"] = (int(prog[-1][1]) - int(prog[0][1])) / (int(prog[-1][3]) - int(prog[0][3]))
+                        if d["rate"] > 0 and d["size"] > d["got"]:
+                            d["eta"] = int((d["size"] - d["got"]) / d["rate"])
+                    elif "NOT ENOUGH DISK" in last:
+                        d["state"], d["note"] = "stuck", last
+                    elif "joining" in last or "verifying" in last:
+                        d["got"], d["note"] = d["size"], last.split(" ", 1)[-1]
+                except Exception:  # noqa: BLE001 -- pod not started yet
+                    pass
+            out.append(d)
+        return out
+
+    def job(self, jid, since):
+        return self.jobs.view(jid, since)
+
+
+# --------------------------------------------------------------------------- the pages' routes
+
+def register(ctx, args):
+    if getattr(args, "demo", False):
+        import demoai
+        backend = demoai.DemoAI(ctx.store)
+    else:
+        backend = Live(ctx.store, getattr(args, "ai_key_file", ""), getattr(args, "nodeyard_bin", ""))
+    ctx.ai = backend
+
+    def fail(h, e):
+        h._json({"ok": False, "error": str(e)}, getattr(e, "code", 400) if isinstance(e, AIError) else 500)
+
+    def targets(h, q):
+        try:
+            h._json(dict(backend.targets(), ok=True, demo=bool(getattr(args, "demo", False))))
+        except AIError as e:
+            fail(h, e)
+
+    def search(h, q):
+        try:
+            limit = int(q.get("limit", ["24"])[0])
+        except ValueError:
+            limit = 24
+        try:
+            h._json({"ok": True, "results": backend.hf.search(q.get("q", [""])[0], q.get("sort", ["downloads"])[0], limit)})
+        except AIError as e:
+            fail(h, e)
+
+    def files(h, q):
+        try:
+            h._json({"ok": True, "files": backend.hf.files(q.get("repo", [""])[0])})
+        except AIError as e:
+            fail(h, e)
+
+    def disk_models(h, q):
+        try:
+            h._json(dict(backend.disk_models(), ok=True))
+        except AIError as e:
+            fail(h, e)
+
+    def ollama(h, q):
+        try:
+            h._json({"ok": True, "pods": backend.ollama_overview()})
+        except AIError as e:
+            fail(h, e)
+
+    def ollama_load(h, body):
+        try:
+            backend.ollama_load(str(body.get("pod", "")), str(body.get("model", "")), bool(body.get("load", True)))
+            h._json({"ok": True})
+        except AIError as e:
+            fail(h, e)
+
+    def reveal(h, body):
+        try:
+            h._json({"ok": True, "key": backend.reveal_key()})
+        except AIError as e:
+            fail(h, e)
+
+    def job(h, q):
+        try:
+            since = max(0, int(q.get("since", ["0"])[0]))
+        except ValueError:
+            since = 0
+        v = backend.job(q.get("id", [""])[0], since)
+        if v is None:
+            return h._json({"ok": False, "error": "No such task."}, 404)
+        h._json(dict(v, ok=True))
+
+    def run(h, body):
+        action = str(body.get("action", ""))
+        if action == "cli" and h._forwarded() is not None:
+            return h._json({"ok": False, "error": "Running any command only works over Tailscale or your own network, not through public access."}, 403)
+        try:
+            h._json({"ok": True, "job": backend.run(action, body)})
+        except AIError as e:
+            fail(h, e)
+
+    # Chats being answered, so Stop can end them: id -> (owner, upstream connection).
+    # Closing the connection to the model makes llama.cpp stop working on the answer.
+    streams = {}
+    streams_lock = threading.Lock()
+
+    def cut(conn):
+        try:
+            sock = conn.sock
+            if sock is not None:
+                sock.shutdown(socket.SHUT_RDWR)
+        except (OSError, AttributeError):
+            pass
+
+    def watch(h, conn, done):
+        """Ends the model's work when the page goes away (closed tab, aborted request),
+        not only at the next word it would have sent."""
+        sock = h.connection
+        if isinstance(sock, ssl.SSLSocket):
+            return  # (can't peek through TLS; the Stop button still works)
+        while not done.is_set():
+            try:
+                r, _, _ = select.select([sock], [], [], 1.0)
+                if r and not sock.recv(1, socket.MSG_PEEK):
+                    cut(conn)
+                    return
+                if r:
+                    done.wait(1.0)
+            except (OSError, ValueError):
+                cut(conn)
+                return
+
+    def stop(h, body):
+        sid = str(body.get("id", ""))[:64]
+        with streams_lock:
+            e = streams.get(sid)
+        if e and e[0] == (h._token() or "local"):
+            cut(e[1])
+        h._json({"ok": True, "stopped": bool(e)})
+
+    def chat(h, body):
+        msgs = body.get("messages")
+        if not isinstance(msgs, list) or not 1 <= len(msgs) <= 200:
+            return h._json({"ok": False, "error": "Send between 1 and 200 messages."}, 400)
+        total = 0
+        clean = []
+        for m in msgs:
+            if not isinstance(m, dict) or m.get("role") not in ("system", "user", "assistant") or not isinstance(m.get("content"), str):
+                return h._json({"ok": False, "error": "Each message needs a role and text."}, 400)
+            total += len(m["content"])
+            clean.append({"role": m["role"], "content": m["content"]})
+        if total > MAX_CHAT_CHARS:
+            return h._json({"ok": False, "error": "That conversation (with its files) is too long to send."}, 413)
+        try:
+            temp = min(2.0, max(0.0, float(body.get("temperature", 0.7))))
+            max_tokens = min(8192, max(1, int(body.get("max_tokens", 1024))))
+        except (TypeError, ValueError):
+            return h._json({"ok": False, "error": "Bad temperature or token limit."}, 400)
+        sid = str(body.get("stream_id") or "")[:64] or secrets.token_hex(8)
+        owner = h._token() or "local"
+        done = threading.Event()
+
+        def on_conn(conn):
+            with streams_lock:
+                streams[sid] = (owner, conn)
+            threading.Thread(target=watch, args=(h, conn, done), daemon=True).start()
+        try:
+            try:
+                conn, resp = backend.open_chat(str(body.get("target", "")), {"messages": clean, "temperature": temp, "max_tokens": max_tokens}, on_conn=on_conn)
+            except AIError as e:
+                return fail(h, e)
+            try:
+                h.send_response(200)
+                for k, v in (("Content-Type", "text/event-stream; charset=utf-8"), ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff"),
+                             ("X-Accel-Buffering", "no"), ("Connection", "close")):
+                    h.send_header(k, v)
+                h.end_headers()
+                h.close_connection = True
+                for line in iter(resp.readline, b""):
+                    h.wfile.write(line)
+                    h.wfile.flush()
+            except (OSError, http.client.HTTPException):
+                pass  # stopped, or the page went away
+            finally:
+                conn.close()
+        finally:
+            done.set()
+            with streams_lock:
+                streams.pop(sid, None)
+
+
+    ctx.get_routes.update({"/api/ai/targets": targets, "/api/ai/search": search, "/api/ai/files": files, "/api/job": job, "/api/ai/ollama": ollama,
+                           "/api/ai/models": disk_models})
+    ctx.post_routes.update({"/api/ai/chat": chat, "/api/ai/stop": stop, "/api/run": run, "/api/ai/ollama-load": ollama_load, "/api/ai/reveal-key": reveal})
+    ctx.post_limits["/api/ai/chat"] = 3 * MAX_CHAT_CHARS + 65536  # (JSON escapes; attached files make it big)
