@@ -475,3 +475,15 @@ body.term-full .tbox { flex: 1; height: auto; }
 .compress-note details { margin-top: 6px; text-align: left; } .compress-note summary { cursor: pointer; text-align: center; color: var(--accent); }
 .srcs { margin-top: 8px; font-size: 12.5px; } .srcs summary { cursor: pointer; color: var(--muted); }
 .srcs a { display: block; margin: 3px 0 0 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* chat plugins: tool cards and permission cards */
+.plugins { margin-top: 10px; } .plug { margin: 6px 0 0; } .plug input:disabled + span { opacity: .55; }
+.toolcard { margin: 6px 0; border: 1px solid var(--line2); border-radius: 10px; background: var(--panel2); font-size: 12.5px; overflow: hidden; }
+.toolcard > summary { cursor: pointer; padding: 7px 10px; display: flex; gap: 8px; align-items: center; list-style: none; flex-wrap: wrap; }
+.toolcard > summary::-webkit-details-marker { display: none; } .toolcard .tres { margin-left: auto; color: var(--muted); }
+.toolcard .tdot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
+.toolcard.running .tdot { background: var(--warn); } .toolcard.ok .tdot { background: var(--good); } .toolcard.bad .tdot { background: var(--bad); }
+.toolcard pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--line); max-height: 260px; overflow: auto; white-space: pre-wrap; font: 12px var(--mono); }
+.toolcard.todo { padding: 8px 10px; } .toolcard.todo .completed { color: var(--muted); text-decoration: line-through; } .toolcard.todo .in_progress { font-weight: 600; }
+.permcard { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--warn); border-radius: 10px; background: var(--panel2); }
+.permcard pre { margin: 6px 0 0; padding: 8px; max-height: 220px; overflow: auto; white-space: pre-wrap; font: 12px var(--mono); background: var(--bg2); border-radius: 8px; }

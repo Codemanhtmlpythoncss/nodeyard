@@ -9,6 +9,11 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- Dashboard chat **plugins** (Chat > Settings > Plugins): the AI can search the web and read pages, look things up on Wikipedia and
+  arXiv, get the weather, calculate, keep a task list, run Python (code interpreter) and use files and shell in a work folder. Tool
+  cards show in the conversation, and anything that runs code or changes things asks first (Allow / Allow for this chat / Deny); code
+  and file plugins run as the terminal user, never root, and never through public access. Built on the same agent as yardcode.
+
 - **yardcode**, a terminal AI agent (like Codex or Claude Code) for your own model API, on macOS and Linux (Python 3.8+, no
   packages): file, shell, Python and web tools (search, fetch, Wikipedia, arXiv, weather; no API keys), permissions with plan and
   accept-edits modes, sessions with `/rewind`, hooks, MCP servers, plugins, sub-agents, `YARDCODE.md` instructions, and automatic
@@ -112,6 +117,8 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Fixed
 
+- The dashboard's status dot (and so its pulsing ring) was rebuilt on every update, so it kept restarting like a loading circle
+  jumping back to the start. It is updated in place now, and the page still refreshes live with no polling.
 - Chat: **Stop** works at any time. The page's regular refresh disabled it
   while an answer was coming; now it stays live (also after switching chats
   or pages), and it tells the dashboard to cut the model's request, so

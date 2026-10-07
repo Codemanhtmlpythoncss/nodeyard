@@ -788,7 +788,12 @@
       else if (!S.live) { cls = ""; text = "Paused · " + fmt.dur(age) + " old"; }
       else text = streamHealthy() ? "Live · real time" : "Live · " + fmt.dur(age) + " ago";
     }
-    pill.innerHTML = '<i class="dot ' + cls + '"></i><span>' + esc(text) + "</span>";
+    // Updated in place: replacing the dot every second restarted its pulsing ring, which looked like a loading circle jumping back to the start.
+    let dot = pill.querySelector("i.dot"), label = pill.querySelector("span");
+    if (!dot || !label) { pill.innerHTML = '<i class="dot"></i><span></span>'; dot = pill.querySelector("i.dot"); label = pill.querySelector("span"); }
+    const want = "dot" + (cls ? " " + cls : "");
+    if (dot.className !== want) dot.className = want;
+    if (label.textContent !== text) label.textContent = text;
   }
   function banners() {
     const out = [];

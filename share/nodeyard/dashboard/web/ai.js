@@ -321,10 +321,78 @@
     return r;
   }
 
+
+  // ---- plugins: the AI uses tools (search, pages, Wikipedia, maths, Python, files) while it answers
+  const pluginList = (c) => {
+    if (!A.plugins) { fetch("/api/ai/plugins", { cache: "no-store" }).then((r) => r.json()).then((j) => { A.plugins = j.plugins || []; const el = $("#plugin-list"); if (el) setHTML(el, pluginList(curChat() || c)); }).catch(() => {}); return html`<span class="muted small">Loading…</span>`; }
+    return raw(A.plugins.map((p) => '<label class="check plug"><input type="checkbox" id="cp-' + esc(p.id) + '"' + ((c.plugins || []).includes(p.id) ? " checked" : "") + (p.available ? "" : " disabled") + '> <span><b>' + esc(p.label) + "</b>: " + esc(p.desc) +
+      (p.available ? "" : ' <span class="faint">(' + esc(p.why) + ")</span>") + "</span></label>").join(""));
+  };
+  const toolsHTML = (m) => {
+    if (!m.agent) return "";
+    const todo = m.todos && m.todos.length ? '<div class="toolcard todo"><b>Tasks</b>' + m.todos.map((x) => '<div class="' + esc(x.status) + '">' + (x.status === "completed" ? "☒ " : x.status === "in_progress" ? "◐ " : "☐ ") + esc(x.content) + "</div>").join("") + "</div>" : "";
+    const cards = (m.tools || []).map((x) => '<details class="toolcard ' + (x.status || "") + '"><summary><span class="tdot"></span><b>' + esc(x.name) + "</b> <span class=\"mono small\">" + esc((x.summary || "").replace(/^[A-Za-z_]+\(/, "(")) + '</span><span class="tres">' + esc(x.result || (x.status === "running" ? "running…" : "")) + "</span></summary>" +
+      (x.text ? "<pre>" + esc(x.text) + "</pre>" : "") + (x.diff ? "<pre>" + esc(x.diff.join("\n")) + "</pre>" : "") + "</details>").join("");
+    const p = m.perm, perm = p ? '<div class="permcard"><b>' + esc(p.tool) + "</b>: " + esc(p.reason || "needs your OK") + (p.risk ? '<div class="err">This ' + esc(p.risk) + ".</div>" : "") + (p.command ? "<pre>" + esc(p.command) + "</pre>" : "") + (p.target ? '<div class="mono small">' + esc(p.target) + "</div>" : "") +
+      (p.diff ? "<pre>" + esc(p.diff.lines.join("\n")) + "</pre>" : "") + '<div class="row" style="gap:8px;margin-top:8px"><button class="btn primary small" data-ai="agent-allow">Allow</button>' + (p.suggest ? '<button class="btn small" data-ai="agent-always">Allow for this chat</button>' : "") + '<button class="btn small danger" data-ai="agent-deny">Deny</button></div></div>' : "";
+    return todo + cards + perm;
+  };
+  function agentReply(c, a) {
+    const m = c && c.messages.slice().reverse().find((x) => x.perm); if (!m) return;
+    const p = m.perm; m.perm = null; paintLast();
+    postJSON("/api/ai/agent/reply", { chat: c.id, id: p.id, decision: a === "agent-deny" ? "deny" : "allow", scope: a === "agent-always" ? "session" : "once" }).catch(() => {});
+  }
+  async function sendAgent(c, mine, text, t) {
+    c.messages.push(mine); A.attach = []; renderAttach();
+    if (c.title === "New chat") c.title = text.slice(0, 48);
+    const history = c.messages.slice(0, -1).filter((m) => !m.error && !m.pending).map((m) => ({ role: m.role, content: m.content || "" }));
+    const msg = { role: "assistant", content: "", thinking: "", pending: true, agent: true, tools: [], todos: null, perm: null };
+    c.messages.push(msg); renderThread(); renderChatList();
+    const ctrl = new AbortController(), sid = uid() + uid();
+    A.stream = { ctrl, chat: c.id, sid, agent: true }; paintSend();
+    const t0 = performance.now(); let raf = 0, usage = null;
+    const paint = () => { raf = 0; paintLast(); };
+    try {
+      const r = await fetch("/api/ai/agent", { method: "POST", cache: "no-store", signal: ctrl.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ chat: c.id, text: apiContent(mine), plugins: c.plugins, history, max_tokens: c.max_tokens || 0 }) });
+      if (r.status === 401) { location.href = "/login"; return; }
+      if (!r.ok) { let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ } throw new Error(j.error || "The AI helper didn't start (HTTP " + r.status + ")."); }
+      const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read(); if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          let ev; try { ev = JSON.parse(line.slice(5)); } catch (e) { continue; }
+          if (ev.type === "text") msg.content += ev.delta;
+          else if (ev.type === "thinking") msg.thinking += ev.delta;
+          else if (ev.type === "tool_use") msg.tools.push({ id: ev.id, name: ev.name, summary: ev.summary, status: "running" });
+          else if (ev.type === "tool_result") { const x = msg.tools.find((k) => k.id === ev.id); if (x) { x.status = ev.ok ? "ok" : "bad"; x.result = ev.summary; x.text = (ev.text || "").slice(0, 2500); x.diff = ev.diff ? ev.diff.lines.slice(0, 40) : null; } }
+          else if (ev.type === "permission") msg.perm = ev;
+          else if (ev.type === "todos") msg.todos = ev.items;
+          else if (ev.type === "usage") usage = ev;
+          else if (ev.type === "error") msg.error = ev.text;
+          else if (ev.type === "warn" && !msg.content) msg.content = "_" + ev.text + "_";
+          if (ev.type === "done" || ev.type === "exit") break;
+          if (!raf) raf = requestAnimationFrame(paint);
+        }
+      }
+    } catch (e) {
+      if (e.name !== "AbortError") msg.error = e.message || "Something went wrong.";
+    } finally {
+      msg.pending = false; msg.perm = null;
+      if (!msg.error && !msg.content && !msg.tools.length) msg.error = ctrl.signal.aborted ? "Stopped." : "The AI sent an empty answer.";
+      if (msg.error === "Stopped." && (msg.content || msg.tools.length)) msg.error = "";
+      msg.meta = [usage && usage.tok_s ? usage.tok_s + " tokens/s" : "", msg.tools.length ? msg.tools.length + " tool call" + (msg.tools.length === 1 ? "" : "s") : "", ((performance.now() - t0) / 1000).toFixed(1) + " s", t.name].filter(Boolean).join(" · ");
+      A.stream = null; paintSend(); saveChats(); paintLast(); refreshChat();
+    }
+  }
+
   // ------------------------------------------------------------------ chat
   const curChat = () => A.chats.find((c) => c.id === A.cur);
   function newChat(target) {
-    const c = { id: uid(), title: "New chat", target: target || (targetList().find((t) => t.ready) || {}).id || "", messages: [], system: "", temperature: 0.7, max_tokens: 1024, compress: "auto", web: false, created: Date.now() };
+    const c = { id: uid(), title: "New chat", target: target || (targetList().find((t) => t.ready) || {}).id || "", messages: [], system: "", temperature: 0.7, max_tokens: 1024, compress: "auto", web: false, plugins: [], created: Date.now() };
     A.chats.unshift(c); A.cur = c.id; saveChats();
     return c;
   }
@@ -374,7 +442,7 @@
   }
   function stopStream() {
     const st = A.stream; if (!st) return;
-    postJSON("/api/ai/stop", { id: st.sid }).catch(() => {});
+    if (st.agent) postJSON("/api/ai/agent/stop", { chat: st.chat }).catch(() => {}); else postJSON("/api/ai/stop", { id: st.sid }).catch(() => {});
     st.ctrl.abort();
   }
   // ---- attached files (text only: that's what the model can read)
@@ -416,7 +484,7 @@
     const body = m.error ? (m.content ? md(m.content, i, false) : "") + '<div class="err">' + esc(m.error) + '</div><button class="btn small" data-ai="retry">Try again</button>' : (m.content || m.thinking ? md((m.thinking ? "<think>" + m.thinking + "</think>" : "") + m.content, i, !!m.pending) : '<span class="typing"><i></i><i></i><i></i></span>');
     const meta = m.meta ? '<div class="meta">' + esc(m.meta) + "</div>" : "";
     const tools = !m.pending && !m.error && m.content ? '<div class="tools"><button data-ai="copy-msg" data-i="' + i + '">Copy</button>' + (last ? '<button data-ai="regen">Regenerate</button>' : "") + "</div>" : "";
-    return '<div class="msg assistant" data-i="' + i + '"><div class="avatar">AI</div><div class="bubble"><div class="md">' + body + (m.pending && m.content ? '<span class="caret"></span>' : "") + "</div>" + meta + tools + "</div></div>";
+    return '<div class="msg assistant" data-i="' + i + '"><div class="avatar">AI</div><div class="bubble">' + toolsHTML(m) + '<div class="md">' + body + (m.pending && m.content ? '<span class="caret"></span>' : "") + "</div>" + meta + tools + "</div></div>";
   };
   function renderThread() {
     const c = curChat(), el = $("#thread"); if (!c || !el) return;
@@ -450,6 +518,8 @@
           <button class="btn small" data-ai="compress-now" type="button" title="Summarise the earlier messages now to free up the model's memory">Compress now</button></div>
         <p class="muted small" style="margin:4px 0 0">Near the model's context length, older messages are replaced by a short summary the model writes, so the chat can go on.</p>
         <label class="check"><input type="checkbox" id="cs-web" ${c.web ? raw("checked") : ""}> <span><b>Web search</b>: look each question up on the internet and give the model what it finds (with sources)</span></label>
+        <div class="plugins"><b>Plugins</b> <span class="muted small">the AI decides when to use them. Slower: every question carries the tool list, so a small cluster model takes a while.</span>
+          <div id="plugin-list">${pluginList(c)}</div></div>
         <label class="check"><input type="checkbox" id="cs-files" ${c.files !== false ? raw("checked") : ""}> <span><b>Make files</b>: scripts, pages and documents the AI writes come as files to download (a .zip for folders)</span></label>`);
     }
   }
@@ -462,6 +532,7 @@
       text = (text || "").trim(); if (!text && !A.attach.length) return;
       mine = { role: "user", content: text, files: A.attach.length ? A.attach.slice() : undefined };
     }
+    if (mine && c.plugins && c.plugins.length && text) return sendAgent(c, mine, text, t);   // plugins: the AI decides when to use tools
     const noLimit = !c.max_tokens;
     if (mine && c.web && text) {   // look things up first, so the model answers with what it found
       A.searching = c.id; refreshChat();
@@ -786,8 +857,9 @@
     if (a === "new-chat") { newChat(); buildChat(); }
     else if (a === "open-chat") { A.cur = el.dataset.id; saveChats(); buildChat(); }
     else if (a === "del-chat") { e.stopPropagation(); A.chats = A.chats.filter((x) => x.id !== el.dataset.id); if (A.cur === el.dataset.id) A.cur = (A.chats[0] || {}).id || ""; saveChats(); buildChat(); }
-    else if (a === "clear-chat" && c) { if (A.stream) A.stream.ctrl.abort(); c.messages = []; c.summary = ""; c.summaryUpTo = 0; c.title = "New chat"; saveChats(); renderThread(); renderChatList(); refreshChat(); }
+    else if (a === "clear-chat" && c) { if (A.stream) A.stream.ctrl.abort(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); c.messages = []; c.summary = ""; c.summaryUpTo = 0; c.title = "New chat"; saveChats(); renderThread(); renderChatList(); refreshChat(); }
     else if (a === "compress-now" && c) { compressChat(c, { manual: true }); }
+    else if (a === "agent-allow" || a === "agent-always" || a === "agent-deny") { agentReply(c, a); }
     else if (a === "stop-compress") { if (A.sumCtrl) A.sumCtrl.abort(); }
     else if (a === "chat-settings") settingsPanel();
     else if (a === "suggest") { send(el.textContent); }
@@ -875,6 +947,7 @@
     else if (t.id === "cs-nolimit" && c) { c.max_tokens = t.checked ? 0 : (+($("#cs-max").value) || 1024); $("#cs-max").disabled = t.checked; saveChats(); }
     else if (t.id === "cs-compress" && c) { c.compress = t.value; saveChats(); refreshChat(); }
     else if (t.id === "cs-web" && c) { c.web = t.checked; saveChats(); }
+    else if (t.id && t.id.startsWith("cp-") && c) { const id = t.id.slice(3); c.plugins = (c.plugins || []).filter((x) => x !== id).concat(t.checked ? [id] : []); saveChats(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); }
   });
   document.addEventListener("change", (e) => {
     const c = curChat();

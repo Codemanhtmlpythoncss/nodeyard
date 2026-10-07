@@ -537,6 +537,8 @@ def main():
         aiapi.register(ctx, a)
         import controlapi
         controlapi.register(ctx, a)
+        import agentapi
+        agentapi.register(ctx, a)
     import settings
     settings.register(ctx, a)
     import terminal

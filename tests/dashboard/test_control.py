@@ -177,3 +177,61 @@ class ChatAndWeb(Control):
         self.assertTrue(j["sources"])
         s, raw = self.post_session("/api/ai/web", {"query": "   "})
         self.assertEqual(s, 502)
+
+
+class Plugins(ChatAndWeb):
+    """The chat's plugins (demo agent): the list, a tool run streamed to the page, and a permission round trip."""
+
+    def stream(self, cookie_path, body, reply_after=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        conn.request("POST", "/api/login", body=json.dumps({"password": PASSWORD}), headers={"Content-Type": "application/json", "X-Nodeyard": "1"})
+        r = conn.getresponse()
+        r.read()
+        cookie = r.getheader("Set-Cookie").split(";")[0]
+        h = {"Content-Type": "application/json", "X-Nodeyard": "1", "Cookie": cookie}
+        conn.request("POST", "/api/ai/agent", body=json.dumps(body), headers=h)
+        r = conn.getresponse()
+        events = []
+        for line in r:
+            line = line.decode().strip()
+            if not line.startswith("data:"):
+                continue
+            ev = json.loads(line[5:])
+            events.append(ev)
+            if ev["type"] == "permission" and reply_after:
+                c2 = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+                c2.request("POST", "/api/ai/agent/reply", body=json.dumps({"chat": body["chat"], "id": ev["id"], "decision": reply_after}), headers=h)
+                c2.getresponse().read()
+            if ev["type"] in ("done", "exit"):
+                break
+        conn.close()
+        return events
+
+    def test_the_list_marks_what_is_available(self):
+        s, raw = self.post_session("/api/ai/agent", {})
+        self.assertEqual(s, 400)
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request("POST", "/api/login", body=json.dumps({"password": PASSWORD}), headers={"Content-Type": "application/json", "X-Nodeyard": "1"})
+        r = conn.getresponse()
+        r.read()
+        cookie = r.getheader("Set-Cookie").split(";")[0]
+        conn.request("GET", "/api/ai/plugins", headers={"Cookie": cookie})
+        j = json.loads(conn.getresponse().read())
+        ids = [p["id"] for p in j["plugins"]]
+        for want in ("web", "wikipedia", "arxiv", "weather", "calculator", "python", "files"):
+            self.assertIn(want, ids)
+        self.assertTrue(all(p["available"] for p in j["plugins"]))     # (the demo allows everything)
+
+    def test_tools_stream_to_the_page(self):
+        ev = self.stream("x", {"chat": "c1", "text": "what is tailscale", "plugins": ["web"]})
+        types = [e["type"] for e in ev]
+        self.assertIn("tool_use", types)
+        self.assertIn("tool_result", types)
+        self.assertEqual(ev[-1]["type"], "done")
+
+    def test_code_asks_first_and_runs_only_when_allowed(self):
+        ev = self.stream("x", {"chat": "c2", "text": "please run some python", "plugins": ["web", "python"]}, reply_after="allow")
+        self.assertTrue(any(e["type"] == "permission" and e["tool"] == "Python" for e in ev))
+        self.assertTrue(any(e["type"] == "tool_result" and e["name"] == "Python" and e["ok"] for e in ev))
+        ev = self.stream("x", {"chat": "c3", "text": "please run some python", "plugins": ["web", "python"]}, reply_after="deny")
+        self.assertTrue(any(e["type"] == "tool_result" and e["name"] == "Python" and not e["ok"] for e in ev))
