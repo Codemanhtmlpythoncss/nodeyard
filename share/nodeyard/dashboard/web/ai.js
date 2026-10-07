@@ -105,6 +105,20 @@
     "</file>",
     'Folders in the path make folders (app/src/main.py); an empty folder is <folder path="app/data"/>. Always the whole file, no ``` fences inside. Then say briefly what each file does and how to use it. Attached files arrive in the same format.',
   ].join("\n");
+  // Replies only become files when you ask for one (or set the chat to "Always"): "write a script" stays a normal code block.
+  const ASKS_FOR_FILE = new RegExp([
+    // "make / give me / put it in ... a file": the file is what is being produced (at most 4 words in between, so "parses a log file" doesn't count)
+    "\\b(?:make|create|generate|write|give|send|save|export|provide|produce|put|build)\\b\\s+(?:me\\s+|us\\s+)?(?:(?:a|an|the|that|this|it|them|those|these|new|single|one|separate|downloadable|\\.?\\w{1,12})\\s+){0,4}(?:files?|zips?|downloads?|downloadable|attachments?)\\b",
+    "\\bas\\s+(?:an?\\s+)?(?:\\.?\\w{1,12}\\s+)?(?:file|zip)\\b",                      // "as a file", "as a .py file", "as a zip"
+    "\\bdownload(?:able|s)?\\b",
+    "\\b(?:save|export)\\s+(?:\\w+\\s+){0,3}(?:as|to|into)\\s+[\\w./-]+\\.\\w{1,5}\\b",   // "save it as app.py"
+  ].join("|"), "i");
+  function wantFiles(c, extra) {
+    const mode = c.files === false || c.files === "never" ? "never" : c.files === "always" ? "always" : "ask";
+    if (mode !== "ask") return mode === "always";
+    const last = extra ? extra.content : ((c.messages.slice().reverse().find((m) => m.role === "user") || {}).content);
+    return ASKS_FOR_FILE.test(last || "");
+  }
   const FILE_RX = /<file\s+(?:path|name)\s*=\s*["']([^"'\n]{1,300})["'][^>\n]*>\n?([\s\S]*?)(<\/file>|$)/g;
   const FOLDER_RX = /<folder\s+(?:path|name)\s*=\s*["']([^"'\n]{1,300})["'][^>\n]*?\/?>(?:\s*<\/folder>)?/g;
   const cleanPath = (p) => p.replace(/\\/g, "/").split("/").filter((x) => x && x !== "." && x !== "..").map((x) => x.replace(/[\u0000-\u001f<>:"|?*]/g, "_").slice(0, 120)).join("/") || "file.txt";
@@ -305,7 +319,7 @@
   const WEB_PROMPT = "Some user messages include <web_results>: search results and page excerpts fetched from the internet for that question. Use them for current facts, quote carefully, and mention the source addresses you relied on. If they don't answer the question, say so.";
   // the messages the model gets: system prompt, a summary of what was compressed away, then the rest
   function chatMessages(c, extra, prune) {
-    const sys = [c.files !== false ? FILES_PROMPT : "", c.system || "", c.web ? WEB_PROMPT : ""].filter(Boolean).join("\n\n");
+    const sys = [wantFiles(c, extra) ? FILES_PROMPT : "", c.system || "", c.web ? WEB_PROMPT : ""].filter(Boolean).join("\n\n");
     const from = Math.min(c.summaryUpTo || 0, c.messages.length), out = sys ? [{ role: "system", content: sys }] : [];
     if (c.summary && from > 0) out.push({ role: "user", content: "[Summary of the earlier part of our conversation, compressed to save space]\n\n" + c.summary }, { role: "assistant", content: "Understood. I'll continue from that summary." });
     const rest = c.messages.slice(from).concat(extra ? [extra] : []).filter((m) => !m.error && !m.pending);
@@ -483,7 +497,7 @@
     ["model", "[name]", "Pick the model for this chat"], ["models", "", "Open the Models tab (load, download, delete)"], ["unload", "", "Unload the model to free memory"], ["max", "[tokens|none]", "Set the longest reply (none = no limit)"],
     ["web", "[on|off]", "Always search the web first"], ["plugins", "[on|off NAME]", "Show or switch plugins (search, Wikipedia, Python...)"], ["system", "[text]", "Set the system prompt"],
     ["temp", "[0-2]", "Set creativity"], ["run", "", "Run the last code block the AI wrote"], ["fix", "", "Ask the AI to fix the last code that failed"], ["autofix", "[on|off]", "Run code automatically and let the AI fix errors"],
-    ["retry", "", "Answer the last message again"], ["stop", "", "Stop the answer"], ["copy", "", "Copy the last answer"], ["export", "", "Download this chat as a file"], ["context", "", "How full the model's memory is"],
+    ["files", "[ask|always|never]", "When the AI delivers files (default: only when you ask)"], ["retry", "", "Answer the last message again"], ["stop", "", "Stop the answer"], ["copy", "", "Copy the last answer"], ["export", "", "Download this chat as a file"], ["context", "", "How full the model's memory is"],
   ];
   const lastBlock = (c) => { for (let i = c.messages.length - 1; i >= 0; i--) { const m = c.messages[i]; if (m.role !== "assistant" || !m.content || m.error) continue; md(m.content, i, false); const bl = (A.blocks[i] || []).map((b, k) => [b, k]).filter(([b]) => b && b.lang); if (bl.length) return { i, b: bl[bl.length - 1][0], k: bl[bl.length - 1][1] }; } return null; };
   async function slash(line) {
@@ -522,6 +536,7 @@
       case "temp": if (arg && !isNaN(+arg)) { c.temperature = Math.min(2, Math.max(0, +arg)); saveChats(); toast("Creativity " + c.temperature); } else toast("Creativity is " + c.temperature + ". Give a number from 0 to 2."); break;
       case "run": { const lb = lastBlock(c); if (!lb) { toast("No code the AI wrote can be run (python, bash or javascript)."); break; } await runCode(c, lb.i, lb.k, lb.b.lang, lb.b.code); break; }
       case "fix": { const lb = lastBlock(c); const r = lb && c.messages[lb.i].runs && c.messages[lb.i].runs[lb.k]; if (!r || r.running) { toast("Run the code first (▶ Run, or /run)."); break; } send(fixPrompt(r)); break; }
+      case "files": { const v = (arg || "").toLowerCase(); if (["ask", "always", "never"].includes(v)) { c.files = v; saveChats(); toast(v === "ask" ? "Files only when you ask for one." : v === "always" ? "Scripts, pages and documents come as files." : "No files: everything stays in the chat."); } else toast("Files: " + (c.files === "always" ? "always" : c.files === false || c.files === "never" ? "never" : "only when you ask") + ". Use /files ask, always or never."); break; }
       case "retry": send("", true); break;
       case "stop": stopStream(); break;
       case "copy": { const m = c.messages.slice().reverse().find((x) => x.role === "assistant" && x.content); if (m) copyText(m.content); else toast("Nothing to copy."); break; }
@@ -683,7 +698,7 @@
         <div class="plugins"><b>Plugins</b> <span class="muted small">the AI decides when to use them. Slower: every question carries the tool list, so a small cluster model takes a while.</span>
           <div id="plugin-list">${pluginList(c)}</div></div>
         <label class="check"><input type="checkbox" id="cs-autofix" ${c.autofix ? raw("checked") : ""}> <span><b>Run and fix code automatically</b>: runs the code the AI writes on the server (as your user) and sends errors back so it fixes them, up to 3 tries. Off by default; code only runs when you press ▶ Run.</span></label>
-        <label class="check"><input type="checkbox" id="cs-files" ${c.files !== false ? raw("checked") : ""}> <span><b>Make files</b>: scripts, pages and documents the AI writes come as files to download (a .zip for folders)</span></label>`);
+        <label>Files<select class="select" id="cs-files"><option value="ask" ${!c.files || c.files === true || c.files === "ask" ? raw("selected") : ""}>Only when I ask for a file</option><option value="always" ${c.files === "always" ? raw("selected") : ""}>Always: scripts, pages and documents as files</option><option value="never" ${c.files === false || c.files === "never" ? raw("selected") : ""}>Never</option></select></label>`);
     }
   }
   async function send(text, regen) {
@@ -1137,6 +1152,6 @@
     if (e.target.id === "chat-target") { if (c) { c.target = e.target.value; saveChats(); refreshChat(true); } }
     else if (e.target.id === "ai-model") pickModel(e.target);
     else if (e.target.id === "attach-input") { addFiles(e.target.files).then(() => { e.target.value = ""; }); }
-    else if (e.target.id === "cs-files" && c) { c.files = e.target.checked; saveChats(); }
+    else if (e.target.id === "cs-files" && c) { c.files = e.target.value; saveChats(); }
   });
 })();

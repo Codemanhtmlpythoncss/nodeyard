@@ -222,7 +222,7 @@ next to nodeyard on the server and never fetches private network addresses).
 
 - **`/` commands**: type `/` in the message box for a menu: `/help`, `/new`, `/compact`, `/model`, `/models`, `/unload`, `/max`
   (`/max none` = no reply limit), `/web`, `/plugins`, `/system`, `/temp`, `/run`, `/fix`, `/autofix`, `/retry`, `/stop`, `/copy`,
-  `/export`, `/context`. A message that really starts with a slash: type `//`.
+  `/export`, `/context`, `/files`. A message that really starts with a slash: type `//`.
 - **Plugins** (chat Settings): the AI decides when to search the web and read pages, look things up on Wikipedia or arXiv, get the
   weather, calculate, keep a task list, run Python (code interpreter) or use files and shell. Every tool call shows as a card;
   anything that runs code or changes things asks first (Allow / Allow for this chat / Deny). Python, files and shell run as the
@@ -237,3 +237,10 @@ The **AI model** menu lists the models downloaded on your machines. Picking one 
 you send your next message, and sending does the rest (switches to it, keeps the old model's files, shows the progress, and sends
 your message once the model answers). If the running model was unloaded, sending loads it again. For the machines and context length,
 use the Models tab.
+
+## When the AI makes files
+
+By default the AI only delivers a file (a card you can view, copy or download; a .zip for several) when you ask for one: "give me
+that as a .py file", "make me a file with…", "download it as a zip". Ordinary requests ("write me a script") stay in the chat as code
+blocks that you can run. Change it per chat in Settings > Files, or with `/files ask`, `/files always` (every script, page and
+document becomes a file) or `/files never`.

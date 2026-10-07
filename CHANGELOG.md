@@ -9,6 +9,10 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- Dashboard chat: **replies are only made into files when you ask for one** ("give me that as a .py file", "make me a zip",
+  "download it"). "Write me a script" now stays a normal code block (with its Run button). The chat Settings have a Files menu: only
+  when I ask (default), always, or never; `/files ask|always|never` does the same.
+
 - AI tab: **the selected model loads when you send a message**. Picking a model in the AI model menu only selects it; sending
   switches to it, shows the loading progress ("Don't wait" gives up waiting) and sends your message when the model answers. The same
   happens when the running model was unloaded. `/model NAME` picks a downloaded model too.
