@@ -146,7 +146,7 @@ def run_interactive(app, a, prompt):
     st = app.settings
     if not st.api_base:
         app.tui.w(S.bold("\n  Welcome to yardcode."))
-        app.tui.w(S.muted("  First, tell me where your model API is. For a nodeyard cluster that's its Tailscale or LAN address, e.g. 100.82.189.124.\n"))
+        app.tui.w(S.muted("  First, tell me where your model API is. For a nodeyard cluster that's its Tailscale or LAN address, e.g. 100.64.0.10.\n"))
         app.new_agent()
         from . import slash
         slash.c_login(app, "")

@@ -11,7 +11,7 @@ import os
 from . import util
 
 DEFAULTS = {
-    "api_base": "",              # e.g. http://100.82.189.124:31435/v1
+    "api_base": "",              # e.g. http://100.64.0.10:31435/v1
     "model": "",                 # empty = whatever the server has loaded
     "control_url": "",           # the nodeyard dashboard, for loading models remotely (default: same host, port 9092)
     "context_window": 0,         # 0 = ask the server

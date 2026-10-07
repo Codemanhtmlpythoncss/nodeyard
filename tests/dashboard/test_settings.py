@@ -103,7 +103,7 @@ class Service(unittest.TestCase):
                     {"port": 9092, "interval": 2, "listen": "local; rm -rf /"}, {"port": 9092, "interval": 2, "listen": "999.1.1.1"}):
             with self.assertRaises(settings.SettingsError):
                 s.apply_service(bad)
-        self.assertEqual(s.apply_service({"port": 9093, "interval": 5, "listen": "local,100.82.189.124"}), {"restarting": False})
+        self.assertEqual(s.apply_service({"port": 9093, "interval": 5, "listen": "local,100.64.0.10"}), {"restarting": False})
 
 
 class Allowlist(unittest.TestCase):

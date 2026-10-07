@@ -66,7 +66,7 @@ def serve(handler_gate):
 class Decisions(unittest.TestCase):
     def test_default_trusted_networks(self):
         nets = gate.parse_networks(gate.DEFAULT_TRUSTED)
-        for ip in ("127.0.0.1", "10.42.1.5", "192.168.1.20", "172.20.0.1", "100.82.189.124", "::1", "fd7a:115c:a1e0::d236:bd7d", "::ffff:192.168.1.5"):
+        for ip in ("127.0.0.1", "10.42.1.5", "192.168.1.20", "172.20.0.1", "100.64.0.10", "::1", "fd7a:115c:a1e0::d236:bd7d", "::ffff:192.168.1.5"):
             self.assertTrue(gate.is_trusted(ip, nets), ip)
         for ip in ("8.8.8.8", "203.0.113.9", "100.128.0.1", "172.32.0.1", "2001:db8::1", "not-an-ip"):
             self.assertFalse(gate.is_trusted(ip, nets), ip)
