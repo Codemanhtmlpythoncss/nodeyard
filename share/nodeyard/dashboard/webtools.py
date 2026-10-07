@@ -70,4 +70,49 @@ def research(query, demo=False):
         _busy.release()
 
 
+ALLOWED = ("WebSearch", "WebFetch", "Wikipedia", "Arxiv", "Weather")
+_tool_slots = threading.BoundedSemaphore(3)
+
+
+def run_tool(name, args):
+    """One of yardcode's web tools, run from THIS machine's internet connection (so a client behind a school or work filter, or on a
+    poor connection, searches through the server). Private network addresses are never fetched."""
+    if name not in ALLOWED or not isinstance(args, dict):
+        raise WebError("That isn't a web tool I can run.")
+    try:
+        from yardcode import config
+        from yardcode.tools import base, web
+    except ImportError:
+        raise WebError("The web tools need yardcode, which isn't installed next to nodeyard on this server.")
+    settings = config.Settings("/", overrides={"web": {"allow_private": False, "timeout": 20}}, environ={})
+    ctx = base.Context(settings, "/")
+    clean = {k: v for k, v in args.items() if not str(k).startswith("_")}
+    try:
+        r = getattr(web, name)().run(clean, ctx)
+    except base.ToolError as e:
+        raise WebError(str(e))
+    return {"text": r.text, "summary": r.summary, "preview": r.preview, "error": bool(r.error)}
+
+
+def register(ctx, args):
+    demo = bool(getattr(args, "demo", False))
+
+    def tool(h, body):
+        name, a = str(body.get("tool", "")), body.get("args")
+        if name not in ALLOWED or not isinstance(a, dict):
+            return h._json({"ok": False, "error": "Say which web tool (%s) and its arguments." % ", ".join(ALLOWED)}, 400)
+        if demo:
+            return h._json({"ok": True, "text": "(demo) %s ran on the server; nothing was fetched." % name, "summary": "demo result", "preview": ["demo"], "error": False})
+        if not _tool_slots.acquire(blocking=False):
+            return h._json({"ok": False, "error": "The server is busy with other searches. Try again in a moment."}, 429)
+        try:
+            h._json(dict(run_tool(name, a), ok=True))
+        except WebError as e:
+            h._json({"ok": False, "error": str(e)}, 502)
+        finally:
+            _tool_slots.release()
+
+    ctx.post_routes["/api/v1/web/tool"] = tool
+
+
 _ = urllib.parse

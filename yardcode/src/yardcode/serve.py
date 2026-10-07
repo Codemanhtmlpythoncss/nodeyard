@@ -66,6 +66,9 @@ class JsonFrontend(Frontend):
     def waiting(self, label, tokens=0):
         self.emit({"type": "waiting", "label": label})
 
+    def progress(self, done, total, cached=0):
+        self.emit({"type": "progress", "done": done, "total": total, "cached": cached})
+
     def tool_use(self, call_id, name, summary, args, depth=0):
         shown = {k: (v if not isinstance(v, str) or len(v) <= 2000 else v[:2000] + "…") for k, v in args.items() if not k.startswith("_")}
         self.emit({"type": "tool_use", "id": call_id, "name": name, "summary": summary, "input": shown, "depth": depth})
@@ -154,6 +157,7 @@ def make_emitter(stream=None):
 def serve(app, window):
     """Run until stdin closes: one conversation, driven by JSON commands."""
     emit = make_emitter()
+    app.settings.data["web"] = dict(app.settings.data.get("web") or {}, via="local")   # (this IS the server: no detour)
     fe = JsonFrontend(emit, interactive=True)
     app.tui = fe
     ag = app.new_agent(window=window)

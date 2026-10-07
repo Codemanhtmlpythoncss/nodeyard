@@ -7,7 +7,7 @@ from .web import WEB_TOOLS
 # The names a person sees in /tools, grouped (the order they are shown to the model).
 GROUPS = [
     ("Files", ["Read", "Write", "Edit", "MultiEdit", "LS", "Glob", "Grep"]),
-    ("Shell", ["Bash", "BashOutput", "KillShell", "Python"]),
+    ("Shell", ["Bash", "BashOutput", "KillShell", "Python", "Terminal"]),
     ("Web", ["WebSearch", "WebFetch", "Wikipedia", "Arxiv", "Weather"]),
     ("Thinking", ["TodoWrite", "Calculator", "FileSearch", "Memory", "AskUserQuestion", "ExitPlanMode", "Task"]),
     ("Cluster", ["Model"]),

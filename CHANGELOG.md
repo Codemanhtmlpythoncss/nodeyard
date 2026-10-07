@@ -9,6 +9,22 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- yardcode: **type `/` and the commands appear above the prompt** (filter as you type, Up/Down, Tab or Enter), with the input framed
+  between two rules and the permission mode, model and context use on the line below. **Shell mode**: `!` on an empty prompt (or
+  `/shell`) gives a real shell prompt: your own `$SHELL` with the terminal attached (vim, ssh, top, sudo, Ctrl-C all work), `cd` and
+  exported variables carry over, Tab completes files, history is separate, and what a command printed is added to the conversation.
+  `!command` runs one line the same way. New **`/reset`** forgets the conversation and starts the model fresh (the old one stays in
+  `/resume`). Start-up no longer waits minutes when the server can't be reached: it says so after 4 seconds.
+- yardcode: web search and page reading go **through the nodeyard server** (its internet connection, not the computer you type on);
+  `/doctor` shows where it runs and `web.via` (`auto`, `server`, `local`) sets it. The Weather tool picks the most likely place and
+  lists the others ("Jersey" is the island; add the country for another).
+- yardcode chats are shared with the dashboard: they appear in the AI tab's chat list and can be continued there, and `/chats`
+  (or `yardcode chats`) continues a dashboard chat in the terminal. `yardcode update` (and `/update`) updates from your server or GitHub.
+
+- yardcode: **`/think live`** (or `--show-thinking`) streams the model's reasoning on screen as it is written; `show` keeps the short
+  summary and `hide` removes it. While the model reads a long prompt the screen now says so, with progress and time left (llama.cpp),
+  and the prompt is smaller and identical every time, so the model server can reuse what it already read: a context under 12k tokens
+  gets 9 essential tools (about 1.3k tokens instead of 3.2k), the date and folder go in the first message, not the system prompt.
 - Dashboard chat: **replies are only made into files when you ask for one** ("give me that as a .py file", "make me a zip",
   "download it"). "Write me a script" now stays a normal code block (with its Run button). The chat Settings have a Files menu: only
   when I ask (default), always, or never; `/files ask|always|never` does the same.

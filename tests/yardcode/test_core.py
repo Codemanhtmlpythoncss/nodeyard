@@ -278,3 +278,39 @@ class Drawing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ThinkingDisplay(unittest.TestCase):
+    def tui(self, mode):
+        import io
+        from yardcode import tui
+        out = io.StringIO()
+        s = type("S", (), {"get": lambda self, k, d=None: mode if k == "thinking" else d})()
+        return tui.TUI(s, S=ui.Style(False), out=out), out
+
+    def test_live_mode_streams_the_reasoning_as_it_arrives(self):
+        t, out = self.tui("live")
+        t.on_thinking("Let me think. ")
+        self.assertIn("Let me think.", out.getvalue())             # already on screen, before the answer
+        t.on_thinking("Second\nline")
+        t.end_text()
+        self.assertIn("    line", out.getvalue())
+        t.end_turn("done")
+        self.assertNotIn("No reasoning came", out.getvalue())
+
+    def test_a_model_that_never_thinks_gets_one_hint_in_live_mode(self):
+        t, out = self.tui("live")
+        t.end_turn("x")
+        t.end_turn("y")
+        self.assertEqual(out.getvalue().count("No reasoning came"), 1)
+
+    def test_show_mode_summarizes_after_and_hide_shows_nothing(self):
+        t, out = self.tui("show")
+        t.on_thinking("a\nb")
+        self.assertEqual(out.getvalue(), "")                        # nothing until it is over
+        t.end_text()
+        self.assertIn("thinking (2 lines)", out.getvalue())
+        t2, out2 = self.tui("hide")
+        t2.on_thinking("secret")
+        t2.end_text()
+        self.assertNotIn("secret", out2.getvalue())

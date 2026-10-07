@@ -62,6 +62,8 @@ def build_parser():
     p.add_argument("--system-prompt", help="replace the built-in instructions")
     p.add_argument("--append-system-prompt", help="add to the built-in instructions")
     p.add_argument("--output-format", choices=["text", "json", "stream-json"], default="text", help="with -p: how to print the result")
+    p.add_argument("--show-thinking", action="store_true", help="show the model's reasoning live, as it writes it")
+    p.add_argument("--hide-thinking", action="store_true", help="don't show the model's reasoning")
     p.add_argument("--theme", choices=["auto", "dark", "light", "none"], help="colours")
     p.add_argument("--no-color", action="store_true", help="plain text, no colours")
     p.add_argument("--no-session", action="store_true", help="don't save this conversation")
@@ -85,6 +87,10 @@ def overrides_from(a):
                      ("api_key", a.api_key)):
         if val is not None:
             o[key] = val
+    if a.show_thinking:
+        o["thinking"] = "live"
+    elif a.hide_thinking:
+        o["thinking"] = "hide"
     if a.max_tokens is not None:
         o["max_tokens"] = 0 if str(a.max_tokens).lower() in ("none", "no", "0", "unlimited") else int(a.max_tokens)
     if a.add_dir:
@@ -102,7 +108,7 @@ def overrides_from(a):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] in ("login", "logout", "models", "config", "doctor", "sessions", "mcp", "version") and not any(x in argv[:1] for x in ("-p",)):
+    if argv and argv[0] in ("login", "logout", "models", "config", "doctor", "sessions", "mcp", "version", "update", "chats") and not any(x in argv[:1] for x in ("-p",)):
         return run_subcommand(argv[0], argv[1:])
     parser = build_parser()
     a = parser.parse_args(argv)
@@ -150,6 +156,7 @@ def run_interactive(app, a, prompt):
         app.new_agent()
         from . import slash
         slash.c_login(app, "")
+    app.tui.w(S.muted("  Connecting to %s ..." % st.api_base))
     window = app.discover()
     session = None
     if a.cont:
@@ -166,6 +173,9 @@ def run_interactive(app, a, prompt):
         from . import slash
         slash.c_resume(app, "")
     app.banner()
+    if app.unreachable:
+        app.tui.warn("Can't reach the model API (%s). You can still look around; it will try again when you send a message. "
+                     "Check the address with /status, change it with /login, and use a VPN or Tailscale if the cluster is on another network." % app.unreachable)
     r = hooks.run_hooks(st, "SessionStart", {}, app.agent.ctx.cwd, session_id=app.session.id)
     for w in r.warnings:
         app.tui.warn(w)
@@ -210,6 +220,7 @@ def run_print(app, a, prompt):
         return 2
     window = app.discover()
     fmt = a.output_format
+    app.persist = app.persist
     if fmt == "stream-json":
         emit = serve.make_emitter()
         fe = serve.JsonFrontend(emit, interactive=False)
@@ -247,6 +258,22 @@ def run_print(app, a, prompt):
     return 1 if failed else 0
 
 
+def run_update_command(app, rest):
+    """yardcode update [--check] [--server|--github] [--ref REF] [--from-dir DIR] [--force]"""
+    import argparse
+    from . import update
+    p = argparse.ArgumentParser(prog="yardcode update", description="Update yardcode (from your nodeyard server, else GitHub).")
+    p.add_argument("--check", action="store_true", help="only say whether a different version is available")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--server", action="store_true", help="only from your nodeyard server")
+    g.add_argument("--github", action="store_true", help="only from GitHub")
+    p.add_argument("--ref", default="main", help="GitHub branch or tag (default main)")
+    p.add_argument("--from-dir", default="", help="a nodeyard checkout to install from")
+    p.add_argument("--force", action="store_true", help="also update a copy that runs from a git checkout")
+    a = p.parse_args(rest)
+    return update.run_update(app.modelapi, "server" if a.server else "github" if a.github else "auto", a.ref, a.from_dir, a.check, a.force)
+
+
 def run_subcommand(name, rest):
     settings = Settings(os.getcwd())
     from .app import App
@@ -261,6 +288,19 @@ def run_subcommand(name, rest):
         slash.c_logout(app, "")
     elif name == "config":
         slash.c_config(app, " ".join(rest))
+    elif name == "update":
+        return run_update_command(app, rest)
+    elif name == "chats":
+        from . import sync
+        try:
+            rows = sync.list_remote(app)
+        except Exception as e:
+            print("yardcode: %s" % e, file=sys.stderr)
+            return 1
+        for r in rows:
+            print("%-22s %s  %-8s %s" % (r["id"], util.iso(r["updated"]), r.get("source", ""), r["title"]))
+        if not rows:
+            print("No shared chats yet.")
     elif name == "doctor":
         app.agent.context_window = app.discover() or app.agent.context_window
         slash.c_doctor(app, "")

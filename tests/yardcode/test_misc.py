@@ -342,6 +342,130 @@ class ControlClient(Base):
             modelapi.ModelAPI("http://127.0.0.1:1", "k", timeout=2).models()
 
 
+class WebViaServer(Base):
+    """Web tools run through the nodeyard server (its internet connection), not this computer's."""
+
+    def make(self, handler, via="auto", key="k"):
+        from yardcode import app as appmod
+        api = FakeWeb(handler).start()
+        self.addCleanup(api.stop)
+        s = self.settings(control_url=api.url, api_key=key, web={"via": via})
+        a = appmod.App(s, persist=False)
+        a.tui.warn = lambda m: a.warnings.append(m)
+        a.warnings = []
+        return a, api
+
+    def test_the_server_result_is_used_and_nothing_is_fetched_locally(self):
+        a, api = self.make(lambda body: (200, {"ok": True, "text": "Results from the server", "summary": "WebSearch(cats)", "preview": ["one"], "error": False}))
+        ctx = self.ctx()
+        ctx.web_proxy = a.make_web_proxy()
+        r = web.WebSearch().run({"query": "cats", "_internal": 1}, ctx)
+        self.assertEqual(r.text, "Results from the server")
+        self.assertIn("via the server", r.summary)
+        self.assertEqual(api.calls[0], {"tool": "WebSearch", "args": {"query": "cats"}})      # underscore keys are not sent
+
+    def test_a_server_that_cant_do_it_falls_back_to_this_computer_once_with_a_warning(self):
+        a, api = self.make(lambda body: (404, {"ok": False}))
+        proxy = a.make_web_proxy()
+        self.assertIsNone(proxy("WebSearch", {"query": "a"}))
+        self.assertIsNone(proxy("WebSearch", {"query": "b"}))
+        self.assertEqual(len(api.calls), 1)               # it doesn't keep asking a server that can't help
+        self.assertEqual(len(a.warnings), 1)
+
+    def test_a_refused_key_falls_back_too(self):
+        a, api = self.make(lambda body: (401, {"ok": False, "error": "bad key"}))
+        self.assertIsNone(a.make_web_proxy()("Weather", {"location": "Leeds"}))
+
+    def test_via_server_never_falls_back(self):
+        from yardcode.tools.base import ToolError
+        a, api = self.make(lambda body: (404, {"ok": False}), via="server")
+        with self.assertRaises(ToolError) as e:
+            a.make_web_proxy()("WebSearch", {"query": "a"})
+        self.assertIn("can't be reached", str(e.exception))
+
+    def test_a_search_that_failed_on_the_server_is_the_answer_not_retried_here(self):
+        from yardcode.tools.base import ToolError
+        a, api = self.make(lambda body: (502, {"ok": False, "error": "No search engine answered."}))
+        with self.assertRaises(ToolError) as e:
+            a.make_web_proxy()("WebSearch", {"query": "a"})
+        self.assertIn("No search engine answered", str(e.exception))
+        self.assertIn("searched from the server", str(e.exception))
+        self.assertEqual(a.warnings, [])
+
+    def test_local_setting_and_a_missing_key_search_from_this_computer(self):
+        a, api = self.make(lambda body: (200, {"ok": True, "text": "x"}), via="local")
+        self.assertIsNone(a.make_web_proxy()("WebSearch", {"query": "a"}))
+        a, api = self.make(lambda body: (200, {"ok": True, "text": "x"}), key="")
+        self.assertIsNone(a.make_web_proxy()("WebSearch", {"query": "a"}))
+        self.assertEqual(api.calls, [])
+
+
+class FakeWeb(FakeControl):
+    """Answers POST /api/v1/web/tool with whatever HANDLER(body) says."""
+
+    def __init__(self, handler):
+        FakeControl.__init__(self)
+        self.handler = handler
+        self.bodies = self.calls = []
+
+    def start(self):
+        outer = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n) or b"{}") if n else {}
+                outer.bodies.append(body)
+                code, obj = outer.handler(body) if self.path == "/api/v1/web/tool" else (404, {"ok": False})
+                b = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        return self
+
+
+class ShellMode(Base):
+    def test_a_shell_keeps_its_folder_and_exports_and_captures_output(self):
+        import pty
+        prog = (
+            "import sys\nsys.path.insert(0, %r)\nfrom yardcode import shellmode\n"
+            "sh = shellmode.Shell(%r, rc=False)\n"
+            "print('R1', sh.run('echo hi; cd /usr && pwd'))\n"
+            "print('R2', sh.run('export FOO=bar'))\n"
+            "print('R3', sh.run('echo $FOO; pwd; false'))\n"
+            "print('R4', sh.run(\"printf '\\\\033[31mred\\\\033[0m\\\\n'\"))\n" % (os.path.join(REPO, "yardcode", "src"), self.cwd))
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execv(sys.executable, [sys.executable, "-c", prog])
+        out = b""
+        while True:
+            try:
+                d = os.read(fd, 65536)
+            except OSError:
+                break
+            if not d:
+                break
+            out += d
+        os.waitpid(pid, 0)
+        text = out.decode("utf-8", "replace").replace("\r\n", "\n")
+        self.assertIn("R1 (0, 'hi\\n/usr')", text)
+        self.assertIn("R3 (1, 'bar\\n/usr')", text)              # the folder and the export carried over, and the exit status came back
+        self.assertIn("R4 (0, 'red')", text)                     # colour codes are stripped from what the model sees
+
+    def test_slash_commands_for_shell_and_reset_exist(self):
+        from yardcode import slash
+        for name in ("shell", "reset", "clear"):
+            self.assertIn(name, slash.REGISTRY)
+
+
 MCP_SERVER = r'''
 import json, sys
 for line in sys.stdin:
@@ -405,3 +529,159 @@ class McpAndPlugins(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Update(Base):
+    """yardcode update: replace this copy from a folder, the server or GitHub's format, safely."""
+
+    def installed_copy(self):
+        root = os.path.join(self.tmp, "lib", "yardcode")
+        os.makedirs(os.path.join(root, "bin"))
+        shutil_copy = __import__("shutil")
+        shutil_copy.copy2(os.path.join(REPO, "yardcode", "bin", "yardcode"), os.path.join(root, "bin", "yardcode"))
+        shutil_copy.copytree(os.path.join(REPO, "yardcode", "src", "yardcode"), os.path.join(root, "src", "yardcode"), ignore=shutil_copy.ignore_patterns("__pycache__"))
+        return root
+
+    def run_from(self, root, *args):
+        # run the COPY's own code, the way a person's installed yardcode would
+        return subprocess.run([sys.executable, os.path.join(root, "bin", "yardcode"), "update"] + list(args), capture_output=True, text=True, timeout=120,
+                              env=dict(os.environ, YARDCODE_HOME=self.home, YARDCODE_DATA=self.data), cwd=self.cwd)
+
+    def test_an_out_of_date_copy_is_brought_up_to_date_and_then_left_alone(self):
+        root = self.installed_copy()
+        with open(os.path.join(root, "src", "yardcode", "util.py"), "a") as f:
+            f.write("\n# an old, different copy\n")
+        r = self.run_from(root, "--from-dir", REPO, "--check")
+        self.assertIn("different yardcode is available", r.stdout)
+        r = self.run_from(root, "--from-dir", REPO)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Updated yardcode", r.stdout)
+        self.assertNotIn("an old, different copy", open(os.path.join(root, "src", "yardcode", "util.py")).read())
+        self.assertTrue(os.access(os.path.join(root, "bin", "yardcode"), os.X_OK))
+        self.assertEqual(os.listdir(os.path.dirname(root)), ["yardcode"])           # no .old or .new folders left behind
+        r = self.run_from(root, "--from-dir", REPO)
+        self.assertIn("already up to date", r.stdout)
+        r = self.run_from(root, "--version") if False else subprocess.run([sys.executable, os.path.join(root, "bin", "yardcode"), "--version"], capture_output=True, text=True)
+        self.assertIn("yardcode 0.1.0", r.stdout)
+
+    def test_the_python_an_install_chose_is_kept(self):
+        root = self.installed_copy()
+        launcher = os.path.join(root, "bin", "yardcode")
+        lines = open(launcher).read().split("\n", 1)
+        open(launcher, "w").write("#!/usr/bin/python3\n" + lines[1])
+        with open(os.path.join(root, "src", "yardcode", "util.py"), "a") as f:
+            f.write("\n# changed\n")
+        r = self.run_from(root, "--from-dir", REPO)
+        self.assertIn("Updated", r.stdout)
+        self.assertEqual(open(launcher).readline().strip(), "#!/usr/bin/python3")
+
+    def test_a_git_checkout_is_not_touched(self):
+        r = subprocess.run([sys.executable, YARDCODE, "update", "--from-dir", REPO], capture_output=True, text=True, timeout=60,
+                           env=dict(os.environ, YARDCODE_HOME=self.home, YARDCODE_DATA=self.data), cwd=self.cwd)
+        self.assertIn("git checkout", r.stdout)
+        self.assertEqual(r.returncode, 0)
+
+    def test_a_download_with_unsafe_paths_is_refused(self):
+        import io
+        import tarfile
+        from yardcode import update
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            ti = tarfile.TarInfo("../evil")
+            ti.size = 1
+            tar.addfile(ti, io.BytesIO(b"x"))
+        with self.assertRaises(update.UpdateError):
+            update._extract(buf.getvalue(), os.path.join(self.tmp, "x"))
+
+    def test_the_dashboard_serves_the_same_program(self):
+        sys.path.insert(0, os.path.join(REPO, "share", "nodeyard", "dashboard"))
+        import updateapi
+        from yardcode import update
+        data, info = updateapi.bundle()
+        self.assertGreater(info["files"], 20)
+        d = os.path.join(self.tmp, "got")
+        os.makedirs(d)
+        new = update._extract(data, d)
+        mine = os.path.join(REPO, "yardcode")
+        self.assertEqual(update.tree_hash(new), update.tree_hash(mine))
+
+
+class SharedChats(Base):
+    """yardcode shares finished turns with the dashboard (against the real demo dashboard) and can continue a chat from it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dash_tmp = __import__("tempfile").mkdtemp()
+        pw = os.path.join(cls.dash_tmp, "pw")
+        open(pw, "w").write("ABCD-EF01-2345-6789-ABCD-EF01")
+        cls.proc = subprocess.Popen([sys.executable, os.path.join(REPO, "share", "nodeyard", "dashboard", "server.py"), "--demo", "--password-file", pw, "--port", "0", "--interval", "1"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        import re
+        cls.port = None
+        end = time.time() + 20
+        while time.time() < end and cls.port is None:
+            m = re.search(r"listening on http://[^:]*:(\d+)", cls.proc.stdout.readline() or "")
+            if m:
+                cls.port = int(m.group(1))
+        threading.Thread(target=lambda: [None for _ in cls.proc.stdout], daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.proc.terminate()
+        cls.proc.wait(timeout=10)
+
+    def app(self, srv):
+        from yardcode.app import App
+        s = self.settings(api_base=srv.url, control_url="http://127.0.0.1:%d" % self.port, api_key="demo-api-key-0000-0000-0000-0000")
+        os.chdir(self.cwd)
+        app = App(s, persist=True)
+        app.discover()
+        app.new_agent()
+        return app
+
+    def test_a_finished_turn_reaches_the_dashboard_and_can_be_continued_from_there(self):
+        from yardcode import sync
+        srv = self.server([{"content": "first answer"}, {"content": "second answer"}])
+        app = self.app(srv)
+        app.send("hello from yardcode")
+        app._sync_thread.join(10)
+        rows = sync.list_remote(app)
+        mine = [r for r in rows if r["id"] == "yc-" + app.session.id]
+        self.assertEqual((mine[0]["source"], mine[0]["count"], mine[0]["title"]), ("yardcode", 2, "hello from yardcode"))
+        app.send("and another")
+        app._sync_thread.join(10)
+        self.assertEqual([r for r in sync.list_remote(app) if r["id"] == "yc-" + app.session.id][0]["count"], 4)     # appended, not duplicated
+        # a fresh yardcode (another computer) picks the conversation up and carries on
+        srv2 = self.server([{"content": "third answer"}])
+        app2 = self.app(srv2)
+        ses, data = sync.pull(app2, "yc-" + app.session.id)
+        app2.new_agent(ses, 8192)
+        self.assertEqual([m["content"] for m in ses.messages if m["role"] == "assistant"], ["first answer", "second answer"])
+        app2.send("continue please")
+        sent = srv2.requests[0]["messages"]
+        self.assertTrue(any(m["content"].startswith("hello from yardcode") for m in sent if m["role"] == "user"))
+        app2._sync_thread.join(10)
+        self.assertEqual([r for r in sync.list_remote(app2) if r["id"] == "yc-" + app.session.id][0]["count"], 6)
+
+    def test_nothing_is_sent_when_sharing_is_off_or_there_is_no_key(self):
+        from yardcode import sync
+        srv = self.server([{"content": "x"}])
+        app = self.app(srv)
+        app.settings.data["sync_chats"] = False
+        self.assertFalse(sync.enabled(app))
+        app.settings.data["sync_chats"] = True
+        app.settings.data["api_key"] = ""
+        self.assertFalse(sync.enabled(app))
+
+    def test_a_compaction_resends_the_whole_chat(self):
+        from yardcode import sync
+        srv = self.server([{"content": "a"}, {"content": "b"}, {"content": "c"}, {"content": "## Request\nsummary"}])
+        app = self.app(srv)
+        for t in ("one", "two", "three"):
+            app.send(t)
+            app._sync_thread.join(10)
+        n_before = [r for r in sync.list_remote(app) if r["id"] == "yc-" + app.session.id][0]["count"]
+        app.agent.maybe_compact(force=True)
+        sync.push(app)
+        n_after = [r for r in sync.list_remote(app) if r["id"] == "yc-" + app.session.id][0]["count"]
+        self.assertLess(n_after, n_before)

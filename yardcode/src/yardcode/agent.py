@@ -33,6 +33,8 @@ SYSTEM = """You are yardcode, a coding agent running in the user's terminal. You
 - If you really need a decision or missing information, use AskUserQuestion.
 - When you finish, say what you did and anything the user must do next, in a few lines."""
 
+SYSTEM_SMALL = """You are yardcode, a coding agent in the user's terminal. Use your tools to look things up and to read, edit and run code; don't guess. Read a file before you edit it. Be brief. For weather use Weather; for other current facts use WebSearch then WebFetch, and name the addresses you used. If a tool is denied, adapt or ask. When done, say what you did in a few lines."""
+
 SUBAGENT_SYSTEM = """You are a sub-agent of yardcode, started to do one focused job and report back. Use your tools to do it thoroughly, then finish with a clear, complete report: your last message is the only thing the main agent sees. Be factual and include file paths, line numbers and addresses where they matter."""
 
 TEXT_TOOLS_NOTE = """# Tools (text format)
@@ -88,25 +90,32 @@ class Agent:
         self.last_text = ""
         self.memory_text, self.memory_info = memory.load(self.ctx.cwd)
         self._system_cache = None
+        self._system_key = None
         self._tools_cache = None
         self._tools_key = None
         self.turns_in_run = 0
 
     # ---- prompt ------------------------------------------------------------------------------------------
+    def tier(self):
+        """How much of the tool box goes into the prompt: full, lean (rare tools left out) or tiny (essentials only).
+        Reading the prompt costs seconds per hundred tokens on a CPU cluster, so a small context gets a small prompt."""
+        prof = self.settings.get("tools.profile", "auto")
+        if prof in ("full", "lean", "tiny"):
+            return prof
+        w = self.context_window
+        if self.depth == 0 and w:
+            return "tiny" if w < 12000 else ("lean" if w < 20000 else "full")
+        return "full"
+
     def system_prompt(self):
-        if self._system_cache is not None:
+        """The same text every time (so a model server can keep its cache of it between conversations): anything that
+        changes (date, folder, git state) goes into the first message instead, see environment()."""
+        key = (self.tier(), self.text_mode)
+        if self._system_cache is not None and self._system_key == key:
             return self._system_cache
-        parts = [SUBAGENT_SYSTEM if self.depth else SYSTEM]
+        parts = [SUBAGENT_SYSTEM if self.depth else (SYSTEM_SMALL if key[0] == "tiny" else SYSTEM)]
         if self.system_extra:
             parts.append(self.system_extra)
-        env = ["# Environment", "Working directory: %s" % self.ctx.cwd, "Platform: %s %s (%s)" % (platform.system(), platform.release(), platform.machine()),
-               "Shell: %s" % os.path.basename(os.environ.get("SHELL", "sh")), "Today: %s" % time.strftime("%A %d %B %Y, %H:%M %Z")]
-        g = git_summary(self.ctx.cwd)
-        if g:
-            env.append(g)
-        if self.client.model:
-            env.append("Model: %s" % self.client.model)
-        parts.append("\n".join(env))
         if self.memory_text and not self.depth:
             parts.append("# Instructions from the user's files (follow them)\n" + self.memory_text)
         if self.settings.get("system_prompt_extra"):
@@ -114,27 +123,40 @@ class Agent:
         if self.text_mode:
             parts.append(TEXT_TOOLS_NOTE % "\n".join("- %s: %s | args: %s" % (t.name, t.description, json.dumps(t.parameters.get("properties", {}))) for t in self.active_tools()))
         self._system_cache = "\n\n".join(parts)
+        self._system_key = key
         return self._system_cache
+
+    def environment(self):
+        """Facts that change between conversations, sent once with the first message."""
+        env = ["<environment>", "Working directory: %s" % self.ctx.cwd, "Platform: %s %s (%s)" % (platform.system(), platform.release(), platform.machine()),
+               "Today: %s" % time.strftime("%A %d %B %Y")]
+        g = git_summary(self.ctx.cwd)
+        if g:
+            env.append(g)
+        env.append("</environment>")
+        return "\n".join(env)
 
     def refresh_prompt(self):
         self._system_cache = None
         self._tools_cache = None
         self.memory_text, self.memory_info = memory.load(self.ctx.cwd)
 
-    LEAN_HIDDEN = {"Arxiv", "Weather", "Wikipedia", "FileSearch", "Memory", "BashOutput", "KillShell", "MultiEdit"}
+    LEAN_HIDDEN = {"Arxiv", "Wikipedia", "FileSearch", "Memory", "BashOutput", "KillShell", "MultiEdit"}
+    TINY_KEEP = {"Read", "Write", "Edit", "Bash", "Grep", "Glob", "WebSearch", "WebFetch", "Weather"}
 
     def lean(self):
-        """Small context windows can't afford every tool definition on every request: the rarely used tools stay out of the prompt."""
-        prof = self.settings.get("tools.profile", "auto")
-        return prof == "lean" or (prof == "auto" and 0 < self.context_window < 20000 and self.depth == 0)
+        return self.tier() != "full"
 
     def active_tools(self):
-        if self.lean():
-            return [t for n, t in self.tools.items() if n not in self.LEAN_HIDDEN]
+        t = self.tier()
+        if t == "tiny":
+            return [x for n, x in self.tools.items() if n in self.TINY_KEEP or n.startswith("mcp__") or getattr(x, "source", None)]
+        if t == "lean":
+            return [x for n, x in self.tools.items() if n not in self.LEAN_HIDDEN]
         return list(self.tools.values())
 
     def schemas(self):
-        key = (self.text_mode, self.lean())
+        key = (self.text_mode, self.tier())
         if self._tools_cache is None or self._tools_key != key:
             self._tools_key = key
             self._tools_cache = [] if self.text_mode else [t.schema() for t in self.active_tools()]
@@ -216,6 +238,8 @@ class Agent:
                 text += "\n\n" + "\n".join(r.context)
         if extra_context:
             text += "\n\n" + extra_context
+        if not self.session.messages:
+            text += "\n\n" + self.environment()      # (at the end: the conversation's title comes from the first line)
         self.fe.begin_turn(text)
         self.session.add({"role": "user", "content": text})
         self.session.set_model(self.client.model)
@@ -350,10 +374,13 @@ class Agent:
             if not state["first"]:
                 state["first"] = True
 
-        fe.waiting("Thinking")
+        msgs = self.build_messages()
+        est = self.overhead_tokens() + compact.estimate(self.session.messages)
+        fe.waiting("Reading the prompt (about %s tokens; the model server keeps what it has already read)" % util.human_tokens(est) if est > 1500 else "Thinking")
         max_tokens = int(self.settings.get("max_tokens", 0) or 0)
-        return self.client.chat(self.build_messages(), tools=self.schemas() or None, max_tokens=max_tokens,
-                                temperature=float(self.settings.get("temperature", 0.2)), on_text=on_text, on_thinking=on_think, on_tool=on_tool, stop=self.stop)
+        return self.client.chat(msgs, tools=self.schemas() or None, max_tokens=max_tokens, temperature=float(self.settings.get("temperature", 0.2)),
+                                on_text=on_text, on_thinking=on_think, on_tool=on_tool, stop=self.stop,
+                                on_progress=(lambda done, total, cached=0: fe.progress(done, total, cached)) if self.depth == 0 else None)
 
     @staticmethod
     def _looping(tail):

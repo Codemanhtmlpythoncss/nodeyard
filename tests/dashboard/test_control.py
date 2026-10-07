@@ -179,6 +179,30 @@ class ChatAndWeb(Control):
         self.assertEqual(s, 502)
 
 
+class WebProxy(ChatAndWeb):
+    """/api/v1/web/tool: yardcode's web tools run from the server's internet connection (key protected)."""
+
+    def test_it_needs_the_key(self):
+        s, j = self.call("POST", "/api/v1/web/tool", {"tool": "WebSearch", "args": {"query": "x"}}, key=None)
+        self.assertEqual(s, 401)
+        s, j = self.call("POST", "/api/v1/web/tool", {"tool": "WebSearch", "args": {"query": "x"}}, key="wrong-key")
+        self.assertEqual(s, 401)
+
+    def test_only_the_web_tools_can_be_run(self):
+        for body in ({"tool": "Bash", "args": {"command": "id"}}, {"tool": "Write", "args": {}}, {"tool": "WebSearch"}, {"tool": "WebSearch", "args": "x"}, {}):
+            s, j = self.call("POST", "/api/v1/web/tool", body)
+            self.assertEqual(s, 400, body)
+            self.assertFalse(j["ok"])
+
+    def test_the_demo_answers_without_fetching_anything(self):
+        for name in ("WebSearch", "WebFetch", "Wikipedia", "Arxiv", "Weather"):
+            s, j = self.call("POST", "/api/v1/web/tool", {"tool": name, "args": {"query": "x", "url": "https://example.com", "location": "Leeds"}})
+            self.assertEqual(s, 200, (name, j))
+            self.assertTrue(j["ok"])
+            self.assertIn(name, j["text"])
+            self.assertFalse(j["error"])
+
+
 class Plugins(ChatAndWeb):
     """The chat's plugins (demo agent): the list, a tool run streamed to the page, and a permission round trip."""
 
@@ -254,4 +278,52 @@ class RunCode(ChatAndWeb):
 
     def test_it_needs_a_sign_in(self):
         s, j = self.call("POST", "/api/ai/run-code", {"lang": "python", "code": "1"}, key=None, headers={"X-Nodeyard": "1"})
+        self.assertEqual(s, 401)
+
+
+class Chats(ChatAndWeb):
+    """Chats kept on the server (yardcode pushes them, the AI tab shows them): key-protected CRUD with limits."""
+
+    def msgs(self, *texts):
+        out = []
+        for i, t in enumerate(texts):
+            out.append({"role": "user" if i % 2 == 0 else "assistant", "content": t})
+        return out
+
+    def test_save_list_get_append_delete_with_the_key(self):
+        s, j = self.call("POST", "/api/v1/chats/save", {"chat": {"id": "yc-test-1", "title": "First", "source": "yardcode", "cwd": "/home/x", "messages": self.msgs("hi", "hello")}})
+        self.assertEqual((s, j["count"]), (200, 2), j)
+        s, j = self.call("POST", "/api/v1/chats/append", {"id": "yc-test-1", "messages": self.msgs("and more")})
+        self.assertEqual(j["count"], 3)
+        s, j = self.call("GET", "/api/v1/chats")
+        mine = [c for c in j["chats"] if c["id"] == "yc-test-1"][0]
+        self.assertEqual((mine["title"], mine["count"], mine["source"]), ("First", 3, "yardcode"))
+        s, j = self.call("GET", "/api/v1/chat?id=yc-test-1")
+        self.assertEqual([m["content"] for m in j["chat"]["messages"]], ["hi", "hello", "and more"])
+        s, j = self.call("POST", "/api/v1/chats/delete", {"id": "yc-test-1"})
+        self.assertTrue(j["deleted"])
+        s, j = self.call("GET", "/api/v1/chat?id=yc-test-1")
+        self.assertEqual(s, 404)
+
+    def test_tool_calls_survive_so_yardcode_can_carry_on(self):
+        chat = {"id": "yc-tools", "messages": [{"role": "user", "content": "calc"}, {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "Calculator", "arguments": "{\"expression\": \"2+2\"}"}}]},
+                                                {"role": "tool", "tool_call_id": "c1", "content": "4"}, {"role": "assistant", "content": "It is 4."}]}
+        self.call("POST", "/api/v1/chats/save", {"chat": chat})
+        s, j = self.call("GET", "/api/v1/chat?id=yc-tools")
+        m = j["chat"]["messages"]
+        self.assertEqual(m[1]["tool_calls"][0]["function"]["name"], "Calculator")
+        self.assertEqual(m[2]["tool_call_id"], "c1")
+
+    def test_bad_ids_roles_and_sizes_are_refused(self):
+        for bad in ({"id": "../etc/passwd", "messages": []}, {"id": "", "messages": []}, {"id": "a b", "messages": []}, {"id": "ok1", "messages": [{"role": "boss", "content": "x"}]},
+                    {"id": "ok2", "messages": [{"role": "user", "content": 5}]}, {"id": "ok3", "messages": "nope"}):
+            s, j = self.call("POST", "/api/v1/chats/save", {"chat": bad})
+            self.assertEqual(s, 400, bad)
+        s, j = self.call("GET", "/api/v1/chat?id=..%2F..%2Fetc%2Fpasswd")
+        self.assertIn(s, (400, 404))
+
+    def test_it_needs_the_key_or_a_sign_in(self):
+        s, j = self.call("GET", "/api/v1/chats", key=None)
+        self.assertEqual(s, 401)
+        s, j = self.call("POST", "/api/v1/chats/save", {"chat": {"id": "x1", "messages": []}}, key=None)
         self.assertEqual(s, 401)

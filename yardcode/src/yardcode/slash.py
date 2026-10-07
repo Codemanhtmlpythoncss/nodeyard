@@ -27,6 +27,13 @@ def cmd(name, help, group="Session", aliases=(), hint=""):
     return deco
 
 
+def menu_items(app):
+    """[(name, help)] for the menu that opens when you type /: built-in commands, then your own."""
+    out = [(n, REGISTRY[n][1]) for n in sorted(REGISTRY)]
+    out += [(n, c["description"]) for n, c in sorted(app.load_custom_commands().items()) if n not in REGISTRY]
+    return out
+
+
 def names(app):
     out = set(REGISTRY) | set(ALIASES) | set(app.load_custom_commands())
     return sorted(out)
@@ -110,11 +117,37 @@ def c_exit(app, arg):
     return False
 
 
-@cmd("clear", "Start a new, empty conversation", aliases=("new", "reset"))
+@cmd("clear", "Start a new, empty conversation", aliases=("new",))
 def c_clear(app, arg):
     window = app.agent.context_window
     app.new_agent(window=window)
     app.tui.w(app.tui.style.muted("  New conversation."))
+
+
+@cmd("reset", "Reset the context: forget this conversation so the model starts fresh (the old one stays in /resume)")
+def c_reset(app, arg):
+    ag = app.agent
+    freed = ag.context_used()
+    window = ag.context_window
+    for sh in list(ag.ctx.shells.values()):
+        sh.kill()
+    app.new_agent(window=window)
+    app.tui.w(app.tui.style.muted("  Context reset: %s tokens freed. Settings, memory and files are untouched." % util.human_tokens(freed)))
+
+
+@cmd("shell", "Open your own shell right here (type exit to come back). For one line use !command; ! on an empty prompt is shell mode", aliases=("sh",))
+def c_shell(app, arg):
+    from . import shellmode
+    if not shellmode.available():
+        app.tui.warn("A shell needs a real terminal on macOS or Linux.")
+        return
+    sh = app.shell_session()
+    app.tui.w(app.tui.style.muted("  Your shell (%s). Type exit to come back to yardcode." % os.path.basename(shellmode.shell_program())))
+    if arg.strip():
+        shellmode.run_line(app, arg.strip())
+        return
+    sh.interactive()
+    app.tui.w(app.tui.style.muted("  Back in yardcode."))
 
 
 @cmd("compact", "Compress the conversation to free up context (optional: what to keep)", hint="[focus]")
@@ -510,11 +543,14 @@ def c_temp(app, arg):
     app.settings.set("temperature", t)
 
 
-@cmd("think", "Show or hide the model's reasoning", group="Settings", hint="[show|hide]")
+@cmd("think", "Show what the model is thinking: live as it writes, a short summary, or not at all", group="Settings", hint="[live|show|hide]")
 def c_think(app, arg):
-    if arg in ("show", "hide"):
-        app.settings.set("thinking", arg)
-    app.tui.w("  Reasoning is %s." % ("shown" if app.settings.get("thinking") != "hide" else "hidden"))
+    if arg in ("show", "hide", "live", "on", "off"):
+        app.settings.set("thinking", {"on": "live", "off": "hide"}.get(arg, arg))
+    mode = app.settings.get("thinking", "show")
+    app.tui.w("  Reasoning: %s." % {"live": "shown live as the model writes it", "show": "shown as a short summary after it finishes", "hide": "hidden"}.get(mode, mode))
+    if mode == "live":
+        app.tui.w(app.tui.style.muted("  Only models that think send any. Your cluster's model thinks only if it was started with: nodeyard ai split deploy --think on"))
 
 
 @cmd("theme", "Change the colours", group="Settings", hint="[auto|dark|light|none]")
@@ -828,6 +864,42 @@ def c_resume(app, arg):
         app.tui.w(ui.render_markdown(util.truncate_middle(last["content"], 1200), S))
 
 
+@cmd("chats", "Chats shared with the dashboard's AI tab: pick one to continue here", group="Session", hint="[id]")
+def c_chats(app, arg):
+    from . import sync
+    S = app.tui.style
+    try:
+        rows = sync.list_remote(app)
+    except ModelAPIError as e:
+        app.tui.warn(str(e))
+        return
+    if not rows:
+        app.tui.w(S.muted("  Nothing is shared yet. Chats from yardcode appear here once the dashboard's address and key are set (yardcode login)."))
+        return
+    if arg:
+        found = next((r for r in rows if r["id"] == arg or r["id"].startswith(arg)), None)
+        if not found:
+            app.tui.warn("No shared chat starts with %r." % arg)
+            return
+    else:
+        i = pick(app, "Chats on the dashboard", ["%s  %-52s %s" % (time.strftime("%d %b %H:%M", time.localtime(r["updated"])), (r["title"] or "(untitled)")[:52],
+                                                              S.muted("%s · %d msgs" % (r.get("source", ""), r.get("count", 0)))) for r in rows])
+        if i is None:
+            return
+        found = rows[i]
+    try:
+        ses, data = sync.pull(app, found["id"])
+    except (ModelAPIError, KeyError) as e:
+        app.tui.error("Couldn't open it: %s" % e)
+        return
+    window = app.agent.context_window
+    app.new_agent(ses, window)
+    app.tui.w(S.muted("  Continuing %r (%d messages). New messages are shared back." % ((data.get("title") or "")[:50], len(ses.messages))))
+    last = next((m for m in reversed(ses.messages) if m["role"] == "assistant" and m.get("content")), None)
+    if last:
+        app.tui.w(ui.render_markdown(util.truncate_middle(last["content"], 1200), S))
+
+
 @cmd("sessions", "List earlier conversations in this folder", group="Session")
 def c_sessions(app, arg):
     S = app.tui.style
@@ -972,18 +1044,34 @@ def c_doctor(app, arg):
             ok("Dashboard control API at %s (model state: %s)" % (app.modelapi.base, (s.get("model") or {}).get("state", "?")))
         except ModelAPIError as e:
             bad("Dashboard control API: %s" % e, "Remote model loading needs nodeyard updated on the server")
-    from .tools.web import web_search
+    from .tools.web import WebSearch, web_search
+    where = "the server (%s)" % app.modelapi.base if app.web_via() == "server" else "this computer"
     try:
-        res, eng = web_search("test", 1, app.agent.ctx)
-        ok("Web search works (%s)" % eng)
+        if app.web_via() == "server":
+            r = app.agent.ctx.web_proxy("WebSearch", {"query": "test", "max_results": 1})
+            if r is None or r.error:
+                raise RuntimeError(r.text if r else "the server wasn't used")
+            ok("Web search works, running on %s" % where)
+        else:
+            res, eng = web_search("test", 1, app.agent.ctx)
+            ok("Web search works (%s), running on %s" % (eng, where))
+            if app.modelapi.available and not app.settings.get("api_key"):
+                app.tui.w("      %s" % S.muted("Add the model's API key (yardcode login) and searches run on the server instead of this network."))
     except Exception as e:
-        bad("Web search failed: %s" % str(e)[:140], "Check the internet connection, or set search.searxng_url / search.brave_key")
+        bad("Web search failed on %s: %s" % (where, str(e)[:140]), "Check the internet connection, or set search.searxng_url / search.brave_key")
     for tool in ("git", "rg", "pdftotext"):
         found = shutil.which(tool)
         app.tui.w("  %s %s" % (S.ok(S.g("check")) if found else S.muted(S.g("bullet")), tool + (" found" if found else " not installed (optional)")))
     ok("Settings: %s" % util.shorten_path(st.user_path))
     ok("%d tools ready%s" % (len(app.agent.tools), ", tool calls: %s" % ("text format" if app.agent.text_mode else "native")))
     app.tui.w("  %s %s %s" % (S.muted(S.g("bullet")), "Python", platform.python_implementation() + " " + platform.python_version()))
+
+
+@cmd("update", "Update yardcode from your nodeyard server (or GitHub); --check only looks", group="Info", hint="[--check]")
+def c_update(app, arg):
+    from . import update
+    flags = arg.split()
+    update.run_update(app.modelapi, "auto", "main", "", "--check" in flags, "--force" in flags, say=lambda m: app.tui.w("  " + m))
 
 
 @cmd("release-notes", "What's new", group="Info")

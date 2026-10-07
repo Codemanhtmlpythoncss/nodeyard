@@ -261,6 +261,12 @@ def _timeout(ctx):
     return int(ctx.settings.get("web.timeout", 20) or 20)
 
 
+def _via_server(name, args, ctx):
+    """The result of this web tool run on the server (its internet connection, not this computer's), or None to run it here."""
+    proxy = getattr(ctx, "web_proxy", None)
+    return proxy(name, args) if proxy is not None else None
+
+
 class WebFetch(Tool):
     name = "WebFetch"
     kind = "net"
@@ -278,6 +284,9 @@ class WebFetch(Tool):
         return "WebFetch(%s)" % str(args.get("url", ""))[:110]
 
     def run(self, args, ctx):
+        remote = _via_server(self.name, args, ctx)
+        if remote is not None:
+            return remote
         url = need(args, "url").strip()
         if not re.match(r"^https?://", url, re.I):
             url = "https://" + url
@@ -508,6 +517,9 @@ class WebSearch(Tool):
         return args.get("query", "")
 
     def run(self, args, ctx):
+        remote = _via_server(self.name, args, ctx)
+        if remote is not None:
+            return remote
         q = need(args, "query").strip()
         if not q:
             raise ToolError("The query is empty.")
@@ -550,6 +562,9 @@ class Wikipedia(Tool):
         return args.get("query", "")
 
     def run(self, args, ctx):
+        remote = _via_server(self.name, args, ctx)
+        if remote is not None:
+            return remote
         q = need(args, "query").strip()
         lang = re.sub(r"[^a-z-]", "", str(args.get("lang") or "en").lower())[:8] or "en"
         base = "https://%s.wikipedia.org/w/api.php?" % lang
@@ -584,6 +599,9 @@ class Arxiv(Tool):
         return args.get("query", "")
 
     def run(self, args, ctx):
+        remote = _via_server(self.name, args, ctx)
+        if remote is not None:
+            return remote
         q = need(args, "query").strip()
         n = max(1, min(int(args.get("max_results") or 5), 10))
         search = q if re.match(r"^(all|ti|au|abs|cat):", q) else "all:" + q
@@ -621,16 +639,27 @@ class Weather(Tool):
         return args.get("location", "")
 
     def run(self, args, ctx):
+        remote = _via_server(self.name, args, ctx)
+        if remote is not None:
+            return remote
         loc = need(args, "location").strip()
-        status, h, body, _ = http_fetch("https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode({"name": loc.split(",")[0], "count": 3, "format": "json"}),
+        wanted = [w.strip().lower() for w in loc.split(",")]
+        status, h, body, _ = http_fetch("https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode({"name": wanted[0], "count": 10, "format": "json"}),
                                         timeout=_timeout(ctx), allow_private=True)
         res = json.loads(body).get("results") or []
         if not res:
             raise ToolError("Couldn't find a place called %r." % loc)
+
+        def score(r):
+            where = " ".join(str(r.get(k, "")) for k in ("admin1", "admin2", "country", "country_code")).lower()
+            hint = sum(1 for w in wanted[1:] if w and w in where)
+            exact = 1 if r.get("name", "").lower() == wanted[0] else 0
+            # a whole country or island named like this (feature codes PCL*) beats a village of the same name; then the bigger place
+            area = 1 if str(r.get("feature_code", "")).startswith("PCL") else 0
+            return (hint, exact, area, r.get("population") or 0)
+        res.sort(key=score, reverse=True)
         pick = res[0]
-        if "," in loc:
-            want = loc.split(",", 1)[1].strip().lower()
-            pick = next((r for r in res if want in (r.get("country", "") + " " + r.get("admin1", "")).lower()), res[0])
+        others = ["%s (%s)" % (r.get("name", ""), ", ".join(x for x in (r.get("admin1"), r.get("country")) if x)) for r in res[1:5]]
         status, h, body, _ = http_fetch("https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode({
             "latitude": pick["latitude"], "longitude": pick["longitude"], "timezone": "auto", "forecast_days": 3,
             "current": "temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,precipitation,weather_code",
@@ -644,6 +673,8 @@ class Weather(Tool):
         for i, day in enumerate(d.get("time", [])):
             lines.append("%s: %s, %s to %s°C, rain %s mm" % (day, WMO.get(d["weather_code"][i], "?"), d["temperature_2m_min"][i], d["temperature_2m_max"][i],
                                                               d["precipitation_sum"][i]))
+        if others and len(wanted) == 1:
+            lines.append("Other places with that name: %s. If this isn't the place meant, ask again with the country, e.g. 'Name, Country'." % "; ".join(others))
         return Result("\n".join(lines), summary="Weather for %s" % pick["name"], preview=lines[1:2])
 
 

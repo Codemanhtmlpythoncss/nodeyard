@@ -92,6 +92,10 @@ class Session:
         self.turn = 0
         self.checkpoints = Checkpoints(os.path.join(self.dir, self.id + ".ckpt"))
         self.model = ""
+        self.remote_id = ""          # the chat's id on the nodeyard server, once shared (see sync.py)
+        self.synced = 0              # how many messages the server already has
+        self.synced_reset = 0
+        self.reset_count = 0         # bumped when history is rewritten (compaction, rewind): the server needs all of it again
         if persist and os.path.exists(self.path):
             self._read()
         elif persist:
@@ -131,6 +135,8 @@ class Session:
                     self.usage.update(r.get("usage", {}))
                 elif t == "model":
                     self.model = r.get("model", "")
+                elif t == "remote":
+                    self.remote_id, self.synced = r.get("id", ""), int(r.get("synced", 0))
         self.turn = sum(1 for m in self.messages if m.get("role") == "user" and not m.get("_synthetic"))
 
     # ---- messages ----
@@ -150,8 +156,13 @@ class Session:
     def reset(self, messages):
         """Replace the whole conversation (after a compaction or a rewind)."""
         self.messages = list(messages)
+        self.reset_count += 1
         self.turn = sum(1 for m in self.messages if m.get("role") == "user" and not m.get("_synthetic"))
         self._write({"type": "reset", "messages": self.messages})
+
+    def set_synced(self, count, reset_count, remote_id):
+        self.synced, self.synced_reset, self.remote_id = count, reset_count, remote_id
+        self._write({"type": "remote", "id": remote_id, "synced": count})
 
     def add_usage(self, comp):
         u = self.usage

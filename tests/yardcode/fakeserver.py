@@ -96,6 +96,9 @@ class FakeModelServer:
                     self.wfile.write(("data: %s\n\n" % json.dumps(obj)).encode())
                     self.wfile.flush()
 
+                if body.get("return_progress"):   # llama.cpp reports how far it is through the prompt
+                    for done in (0, 40, 80, 100):
+                        send({"choices": [{"index": 0, "delta": {}}], "prompt_progress": {"total": 100, "cache": 0, "processed": done, "time_ms": done * 10}})
                 if item.get("thinking"):
                     send({"choices": [{"index": 0, "delta": {"reasoning_content": item["thinking"]}}]})
                 text = item.get("content", "")

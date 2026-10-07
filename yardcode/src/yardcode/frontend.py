@@ -25,6 +25,9 @@ class Frontend:
     def waiting(self, label, tokens=0):
         """Waiting for the model (first token not here yet)."""
 
+    def progress(self, done, total, cached=0):
+        """How far the model is through reading the prompt (llama.cpp only)."""
+
     def end_turn(self, final_text):
         pass
 

@@ -23,17 +23,18 @@ DEFAULTS = {
     "tool_mode": "auto",         # auto | native | text (text: for servers without tool calling)
     "tool_output_limit": 16000,  # characters of one tool result sent to the model
     "tools": {"disabled": [], "profile": "auto"},   # profile: auto (lean when the context is small) | full | lean
-    "thinking": "show",          # show | hide
+    "thinking": "show",          # live (as it is written) | show (a short summary afterwards) | hide
     "theme": "auto",             # auto | dark | light | none
     "vim": False,
     "compact": {"auto": True, "threshold": 0.8, "keep_turns": 3, "prune_after": 6, "prune_chars": 600},
     "search": {"engine": "auto", "searxng_url": "", "brave_key": "", "tavily_key": ""},
-    "web": {"allow_private": False, "timeout": 20},
+    "web": {"allow_private": False, "timeout": 20, "via": "auto"},   # via: auto (the server when it can) | server | local (this computer)
     "hooks": {},
     "mcpServers": {},
     "env": {},
     "system_prompt_extra": "",
     "check_updates": False,
+    "sync_chats": True,          # share finished chats with the nodeyard dashboard (needs the model's API key)
     "trusted_projects": [],
 }
 

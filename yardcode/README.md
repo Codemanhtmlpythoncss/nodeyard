@@ -31,7 +31,7 @@ git diff | yardcode -p "review this"      # one answer, then exit
 | **Also** | Calculator, FileSearch (ranked search over a folder of documents), Memory (`#note`), Model (switch the cluster's model) |
 | **Safety** | asks before edits, commands and unknown web pages; allow/deny rules; read-only commands never ask; risky commands always ask; project settings are untrusted until you run `/trust` |
 | **Long chats** | automatic **context compression**: old tool output is trimmed, then the model summarizes the earlier conversation (`/compact`, `/context`) |
-| **Control** | `--max-tokens none` (no reply limit), plan / accept-edits / bypass modes (shift+tab), `/rewind` and `/undo` put files back, esc interrupts |
+| **Control** | `--max-tokens none` (no reply limit), plan / accept-edits / bypass modes (shift+tab), `/rewind` and `/undo` put files back, esc interrupts, `--show-thinking` or `/think live` to watch the model's reasoning as it writes it |
 | **Extend** | plugins (a Python file or a JSON file), MCP servers, hooks, custom `/commands`, custom sub-agents, `YARDCODE.md` instructions (`AGENTS.md` and `CLAUDE.md` work too) |
 | **Cluster** | `/models`, `/model`, `/load`, `/unload`, `/download`, `/search`: load models on your nodeyard cluster from here, with the model's API key |
 

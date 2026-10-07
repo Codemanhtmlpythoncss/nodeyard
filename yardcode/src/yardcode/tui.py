@@ -141,6 +141,9 @@ class TUI(Frontend):
         self.turn_seconds = 0.0
         self.turn_gen_seconds = 0.0
         self.thinking_on = False
+        self.think_live = False
+        self.turn_thought = False
+        self.hinted = False
         self.think_buf = ""
         self.quiet = False
         self.verbose = False
@@ -158,6 +161,11 @@ class TUI(Frontend):
             self._flush_think()
 
     def _flush_think(self):
+        if self.think_live:               # it was streamed on screen already: just end the line
+            self.think_live = False
+            self.think_buf = ""
+            self.w()
+            return
         if self.think_buf.strip():
             S = self.style
             text = self.think_buf.strip()
@@ -173,20 +181,52 @@ class TUI(Frontend):
         self.turn_start = time.time()
         self.turn_tokens = self.turn_prompt = 0
         self.turn_seconds = self.turn_gen_seconds = 0.0
+        self.turn_thought = False
         if self.esc is None and self.agent is not None:
             self.esc = EscWatcher(self.agent.interrupt)
         if self.esc:
             self.esc.start()
 
     def waiting(self, label, tokens=0):
+        self._prompt_t0 = None
         if self.live is None:
             self.spinner.begin(label, "esc to interrupt")
         self.spinner.update(label)
 
+    _prompt_t0 = None
+
+    def progress(self, done, total, cached=0):
+        """The model is reading the prompt: show how far it is and about how long is left."""
+        now = time.time()
+        todo = max(0, total - cached)
+        if self._prompt_t0 is None:
+            self._prompt_t0 = (now, done)
+        t0, d0 = self._prompt_t0
+        rate = (done - d0) / (now - t0) if now - t0 > 3 and done > d0 else 0
+        left = ((total - done) / rate) if rate else None
+        label = "Reading the prompt: %s of %s tokens" % (util.human_tokens(done), util.human_tokens(total))
+        if left is not None and total > done:
+            label += " · about %s left" % util.human_duration(left)
+        elif cached and not todo:
+            label = "Reading the prompt (already cached)"
+        self.spinner.update(label)
+
     def on_thinking(self, delta):
         S = self.style
-        if self.settings.get("thinking", "show") == "hide":
+        mode = self.settings.get("thinking", "show")
+        self.turn_thought = True
+        if mode == "hide":
             self.spinner.update("Thinking", self.spinner.tokens + 1)
+            return
+        if mode == "live":              # the reasoning appears as the model writes it
+            if not self.think_live:
+                self.spinner.end()
+                self.thinking_on = True
+                self.think_live = True
+                self.w(S.fg("think", S.italic("  " + S.g("tri") + " thinking")))
+                self.out.write("    ")
+            self.out.write(S.fg("think", S.italic(delta.replace("\n", "\n    "))))
+            self.out.flush()
             return
         self.thinking_on = True
         self.think_buf += delta
@@ -213,6 +253,9 @@ class TUI(Frontend):
         if self.esc:
             self.esc.stop()
         S = self.style
+        if self.settings.get("thinking", "show") == "live" and not self.turn_thought and not self.hinted:
+            self.hinted = True
+            self.w(S.muted("  (No reasoning came from this model. A llama.cpp model only thinks when it is started with thinking on: nodeyard ai split deploy --think on)"))
         secs = time.time() - self.turn_start
         parts = [util.human_duration(secs) if secs >= 1 else "%.1fs" % secs]
         if self.turn_tokens:

@@ -225,7 +225,7 @@
       loadDisk();
       selectTab(A.tab);
     },
-    update() { loadTargets(); if (A.tab === "models") { loadOllama(); loadDisk(); } refreshTab(); },
+    update() { loadRemoteChats(); loadTargets(); if (A.tab === "models") { loadOllama(); loadDisk(); } refreshTab(); },
   };
   function selectTab(t) {
     A.tab = t; store.set("ai.tab", t);
@@ -310,6 +310,58 @@
       return true;
     } catch (e) { toast("Couldn't load the model."); return false; }
     finally { A.loadingModel = null; paintSend(); refreshChat(); loadDisk(true); }
+  }
+
+
+  // ---- chats shared with yardcode: kept on the server, listed here with a badge, continued here or there
+  function rawToMessages(raw) {
+    const out = []; let last = null;
+    for (const m of raw || []) {
+      if (m.role === "user") {
+        if (["ack", "tool", "hook", "summary"].includes(m.synthetic)) continue;
+        out.push({ role: "user", content: (m.content || "").replace(/\n\n<environment>[\s\S]*?<\/environment>\s*$/, "") }); last = null;
+      } else if (m.role === "assistant") {
+        if (m.synthetic) continue;
+        if (!last) { last = { role: "assistant", content: "", agent: true, tools: [] }; out.push(last); }
+        if (m.content && m.content.trim()) last.content += (last.content ? "\n\n" : "") + m.content;
+        for (const tc of m.tool_calls || []) {
+          let a = ""; try { a = Object.values(JSON.parse(tc.function.arguments || "{}")).map((v) => (typeof v === "string" ? v : JSON.stringify(v))).join(", "); } catch (e) { a = (tc.function.arguments || "").slice(0, 60); }
+          last.tools.push({ id: tc.id, name: tc.function.name, summary: tc.function.name + "(" + a.slice(0, 80) + ")", status: "ok" });
+        }
+      } else if (m.role === "tool" && last) {
+        const x = last.tools.find((k) => k.id === m.tool_call_id); if (x) { x.text = (m.content || "").slice(0, 2500); x.result = (m.content || "").split("\n")[0].slice(0, 70); }
+      }
+    }
+    return out.filter((m) => m.role === "user" || m.content || (m.tools && m.tools.length));
+  }
+  async function loadRemoteChats(force) {
+    if (A.remoteBusy || (!force && A.remoteAt && Date.now() - A.remoteAt < 15000) || (force && A.remoteAt && Date.now() - A.remoteAt < 3000)) return;
+    A.remoteBusy = true; A.remoteAt = Date.now();
+    try {
+      const r = await getJSON("/api/v1/chats"); if (!r || !r.ok) return;
+      const ids = new Set((r.chats || []).map((x) => x.id)); let changed = false;
+      for (const sm of r.chats || []) {
+        let c = A.chats.find((x) => x.remote && x.remote.id === sm.id);
+        if (c && (c.remote.updated >= sm.updated || (A.stream && A.stream.chat === c.id))) continue;
+        let full; try { full = (await getJSON("/api/v1/chat?id=" + encodeURIComponent(sm.id))).chat; } catch (e) { continue; }
+        if (!full) continue;
+        const msgs = rawToMessages(full.messages);
+        if (c) { c.messages = msgs; c.title = full.title || c.title; c.remote.updated = full.updated; c.remote.shown = msgs.length; }
+        else { A.chats.unshift({ id: uid(), title: full.title || "yardcode chat", target: (targetList().find((t) => t.ready) || {}).id || "", messages: msgs, system: "", temperature: 0.7, max_tokens: 1024, compress: "auto", web: false, plugins: [],
+          created: (full.created || 0) * 1000 || Date.now(), remote: { id: sm.id, source: sm.source, host: sm.host, cwd: sm.cwd, updated: full.updated, shown: msgs.length } }); }
+        changed = true;
+      }
+      const before = A.chats.length; A.chats = A.chats.filter((c) => !c.remote || ids.has(c.remote.id)); if (A.chats.length !== before) changed = true;
+      if (changed) { if (A.cur && !curChat()) A.cur = (A.chats[0] || {}).id || ""; saveChats(); renderChatList(); if (!A.stream && $("#thread")) refreshChat(true); }
+    } catch (e) { /* not signed in, or the server is busy: try again later */ } finally { A.remoteBusy = false; }
+  }
+  // after a turn in a shared chat: send what is new, so yardcode can carry on from here
+  async function syncBack(c) {
+    if (!c || !c.remote) return;
+    const fresh = c.messages.slice(c.remote.shown || 0).filter((m) => !m.error && !m.pending);
+    const raw = fresh.map((m) => ({ role: m.role, content: m.role === "user" ? apiContent(m, true) : (m.content || "") })).filter((m) => m.content);
+    if (!raw.length) { c.remote.shown = c.messages.length; return; }
+    try { const r = await postJSON("/api/v1/chats/append", { id: c.remote.id, messages: raw }); if (r.ok) { c.remote.shown = c.messages.length; c.remote.updated = r.updated; saveChats(); } } catch (e) { /* offline: it goes next time */ }
   }
 
   // ---- context size, compression and web research
@@ -444,7 +496,7 @@
       if (msg.error === "Stopped." && (msg.content || msg.tools.length)) msg.error = "";
       msg.meta = [usage && usage.tok_s ? usage.tok_s + " tokens/s" : "", msg.tools.length ? msg.tools.length + " tool call" + (msg.tools.length === 1 ? "" : "s") : "", ((performance.now() - t0) / 1000).toFixed(1) + " s", t.name].filter(Boolean).join(" · ");
       A.stream = null; paintSend(); saveChats(); paintLast(); refreshChat();
-      setTimeout(() => autoRun(c, msg), 50);
+      setTimeout(() => { syncBack(c); autoRun(c, msg); }, 50);
     }
   }
 
@@ -570,6 +622,7 @@
     return c;
   }
   function buildChat() {
+    loadRemoteChats(true);
     if (!curChat()) { if (A.chats.length) A.cur = A.chats[0].id; else newChat(); }
     setHTML($("#ai-pane"), html`<div class="chat">
       <aside class="chat-side card"><button class="btn primary wide" data-ai="new-chat">+ New chat</button><div id="chat-list" class="chat-list"></div></aside>
@@ -606,7 +659,7 @@
       A.wanted && (!findTarget("split") || findTarget("split").ready === false || (S.d.ai.split && S.d.ai.split.model !== A.wanted.file)) ? html`<b>${A.wanted.file.replace(/\.gguf$/i, "")}</b> will be loaded when you send your message.` : null;
     setHTML($("#chat-note"), loadNote ? loadNote : !list.length && A.targets && !A.wanted ? html`Nothing to chat with yet. <a href="#" data-ai-tab-link="models">Run a model</a> on the Models tab, or find one under <a href="#" data-ai-tab-link="search">Find models</a>.` : t && !t.ready ? html`${t.name} isn't loaded yet.` :
       A.compressing && c && A.compressing === c.id ? html`Compressing the earlier messages… <button class="btn small" type="button" data-ai="stop-compress">Stop</button>` : A.searching && c && A.searching === c.id ? html`Searching the web…` :
-      cx ? html`Context: about ${used.toLocaleString()} of ${cx.toLocaleString()} tokens (${Math.min(100, Math.round((100 * used) / cx))}%)${c.summary ? " · earlier messages compressed" : ""}${c.max_tokens ? "" : " · no reply limit"}` : "");
+      cx ? html`${c.remote ? "From " + (c.remote.source || "yardcode") + (c.remote.host ? " on " + c.remote.host : "") + " · " : ""}Context: about ${used.toLocaleString()} of ${cx.toLocaleString()} tokens (${Math.min(100, Math.round((100 * used) / cx))}%)${c.summary ? " · earlier messages compressed" : ""}${c.max_tokens ? "" : " · no reply limit"}` : "");
   }
   // Send turns into Stop while an answer is coming, wherever you are (another chat, back from another page),
   // and Stop always works: it ends the request and tells the model to stop working on it.
@@ -651,7 +704,7 @@
     return out;
   };
   function renderChatList() {
-    setHTML($("#chat-list"), A.chats.map((c) => raw('<div class="chat-item' + (c.id === A.cur ? " on" : "") + '" data-ai="open-chat" data-id="' + esc(c.id) + '"><span>' + esc(c.title) + '</span><button class="x" data-ai="del-chat" data-id="' + esc(c.id) + '" aria-label="Delete chat">×</button></div>')));
+    setHTML($("#chat-list"), A.chats.map((c) => raw('<div class="chat-item' + (c.id === A.cur ? " on" : "") + '" data-ai="open-chat" data-id="' + esc(c.id) + '"><span>' + esc(c.title) + (c.remote ? ' <span class="chip small" title="From ' + esc(c.remote.source || "yardcode") + (c.remote.host ? " on " + esc(c.remote.host) : "") + '">' + esc(c.remote.source || "yardcode") + "</span>" : "") + '</span><button class="x" data-ai="del-chat" data-id="' + esc(c.id) + '" aria-label="Delete chat">×</button></div>')));
   }
   const webChips = (m) => m.web && m.web.sources && m.web.sources.length ? '<details class="srcs"><summary>Searched the web · ' + m.web.sources.length + " source" + (m.web.sources.length === 1 ? "" : "s") + "</summary>" +
     m.web.sources.map((x) => '<a href="' + esc(x.url) + '" target="_blank" rel="noopener noreferrer nofollow">' + esc(x.title || x.url) + '</a>').join("") + "</details>" : "";
@@ -784,7 +837,7 @@
       A.stream = null;
       paintSend();
       saveChats(); paintLast(); refreshChat();
-      setTimeout(() => autoRun(c, msg), 50);
+      setTimeout(() => { syncBack(c); autoRun(c, msg); }, 50);
     }
   }
 
@@ -1039,7 +1092,7 @@
     const a = el.dataset.ai, c = curChat();
     if (a === "new-chat") { newChat(); buildChat(); }
     else if (a === "open-chat") { A.cur = el.dataset.id; saveChats(); buildChat(); }
-    else if (a === "del-chat") { e.stopPropagation(); A.chats = A.chats.filter((x) => x.id !== el.dataset.id); if (A.cur === el.dataset.id) A.cur = (A.chats[0] || {}).id || ""; saveChats(); buildChat(); }
+    else if (a === "del-chat") { e.stopPropagation(); const gone = A.chats.find((x) => x.id === el.dataset.id); if (gone && gone.remote) postJSON("/api/v1/chats/delete", { id: gone.remote.id }).catch(() => {}); A.chats = A.chats.filter((x) => x.id !== el.dataset.id); if (A.cur === el.dataset.id) A.cur = (A.chats[0] || {}).id || ""; saveChats(); buildChat(); }
     else if (a === "clear-chat" && c) { if (A.stream) A.stream.ctrl.abort(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); c.messages = []; c.summary = ""; c.summaryUpTo = 0; c.title = "New chat"; saveChats(); renderThread(); renderChatList(); refreshChat(); }
     else if (a === "compress-now" && c) { compressChat(c, { manual: true }); }
     else if (a === "agent-allow" || a === "agent-always" || a === "agent-deny") { agentReply(c, a); }

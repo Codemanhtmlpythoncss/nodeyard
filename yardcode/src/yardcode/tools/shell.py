@@ -383,5 +383,7 @@ class Python(Tool):
                       preview=lines[-6:] if err else lines[:6])
 
 
-SHELL_TOOLS = [Bash, BashOutput, KillShell, Python]
+from .terminal import Terminal  # noqa: E402
+
+SHELL_TOOLS = [Bash, BashOutput, KillShell, Python, Terminal]
 _ = json

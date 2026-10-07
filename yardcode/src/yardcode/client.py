@@ -184,6 +184,7 @@ class Client:
         self.timeout = timeout
         self.connect_timeout = connect_timeout
         self.verify_tls = verify_tls
+        self.llama = False        # a llama.cpp server (it can report how far it is through reading the prompt)
         self._conn = None
         self._lock = threading.Lock()
 
@@ -209,6 +210,18 @@ class Client:
             raise APIError("Can't reach the model API at %s:%d (%s)." % (host, port, e), kind="connect")
         conn.sock.settimeout(self.timeout)
         return conn
+
+    def probe(self, timeout=4):
+        """Can a connection be opened at all? "" if so, otherwise why not. Quick, so a server that isn't there doesn't stall start-up."""
+        try:
+            scheme, host, port, _ = self._split("")
+        except APIError as e:
+            return str(e)
+        try:
+            socket.create_connection((host, port), timeout=timeout).close()
+        except OSError as e:
+            return "%s:%d didn't answer within %d s (%s)" % (host, port, timeout, e)
+        return ""
 
     def _headers(self, extra=None):
         h = {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "yardcode"}
@@ -299,6 +312,7 @@ class Client:
                     j = json.loads(raw)
                     n = (j.get("default_generation_settings") or {}).get("n_ctx") or j.get("n_ctx")
                     if n:
+                        self.llama = True
                         return int(n)
             except (APIError, OSError, ValueError, http.client.HTTPException):
                 pass
@@ -364,7 +378,7 @@ class Client:
 
     # -- chat --
     def chat(self, messages, tools=None, max_tokens=0, temperature=0.2, on_text=None, on_thinking=None,
-             on_tool=None, stop=None, extra=None):
+             on_tool=None, stop=None, extra=None, on_progress=None):
         """One streamed completion. Callbacks get text pieces as they arrive; returns a Completion."""
         body = {"model": self.model or "default", "messages": messages, "stream": True, "temperature": temperature,
                 "stream_options": {"include_usage": True}}
@@ -373,6 +387,8 @@ class Client:
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
+        if self.llama and on_progress:
+            body["return_progress"] = True
         body.update(extra or {})
         scheme, host, port, full = self._split("/chat/completions")
         t0 = time.time()
@@ -396,7 +412,7 @@ class Client:
             if "event-stream" not in ctype:  # a server that ignored stream:true
                 self._take_whole(json.loads(resp.read().decode("utf-8", "replace")), comp, splitter, on_text, on_thinking, on_tool)
             else:
-                self._read_stream(resp, comp, splitter, calls, on_text, on_thinking, on_tool, stop)
+                self._read_stream(resp, comp, splitter, calls, on_text, on_thinking, on_tool, stop, on_progress)
         except (OSError, http.client.HTTPException) as e:
             if stop is not None and stop.is_set():
                 raise Cancelled()
@@ -430,7 +446,7 @@ class Client:
             if on_text:
                 on_text(text)
 
-    def _read_stream(self, resp, comp, splitter, calls, on_text, on_thinking, on_tool, stop):
+    def _read_stream(self, resp, comp, splitter, calls, on_text, on_thinking, on_tool, stop, on_progress=None):
         t0 = time.time()
         while True:
             if stop is not None and stop.is_set():
@@ -456,6 +472,12 @@ class Client:
                 comp.usage = chunk["usage"]
             if chunk.get("timings"):
                 comp.timings = chunk["timings"]
+            pp = chunk.get("prompt_progress")
+            if pp and on_progress:
+                try:
+                    on_progress(int(pp.get("processed", 0)), int(pp.get("total", 0)), int(pp.get("cache", 0)))
+                except (TypeError, ValueError):
+                    pass
             for ch in chunk.get("choices") or []:
                 delta = ch.get("delta") or {}
                 if comp.first_token is None and (delta.get("content") or delta.get("reasoning_content") or delta.get("tool_calls")):

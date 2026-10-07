@@ -439,6 +439,8 @@ class Permissions:
                 return Decision("ask", "it runs a command", suggest, hint, risk)
             if name == "KillShell":
                 return Decision("allow", "stops a shell this session started")
+            if name == "Terminal" and args.get("action") in ("read", "list", "stop"):
+                return Decision("allow", "looks at or closes a terminal this session started")
             return Decision("ask", "it runs code", suggest)
         if kind == "cluster":
             if args.get("action") in ("status", "list", "search", "files"):

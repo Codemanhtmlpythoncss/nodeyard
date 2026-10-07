@@ -240,6 +240,8 @@ def register(ctx, args):
             return h._json({"ok": False, "error": "No such task."}, 404)
         h._json(dict(v, ok=True))
 
+    import webtools
+    webtools.register(ctx, args)
     ctx.get_routes.update({PREFIX + "status": status, PREFIX + "models": models, PREFIX + "search": search, PREFIX + "files": files, PREFIX + "jobs": job})
     ctx.post_routes.update({PREFIX + "models/load": load, PREFIX + "models/unload": unload, PREFIX + "models/download": download})
 

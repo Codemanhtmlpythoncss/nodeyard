@@ -257,3 +257,49 @@ class SubAgents(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SmallPrompts(Base):
+    def test_the_system_prompt_is_the_same_every_time_and_the_date_goes_in_the_first_message(self):
+        import time
+        srv = self.server([{"content": "a"}, {"content": "b"}])
+        ag1, _ = self.agent(srv)
+        first = ag1.system_prompt()
+        ag1.run("hello")
+        time.sleep(1.1)
+        ag2, _ = self.agent(srv)
+        self.assertEqual(ag2.system_prompt(), first)                     # nothing in it changes with the time or folder
+        self.assertNotIn("Today", first)
+        self.assertIn("<environment>", srv.requests[0]["messages"][1]["content"])
+        self.assertTrue(srv.requests[0]["messages"][1]["content"].startswith("hello"))
+        ag1.run("again")
+        self.assertEqual(srv.requests[1]["messages"][0]["content"], srv.requests[0]["messages"][0]["content"])
+        self.assertEqual(sum("<environment>" in m["content"] for m in srv.requests[1]["messages"] if m["role"] == "user"), 1)
+
+    def test_small_contexts_get_small_prompts(self):
+        srv = self.server()
+        sizes = {}
+        for window in (8192, 16000, 40000):
+            ag, _ = self.agent(srv)
+            ag.context_window = window
+            sizes[window] = (ag.tier(), {t["function"]["name"] for t in ag.schemas()})
+        self.assertEqual(sizes[8192][0], "tiny")
+        self.assertEqual(sizes[16000][0], "lean")
+        self.assertEqual(sizes[40000][0], "full")
+        self.assertTrue({"Read", "Edit", "Bash", "WebSearch", "Weather"} <= sizes[8192][1])
+        self.assertTrue(len(sizes[8192][1]) < len(sizes[16000][1]) < len(sizes[40000][1]))
+
+    def test_reading_the_prompt_is_reported_when_the_server_can_say(self):
+        srv = self.server([{"content": "hi"}])
+        ag, fe = self.agent(srv)
+        ag.client.llama = True
+        seen = []
+        fe.progress = lambda done, total, cached=0: seen.append((done, total))
+        ag.run("hello")
+        self.assertTrue(srv.requests[0].get("return_progress"))
+        self.assertEqual(seen[-1], (100, 100))
+        # a server that isn't llama.cpp never gets the extra field
+        srv2 = self.server([{"content": "hi"}])
+        ag2, _ = self.agent(srv2)
+        ag2.run("hello")
+        self.assertNotIn("return_progress", srv2.requests[0])

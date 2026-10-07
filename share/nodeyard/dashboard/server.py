@@ -539,6 +539,10 @@ def main():
         controlapi.register(ctx, a)
         import agentapi
         agentapi.register(ctx, a)
+        import chatsapi
+        chatsapi.register(ctx, a)
+        import updateapi
+        updateapi.register(ctx, a)
     import settings
     settings.register(ctx, a)
     import terminal

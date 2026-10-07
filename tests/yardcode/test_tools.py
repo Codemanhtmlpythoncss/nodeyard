@@ -243,3 +243,71 @@ class SmallTools(Base):
 if __name__ == "__main__":
     unittest.main()
 _ = sys
+
+
+class InteractiveTerminal(Base):
+    def term(self):
+        from yardcode.tools import terminal
+        return terminal.Terminal()
+
+    def test_start_a_shell_type_and_read_the_screen(self):
+        ctx = self.ctx()
+        t = self.term()
+        try:
+            r = t.run({"action": "start", "command": "sh", "wait": 1}, ctx)
+            self.assertIn("[term_1: running]", r.text)
+            r = t.run({"action": "send", "id": "term_1", "keys": "echo hello-$((6*7)){enter}"}, ctx)
+            self.assertIn("hello-42", r.text)
+        finally:
+            t.run({"action": "stop", "id": "term_1"}, ctx)
+
+    def test_a_python_repl_keeps_its_state_between_sends(self):
+        ctx = self.ctx()
+        t = self.term()
+        try:
+            t.run({"action": "start", "command": sys.executable + " -q", "wait": 1.5}, ctx)
+            t.run({"action": "send", "id": "term_1", "keys": "x = 20 + 1\n"}, ctx)
+            r = t.run({"action": "send", "id": "term_1", "keys": "x * 2\n"}, ctx)
+            self.assertIn("42", r.text)
+        finally:
+            t.run({"action": "stop", "id": "term_1"}, ctx)
+
+    def test_programs_that_ask_questions_can_be_answered_and_ctrl_c_works(self):
+        ctx = self.ctx()
+        t = self.term()
+        try:
+            t.run({"action": "start", "command": "sh -c 'printf \"name? \"; read n; echo hi $n; sleep 30'", "wait": 1}, ctx)
+            r = t.run({"action": "send", "id": "term_1", "keys": "Ada{enter}"}, ctx)
+            self.assertIn("hi Ada", r.text)
+            r = t.run({"action": "send", "id": "term_1", "keys": "{ctrl-c}", "wait": 1.5}, ctx)
+            self.assertIn("finished", r.text)
+        finally:
+            t.run({"action": "stop", "id": "term_1"}, ctx)
+
+    def test_a_finished_program_reports_its_exit_code_and_unknown_ids_are_explained(self):
+        ctx = self.ctx()
+        t = self.term()
+        r = t.run({"action": "start", "command": "sh -c 'echo done; exit 3'", "wait": 1.5}, ctx)
+        self.assertIn("exit code 3", r.text)
+        with self.assertRaises(ToolError):
+            t.run({"action": "send", "id": "term_1", "keys": "x"}, ctx)
+        with self.assertRaises(ToolError):
+            t.run({"action": "read", "id": "term_9"}, ctx)
+
+    def test_key_names_become_the_right_bytes(self):
+        from yardcode.tools.terminal import translate
+        self.assertEqual(translate("ls{enter}"), "ls\r")
+        self.assertEqual(translate("{ctrl-c}{up}{tab}{esc}"), "\x03\x1b[A\t\x1b")
+        self.assertEqual(translate("a\nb"), "a\rb")
+        self.assertEqual(translate("{nonsense}"), "{nonsense}")
+
+    def test_reading_and_stopping_need_no_permission_but_typing_does(self):
+        from yardcode import perms
+        from yardcode.tools.base import Context
+        s = self.settings()
+        p = perms.Permissions(s, Context(s, self.cwd))
+        t = self.term()
+        self.assertEqual(p.decide(t, {"action": "read", "id": "term_1"}).action, "allow")
+        self.assertEqual(p.decide(t, {"action": "stop", "id": "term_1"}).action, "allow")
+        self.assertEqual(p.decide(t, {"action": "start", "command": "ssh host"}).action, "ask")
+        self.assertEqual(p.decide(t, {"action": "send", "id": "term_1", "keys": "rm -rf x{enter}"}).action, "ask")
