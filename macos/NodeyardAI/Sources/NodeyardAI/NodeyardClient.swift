@@ -59,16 +59,55 @@ final class NodeyardClient {
         return req
     }
 
+    static func suggestedDashboardAddress(from value: String) -> String? {
+        guard var parts = URLComponents(string: value.trimmingCharacters(in: .whitespacesAndNewlines)), parts.host != nil else { return nil }
+        if let migrated = migratedDashboardAddress(from: value) { return migrated }
+        if parts.port == 9092, parts.scheme?.lowercased() == "https" {
+            parts.scheme = "http"
+            return parts.string
+        }
+        return nil
+    }
+
+    static func migratedDashboardAddress(from value: String) -> String? {
+        guard var parts = URLComponents(string: value.trimmingCharacters(in: .whitespacesAndNewlines)), parts.host != nil, parts.port == 31435 else { return nil }
+        parts.scheme = "http"
+        parts.port = 9092
+        parts.path = ""
+        parts.query = nil
+        parts.fragment = nil
+        return parts.string
+    }
+
+    private func explainNetworkError(_ error: Error) -> Error {
+        guard let urlError = error as? URLError else { return error }
+        guard [.secureConnectionFailed, .serverCertificateHasBadDate, .serverCertificateUntrusted,
+               .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid].contains(urlError.code) else { return error }
+        let parts = URLComponents(string: baseAddress)
+        let host = parts?.host ?? "your server"
+        if parts?.port == 31435 {
+            return NodeyardError.server("This address points to the model API on port 31435. Nodeyard AI needs the dashboard API instead. In Settings, change Server address to http://\(host):9092 (or your dashboard's address). Keep the same server-wide API key.")
+        }
+        if parts?.port == 9092, parts?.scheme?.lowercased() == "https" {
+            return NodeyardError.server("The Nodeyard dashboard on port 9092 serves HTTP, not HTTPS. In Settings, change Server address to http://\(host):9092. Use this on your private LAN or Tailscale; for public access, use a valid HTTPS dashboard address.")
+        }
+        return NodeyardError.server("The secure connection to \(host) failed because the certificate or host name could not be verified. Use the HTTPS address that matches the server's certificate, or use HTTP only on a private, trusted network.")
+    }
+
     private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = [], as type: T.Type) async throws -> T {
-        let (data, response) = try await session.data(for: request("GET", path, query: query))
-        try check(response, data)
-        return try JSONDecoder().decode(type, from: data)
+        do {
+            let (data, response) = try await session.data(for: request("GET", path, query: query))
+            try check(response, data)
+            return try JSONDecoder().decode(type, from: data)
+        } catch { throw explainNetworkError(error) }
     }
 
     private func post<T: Decodable>(_ path: String, body: Any, as type: T.Type) async throws -> T {
-        let (data, response) = try await session.data(for: request("POST", path, body: body))
-        try check(response, data)
-        return try JSONDecoder().decode(type, from: data)
+        do {
+            let (data, response) = try await session.data(for: request("POST", path, body: body))
+            try check(response, data)
+            return try JSONDecoder().decode(type, from: data)
+        } catch { throw explainNetworkError(error) }
     }
 
     private func check(_ response: URLResponse, _ data: Data) throws {
@@ -104,7 +143,10 @@ final class NodeyardClient {
         var req = try request("POST", "/api/v1/chat/completions")
         req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         req.httpBody = data
-        let (bytes, response) = try await session.bytes(for: req)
+        let bytes: URLSession.AsyncBytes
+        let response: URLResponse
+        do { (bytes, response) = try await session.bytes(for: req) }
+        catch { throw explainNetworkError(error) }
         guard let http = response as? HTTPURLResponse else { throw NodeyardError.server("The server response was not HTTP.") }
         guard (200..<300).contains(http.statusCode) else {
             var errorText = "Request failed."
@@ -117,19 +159,21 @@ final class NodeyardClient {
             throw NodeyardError.http(http.statusCode, errorText)
         }
         var stats = StreamStats()
-        for try await line in bytes.lines {
-            try Task.checkCancellation()
-            guard line.hasPrefix("data: ") else { continue }
-            let chunk = String(line.dropFirst(6))
-            if chunk == "[DONE]" { break }
-            guard let json = chunk.data(using: .utf8), let part = try? JSONDecoder().decode(StreamDelta.self, from: json) else { continue }
-            if let usage = part.usage?.completion_tokens { stats.tokens = usage }
-            if let speed = part.timings?.predicted_per_second { stats.tokensPerSecond = speed }
-            for choice in part.choices ?? [] {
-                if let thought = choice.delta.reasoning_content ?? choice.delta.reasoning, !thought.isEmpty { onReasoning(thought) }
-                if let text = choice.delta.content, !text.isEmpty { onContent(text) }
+        do {
+            for try await line in bytes.lines {
+                try Task.checkCancellation()
+                guard line.hasPrefix("data: ") else { continue }
+                let chunk = String(line.dropFirst(6))
+                if chunk == "[DONE]" { break }
+                guard let json = chunk.data(using: .utf8), let part = try? JSONDecoder().decode(StreamDelta.self, from: json) else { continue }
+                if let usage = part.usage?.completion_tokens { stats.tokens = usage }
+                if let speed = part.timings?.predicted_per_second { stats.tokensPerSecond = speed }
+                for choice in part.choices ?? [] {
+                    if let thought = choice.delta.reasoning_content ?? choice.delta.reasoning, !thought.isEmpty { onReasoning(thought) }
+                    if let text = choice.delta.content, !text.isEmpty { onContent(text) }
+                }
             }
-        }
+        } catch { throw explainNetworkError(error) }
         return stats
     }
 

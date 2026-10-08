@@ -23,6 +23,8 @@ The bundle is unsigned, so it is intended for local use or internal sharing. A f
 
 Open Settings, enter the dashboard address (for example `https://nodeyard.example:9092`) and the shared server API key from Dashboard → Settings. The key is stored in macOS Keychain. The app fetches model targets and downloads from the protected `/api/v1` API, and sends chat through `/api/v1/chat/completions`. Keep TLS enabled when connecting over an untrusted network. Local chats work before a server is configured.
 
+Enter the **dashboard** address, not the model's OpenAI-compatible URL. For a direct Nodeyard dashboard connection, use `http://<server>:9092` on a private LAN or Tailscale network; port `31435` is the model endpoint. A saved port-31435 address is corrected to the dashboard address when the app starts, and Settings offers the same one-click switch if you enter it again. For public access, use a valid HTTPS address whose certificate matches its host name.
+
 Chat JSON is stored under `~/Library/Application Support/NodeyardAI/Chats`; uploaded files are copied to its `Attachments` folder. They stay on this Mac; remote sync stores message text and does not upload attachment contents.
 
 ## Included features

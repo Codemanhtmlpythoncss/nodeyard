@@ -44,7 +44,12 @@ final class AppState: ObservableObject {
 
     init() {
         defaults = store.loadDefaults()
-        let address = UserDefaults.standard.string(forKey: "nodeyard.serverAddress") ?? "http://localhost:9092"
+        let savedAddress = UserDefaults.standard.string(forKey: "nodeyard.serverAddress") ?? "http://localhost:9092"
+        let address = NodeyardClient.migratedDashboardAddress(from: savedAddress) ?? savedAddress
+        if address != savedAddress {
+            UserDefaults.standard.set(address, forKey: "nodeyard.serverAddress")
+            info = "Updated the saved model endpoint to the Nodeyard dashboard on port 9092."
+        }
         let key = KeychainStore.read()
         serverAddress = address
         apiKey = key

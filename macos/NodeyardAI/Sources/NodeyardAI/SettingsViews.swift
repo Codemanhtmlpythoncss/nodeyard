@@ -16,6 +16,15 @@ struct AppSettingsView: View {
                 Section("Nodeyard server") {
                     TextField("Server address", text: $address, prompt: Text("https://nodeyard.example:9092"))
                         .autocorrectionDisabled()
+                    if let suggestion = NodeyardClient.suggestedDashboardAddress(from: address) {
+                        Label("This looks like a model endpoint. Nodeyard AI needs the dashboard address.", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange)
+                        Button {
+                            address = suggestion
+                            saveConnection()
+                            state.refresh()
+                        } label: { Label("Use dashboard address · \(suggestion)", systemImage: "arrow.triangle.turn.up.right.diamond") }
+                    }
                     SecureField("Server API key", text: $key).textContentType(.password).autocorrectionDisabled()
                     HStack {
                         Label(state.isConnected ? "Connected" : "Not connected", systemImage: state.isConnected ? "checkmark.circle.fill" : "circle.dashed")
@@ -26,7 +35,7 @@ struct AppSettingsView: View {
                     Text("Use the shared server API key from Nodeyard Dashboard → Settings. It is stored in macOS Keychain.")
                         .font(.caption).foregroundStyle(.secondary)
                     if address.lowercased().hasPrefix("http://") {
-                        Label("HTTP does not encrypt your key in transit. Use HTTPS on shared or public networks.", systemImage: "lock.open.fill")
+                        Label("HTTP has no TLS protection. Use it only on a private LAN or Tailscale. Use a valid HTTPS dashboard address on public networks.", systemImage: "lock.open.fill")
                             .font(.caption).foregroundStyle(.orange)
                     }
                 }
