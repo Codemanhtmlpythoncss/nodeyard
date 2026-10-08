@@ -21,6 +21,24 @@ undo for every change it makes.
 
 **New:** [`yardcode`](yardcode/README.md) is a terminal AI agent (like Codex or Claude Code) for your own model API: it edits files, runs commands, searches the web, and can load models on your cluster. It installs with nodeyard and on its own, on macOS and Linux.
 
+### Install yardcode on its own
+
+You don't need nodeyard or a cluster for yardcode. One command, macOS or Linux, Python 3.8+ and nothing else, no sudo (it installs in `~/.local`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Codemanhtmlpythoncss/nodeyard/main/yardcode/install.sh | sh
+```
+
+Then point it at your model API and start:
+
+```sh
+yardcode login      # the model API address and key
+yardcode            # start working in this folder (type / for commands, ! for a shell)
+```
+
+Update it later with `yardcode update`, remove it with `sh yardcode/install.sh --uninstall`. From a checkout: `sh yardcode/install.sh --from-dir .`.
+More in [yardcode/README.md](yardcode/README.md). nodeyard's own installer installs yardcode too.
+
 ## Features
 
 **Today (0.1.0)**
