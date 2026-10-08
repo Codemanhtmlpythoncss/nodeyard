@@ -19,6 +19,8 @@ You can choose another bundle path by passing it to the script:
 
 The bundle is unsigned, so it is intended for local use or internal sharing. A full Xcode installation is not required; Swift and the macOS SDK from Command Line Tools are enough.
 
+The build generates a branded multi-resolution `AppIcon.icns` and uses the same gradient node-network mark in the sidebar.
+
 ## Connect
 
 Open Settings, enter the dashboard address (for example `https://nodeyard.example:9092`) and the shared server API key from Dashboard → Settings. The key is stored in macOS Keychain. The app fetches model targets and downloads from the protected `/api/v1` API, and sends chat through `/api/v1/chat/completions`. Keep TLS enabled when connecting over an untrusted network. Local chats work before a server is configured.

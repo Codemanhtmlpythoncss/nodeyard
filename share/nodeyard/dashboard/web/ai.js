@@ -1349,7 +1349,12 @@
   // ------------------------------------------------------------------ API examples
   function renderApi() {
     const d = S.d, sp = d.ai && d.ai.split, host = location.hostname, port = sp && (sp.node_port || (sp.gate && sp.gate.port));
-    const base = port ? "http://" + host + ":" + port + "/v1" : "http://NODE-IP:31435/v1", model = (sp && (sp.alias || "model")) || "your-model", key = A.key || "YOUR_API_KEY", keyless = !!(sp && sp.gate) && !A.useKey;
+    const controlBase = location.origin + "/api/v1";
+    const ollamaTarget = targetList().find((t) => t.kind === "ollama" && t.ready);
+    const ollamaModel = ollamaTarget ? ollamaTarget.id : "ollama:ollama-0:MODEL_NAME";
+    const base = sp ? (port ? "http://" + host + ":" + port + "/v1" : "http://NODE-IP:31435/v1") : controlBase;
+    const model = sp ? (sp.alias || "model") : (ollamaTarget ? ollamaModel : "your-model");
+    const key = A.key || "YOUR_API_KEY", keyless = !!(sp && sp.gate) && !A.useKey;
     const hdr = (pad) => (keyless ? "" : pad + "-H 'Authorization: Bearer " + key + "' \\\n");
     const ips = d.nodes.map((n) => n.internal_ip);
     const k2 = keyless ? "not-needed" : key;
@@ -1364,7 +1369,6 @@
     };
     const block = (title, text) => html`<div class="mt"><div class="muted small" style="margin-bottom:6px;font-weight:600">${title}</div><div class="cmd">${text}<button class="btn small" data-copy="${text}"><svg class="icon" style="width:14px;height:14px"><use href="#i-copy"/></svg>Copy</button></div></div>`;
     const oll = d.pods.some((p) => p.namespace === "ai-inference" && p.name.startsWith("ollama"));
-    const osvc = d.services.find((s) => s.namespace === "ai-inference" && s.name === "ollama"), obase = osvc ? "http://" + (osvc.node_ports[0] ? host + ":" + osvc.node_ports[0] : osvc.cluster_ip + ":11434") : "http://NODE-IP:11434";
     setHTML($("#ai-pane"), html`<div class="grid g-2">
       ${card("Connect to the split model", sp ? html`<div class="kvl"><span class="muted">Base URL</span><span class="chip btnlike" data-copy="${base}"><span class="mono">${base}</span></span></div>
         <div class="kvl"><span class="muted">Model name</span><span class="chip btnlike" data-copy="${model}"><span class="mono">${model}</span></span></div>
@@ -1372,19 +1376,24 @@
         ${sp.gate ? html`<p class="muted small" style="margin:10px 0 0"><b>No key is needed from</b> ${sp.gate.trusted.map((n) => html`<span class="mono">${n}</span> `)}(your machines, LAN and Tailscale). <b>From anywhere else</b>, such as a router port-forward from the internet, send the key.</p>
           <label class="check" style="margin-top:10px"><input type="checkbox" data-ai="use-key" ${A.useKey ? raw("checked") : ""}> Show the examples for access from outside (with the key)</label>` : ""}
         <p class="muted small" style="margin:12px 0 0">The server API key is <b>not</b> the dashboard password. It lives on the server in <span class="mono">/etc/nodeyard/secrets/ai-split-api-key</span>. It works on any machine address: ${ips.slice(0, 5).map((ip) => html`<span class="mono copy" data-copy="http://${ip}:${port || 31435}/v1">${ip}</span> `)}</p>` : empty("No split model is running", "Run one from the Models or Find models tabs to get its API address."))}
-      ${NY.publicAccess && NY.publicAccess.api ? card("From the internet", html`<p class="muted small" style="margin-top:0">Public through Tailscale Funnel: works from any device, no Tailscale needed. The API key is always required here.</p>
+      ${sp && NY.publicAccess && NY.publicAccess.api ? card("From the internet", html`<p class="muted small" style="margin-top:0">Public through Tailscale Funnel: works from any device, no Tailscale needed. The API key is always required here.</p>
         <div class="kvl"><span class="muted">Base URL</span><span class="chip btnlike" data-copy="${NY.publicAccess.api}"><span class="mono">${NY.publicAccess.api}</span></span></div>
         <div class="cmd mt">${"curl " + NY.publicAccess.api + "/chat/completions -H 'Content-Type: application/json' -H 'Authorization: Bearer " + (A.key || "YOUR_API_KEY") + "' -d '{\"model\":\"" + model + "\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}]}'"}<button class="btn small" data-copy="${"curl " + NY.publicAccess.api + "/chat/completions -H 'Content-Type: application/json' -H 'Authorization: Bearer " + (A.key || "YOUR_API_KEY") + "' -d '{\"model\":\"" + model + "\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}]}'"}">Copy</button></div>`) : ""}
-      ${card("What the API understands", html`<p class="muted small" style="margin-top:0">It speaks the OpenAI API, so most tools just work: set the base URL and key and pick the model name.</p>
+      ${sp ? html`${card("What the API understands", html`<p class="muted small" style="margin-top:0">It speaks the OpenAI API, so most tools just work: set the base URL and key and pick the model name.</p>
         <div class="tablewrap"><table class="tbl"><tbody>
           <tr><td class="mono">POST /v1/chat/completions</td><td class="muted">chat; add <span class="mono">"stream": true</span> for live tokens</td></tr>
           <tr><td class="mono">POST /v1/completions</td><td class="muted">plain text completion</td></tr>
           <tr><td class="mono">GET /v1/models</td><td class="muted">the model's name</td></tr>
           <tr><td class="mono">GET /health</td><td class="muted">is it ready? (no key needed)</td></tr>
           <tr><td class="mono">GET /</td><td class="muted">llama.cpp's own chat page</td></tr></tbody></table></div>
-        <p class="muted small" style="margin-bottom:0">Reasoning models may spend part of <span class="mono">max_tokens</span> thinking: raise it if answers get cut off.</p>`)}</div>
-      ${block("curl", ex.curl)}${block("curl: stream the answer as it's written", ex.stream)}${block("curl: list models", ex.models)}${block("Python: OpenAI library", ex.python)}${block("Python: requests only", ex.requests)}${block("JavaScript", ex.js)}${block("Editors and chat apps", ex.editor)}
-      ${oll ? html`<div class="section-title">Ollama</div>${block("Ollama chat (its own API)", `curl ${obase}/api/chat -d '{"model":"llama3.2:3b","messages":[{"role":"user","content":"Hello!"}],"stream":false}'`)}${block("Ollama, OpenAI-compatible", `curl ${obase}/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"llama3.2:3b","messages":[{"role":"user","content":"Hello!"}]}'`)}<p class="muted small">Ollama has no API key; it is only reachable from inside the cluster${osvc && osvc.node_ports[0] ? "" : " (use kubectl port-forward, or deploy it with --nodeport)"}.</p>` : ""}`);
+        <p class="muted small" style="margin-bottom:0">Reasoning models may spend part of <span class="mono">max_tokens</span> thinking: raise it if answers get cut off.</p>`)}${block("curl", ex.curl)}${block("curl: stream the answer as it's written", ex.stream)}${block("curl: list models", ex.models)}${block("Python: OpenAI library", ex.python)}${block("Python: requests only", ex.requests)}${block("JavaScript", ex.js)}${block("Editors and chat apps", ex.editor)}` : ""}
+      ${oll ? html`<div class="section-title">Ollama through the shared API key</div>
+        <div class="kvl"><span class="muted">Gateway URL</span><span class="chip btnlike" data-copy="${controlBase}"><span class="mono">${controlBase}</span></span></div>
+        <div class="kvl"><span class="muted">Model value</span><span class="chip btnlike" data-copy="${ollamaModel}"><span class="mono">${ollamaModel}</span></span></div>
+        <div class="kvl"><span class="muted">Shared API key</span><span>${A.key ? html`<span class="chip btnlike" data-copy="${A.key}"><span class="mono">${A.key}</span></span>` : html`<button class="btn small" data-ai="reveal-key">Reveal the key</button>`}</span></div>
+        ${block("Ollama via the Nodeyard gateway", `curl -N ${controlBase}/chat/completions \\\n  -H 'Content-Type: application/json' \\\n  -H 'Authorization: Bearer ${key}' \\\n  -d '{"model":"${ollamaModel}","messages":[{"role":"user","content":"Hello!"}],"stream":true}'`)}
+        ${block("Python: Ollama via the shared key", `from openai import OpenAI\n\nclient = OpenAI(base_url="${controlBase}", api_key="${key}")\nreply = client.chat.completions.create(\n    model="${ollamaModel}",\n    messages=[{"role": "user", "content": "Hello!"}],\n)\nprint(reply.choices[0].message.content)`)}
+        <p class="muted small">Ollama has no native API key. These examples go through Nodeyard's key-protected gateway, so they use the same server key as the split model and dashboard control API. Keep Ollama's direct port inside trusted networks.</p>` : ""}`);
   }
 
   // ------------------------------------------------------------------ events

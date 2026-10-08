@@ -58,7 +58,11 @@ struct ContentView: View {
     private var sidebar: some View {
         VStack(spacing: 0) {
             HStack {
-                Label("Nodeyard AI", systemImage: "sparkles").font(.headline)
+                HStack(spacing: 9) {
+                    NodeyardMark(size: 25)
+                    Text("Nodeyard AI").font(.headline)
+                }
+                .accessibilityElement(children: .combine)
                 Spacer()
                 Button { state.createChat(); showModels = false } label: { Image(systemName: "square.and.pencil") }
                     .help("New chat (⌘N)").keyboardShortcut("n", modifiers: .command)

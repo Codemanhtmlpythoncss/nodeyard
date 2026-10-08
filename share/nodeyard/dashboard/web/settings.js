@@ -130,15 +130,15 @@
           <span class="faint small" style="display:block;margin-top:4px">PNG, JPEG or WebP, up to 8 MB. Stored on the server and only shown to signed-in browsers.</span></div>
         ${bg ? html`${field(html`Blur <span class="faint" id="st-blur-v">${bg.blur}px</span>`, html`<input type="range" id="st-blur" min="0" max="40" value="${bg.blur}" class="range">`)}
           ${field(html`Darken <span class="faint" id="st-dim-v">${bg.dim}%</span>`, html`<input type="range" id="st-dim" min="0" max="95" value="${bg.dim}" class="range">`, "Darker keeps text easy to read.")}` : ""}`)}
-      ${card("Server API key", html`
-        <p class="muted small" style="margin-top:0">One key for the whole server: yardcode, the control API and every model use it. It is <b>not</b> the dashboard password.${s.gate ? " From your own networks (see Model gate) no key is needed." : ""}</p>
-        <div class="row wrap" style="gap:8px"><button class="btn" data-st="key-reveal">Reveal</button><button class="btn" data-st="key-rotate">Make a new one</button></div>
+      ${card("One shared API key", html`
+        <p class="muted small" style="margin-top:0">Use one key for Nodeyard AI, yardcode, the dashboard control API and every split model. The dashboard keeps the running model and this server key in sync. Ollama has no native API-key setting; requests to it go through this key-protected dashboard API. The dashboard sign-in password is separate.${s.gate ? " From your own networks (see Model gate) no API key is needed." : ""}</p>
+        <div class="row wrap" style="gap:8px"><button class="btn" data-st="key-reveal">Reveal shared key</button><button class="btn" data-st="key-rotate">Generate a new shared key</button></div>
         <div id="st-key-shown"></div>
         ${field("Or set your own", html`<input class="input mono" id="st-key" placeholder="at least 16 characters" spellcheck="false" autocomplete="off">`)}
-        <button class="btn" data-st="key-set">Use this key</button>
-        ${s.split ? html`<div class="row wrap" style="gap:8px;margin-top:12px"><button class="btn" data-st="key-adopt">Use the running model's key</button></div>
-          <p class="faint small">If yardcode's key works with this model but the dashboard refuses it, adopt the model's current key as the shared server key. The model keeps using the same key.</p>` : ""}
-        <p class="faint small">Changing it restarts the model's front end (about a minute). Apps using the old key need the new one.</p>`)}
+        <button class="btn" data-st="key-set">Set the shared key</button>
+        ${s.split ? html`<div class="row wrap" style="gap:8px;margin-top:12px"><button class="btn" data-st="key-adopt">Use the running model's key everywhere</button></div>
+          <p class="faint small">If your current key works with the model, this makes it the shared key for the dashboard API and yardcode too. The model stays on that key.</p>` : ""}
+        <p class="faint small">Changing it restarts the model's front end (about a minute). Update Nodeyard AI and yardcode to use the new shared key.</p>`)}
       ${card("Kubernetes", html`
         <p class="muted small" style="margin-top:0">Restart Kubernetes (k3s) on every machine: workers one at a time, then the control node. Running containers keep running; the cluster is out of reach for a minute or two. Use it when nodes act stuck.</p>
         <button class="btn danger" data-st="k8s-restart">Restart Kubernetes…</button>

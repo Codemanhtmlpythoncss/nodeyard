@@ -140,7 +140,7 @@
   document.addEventListener("pointercancel", releasePointer, true);
   document.addEventListener("focusout", () => setTimeout(flushQueuedRender, 80), true);
   function connectStream() {
-    if (!S.live || typeof EventSource === "undefined") return;
+    if (!S.live || document.hidden || typeof EventSource === "undefined") return;
     const want = needAgents();
     if (es && esAgents === want) return;
     if (es) es.close();
@@ -159,7 +159,7 @@
   }
   function schedule() {
     clearTimeout(S.timer);
-    if (!S.live) return;
+    if (!S.live || document.hidden) return;
     S.timer = setTimeout(async () => { if (!streamHealthy()) { await load(); connectStream(); } schedule(); }, Math.max(2, S.interval) * 1000);
   }
 
@@ -792,24 +792,55 @@
   }
 
   // ---------------------------------------------------------------- chrome, routing, search
+  const MOBILE_PRIMARY = new Set(["overview", "nodes", "pods", "ai"]);
+  let mobileMenuReturnFocus = null;
   function buildNav() {
-    setHTML($("#nav"), VIEWS.map((v) => raw('<a href="#' + v.id + '" data-view="' + v.id + '"><svg class="icon"><use href="#i-' + v.icon + '"/></svg>' + esc(v.label) + '<span class="n" id="nav-n-' + v.id + '"></span></a>')));
+    const link = (v, mobile) => '<a href="#' + v.id + '" data-view="' + v.id + '"' + (mobile ? ' class="mobile-section-link"' : "") + '><svg class="icon"><use href="#i-' + v.icon + '"/></svg><span class="nav-label">' + esc(v.label) + '</span><span class="n" id="' + (mobile ? "mobile-n-" : "nav-n-") + v.id + '"></span></a>';
+    setHTML($("#nav"), VIEWS.map((v) => raw(link(v, false))));
+    setHTML($("#mobile-tabs"), [...MOBILE_PRIMARY].map((id) => VIEWS.find((v) => v.id === id)).map((v) => raw('<a href="#' + v.id + '" data-view="' + v.id + '"><svg class="icon"><use href="#i-' + v.icon + '"/></svg><span class="mobile-tab-label">' + esc(v.label) + '</span></a>')).concat([raw('<button type="button" class="mobile-tab-more" aria-haspopup="dialog" aria-controls="mobile-menu" aria-expanded="false"><svg class="icon"><use href="#i-settings"/></svg><span class="mobile-tab-label">More</span></button>')]));
+    setHTML($("#mobile-more-list"), VIEWS.filter((v) => !MOBILE_PRIMARY.has(v.id)).map((v) => raw(link(v, true))));
+  }
+  function setMobileMenu(open, restoreFocus) {
+    const menu = $("#mobile-menu"), shell = $(".shell"), more = $(".mobile-tab-more");
+    if (!menu || menu.classList.contains("on") === open) return;
+    if (open) mobileMenuReturnFocus = document.activeElement;
+    menu.classList.toggle("on", open);
+    menu.inert = !open;
+    menu.setAttribute("aria-hidden", open ? "false" : "true");
+    more.setAttribute("aria-expanded", open ? "true" : "false");
+    $("#mobile-menu-backdrop").hidden = !open;
+    shell.inert = open;
+    document.body.classList.toggle("mobile-menu-open", open);
+    if (open) $("[data-mobile-close]").focus();
+    else if (restoreFocus !== false && mobileMenuReturnFocus && mobileMenuReturnFocus.isConnected) mobileMenuReturnFocus.focus();
   }
   function renderChrome() {
     const v = VIEWS.find((x) => x.id === S.view);
-    $$("#nav a").forEach((a) => a.classList.toggle("on", a.dataset.view === S.view));
+    $$("[data-view]").forEach((a) => {
+      const active = a.dataset.view === S.view;
+      a.classList.toggle("on", active);
+      if (active) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+    });
     $("#title").textContent = v.label;
     $("#subtitle").textContent = S.d ? v.sub : "";
     const th = store.get("theme", "auto");
     $("#theme use").setAttribute("href", "#i-" + (["light", "solarized-light", "rose", "paper"].includes(th) ? "sun" : "moon"));
     $("#theme").title = "Theme: " + th + " (t)";
     const live = $("#live"); live.setAttribute("aria-checked", S.live ? "true" : "false");
+    const mobileLive = $("[data-mobile-live]");
+    mobileLive.setAttribute("aria-checked", S.live ? "true" : "false");
+    mobileLive.querySelector("span:last-child").textContent = S.live ? "Live updates on" : "Live updates off";
     $("#interval").value = String(S.interval);
+    $("#mobile-interval").value = String(S.interval);
     $("#interval").classList.toggle("hide", streamHealthy());
     $("#refresh-label").textContent = streamHealthy() ? "Real time" : "Refresh";
     $("#signout").classList.toggle("hide", !(S.res && S.res.auth));
+    $("[data-mobile-signout]").classList.toggle("hide", !(S.res && S.res.auth));
+    const theme = $("[data-mobile-theme]");
+    theme.querySelector("use").setAttribute("href", $("#theme use").getAttribute("href"));
+    theme.lastChild.textContent = "Theme · " + th;
     if (S.d) {
-      const set = (id, n, cls) => { const el = $("#nav-n-" + id); if (el) { el.textContent = n || ""; el.className = "n " + (cls || ""); } };
+      const set = (id, n, cls) => { [$("#nav-n-" + id), $("#mobile-n-" + id)].forEach((el) => { if (el) { el.textContent = n || ""; el.className = "n " + (cls || ""); } }); };
       const al = S.res.alerts.filter((a) => a.level !== "info"), crit = al.some((a) => a.level === "critical");
       set("nodes", S.t.nodes); set("pods", S.t.pods); set("workloads", S.d.workloads.length); set("alerts", al.length, crit ? "bad" : "warn");
       $("#brand-sub").textContent = S.d.cluster.name;
@@ -995,6 +1026,15 @@
   // ---------------------------------------------------------------- events
   document.addEventListener("click", (e) => {
     const t = e.target; let el;
+    if (t.closest("#mobile-menu-backdrop") || t.closest("[data-mobile-close]")) { setMobileMenu(false); return; }
+    if ((el = t.closest(".mobile-tab-more"))) { setMobileMenu(!$("#mobile-menu").classList.contains("on")); return; }
+    if ((el = t.closest("#mobile-menu [data-view]"))) { e.preventDefault(); setMobileMenu(false, false); go(el.dataset.view); requestAnimationFrame(() => $("#content").focus({ preventScroll: true })); return; }
+    if (t.closest("[data-mobile-theme]")) { cycleTheme(); return; }
+    if (t.closest("[data-mobile-export]")) { $("#export").click(); return; }
+    if (t.closest("[data-mobile-live]")) { setLive(!S.live); return; }
+    if (t.closest("[data-mobile-help]")) { setMobileMenu(false, false); closeModals(); $("#scrim").classList.add("on"); $("#helpm").classList.add("on"); $("#helpm").focus(); return; }
+    if (t.closest("[data-mobile-refresh]")) { setMobileMenu(false, false); load(true); return; }
+    if (t.closest("[data-mobile-signout]")) { $("#signout").click(); return; }
     if ((el = t.closest("[data-copy]"))) { e.preventDefault(); e.stopPropagation(); copyText(el.dataset.copy); return; }
     if ((el = t.closest("[data-act]"))) { e.preventDefault(); act(el.dataset.act, el); return; }
     if ((el = t.closest("[data-set]"))) { const [p, v] = el.dataset.set.split(":"); if (p === "range") { S.range = +v; store.set("range", v); } else setPath(p, v); if (S.d) { V[S.view].update(); updateDrawer(false); } syncControls(); return; }
@@ -1015,10 +1055,20 @@
     if (t.dataset && t.dataset.f) { setPath(t.dataset.f, t.value); if (S.d) V[S.view].update(); }
     else if (t.id === "lg-c" && S.logs) { S.logs.container = t.value; S.logs.text = null; renderLogs(); }
     else if (t.id === "lg-n" && S.logs) { S.logs.lines = +t.value; if (S.logs.text != null) loadLogs(false); }
-    else if (t.id === "interval") { S.interval = +t.value; store.set("interval", t.value); schedule(); }
+    else if (t.id === "interval" || t.id === "mobile-interval") { S.interval = +t.value; $("#interval").value = t.value; $("#mobile-interval").value = t.value; store.set("interval", t.value); schedule(); }
   });
   document.addEventListener("keydown", (e) => {
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test((e.target.tagName || ""));
+    if ($("#mobile-menu").classList.contains("on")) {
+      if (e.key === "Escape") { e.preventDefault(); setMobileMenu(false); return; }
+      if (e.key === "Tab") {
+        const focusable = $$("button:not(:disabled), a[href], select", $("#mobile-menu")).filter((el) => !el.closest(".hide"));
+        const first = focusable[0], last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); return; }
     if ($("#palette").classList.contains("on")) {
       if (e.key === "Escape") closeModals();
@@ -1037,10 +1087,20 @@
     else if (e.key === "t") cycleTheme();
   });
   window.addEventListener("hashchange", applyRoute);
+  window.addEventListener("resize", () => {
+    if (window.innerWidth > 960 && $("#mobile-menu").classList.contains("on")) {
+      setMobileMenu(false, false);
+      const active = $("#nav [aria-current='page']"); if (active) active.focus();
+    }
+  }, { passive: true });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) { clearTimeout(S.timer); closeStream(); }
+    else if (S.live) { connectStream(); void load(true); schedule(); }
+  });
   $("#searchbtn").addEventListener("click", openPalette);
   $("#refresh").addEventListener("click", () => load(true));
   $("#theme").addEventListener("click", cycleTheme);
-  $("#helpbtn").addEventListener("click", () => { closeModals(); $("#scrim").classList.add("on"); $("#helpm").classList.add("on"); });
+  $("#helpbtn").addEventListener("click", () => { closeModals(); $("#scrim").classList.add("on"); $("#helpm").classList.add("on"); $("#helpm").focus(); });
   $("#live").addEventListener("click", () => setLive(!S.live));
   $("#signout").addEventListener("click", async () => {
     try { await fetch("/api/logout", { method: "POST", headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: "{}" }); } catch (e) { /* leaving anyway */ }

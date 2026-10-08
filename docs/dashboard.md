@@ -207,11 +207,14 @@ downloading, loading, or unloaded (press Load).
 
 ## Control API
 
-Other programs can see and switch models with the server API key (Settings > Server API key). It works from any network the dashboard
-answers on (also through public access) and the same key applies to yardcode, the control API and split-model deployments. If an older
-deployment has a working model key that the dashboard refuses, use **Use the running model's key** in Settings > Server API key to adopt it.
-The model is not restarted. Deleting models, running commands and changing settings are not
-in it: those need the dashboard's password.
+There is one server API key for yardcode, the dashboard's `/api/v1` control/chat API, and every split-model deployment. New models inherit it;
+if a deployment was made with a different key, Settings > **One shared API key** can adopt the running model's key (without restarting it),
+or set/rotate the shared key and restart the model with it. The macOS app uses this same key. Ollama does not have native API-key support;
+use it through the dashboard's key-protected `/api/v1/chat/completions` gateway, and do not expose Ollama's own port directly to untrusted networks.
+
+The dashboard's browser sign-in password remains a separate web-session credential. A signed-in dashboard session can use the control API
+without sending a bearer key, while external clients use the shared server API key. Deleting models, running commands and changing settings are not
+available in the control API: those actions need a signed-in dashboard session.
 
 ```sh
 KEY=...   # the server API key

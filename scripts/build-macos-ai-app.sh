@@ -37,6 +37,15 @@ test -x "$binary" || {
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS"
 cp "$binary" "$app/Contents/MacOS/NodeyardAI"
+resources="$app/Contents/Resources"
+mkdir -p "$resources"
+iconset="$resources/AppIcon.iconset"
+icon_builder="$build/build-nodeyard-ai-icon"
+swiftc -O -sdk "$sdk" -target "$arch-apple-macosx13.0" -swift-version 6 -module-cache-path "$build/ModuleCache" \
+    "$repo/scripts/build-nodeyard-ai-icon.swift" -o "$icon_builder"
+"$icon_builder" "$iconset"
+/usr/bin/iconutil -c icns "$iconset" -o "$resources/AppIcon.icns"
+rm -rf "$iconset"
 cat >"$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -45,6 +54,8 @@ cat >"$app/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDevelopmentRegion</key><string>en</string>
   <key>CFBundleDisplayName</key><string>Nodeyard AI</string>
   <key>CFBundleExecutable</key><string>NodeyardAI</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleIconName</key><string>AppIcon</string>
   <key>CFBundleIdentifier</key><string>com.nodeyard.ai</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>Nodeyard AI</string>

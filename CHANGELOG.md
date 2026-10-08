@@ -19,6 +19,8 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   a control API that is off (403) and too many tries (429), and checks the key right after `yardcode login`.
 - Settings can adopt the running split model's existing API key as the server key. This fixes older installs where yardcode's valid model key and
   the dashboard's control key drifted apart, without rotating the model's key.
+- Settings now labels this as **One shared API key** and explains that Ollama is reached through the key-protected dashboard gateway (Ollama
+  itself has no native key). Dashboard documentation distinguishes the shared API key from the browser sign-in password.
 - Dashboard Settings and the Devices sidebar can restart k3s across the cluster, workers one at a time and the control node last, with a confirmation.
 - `sudo nodeyard reboot-cluster` and matching dashboard buttons now perform a complete rolling OS reboot: drain and reboot workers one at a time, verify a new boot ID and Ready state, then reboot the control server last.
 - Ollama models explicitly loaded from the dashboard stay loaded until Unload or an Ollama restart. Live updates now share requests and defer redraws during clicks and edits. Brief node outages and recoveries stay amber for a minute; longer NotReady states remain critical.
@@ -31,6 +33,10 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 ### Added
 
 - Native SwiftUI **Nodeyard AI for macOS**: local chat saving, optional server sync, model selection, live replies, attachments, and Keychain-backed server credentials. The shared-key Control API now offers chat-ready targets and streamed chat for the app.
+- Nodeyard AI now has a custom gradient network mark in its sidebar and a matching multi-resolution macOS app icon.
+- The dashboard now has an iPhone layout with four primary bottom tabs, a keyboard-accessible More sheet for every other section, safe-area
+  spacing, larger touch targets, responsive dialogs/tables/cards, and 50 documented navigation, touch, accessibility and layout refinements.
+- Live dashboard polling and its event stream pause in a background tab, then reconnect and refresh when the tab is visible again.
 - Mac connection settings now detect a model API address accidentally entered instead of the dashboard, automatically correct a saved port-31435 address to the dashboard on port 9092, offer the same one-click fix in Settings, and explain HTTPS/certificate mismatches without bypassing certificate checks.
 - Dashboard chat can automatically choose among available AI skills; permanent chat defaults include a default context length.
 - Dashboard **Find Models** now starts with an **Already downloaded** section showing saved models, the machines that contain them, and a direct Run/Load/Chat action. Its inventory refreshes while this tab is open.

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
 <meta name="referrer" content="no-referrer">
 <title>nodeyard dashboard</title>
@@ -11,6 +11,7 @@
 <script src="theme.js"></script>
 </head>
 <body>
+<a class="skip-link" href="#content">Skip to dashboard content</a>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <defs>
     <symbol id="i-overview" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></symbol>
@@ -66,26 +67,42 @@
     </div>
   </aside>
 
-  <div class="main">
+  <main class="main">
     <header class="top">
       <div><h1 id="title">Overview</h1><div class="sub" id="subtitle"></div></div>
       <div class="spacer"></div>
       <button class="search" id="searchbtn" aria-label="Search"><svg class="icon"><use href="#i-search"/></svg><span class="label">Search nodes, pods, IPs…</span><span class="kbd">Ctrl K</span></button>
       <button class="btn device-toggle" id="devsbtn" aria-label="Toggle device monitoring" aria-pressed="true" title="Toggle device monitoring (D)"><svg class="icon"><use href="#i-hardware"/></svg><span>Devices</span></button>
-      <span class="pill" id="status"><i class="dot"></i><span>Connecting…</span></span>
+      <span class="pill" id="status" role="status" aria-live="polite" aria-atomic="true"><i class="dot"></i><span>Connecting…</span></span>
       <button class="btn icon-only" id="refresh" aria-label="Refresh now" title="Refresh now (r)"><svg class="icon"><use href="#i-refresh"/></svg></button>
       <a class="btn icon-only" id="export" href="/api/export" download aria-label="Download a JSON snapshot" title="Download a JSON snapshot"><svg class="icon"><use href="#i-download"/></svg></a>
       <button class="btn icon-only" id="theme" aria-label="Switch theme" title="Switch theme (t)"><svg class="icon"><use href="#i-moon"/></svg></button>
     </header>
-    <div class="content" id="content"><div class="loading"><div><div class="spin"></div>Reading your cluster…</div></div></div>
-  </div>
+    <div class="content" id="content" tabindex="-1"><div class="loading"><div><div class="spin"></div>Reading your cluster…</div></div></div>
+  </main>
   <aside class="devices" id="devs" aria-label="Device monitoring" aria-hidden="false"></aside>
 </div>
+
+<nav class="mobile-tabs" id="mobile-tabs" aria-label="Primary sections"></nav>
+<div class="mobile-menu-backdrop" id="mobile-menu-backdrop" hidden></div>
+<section class="mobile-menu" id="mobile-menu" role="dialog" aria-modal="true" aria-labelledby="mobile-menu-title" aria-hidden="true" inert>
+  <div class="mobile-menu-head"><div><h2 id="mobile-menu-title">More</h2><p class="muted small">All dashboard sections and quick actions</p></div><button class="btn icon-only" type="button" data-mobile-close aria-label="Close menu"><svg class="icon"><use href="#i-x"/></svg></button></div>
+  <nav class="mobile-menu-list" id="mobile-more-list" aria-label="All sections"></nav>
+  <div class="mobile-menu-tools">
+    <button class="btn" type="button" data-mobile-theme><svg class="icon"><use href="#i-moon"/></svg>Theme</button>
+    <button class="btn" type="button" data-mobile-export><svg class="icon"><use href="#i-download"/></svg>Export snapshot</button>
+    <button class="btn" type="button" data-mobile-live role="switch" aria-checked="true"><span class="dot good"></span><span>Live updates on</span></button>
+    <button class="btn" type="button" data-mobile-refresh><svg class="icon"><use href="#i-refresh"/></svg>Refresh now</button>
+    <label class="mobile-refresh">Refresh interval<select class="select" id="mobile-interval" aria-label="Refresh interval"><option value="2">2 seconds</option><option value="5">5 seconds</option><option value="10">10 seconds</option><option value="30">30 seconds</option></select></label>
+    <button class="btn" type="button" data-mobile-help>Keyboard shortcuts</button>
+    <button class="btn hide" type="button" data-mobile-signout>Sign out</button>
+  </div>
+</section>
 
 <div class="scrim" id="scrim"></div>
 <aside class="drawer" id="drawer" aria-label="Details" aria-hidden="true"></aside>
 <div class="modal" id="palette" role="dialog" aria-label="Search"><input id="pq" placeholder="Search nodes, pods, services, IP addresses…" autocomplete="off" spellcheck="false"><div class="results" id="presults"></div></div>
-<div class="modal" id="helpm" role="dialog" aria-label="Keyboard shortcuts"><div class="help">
+<div class="modal" id="helpm" role="dialog" aria-label="Keyboard shortcuts" tabindex="-1"><div class="help">
   <h3>Keyboard shortcuts</h3>
   <dl>
     <dt><span class="kbd">Ctrl K</span> or <span class="kbd">/</span></dt><dd>Search everything: nodes, pods, services, IP addresses</dd>
@@ -108,7 +125,7 @@
   <div class="modal-foot"><button class="btn" id="confirmcancel">Cancel</button><button class="btn primary" id="confirmok">OK</button></div>
 </div>
 <div class="tip" id="tip"></div>
-<div class="toast" id="toast" role="status"></div>
+<div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 <noscript><p style="padding:24px">The nodeyard dashboard needs JavaScript. It loads nothing from the internet.</p></noscript>
 <script src="charts.js"></script>
 <script src="app.js"></script>

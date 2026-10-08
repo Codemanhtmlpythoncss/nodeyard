@@ -487,13 +487,36 @@ switch_stubs() {
     assert_output "0"
 }
 
-@test "the server API key: a model deployed without a key gets it, one given a key keeps its own" {
+@test "new split deployments inherit the server key, and an explicit key is staged as the shared key" {
     printf '%s' "server-key-0123456789abcdef" | ny_secret_set "$SPLIT_KEY_SECRET"
     split_parse_flags
     [ "$SPLIT_API_KEY" = "server-key-0123456789abcdef" ]
     printf '%s' "my-own-key-0123456789abcdef" >"${BATS_TEST_TMPDIR}/k"
     split_parse_flags --api-key-file "${BATS_TEST_TMPDIR}/k"
     [ "$SPLIT_API_KEY" = "my-own-key-0123456789abcdef" ]
+}
+
+@test "deploying with an explicit model key makes it the single server key before apply" {
+    printf '%s' "old-server-key-0123456789" | ny_secret_set "$SPLIT_KEY_SECRET"
+    SPLIT_API_KEY="model-key-0123456789abcdef"
+    PLAN_NAMES=(debian-1)
+    split_manifest() { printf 'kind: Secret\n' >"$1"; }
+    split_hf_secret_sync() { :; }
+    ny_simulating() { return 1; }
+    kctl() {
+        echo "$*" >>"$KLOG"
+        case "$*" in
+            "get namespace ai-split") return 0 ;;
+            *"get job"* | *"get daemonset llama-gate"*) return 1 ;;
+            *) return 0 ;;
+        esac
+    }
+
+    run split_apply
+    assert_success
+    [ "$(ny_secret_get "$SPLIT_KEY_SECRET")" = "$SPLIT_API_KEY" ]
+    run grep -F "apply -f" "$KLOG"
+    assert_success
 }
 
 @test "ai key --show prints the server API key, and says how to make one when there is none" {
