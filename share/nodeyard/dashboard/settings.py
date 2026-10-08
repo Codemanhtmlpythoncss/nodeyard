@@ -8,6 +8,7 @@ The page's own preferences (background, blur, dim) live in --state-dir.
 import base64
 import ipaddress
 import json
+import math
 import os
 import re
 import subprocess
@@ -19,6 +20,8 @@ BODY_MAX = IMAGE_MAX * 4 // 3 + 64 * 1024       # ... sent as base64 JSON
 KINDS = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}
 LISTEN_RE = re.compile(r"^[a-z0-9.:]+(,[a-z0-9.:]+)*$")  # each item is then checked on its own
 ENV = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/tmp", "LANG": "C.UTF-8", "NODEYARD_COLOR": "never"}
+CHAT_DEFAULTS = {"system": "", "temperature": 0.7, "max_tokens": 1024, "compress": "auto", "web": False,
+                 "skills_auto": True, "autofix": False, "files": "ask", "context_length": 8192}
 
 DEMO_DOCTOR = {"ok": True, "issues": 1, "warnings": 2, "fixed": 0, "checks": [
     {"id": "deps", "category": "nodeyard", "title": "nodeyard's required tools are installed", "status": "ok", "detail": None, "fix": None},
@@ -84,6 +87,84 @@ class Settings:
             json.dump(p, f)
         os.replace(tmp, self._prefs_path())
 
+    @staticmethod
+    def _clean_chat_defaults(value):
+        out = dict(CHAT_DEFAULTS)
+        if not isinstance(value, dict):
+            return out
+        system = value.get("system", out["system"])
+        if isinstance(system, str) and len(system) <= 12000:
+            out["system"] = system
+        try:
+            temperature = float(value.get("temperature", out["temperature"]))
+            if math.isfinite(temperature) and 0 <= temperature <= 2:
+                out["temperature"] = temperature
+        except (TypeError, ValueError):
+            pass
+        for key, low, high in (("max_tokens", 0, 65536), ("context_length", 512, 131072)):
+            raw = value.get(key, out[key])
+            if isinstance(raw, bool):
+                continue
+            try:
+                number = int(raw)
+                if str(number) == str(raw).strip() and low <= number <= high and (key != "max_tokens" or number == 0 or number >= 16):
+                    out[key] = number
+            except (TypeError, ValueError):
+                pass
+        if value.get("compress") in ("auto", "off"):
+            out["compress"] = value["compress"]
+        if value.get("files") in ("ask", "always", "never"):
+            out["files"] = value["files"]
+        for key in ("web", "skills_auto", "autofix"):
+            if isinstance(value.get(key), bool):
+                out[key] = value[key]
+        return out
+
+    def chat_defaults(self, prefs=None):
+        p = self.prefs() if prefs is None else prefs
+        return self._clean_chat_defaults(p.get("ai_chat_defaults"))
+
+    def set_chat_defaults(self, body):
+        value = body.get("defaults", body)
+        if not isinstance(value, dict):
+            raise SettingsError("Chat defaults must be an object.")
+        candidate = dict(self.chat_defaults())
+        candidate.update({k: v for k, v in value.items() if k in CHAT_DEFAULTS})
+        if "system" in value and (not isinstance(value["system"], str) or len(value["system"]) > 12000):
+            raise SettingsError("The system prompt must be text under 12,000 characters.")
+        for key, low, high in (("temperature", 0, 2), ("max_tokens", 0, 65536), ("context_length", 512, 131072)):
+            if key not in value:
+                continue
+            raw = value[key]
+            if isinstance(raw, bool):
+                raise SettingsError("%s must be a number." % key.replace("_", " ").capitalize())
+            try:
+                number = float(raw) if key == "temperature" else int(raw)
+            except (TypeError, ValueError):
+                raise SettingsError("%s must be a number." % key.replace("_", " ").capitalize())
+            if not math.isfinite(number) or not low <= number <= high:
+                raise SettingsError("%s must be between %s and %s." % (key.replace("_", " ").capitalize(), low, high))
+            if key == "max_tokens" and number != 0 and number < 16:
+                raise SettingsError("Reply length must be 0 (no limit) or between 16 and 65,536 tokens.")
+            if key != "temperature" and str(number) != str(raw).strip():
+                raise SettingsError("%s must be a whole number." % key.replace("_", " ").capitalize())
+            candidate[key] = number
+        for key, allowed in (("compress", ("auto", "off")), ("files", ("ask", "always", "never"))):
+            if key in value:
+                if value[key] not in allowed:
+                    raise SettingsError("Choose a supported %s option." % key)
+                candidate[key] = value[key]
+        for key in ("web", "skills_auto", "autofix"):
+            if key in value:
+                if not isinstance(value[key], bool):
+                    raise SettingsError("%s must be on or off." % key.replace("_", " ").capitalize())
+                candidate[key] = value[key]
+        with self.lock:
+            prefs = self.prefs()
+            prefs["ai_chat_defaults"] = candidate
+            self._save_prefs(prefs)
+        return {"chat_defaults": candidate}
+
     def view(self, token):
         st = (self.ctx.store.snapshot()["state"] or {})
         split = (st.get("ai") or {}).get("split") or {}
@@ -98,6 +179,7 @@ class Settings:
             "agents": bool((st.get("agents") or {}).get("installed")),
             "gate": split.get("gate"), "split": bool(split),
             "background": p.get("bg"),
+            "chat_defaults": self.chat_defaults(p),
             "public": self.public_state(),
             "weak_password": self.weak_ok(),
             "nodes": [{"name": n["name"], "disk_limit": n.get("disk_limit")} for n in st.get("nodes", [])],
@@ -435,6 +517,7 @@ def register(ctx, args):
     })
     ctx.post_routes.update({
         "/api/settings/password": wrap(lambda h, b: s.set_password(b, h._token())),
+        "/api/settings/chat-defaults": wrap(lambda h, b: s.set_chat_defaults(b)),
         "/api/settings/signout-all": wrap(lambda h, b: s.signout_all()),
         "/api/settings/weak-password": wrap(lambda h, b: s.set_weak(b)),
         "/api/settings/model-key": wrap(lambda h, b: s.set_model_key(b)),

@@ -70,6 +70,30 @@ class Pictures(unittest.TestCase):
         self.assertIn("/api/settings/password", ctx.post_routes)
 
 
+class ChatDefaults(unittest.TestCase):
+    def test_defaults_persist_in_server_preferences(self):
+        s, _ = make()
+        values = {"system": "Be concise", "temperature": 0.4, "max_tokens": 2048, "compress": "off", "web": True,
+                  "skills_auto": False, "autofix": True, "files": "always", "context_length": 16384}
+        self.assertEqual(s.set_chat_defaults({"defaults": values})["chat_defaults"], values)
+        reopened = settings.Settings(s.ctx, s.args)
+        self.assertEqual(reopened.chat_defaults(), values)
+
+    def test_context_and_other_values_are_validated(self):
+        s, _ = make()
+        for bad in ({"context_length": 511}, {"context_length": 131073}, {"temperature": 2.1},
+                    {"max_tokens": 15}, {"max_tokens": 65537}, {"files": "delete-everything"}, {"skills_auto": "yes"}):
+            with self.subTest(bad=bad), self.assertRaises(settings.SettingsError):
+                s.set_chat_defaults(bad)
+
+    def test_defaults_are_exposed_and_a_save_route_is_registered(self):
+        s, ctx = make(demo=True)
+        self.assertEqual(s.chat_defaults()["context_length"], 8192)
+        self.assertEqual(s.view(None)["chat_defaults"]["context_length"], 8192)
+        settings.register(ctx, types.SimpleNamespace(demo=True, state_dir=tempfile.mkdtemp()))
+        self.assertIn("/api/settings/chat-defaults", ctx.post_routes)
+
+
 class SignIn(unittest.TestCase):
     def test_set_password_keeps_this_browser_signs_out_others(self):
         a = auth.Auth("old-password")

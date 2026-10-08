@@ -216,6 +216,10 @@ class Plugins(ChatAndWeb):
         h = {"Content-Type": "application/json", "X-Nodeyard": "1", "Cookie": cookie}
         conn.request("POST", "/api/ai/agent", body=json.dumps(body), headers=h)
         r = conn.getresponse()
+        if r.status != 200:
+            detail = r.read().decode("utf-8", "replace")
+            conn.close()
+            raise AssertionError("AI agent returned HTTP %d: %s" % (r.status, detail))
         events = []
         for line in r:
             line = line.decode().strip()
@@ -253,6 +257,11 @@ class Plugins(ChatAndWeb):
         self.assertIn("tool_use", types)
         self.assertIn("tool_result", types)
         self.assertEqual(ev[-1]["type"], "done")
+
+    def test_automatic_skills_let_the_ai_choose_from_available_tools(self):
+        ev = self.stream("x", {"chat": "c1", "text": "please run some python", "auto_skills": True}, reply_after="deny")
+        self.assertTrue(any(e["type"] == "tool_use" and e["name"] == "WebSearch" for e in ev))
+        self.assertTrue(any(e["type"] == "permission" and e["tool"] == "Python" for e in ev))
 
     def test_code_asks_first_and_runs_only_when_allowed(self):
         ev = self.stream("x", {"chat": "c2", "text": "please run some python", "plugins": ["web", "python"]}, reply_after="allow")

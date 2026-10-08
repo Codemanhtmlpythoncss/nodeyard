@@ -25,6 +25,8 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 - Model inventory scans wait for helpers to finish and skip unavailable nodes while retaining their previous locations. The dashboard also saves last-known model locations in the browser and retries incomplete scans with backoff; successful deletes clear saved locations.
 - Chat accepts batches of text and image attachments. Browser-side image resizing keeps requests manageable, and PNG/JPEG/WebP/GIF/BMP images reach vision-capable models for OCR; image uploads are not persisted in browser history.
 - When the selected model emits reasoning tokens, Chat shows them in an expandable panel as they arrive and keeps the panel available after the answer.
+- Chat can choose among every available AI skill automatically (web, research, weather, maths, code and files); `/skills off` returns to manual selection. Code and file changes still ask for permission.
+- Settings now save permanent AI chat defaults (including model context length) on the dashboard server; new chats inherit them while existing chats keep their own settings.
 
 ### Added
 

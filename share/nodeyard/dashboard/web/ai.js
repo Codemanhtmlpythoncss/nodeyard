@@ -15,6 +15,20 @@
     search: { q: "", sort: "downloads", results: null, loading: false, error: "", files: {}, open: "" }, key: "", useKey: false, locked: false,
     attach: [],
   };
+  const DEFAULT_CHAT_SETTINGS = { system: "", temperature: 0.7, max_tokens: 1024, compress: "auto", web: false, skills_auto: true, autofix: false, files: "ask", context_length: 8192 };
+  function chatDefaults() {
+    let saved = {};
+    try { saved = JSON.parse(store.get("ai.chatDefaults", "") || "{}"); } catch (e) { /* use defaults */ }
+    const d = Object.assign({}, DEFAULT_CHAT_SETTINGS, saved);
+    d.system = typeof d.system === "string" ? d.system.slice(0, 12000) : "";
+    d.temperature = Number.isFinite(+d.temperature) && +d.temperature >= 0 && +d.temperature <= 2 ? +d.temperature : DEFAULT_CHAT_SETTINGS.temperature;
+    d.max_tokens = Number.isInteger(+d.max_tokens) && +d.max_tokens >= 0 && +d.max_tokens <= 65536 ? +d.max_tokens : DEFAULT_CHAT_SETTINGS.max_tokens;
+    d.context_length = Number.isInteger(+d.context_length) && +d.context_length >= 512 && +d.context_length <= 131072 ? +d.context_length : DEFAULT_CHAT_SETTINGS.context_length;
+    d.compress = d.compress === "off" ? "off" : "auto";
+    d.web = d.web === true; d.skills_auto = d.skills_auto !== false; d.autofix = d.autofix === true;
+    d.files = ["ask", "always", "never"].includes(d.files) ? d.files : "ask";
+    return d;
+  }
   const INVENTORY_TTL = 30 * 24 * 60 * 60 * 1000;
   function readSavedInventory() {
     try {
@@ -451,7 +465,7 @@
     const sp = S.d.ai && S.d.ai.split, same = !want || want.same || (sp && sp.model === want.file), name = ((want && want.file) || (sp && sp.model) || "the model").replace(/\.gguf$/i, "");
     A.loadingModel = { chat: c.id, name, t0: Date.now(), cancelled: false, line: "" }; paintSend(); refreshChat();
     try {
-      const r = same ? await postJSON("/api/run", { action: "split-load" }) : await postJSON("/api/run", { action: sp ? "switch" : "deploy", local: true, file: want.file, ctx: (sp && +sp.ctx) || 8192, alias: aliasFor(want.file), nodes: [], keep_old: true });
+      const r = same ? await postJSON("/api/run", { action: "split-load" }) : await postJSON("/api/run", { action: sp ? "switch" : "deploy", local: true, file: want.file, ctx: chatDefaults().context_length, alias: aliasFor(want.file), nodes: [], keep_old: true });
       if (!r.ok) { toast(r.error || "Couldn't start loading the model."); return false; }
       let status = "running";
       while (status === "running") {
@@ -508,7 +522,7 @@
         if (!full) continue;
         const msgs = rawToMessages(full.messages);
         if (c) { c.messages = msgs; c.title = full.title || c.title; c.remote.updated = full.updated; c.remote.shown = msgs.length; }
-        else { A.chats.unshift({ id: uid(), title: full.title || "yardcode chat", target: (targetList().find((t) => t.ready) || {}).id || "", messages: msgs, system: "", temperature: 0.7, max_tokens: 1024, compress: "auto", web: false, plugins: [],
+        else { const d = chatDefaults(); A.chats.unshift({ id: uid(), title: full.title || "yardcode chat", target: (targetList().find((t) => t.ready) || {}).id || "", messages: msgs, system: d.system, temperature: d.temperature, max_tokens: d.max_tokens, compress: d.compress, web: d.web, skills_auto: d.skills_auto, autofix: d.autofix, files: d.files, plugins: [],
           created: (full.created || 0) * 1000 || Date.now(), remote: { id: sm.id, source: sm.source, host: sm.host, cwd: sm.cwd, updated: full.updated, shown: msgs.length } }); }
         changed = true;
       }
@@ -532,7 +546,7 @@
     const url = part.type === "image_url" && part.image_url && part.image_url.url;
     return n + (typeof url === "string" ? Math.floor((url.length - url.indexOf(",") - 1) * 3 / 4) : 0);
   }, 0) : 0), 0);
-  const chatCtx = (t) => (t && t.id === "split" ? +((S.d.ai && S.d.ai.split && S.d.ai.split.ctx) || 0) : 0);
+  const chatCtx = (t) => (t && t.id === "split" ? +((S.d.ai && S.d.ai.split && S.d.ai.split.ctx) || chatDefaults().context_length) : 0);
   const SUMMARY_PROMPT = "Summarize the conversation so far so it can continue without the original messages. Use these sections and leave out empty ones: ## Request (what the user wants and any preferences), ## Done so far, ## Files and facts (exact names, numbers, errors), ## Decisions, ## Open questions and next steps. Be concise (under 350 words) but keep every detail needed to carry on. Never invent anything.";
   const WEB_PROMPT = "Some user messages include <web_results>: search results and page excerpts fetched from the internet for that question. Use them for current facts, quote carefully, and mention the source addresses you relied on. If they don't answer the question, say so.";
   // the messages the model gets: system prompt, a summary of what was compressed away, then the rest
@@ -601,7 +615,8 @@
   // ---- plugins: the AI uses tools (search, pages, Wikipedia, maths, Python, files) while it answers
   const pluginList = (c) => {
     if (!A.plugins) { fetch("/api/ai/plugins", { cache: "no-store" }).then((r) => r.json()).then((j) => { A.plugins = j.plugins || []; const el = $("#plugin-list"); if (el) setHTML(el, pluginList(curChat() || c)); }).catch(() => {}); return html`<span class="muted small">Loading…</span>`; }
-    return raw(A.plugins.map((p) => '<label class="check plug"><input type="checkbox" id="cp-' + esc(p.id) + '"' + ((c.plugins || []).includes(p.id) ? " checked" : "") + (p.available ? "" : " disabled") + '> <span><b>' + esc(p.label) + "</b>: " + esc(p.desc) +
+    const automatic = c.skills_auto !== false;
+    return raw(A.plugins.map((p) => '<label class="check plug"><input type="checkbox" id="cp-' + esc(p.id) + '"' + (!automatic && (c.plugins || []).includes(p.id) ? " checked" : "") + (p.available && !automatic ? "" : " disabled") + '> <span><b>' + esc(p.label) + "</b>: " + esc(p.desc) +
       (p.available ? "" : ' <span class="faint">(' + esc(p.why) + ")</span>") + "</span></label>").join(""));
   };
   const toolsHTML = (m) => {
@@ -629,7 +644,7 @@
     const t0 = performance.now(); let raf = 0, usage = null;
     const paint = () => { raf = 0; paintLast(); };
     try {
-      const r = await fetch("/api/ai/agent", { method: "POST", cache: "no-store", signal: ctrl.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ chat: c.id, text: apiContent(mine), plugins: c.plugins, history, max_tokens: c.max_tokens || 0 }) });
+      const r = await fetch("/api/ai/agent", { method: "POST", cache: "no-store", signal: ctrl.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ chat: c.id, text: apiContent(mine), plugins: c.plugins, auto_skills: c.skills_auto !== false, history, max_tokens: c.max_tokens || 0 }) });
       if (r.status === 401) { location.href = "/login"; return; }
       if (!r.ok) { let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ } throw new Error(j.error || "The AI helper didn't start (HTTP " + r.status + ")."); }
       const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "";
@@ -713,7 +728,7 @@
   const COMMANDS = [
     ["help", "", "Show every command"], ["new", "", "Start a new chat (also /clear)"], ["clear", "", "Start a new chat"], ["compact", "", "Compress the earlier messages to free up the model's memory"],
     ["model", "[name]", "Pick the model for this chat"], ["models", "", "Open the Models tab (load, download, delete)"], ["unload", "", "Unload the model to free memory"], ["max", "[tokens|none]", "Set the longest reply (none = no limit)"],
-    ["web", "[on|off]", "Always search the web first"], ["plugins", "[on|off NAME]", "Show or switch plugins (search, Wikipedia, Python...)"], ["system", "[text]", "Set the system prompt"],
+    ["web", "[on|off]", "Always search the web first"], ["skills", "[on|off]", "Let the AI choose its available skills automatically"], ["plugins", "[on|off NAME]", "Show or switch skills manually (search, Wikipedia, Python...)"], ["system", "[text]", "Set the system prompt"],
     ["temp", "[0-2]", "Set creativity"], ["run", "", "Run the last code block the AI wrote"], ["fix", "", "Ask the AI to fix the last code that failed"], ["autofix", "[on|off]", "Run code automatically and let the AI fix errors"],
     ["files", "[ask|always|never]", "When the AI delivers files (default: only when you ask)"], ["retry", "", "Answer the last message again"], ["stop", "", "Stop the answer"], ["copy", "", "Copy the last answer"], ["export", "", "Download this chat as a file"], ["context", "", "How full the model's memory is"],
   ];
@@ -739,6 +754,7 @@
       case "unload": { const v = await dialog("Unload the model?", raw("<p>Nothing can answer until you load one again. Its memory is freed on every machine.</p>"), "Unload"); if (v) { const r = await postJSON("/api/run", { action: "split-unload" }); toast(r.ok ? "Unloading…" : (r.error || "Couldn't unload.")); } break; }
       case "max": if (!arg) toast(c.max_tokens ? "Replies stop at " + c.max_tokens + " tokens." : "No limit on the reply length."); else if (/^(none|no|off|unlimited|0)$/i.test(arg)) { c.max_tokens = 0; saveChats(); toast("No limit on the reply length."); } else if (+arg > 0) { c.max_tokens = Math.min(65536, Math.max(16, +arg | 0)); saveChats(); toast("Replies stop at " + c.max_tokens + " tokens."); } else toast("Give a number, or none."); refreshChat(); break;
       case "web": c.web = on(arg); saveChats(); toast("Web search first: " + (c.web ? "on" : "off")); break;
+      case "skills": c.skills_auto = on(arg); saveChats(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); refreshChat(); toast("Automatic AI skills: " + (c.skills_auto ? "on" : "off")); break;
       case "autofix": c.autofix = on(arg); saveChats(); toast("Run and fix code automatically: " + (c.autofix ? "on" : "off")); break;
       case "plugins": case "plugin": {
         if (!A.plugins) { try { A.plugins = (await (await fetch("/api/ai/plugins", { cache: "no-store" })).json()).plugins || []; } catch (e) { A.plugins = []; } }
@@ -746,8 +762,8 @@
         if (verb === "on" || verb === "off") {
           const p = A.plugins.find((x) => x.id === (name || "").toLowerCase() || x.label.toLowerCase() === (name || "").toLowerCase());
           if (!p) { toast("No plugin called “" + (name || "") + "”."); break; } if (verb === "on" && !p.available) { toast(p.label + ": " + p.why); break; }
-          c.plugins = (c.plugins || []).filter((x) => x !== p.id).concat(verb === "on" ? [p.id] : []); saveChats(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); toast(p.label + " " + verb);
-        } else await dialog("Plugins", raw("<p>" + A.plugins.map((p) => ((c.plugins || []).includes(p.id) ? "● " : "○ ") + "<b>" + esc(p.label) + "</b> <span class=\"muted small\">/plugins on " + esc(p.id) + (p.available ? "" : " (" + esc(p.why) + ")") + "</span>").join("<br>") + "</p>"), "OK");
+          c.skills_auto = false; c.plugins = (c.plugins || []).filter((x) => x !== p.id).concat(verb === "on" ? [p.id] : []); saveChats(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); refreshChat(); toast(p.label + " " + verb);
+        } else await dialog("AI skills", raw("<p>" + (c.skills_auto !== false ? "● <b>Automatic</b>: the AI chooses from every skill available in this chat. Use /skills off to choose manually.<br><br>" : "○ <b>Automatic</b>: off. Use /skills on to let the AI choose.<br><br>") + A.plugins.map((p) => ((!c.skills_auto && (c.plugins || []).includes(p.id)) ? "● " : "○ ") + "<b>" + esc(p.label) + "</b> <span class=\"muted small\">/plugins on " + esc(p.id) + (p.available ? "" : " (" + esc(p.why) + ")") + "</span>").join("<br>") + "</p>"), "OK");
         break;
       }
       case "system": c.system = arg; saveChats(); toast(arg ? "System prompt set." : "System prompt cleared."); break;
@@ -783,7 +799,8 @@
   // ------------------------------------------------------------------ chat
   const curChat = () => A.chats.find((c) => c.id === A.cur);
   function newChat(target) {
-    const c = { id: uid(), title: "New chat", target: target || (targetList().find((t) => t.ready) || {}).id || "", messages: [], system: "", temperature: 0.7, max_tokens: 1024, compress: "auto", web: false, plugins: [], created: Date.now() };
+    const d = chatDefaults();
+    const c = { id: uid(), title: "New chat", target: target || (targetList().find((t) => t.ready) || {}).id || "", messages: [], system: d.system, temperature: d.temperature, max_tokens: d.max_tokens, compress: d.compress, web: d.web, skills_auto: d.skills_auto, autofix: d.autofix, files: d.files, plugins: [], created: Date.now() };
     A.chats.unshift(c); A.cur = c.id; saveChats();
     return c;
   }
@@ -966,7 +983,8 @@
           <button class="btn small" data-ai="compress-now" type="button" title="Summarise the earlier messages now to free up the model's memory">Compress now</button></div>
         <p class="muted small" style="margin:4px 0 0">Near the model's context length, older messages are replaced by a short summary the model writes, so the chat can go on.</p>
         <label class="check"><input type="checkbox" id="cs-web" ${c.web ? raw("checked") : ""}> <span><b>Web search</b>: look each question up on the internet and give the model what it finds (with sources)</span></label>
-        <div class="plugins"><b>Plugins</b> <span class="muted small">the AI decides when to use them. Slower: every question carries the tool list, so a small cluster model takes a while.</span>
+        <div class="plugins"><b>AI skills</b> <label class="check"><input type="checkbox" id="cs-auto-skills" ${c.skills_auto !== false ? raw("checked") : ""}> <span><b>Choose automatically</b>: the AI can use any available skill when it helps. File changes and code still ask before running.</span></label>
+          <span class="muted small">Automatic mode sends the available skill list with each message and can add a little delay. Turn it off to select individual skills.</span>
           <div id="plugin-list">${pluginList(c)}</div></div>
         <label class="check"><input type="checkbox" id="cs-autofix" ${c.autofix ? raw("checked") : ""}> <span><b>Run and fix code automatically</b>: runs the code the AI writes on the server (as your user) and sends errors back so it fixes them, up to 3 tries. Off by default; code only runs when you press ▶ Run.</span></label>
         <label>Files<select class="select" id="cs-files"><option value="ask" ${!c.files || c.files === true || c.files === "ask" ? raw("selected") : ""}>Only when I ask for a file</option><option value="always" ${c.files === "always" ? raw("selected") : ""}>Always: scripts, pages and documents as files</option><option value="never" ${c.files === false || c.files === "never" ? raw("selected") : ""}>Never</option></select></label>`);
@@ -991,8 +1009,10 @@
       const hasImages = A.attach.some((f) => f.kind === "image");
       mine = { role: "user", content: text || (hasImages ? "Please transcribe the visible text in the attached image(s), preserving line breaks and marking anything unclear." : ""), files: A.attach.length ? A.attach.slice() : undefined };
     }
-    if (mine && c.plugins && c.plugins.length && text && !(mine.files || []).some((f) => f.kind === "image")) return sendAgent(c, mine, text, t);   // the tool agent accepts text; image turns go to the vision model directly
-    if (mine && c.plugins && c.plugins.length && (mine.files || []).some((f) => f.kind === "image")) toast("This image message goes straight to the model; chat plugins are skipped for this turn.");
+    const hasImageAttachment = !!(mine && (mine.files || []).some((f) => f.kind === "image"));
+    const wantsSkills = !!(mine && text && (c.skills_auto !== false || (c.plugins || []).length));
+    if (wantsSkills && !hasImageAttachment) return sendAgent(c, mine, text, t);
+    if (wantsSkills && hasImageAttachment) toast("This image message goes straight to the vision model; AI skills are skipped for this turn.");
     const noLimit = !c.max_tokens;
     if (mine && c.web && text) {   // look things up first, so the model answers with what it found
       A.searching = c.id; refreshChat();
@@ -1312,7 +1332,7 @@
         <label class="check"><input type="checkbox" data-v="keep"> <span>Keep its files on disk instead (switching back is quicker, but they take the space)</span></label></div>` : ""}
       ${sp && !old ? html`<p style="color:var(--warn)">This restarts the running model with these settings.</p>` : ""}
       <label class="field-l">Name for the API<input class="input" data-v="alias" value="${alias}" spellcheck="false"></label>
-      <label class="field-l">Context length (how much text it can remember: attached files count)<input class="input" data-v="ctx" type="number" min="512" max="131072" step="512" value="${(sp && +sp.ctx) || 8192}"></label>
+      <label class="field-l">Context length (how much text it can remember: attached files count)<input class="input" data-v="ctx" type="number" min="512" max="131072" step="512" value="${(sp && sp.model === file && +sp.ctx) || chatDefaults().context_length}"></label>
       <div class="field-l">Machines to use
         <label class="check" style="margin-top:8px"><input type="checkbox" data-v="auto" checked> <span><b>Pick the fastest machines automatically</b> (fewer, faster machines usually win: every extra one adds a network hop per word)</span></label>
         <div class="checklist">${nodes.map((n) => html`<label class="check"><input type="checkbox" data-v="n-${n.name}" checked> <span>${n.name}</span> <span class="faint small">${fmt.bytes(n.mem_total, 0)}</span></label>`)}</div>
@@ -1496,8 +1516,9 @@
     else if (t.id === "cs-nolimit" && c) { c.max_tokens = t.checked ? 0 : (+($("#cs-max").value) || 1024); $("#cs-max").disabled = t.checked; saveChats(); }
     else if (t.id === "cs-compress" && c) { c.compress = t.value; saveChats(); refreshChat(); }
     else if (t.id === "cs-web" && c) { c.web = t.checked; saveChats(); }
+    else if (t.id === "cs-auto-skills" && c) { c.skills_auto = t.checked; saveChats(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); setHTML($("#plugin-list"), pluginList(c)); }
     else if (t.id === "cs-autofix" && c) { c.autofix = t.checked; saveChats(); }
-    else if (t.id && t.id.startsWith("cp-") && c) { const id = t.id.slice(3); c.plugins = (c.plugins || []).filter((x) => x !== id).concat(t.checked ? [id] : []); saveChats(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); }
+    else if (t.id && t.id.startsWith("cp-") && c) { const id = t.id.slice(3); c.skills_auto = false; c.plugins = (c.plugins || []).filter((x) => x !== id).concat(t.checked ? [id] : []); saveChats(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); setHTML($("#plugin-list"), pluginList(c)); }
   });
   document.addEventListener("change", (e) => {
     const c = curChat();

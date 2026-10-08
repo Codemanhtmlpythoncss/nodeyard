@@ -241,15 +241,20 @@ model's context length, older messages become a short summary the model writes; 
 (each question is searched on the internet, the best pages are read, and the model gets the text with its sources; needs yardcode
 next to nodeyard on the server and never fetches private network addresses).
 
+The permanent **Settings → AI chat defaults** card sets the starting system prompt, creativity, reply length, model context length,
+compression, web search, skill selection, code behavior and file preference for new chats. Changing these defaults does not alter an
+existing chat; its own Settings remain in effect. The default context length is used when starting a downloaded model. A model that is
+already running keeps its current context length until it is started again.
+
 ## Chat: commands, plugins and running code
 
 - **`/` commands**: type `/` in the message box for a menu: `/help`, `/new`, `/compact`, `/model`, `/models`, `/unload`, `/max`
-  (`/max none` = no reply limit), `/web`, `/plugins`, `/system`, `/temp`, `/run`, `/fix`, `/autofix`, `/retry`, `/stop`, `/copy`,
+  (`/max none` = no reply limit), `/web`, `/skills`, `/plugins`, `/system`, `/temp`, `/run`, `/fix`, `/autofix`, `/retry`, `/stop`, `/copy`,
   `/export`, `/context`, `/files`. A message that really starts with a slash: type `//`.
-- **Plugins** (chat Settings): the AI decides when to search the web and read pages, look things up on Wikipedia or arXiv, get the
+- **AI skills** (chat Settings): **Choose automatically** lets the model select from every available skill when useful: search the web and read pages, look things up on Wikipedia or arXiv, get the
   weather, calculate, keep a task list, run Python (code interpreter) or use files and shell. Every tool call shows as a card;
   anything that runs code or changes things asks first (Allow / Allow for this chat / Deny). Python, files and shell run as the
-  terminal user (never root), and never through public access. Needs yardcode next to nodeyard (the installer does that).
+  terminal user (never root), and never through public access. Needs yardcode next to nodeyard (the installer does that). Turn automatic selection off with `/skills off` to pick individual skills; use `/skills on` to turn it back on.
 - **Run the AI's code**: python, bash and javascript blocks have a ▶ Run button. The code runs on the server as the terminal user
   (30 second limit, never through public access) and its output shows under the block; "Ask the AI to fix it" sends the error back.
   **Run and fix code automatically** (chat Settings, off by default) does that after every answer, up to 3 tries.

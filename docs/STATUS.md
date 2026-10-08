@@ -36,7 +36,7 @@ Built ahead of the roadmap, in Python and Bash (the Go agent of phase 5 is not s
   downloads, disk limits and cleaning, NVIDIA GPU use, switching models), the model gate (no key needed on your own network, put back
   automatically after a redeploy), and a key-protected control API to load models remotely.
 - **Dashboard chat**: attachments and generated files, reply length with a "no limit" option, context compression, web search,
-  plugins (Wikipedia, arXiv, weather, calculator, Python, files and shell), `/` commands, and a Run button on code the AI writes,
+  persistent global defaults with per-chat overrides, automatically selected AI skills (Wikipedia, arXiv, weather, calculator, Python, files and shell), `/` commands, and a Run button on code the AI writes,
   with the output sent back so the AI can fix it.
 - **yardcode** (`yardcode/`): a terminal AI agent for any OpenAI-compatible model API on macOS and Linux. Installs with nodeyard or alone.
   See [yardcode/README.md](../yardcode/README.md).

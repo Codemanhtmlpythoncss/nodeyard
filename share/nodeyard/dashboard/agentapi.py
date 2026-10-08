@@ -130,6 +130,18 @@ class Agents:
             out.append({"id": pid, "label": label, "desc": desc, "tools": tools, "code": code, "available": ok, "why": why})
         return out
 
+    def request_plugins(self, h, body):
+        """Resolve the chat's selected tools, or every skill available in automatic mode."""
+        requested = body.get("plugins") if isinstance(body.get("plugins"), list) else []
+        selected = [p for p in requested if isinstance(p, str) and p in BY_ID]
+        available = {p["id"]: p for p in self.listing(h)}
+        if body.get("auto_skills") is True:
+            return [pid for pid, info in available.items() if info["available"]]
+        for pid in selected:
+            if not available[pid]["available"]:
+                raise AgentError("%s: %s." % (available[pid]["label"], available[pid]["why"]), 403)
+        return [pid for pid in selected if available[pid]["available"]]
+
     # ---- processes ----------------------------------------------------------------------------------------
     def _model(self):
         """Where the model is, from inside this machine: address, port and the key if it needs one."""
@@ -179,15 +191,15 @@ class Agents:
     def run(self, h, body):
         cid = str(body.get("chat") or "")[:64]
         text = str(body.get("text") or "")
-        plugins = [p for p in (body.get("plugins") or []) if p in BY_ID]
+        try:
+            plugins = self.request_plugins(h, body)
+        except AgentError as e:
+            return h._json({"ok": False, "error": str(e)}, e.code)
         if not cid or not text.strip() or not plugins:
-            return h._json({"ok": False, "error": "Say which chat, what to do and which plugins."}, 400)
+            message = "No AI skills are available here." if body.get("auto_skills") is True else "Say which chat, what to do and which plugins."
+            return h._json({"ok": False, "error": message}, 400)
         if len(text) > 200000:
             return h._json({"ok": False, "error": "That message is too long."}, 413)
-        listing = {p["id"]: p for p in self.listing(h)}
-        for p in plugins:
-            if not listing[p]["available"]:
-                return h._json({"ok": False, "error": "%s: %s." % (listing[p]["label"], listing[p]["why"])}, 403)
         try:
             pr, _ = self.get(h, cid, plugins, int(body.get("max_tokens") or 0))
         except AgentError as e:

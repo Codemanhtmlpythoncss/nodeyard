@@ -42,7 +42,7 @@
     document.body.classList.add("has-bg");
   }
   async function loadSettings() {
-    try { const r = await getJSON("/api/settings"); if (r.ok) { T.settings = r; NY.publicAccess = r.public || null; applyBackground(r.background); } } catch (e) { /* signed out */ }
+    try { const r = await getJSON("/api/settings"); if (r.ok) { T.settings = r; store.set("ai.chatDefaults", JSON.stringify(r.chat_defaults || {})); NY.publicAccess = r.public || null; applyBackground(r.background); } } catch (e) { /* signed out */ }
     return T.settings;
   }
   loadSettings();
@@ -92,9 +92,27 @@
     const s = T.settings;
     if (!s) return setHTML(el, html`<div class="card"><div class="empty"><div class="spin"></div>Loading settings…</div></div>`);
     const theme = store.get("theme", "auto"), bg = s.background;
+    const d = s.chat_defaults || {};
     const gateNets = s.gate ? s.gate.trusted.join("\n") : "127.0.0.0/8\n10.0.0.0/8\n172.16.0.0/12\n192.168.0.0/16\n100.64.0.0/10\n::1/128\nfc00::/7\nfd7a:115c:a1e0::/48";
     NY.freshHTML(el, html`${s.demo ? html`<div class="banner">Demo: changes here aren't saved anywhere.</div>` : ""}
       ${themeCard(theme)}
+      ${card("AI chat defaults", html`
+        <p class="muted small" style="margin-top:0">Saved on this server. New chats inherit these choices; each chat keeps its own settings after that.</p>
+        ${field("System prompt", html`<textarea class="input" id="st-chat-system" rows="3" maxlength="12000" placeholder="e.g. You are a concise assistant.">${d.system || ""}</textarea>`)}
+        <div class="row wrap" style="gap:18px;align-items:flex-end">
+          ${field(html`Creativity <b id="st-chat-temp-v">${d.temperature == null ? 0.7 : d.temperature}</b>`, html`<input type="range" id="st-chat-temp" min="0" max="2" step="0.1" value="${d.temperature == null ? 0.7 : d.temperature}" class="range">`)}
+          ${field("Default reply length (tokens)", html`<span class="row" style="gap:10px"><input class="input" id="st-chat-max" type="number" min="16" max="65536" step="16" value="${d.max_tokens || 1024}" style="width:130px" ${d.max_tokens === 0 ? raw("disabled") : ""}>
+            <span class="check"><input type="checkbox" id="st-chat-nolimit" ${d.max_tokens === 0 ? raw("checked") : ""}> <span>No limit</span></span></span>`)}</div>
+        <div class="row wrap" style="gap:18px;align-items:flex-end">
+          ${field("Default model context length", html`<input class="input" id="st-chat-ctx" type="number" min="512" max="131072" step="512" value="${d.context_length || 8192}" style="width:150px">`, "Used when you start a downloaded model. A running model keeps its current context until it is started again.")}
+          ${field("Context compression", html`<select class="select" id="st-chat-compress"><option value="auto" ${d.compress !== "off" ? raw("selected") : ""}>Automatic</option><option value="off" ${d.compress === "off" ? raw("selected") : ""}>Off</option></select>`)}
+          ${field("Files", html`<select class="select" id="st-chat-files"><option value="ask" ${!d.files || d.files === "ask" ? raw("selected") : ""}>Only when I ask</option><option value="always" ${d.files === "always" ? raw("selected") : ""}>Always create files</option><option value="never" ${d.files === "never" ? raw("selected") : ""}>Never</option></select>`)}</div>
+        <div class="row wrap" style="gap:14px;margin:8px 0">
+          <label class="check"><input type="checkbox" id="st-chat-web" ${d.web ? raw("checked") : ""}> <span>Search the web first</span></label>
+          <label class="check"><input type="checkbox" id="st-chat-skills" ${d.skills_auto !== false ? raw("checked") : ""}> <span>Choose AI skills automatically</span></label>
+          <label class="check"><input type="checkbox" id="st-chat-autofix" ${d.autofix ? raw("checked") : ""}> <span>Run and fix code automatically</span></label>
+        </div>
+        <button class="btn primary" data-st="chat-defaults">Save defaults</button>`)}
       <div class="grid g-2 mt">
       ${card("Sign-in", s.auth ? html`
         ${field("New password", html`<input class="input" type="password" id="st-pw1" autocomplete="new-password">`)}
@@ -183,6 +201,19 @@
     else if (a === "doc-fix") startJob("doctor-fix", { only: el.dataset.id }, () => loadDoctor(true));
     else if (a === "doc-fix-all") startJob("doctor-fix", {}, () => loadDoctor(true));
     else if (a === "theme") { setTheme(el.dataset.theme); renderSettings(); }
+    else if (a === "chat-defaults") {
+      const noLimit = $("#st-chat-nolimit").checked;
+      const defaults = {
+        system: $("#st-chat-system").value, temperature: +$("#st-chat-temp").value,
+        max_tokens: noLimit ? 0 : +$("#st-chat-max").value,
+        compress: $("#st-chat-compress").value, files: $("#st-chat-files").value,
+        context_length: +$("#st-chat-ctx").value,
+        web: $("#st-chat-web").checked, skills_auto: $("#st-chat-skills").checked,
+        autofix: $("#st-chat-autofix").checked,
+      };
+      const r = await post("/api/settings/chat-defaults", { defaults });
+      if (r.ok) { T.settings.chat_defaults = r.chat_defaults; store.set("ai.chatDefaults", JSON.stringify(r.chat_defaults)); toast("AI chat defaults saved for new chats."); renderSettings(); }
+    }
     else if (a === "pw-set") {
       const r = await post("/api/settings/password", { password: $("#st-pw1").value, again: $("#st-pw2").value });
       if (r.ok) { T.newPassword = ""; toast("Password changed. Other browsers have to sign in again."); loadSettings().then(renderSettings); }
@@ -238,6 +269,7 @@
     void s;
   });
   document.addEventListener("change", async (e) => {
+    if (e.target.id === "st-chat-nolimit") { $("#st-chat-max").disabled = e.target.checked; return; }
     if (e.target.id !== "st-bg-file") return;
     const f = e.target.files && e.target.files[0]; if (!f) return;
     if (f.size > IMAGE_MAX) { toast("That picture is over 8 MB."); return; }
@@ -249,6 +281,7 @@
   });
   let styleTimer = null;
   document.addEventListener("input", (e) => {
+    if (e.target.id === "st-chat-temp") { $("#st-chat-temp-v").textContent = e.target.value; return; }
     if (e.target.id !== "st-blur" && e.target.id !== "st-dim") return;
     const s = T.settings; if (!s || !s.background) return;
     const blur = +$("#st-blur").value, dim = +$("#st-dim").value;
