@@ -334,7 +334,8 @@ class ControlClient(Base):
         self.addCleanup(api.stop)
         with self.assertRaises(modelapi.ModelAPIError) as e:
             modelapi.ModelAPI(api.url, "bad").models()
-        self.assertIn("isn't the server's API key", str(e.exception))
+        self.assertIn("Use the running model's key", str(e.exception))
+        self.assertIn("nodeyard ai key --adopt-model", str(e.exception))
         self.assertEqual(e.exception.status, 401)
         with self.assertRaises(modelapi.ModelAPIError) as e:
             modelapi.ModelAPI(api.url, "k").request("GET", "/nothing")

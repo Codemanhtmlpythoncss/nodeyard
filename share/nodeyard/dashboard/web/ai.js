@@ -304,9 +304,14 @@
   }
   // Picking a model only selects it: it is loaded (and waited for) when you send your next message.
   async function pickModel(sel) {
-    const m = A.pick && A.pick[sel.value], sp = S.d.ai && S.d.ai.split;
+    const m = A.pick && A.pick[sel.value], sp = S.d.ai && S.d.ai.split, c = curChat();
     sel.dataset.sig = ""; sel.blur();
-    if (!m || (sp && sp.model === m.file && sp.loaded !== false)) { A.wanted = null; store.set("ai.wanted", ""); refreshModelPick(); refreshChat(); return; }
+    if (!m) { A.wanted = null; store.set("ai.wanted", ""); refreshModelPick(); refreshChat(); return; }
+    if (sp && sp.model === m.file && sp.loaded !== false) {
+      A.wanted = null; store.set("ai.wanted", "");
+      if (c && c.target !== "split") { c.target = "split"; saveChats(); }
+      refreshModelPick(); refreshChat(); return;
+    }
     A.wanted = { file: m.file, size: m.size, node: m.node }; store.set("ai.wanted", JSON.stringify(A.wanted));
     toast(m.file.replace(/\.gguf$/i, "") + " will load when you send your next message.");
     refreshModelPick(); refreshChat();
@@ -314,8 +319,10 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const aliasFor = (file) => file.replace(/\.gguf$/i, "").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[-.]+/, "").slice(0, 40) || "model";
   // does sending need to load the selected model first?
-  const pendingLoad = (c) => { const sp = S.d && S.d.ai && S.d.ai.split, t = c && findTarget(c.target); if (c && c.target && c.target !== "split" && t) return null;
-    if (A.wanted && (!sp || sp.model !== A.wanted.file || sp.loaded === false)) return A.wanted; if (sp && sp.loaded === false) return { file: sp.model, same: true }; return null; };
+  const pendingLoad = (c) => { const sp = S.d && S.d.ai && S.d.ai.split, t = c && findTarget(c.target);
+    if (A.wanted && (!sp || sp.model !== A.wanted.file || sp.loaded === false)) return A.wanted;
+    if (c && c.target && c.target !== "split" && t) return null;
+    if (sp && sp.loaded === false) return { file: sp.model, same: true }; return null; };
   async function autoLoad(c, want) {
     const sp = S.d.ai && S.d.ai.split, same = !want || want.same || (sp && sp.model === want.file), name = ((want && want.file) || (sp && sp.model) || "the model").replace(/\.gguf$/i, "");
     A.loadingModel = { chat: c.id, name, t0: Date.now(), cancelled: false, line: "" }; paintSend(); refreshChat();
@@ -338,7 +345,7 @@
       }
       c.target = "split"; A.wanted = null; store.set("ai.wanted", ""); saveChats(); refreshModelPick();
       return true;
-    } catch (e) { toast("Couldn't load the model."); return false; }
+    } catch (e) { toast("Couldn't load the model: " + (e.message || "the dashboard couldn't reach the server.")); return false; }
     finally { A.loadingModel = null; paintSend(); refreshChat(); loadDisk(true); }
   }
 
@@ -787,6 +794,11 @@
   async function send(text, regen) {
     const c = curChat(); if (!c || A.stream) return;
     let t = findTarget(c.target);
+    const sp = S.d && S.d.ai && S.d.ai.split;
+    if (A.wanted && sp && sp.model === A.wanted.file && sp.loaded !== false) {
+      A.wanted = null; store.set("ai.wanted", "");
+      c.target = "split"; saveChats(); t = findTarget("split");
+    }
     const want = pendingLoad(c);
     if (want || !t) { if (want || A.wanted) { if (!(await autoLoad(c, want || A.wanted))) return; t = findTarget("split") || findTarget(c.target); } }
     if (!t || !t.ready) { toast("That model isn't ready."); return; }
@@ -939,16 +951,25 @@
     const hasInventory = (D.nodes || []).some((n) => (n.items || []).length);
     if (D.scanning && !hasInventory) return card("Downloaded models", html`<div class="empty"><div class="spin"></div>Looking at each machine's disk…</div>`);
     const kindName = { model: "Model file", partial: "Unfinished download", cache: "Weight cache" };
-    const rows = [];
+    const rows = [], byModel = {};
     let reclaim = 0;
     D.nodes.forEach((n) => n.items.forEach((it) => {
       if (it.kind === "disk") return;
+      if (it.kind === "model") {
+        const m = byModel[it.name] || (byModel[it.name] = { file: it.name, size: 0, nodes: [] });
+        m.size = Math.max(m.size, it.bytes || 0);
+        if (!m.nodes.includes(n.node)) m.nodes.push(n.node);
+        return;
+      }
       const base = it.kind === "partial" ? it.name.replace(/\.(part\d*|joining|copying)$/, "") : it.name;
       const busy = (D.downloads || []).some((d) => d.state === "running" && d.file === base);
-      const inUse = it.kind === "model" ? it.name === D.in_use : it.kind === "cache" ? !!D.in_use && it.name === cacheKey(D.in_use) : busy;
-      if (!inUse && it.kind !== "model") reclaim += it.bytes;
+      const inUse = it.kind === "cache" ? !!D.in_use && it.name === cacheKey(D.in_use) : busy;
+      if (!inUse) reclaim += it.bytes;
       rows.push({ node: n.node, it, base, inUse, busy });
     }));
+    const models = Object.values(byModel).sort((a, b) => a.file.localeCompare(b.file));
+    const split = S.d.ai && S.d.ai.split;
+    const aiBusy = A.targets && A.targets.busy;
     const disks = D.nodes.map((n) => { const d = n.items.find((x) => x.kind === "disk"); return d ? { node: n.node, free: d.free, cap: d.capacity } : null; }).filter(Boolean);
     const cols = [
       { k: "name", t: "File", cls: "wrap mono", v: (r) => r.it.name, r: (r) => html`${r.it.name}<div class="sub">${kindName[r.it.kind]}</div>` },
@@ -961,7 +982,19 @@
     const dls = (D.downloads || []).filter((d) => d.state !== "done");
     return card("Downloaded models", html`${D.scanning ? html`<div class="muted small" style="margin-bottom:10px"><span class="spin small"></span> Refreshing the saved disk inventory…</div>` : ""}${D.scan_error ? html`<div class="note small">The latest disk scan failed: ${D.scan_error}. Showing the last saved inventory.</div>` : ""}<div class="disks">${disks.map((d) => { const used = 1 - d.free / Math.max(1, d.cap); return html`<div><div class="row"><b>${d.node}</b><span class="grow"></span><span class="muted small">${fmt.bytes(d.free)} free of ${fmt.bytes(d.cap)}</span></div><div class="bar ${used > 0.9 ? "bad" : used > 0.8 ? "warn" : ""}"><i style="width:${(used * 100).toFixed(1)}%"></i></div></div>`; })}</div>
       ${dls.map((d) => html`<div class="mt"><div class="row"><span class="mono small grow" style="word-break:break-all">${d.file}</span><span class="muted small">${d.state === "stuck" ? "stuck: not enough disk" : d.state === "failed" ? "failed" : d.note ? d.note : fmt.bytes(d.got) + " of " + fmt.bytes(d.size) + (d.rate ? " · " + fmt.rate(d.rate) : "") + (d.eta != null ? " · about " + etaText(d.eta) + " left" : "")} · ${d.node}</span></div><div class="bar ${d.state === "running" ? "" : "bad"}"><i style="width:${d.size ? Math.min(100, (100 * d.got) / d.size).toFixed(1) : 0}%"></i></div></div>`)}
-      <div class="mt">${U.table("disk-models", cols, rows, { k: "size", empty: "Nothing downloaded", emptySub: "Download a model from Find models." })}</div>
+      <div class="ai-model-list">${models.length ? models.map((m) => {
+        const active = m.file === D.in_use || !!(split && split.model === m.file);
+        const locations = m.nodes.slice().sort();
+        const run = active ? (split && split.model === m.file && split.loaded === false
+          ? '<button class="btn small" data-ai="m-load"' + (aiBusy ? ' disabled' : '') + '>Load into memory</button>'
+          : split && split.model === m.file && split.ready
+            ? '<button class="btn small primary" data-ai="goto-chat" data-target="split">Chat</button>'
+            : '<button class="btn small" disabled>Starting…</button>')
+          : '<button class="btn small primary" data-ai="m-run" data-file="' + esc(m.file) + '" data-size="' + m.size + '"' + (aiBusy ? ' disabled' : '') + '>Run model</button>';
+        const remove = active ? "" : ' <button class="btn small danger" data-ai="m-rm" data-file="' + esc(m.file) + '">Delete</button>';
+        return html`<article class="ai-model-row"><div class="ai-model-icon" aria-hidden="true">AI</div><div class="ai-model-main"><div class="ai-model-heading"><b class="ai-model-name">${m.file}</b>${active ? chip(split && split.model === m.file && split.ready ? "Serving" : "In use", split && split.model === m.file && split.ready ? "good" : "warn") : ""}</div><div class="muted small">${fmt.bytes(m.size)} model file · saved on ${plural(locations.length, "machine")}</div><div class="ai-model-locations">${locations.map((node) => html`<span class="ai-model-location"><i></i>${node}</span>`)}</div></div><div class="ai-model-actions">${raw(run + remove)}</div></article>`;
+      }) : html`<div class="empty">Nothing downloaded yet<div class="muted small">Download a model from Find models, then run it here.</div></div>`}</div>
+      ${rows.length ? html`<details class="ai-disk-details"><summary>Storage details <span class="muted small">${plural(rows.length, "item")}</span></summary><div class="mt">${U.table("disk-items", cols, rows, { k: "size", empty: "No unfinished downloads or weight caches." })}</div></details>` : ""}
       <div class="row wrap" style="margin-top:14px;gap:8px">
         <button class="btn primary" data-ai="clean">Free up space${reclaim ? " (" + fmt.bytes(reclaim) + ")" : ""}</button>
         <button class="btn" data-ai="clean-models">…including unused models</button>
@@ -1045,9 +1078,9 @@
   }
   // the old model's file size on disk (what deleting it frees, caches not counted)
   const fileBytes = (file) => { let b = 0; ((A.disk && A.disk.nodes) || []).forEach((n) => n.items.forEach((it) => { if (it.kind === "model" && it.name === file) b += it.bytes; })); return b; };
-  async function runModel(repo, file, size, localNode) {
+  async function runModel(repo, file, size, localNode, localFile) {
     const d = S.d, sp = d.ai && d.ai.split, nodes = d.nodes.filter((n) => n.ready && n.mem_total >= 1.5 * GiB);
-    const fit = size ? fitFor(size) : null, old = sp && sp.model && sp.model !== file ? sp.model : "", oldBytes = old ? fileBytes(old) : 0, have = !!localNode || installed().some((m) => m.file === file);
+    const fit = size ? fitFor(size) : null, old = sp && sp.model && sp.model !== file ? sp.model : "", oldBytes = old ? fileBytes(old) : 0, have = !!localNode || !!localFile || installed().some((m) => m.file === file);
     const alias = file.replace(/\.gguf$/i, "").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").slice(0, 40);
     const vals = await dialog(old ? "Switch the AI model" : "Run this model across your machines", html`<p style="margin-top:0">${repo ? html`<b>${repo}</b><br>` : ""}<span class="mono small">${file}</span>${size ? " · " + fmt.bytes(size) : ""}${localNode ? " · on " + localNode : ""}</p>
       ${fit ? html`<p>${verdict(fit.split)} It needs about ${fmt.bytes(fit.need)} of your ${fmt.bytes(fit.free)} of free memory${old ? " (counting what the old model frees)" : ""}.</p>` : ""}
@@ -1062,12 +1095,12 @@
         <label class="check" style="margin-top:8px"><input type="checkbox" data-v="auto" checked> <span><b>Pick the fastest machines automatically</b> (fewer, faster machines usually win: every extra one adds a network hop per word)</span></label>
         <div class="checklist">${nodes.map((n) => html`<label class="check"><input type="checkbox" data-v="n-${n.name}" checked> <span>${n.name}</span> <span class="faint small">${fmt.bytes(n.mem_total, 0)}</span></label>`)}</div>
         <div class="faint small" style="margin-top:6px">The ticks only count when automatic is off.</div></div>
-      <p class="muted small">The file (${fmt.bytes(size, 1)}) goes to the machine with the most free disk, then each machine loads its share. Use “Check speed” in the file list to see the plan and its estimated speed first. You can close the progress window and watch on the Models tab.</p>`,
+      <p class="muted small">${localNode || localFile ? "The saved model file is reused; no download is needed. You can close the progress window and watch on the Models tab." : "The file (" + fmt.bytes(size, 1) + ") goes to the machine with the most free disk, then each machine loads its share. Use “Check speed” in the file list to see the plan and its estimated speed first. You can close the progress window and watch on the Models tab."}</p>`,
     old ? "Switch" : "Run it");
     if (!vals) return;
     const chosen = vals.auto ? [] : nodes.filter((n) => vals["n-" + n.name]).map((n) => n.name);
     if (!vals.auto && !chosen.length) { toast("Pick at least one machine."); return; }
-    startJob(sp ? "switch" : "deploy", Object.assign(localNode ? { local: true } : { repo }, { file, ctx: +vals.ctx || 8192, alias: vals.alias, nodes: chosen, keep_old: !!vals.keep }),
+    startJob(sp ? "switch" : "deploy", Object.assign(localNode || localFile ? { local: true } : { repo }, { file, ctx: +vals.ctx || 8192, alias: vals.alias, nodes: chosen, keep_old: !!vals.keep }),
       () => { loadTargets(true); loadDisk(true); });
   }
 
@@ -1156,6 +1189,7 @@
     else if (a === "o-chat") { newChat("ollama:" + el.dataset.pod + ":" + el.dataset.model); selectTab("chat"); }
     else if (a === "split-unload") { const v = await dialog("Unload the split model?", html`Every machine gets its memory back. The downloaded file stays on disk, so loading again takes a minute or two. Chat stops working until you load it.`, "Unload"); if (v) startAIJob(el, "split-unload", {}, () => loadTargets(true)); }
     else if (a === "split-load") startAIJob(el, "split-load", {}, () => loadTargets(true));
+    else if (a === "m-load") startAIJob(el, "split-load", {}, () => loadTargets(true));
     else if (a === "split-status") startAIJob(el, "status");
     else if (a === "split-test") startAIJob(el, "test");
     else if (a === "split-remove") {
@@ -1174,6 +1208,7 @@
     } else if (a === "open-job") openJob(el.dataset.id);
     else if (a === "o-rm") { const v = await dialog("Delete this Ollama model?", html`<span class="mono">${el.dataset.model}</span> is deleted from every machine that runs Ollama. You can download it again later.`, "Delete", { danger: true }); if (v) startAIJob(el, "ollama-rm", { name: el.dataset.model }, () => loadOllama(true)); }
     else if (a === "m-rm") { const v = await dialog("Delete this model?", html`<span class="mono">${el.dataset.file}</span>, any unfinished parts of it and its weight caches are deleted from every machine. A download of it that is still running is stopped.`, "Delete", { danger: true }); if (v) startAIJob(el, "split-rm", { file: el.dataset.file }, () => loadDisk(true)); }
+    else if (a === "m-run") runModel("", el.dataset.file, +el.dataset.size, "", true);
     else if (a === "clean") startAIJob(el, "clean", {}, () => loadDisk(true));
     else if (a === "clean-models") { const v = await dialog("Free up space, including models?", html`This also deletes every downloaded model file that isn't running now. The running model stays.`, "Delete them", { danger: true }); if (v) startAIJob(el, "clean", { models: true }, () => loadDisk(true)); }
     else if (a === "disk-refresh") loadDisk(true, true);

@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034 # NY_YES is read by the shared confirmation helpers.
 # Multi-node operations: adding a machine over SSH, removing a node, the
 # control-plane watchdog, and the pod network test (ported from k3s-manager).
 

@@ -395,7 +395,9 @@ class KubeSource:
         meta, st, spec = n.get("metadata", {}), n.get("status", {}), n.get("spec", {})
         name = meta["name"]
         info = st.get("nodeInfo", {})
-        conds = {c["type"]: c["status"] for c in st.get("conditions", [])}
+        condition_rows = st.get("conditions", [])
+        conds = {c["type"]: c["status"] for c in condition_rows}
+        ready_condition = next((c for c in condition_rows if c.get("type") == "Ready"), {})
         addrs = [{"type": a["type"], "address": a["address"]} for a in st.get("addresses", [])]
         internal = next((a["address"] for a in addrs if a["type"] == "InternalIP"), "")
         external = next((a["address"] for a in addrs if a["type"] == "ExternalIP"), "")
@@ -449,6 +451,8 @@ class KubeSource:
             "disk_total": fs.get("capacityBytes"), "disk_used": fs.get("usedBytes"),
             "net_rx": rx, "net_tx": tx, "net_rx_rate": rx_rate, "net_tx_rate": tx_rate,
             "conditions": conds, "labels": labels, "taints": taints, "created": parse_time(meta.get("creationTimestamp")),
+            "ready_since": parse_time(ready_condition.get("lastTransitionTime")),
+            "ready_reason": ready_condition.get("reason", ""), "ready_message": ready_condition.get("message", ""),
             "kubelet_start": parse_time(snode.get("startTime")), "unschedulable": bool(spec.get("unschedulable")),
             "pod_cidr": spec.get("podCIDR", ""), "images": images,
             "allocatable": {"cpu": parse_quantity(alloc.get("cpu")), "memory": parse_quantity(alloc.get("memory")),

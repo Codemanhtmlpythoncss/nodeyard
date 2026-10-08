@@ -87,6 +87,7 @@ k3s etcd-snapshot ls*	0	@etcd-snapshots.txt
 k3s etcd-snapshot save*	0	Snapshot saved
 k3s kubectl get nodes --no-headers -o wide*	0	@nodes-wide.txt
 k3s kubectl get nodes --no-headers*	0	@nodes.txt
+k3s kubectl get nodes -o name*	0	node/yard-1\\nnode/yard-2\\nnode/yard-3\\nnode/yard-4
 k3s kubectl get nodes -o json	0	@nodes.json
 k3s kubectl get node yard-1 --no-headers*	0	yard-1   Ready    control-plane,etcd,master   41d   v1.33.4+k3s1
 k3s kubectl get node * -o jsonpath=*InternalIP*	0	192.168.1.10

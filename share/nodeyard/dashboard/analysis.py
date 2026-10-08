@@ -56,7 +56,17 @@ def alerts(state):
 
     for n in state["nodes"]:
         if not n["ready"]:
-            add("critical", "%s is not ready" % n["name"], "Its kubelet isn't reporting. Check the machine and its network cable.", "node", n["name"])
+            reason = n.get("ready_reason") or ""
+            message = n.get("ready_message") or "Its kubelet isn't reporting. Check the machine and its network cable."
+            detail = (reason + ": " if reason and message and not message.startswith(reason) else "") + message
+            since = n.get("ready_since") or 0
+            down_for = now - since if since else None
+            if down_for is not None and 0 <= down_for < 20:
+                add("info", "%s briefly stopped reporting" % n["name"],
+                    "%s Kubernetes has reported this for %d seconds and is checking whether it continues." % (detail, int(down_for)),
+                    "node", n["name"])
+            else:
+                add("critical", "%s is not ready" % n["name"], detail, "node", n["name"])
         for cond in ("MemoryPressure", "DiskPressure", "PIDPressure"):
             if n["conditions"].get(cond) == "True":
                 add("critical" if cond != "PIDPressure" else "warning", "%s: %s" % (n["name"], cond),

@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import unittest
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "share", "nodeyard", "dashboard"))
@@ -199,6 +200,18 @@ class ClusterReading(unittest.TestCase):
         self.assertEqual(node["roles"], ["worker"])
         self.assertEqual(node["internal_ip"], "10.0.0.1")
 
+    def test_ready_condition_details_are_preserved(self):
+        src, n = self.source(), self.k8s_node()
+        n["status"]["conditions"][0].update({
+            "status": "False", "lastTransitionTime": "2026-10-08T10:00:00Z",
+            "reason": "KubeletNotReady", "message": "kubelet stopped posting node status",
+        })
+        node = src._build_node(n, {}, {}, [])
+        self.assertFalse(node["ready"])
+        self.assertEqual(node["ready_since"], kube.parse_time("2026-10-08T10:00:00Z"))
+        self.assertEqual(node["ready_reason"], "KubeletNotReady")
+        self.assertEqual(node["ready_message"], "kubelet stopped posting node status")
+
 
 class DemoAndAnalysis(unittest.TestCase):
     def setUp(self):
@@ -241,6 +254,19 @@ class DemoAndAnalysis(unittest.TestCase):
         a = analysis.alerts(self.state)
         self.assertEqual(a[0]["level"], "critical")
         self.assertEqual(a[0]["kind"], "node")
+
+    def test_short_node_ready_flap_is_info_then_becomes_critical(self):
+        node = self.state["nodes"][0]
+        node.update({"ready": False, "ready_since": 995, "ready_reason": "KubeletNotReady",
+                     "ready_message": "kubelet stopped posting node status"})
+        with patch.object(analysis.time, "time", return_value=1000):
+            alert = next(a for a in analysis.alerts(self.state) if a["kind"] == "node" and a["ref"] == node["name"])
+        self.assertEqual(alert["level"], "info")
+        self.assertIn("KubeletNotReady", alert["detail"])
+        with patch.object(analysis.time, "time", return_value=1030):
+            alert = next(a for a in analysis.alerts(self.state) if a["kind"] == "node" and a["ref"] == node["name"])
+        self.assertEqual(alert["level"], "critical")
+        self.assertIn("kubelet stopped posting node status", alert["detail"])
 
     def test_history_seed_and_sample(self):
         h = demo.DemoSource().seed_history(30, 5)
