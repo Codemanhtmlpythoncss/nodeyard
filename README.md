@@ -40,6 +40,8 @@ yardcode            # start working in this folder (type / for commands, ! for a
 Update it later with `yardcode update`, remove it with `sh yardcode/install.sh --uninstall`. From a checkout: `sh yardcode/install.sh --from-dir .`.
 More in [yardcode/README.md](yardcode/README.md). nodeyard's own installer installs yardcode too.
 
+**New:** [Nodeyard AI for macOS](macos/README.md) is a native chat app for the cluster, with locally saved conversations, streaming replies, image and document attachments, and optional dashboard sync.
+
 ## Features
 
 **Current main branch (unreleased)**

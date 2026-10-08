@@ -3,6 +3,7 @@
 
 # Build output
 dist/
+.build/
 
 # Editor and OS clutter
 .DS_Store

@@ -7,7 +7,7 @@ BATS := .tools/bin/bats
 export PATH := $(CURDIR)/.tools/bin:$(PATH)
 
 .DEFAULT_GOAL := help
-.PHONY: help deps lint fmt test test-py harness demo build yardcode release screenshots clean
+.PHONY: help deps lint fmt test test-py harness demo build build-macos-ai-app yardcode release screenshots clean
 
 help: ## Show this list
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-12s %s\n", $$1, $$2}'
@@ -42,6 +42,9 @@ demo: ## Try nodeyard against a simulated cluster (changes nothing)
 
 build: ## Build release tarballs and SHA256SUMS into dist/
 	scripts/build-release.sh $(VERSION)
+
+build-macos-ai-app: ## Build the native Nodeyard AI macOS app
+	scripts/build-macos-ai-app.sh
 
 yardcode: ## Build the single-file yardcode program into dist/yardcode
 	scripts/build-yardcode.sh dist/yardcode

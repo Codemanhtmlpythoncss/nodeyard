@@ -5,6 +5,8 @@
 
 Endpoints (all JSON):
   GET  /api/v1/status                    what is loaded and whether it is ready
+  GET  /api/v1/targets                   chat-ready split and Ollama models
+  POST /api/v1/chat/completions          streamed OpenAI-compatible chat through a model target
   GET  /api/v1/models                    downloaded models (and Ollama's), which one is loaded, running downloads
   POST /api/v1/models/load     {"model": "file.gguf" | "ollama-name", "ctx": 8192}   -> {"job": id}
   POST /api/v1/models/unload   {"model": optional name}                              -> {"job": id}
@@ -148,6 +150,12 @@ def register(ctx, args):
         st = backend.store.snapshot()["state"] or {}
         h._json({"ok": True, "model": model, "nodes": len(st.get("nodes", [])), "version": getattr(args, "nodeyard_version", "")})
 
+    def targets(h, q):
+        try:
+            h._json(dict(backend.targets(), ok=True))
+        except aiapi.AIError as e:
+            fail(h, e)
+
     def models(h, q):
         try:
             rows, downloads = describe(backend)
@@ -240,10 +248,51 @@ def register(ctx, args):
             return h._json({"ok": False, "error": "No such task."}, 404)
         h._json(dict(v, ok=True))
 
+    def chat_completions(h, body):
+        """Stream OpenAI-compatible chat through the shared-key control API."""
+        target = str(body.get("model") or body.get("target") or "")[:240]
+        messages = body.get("messages")
+        if not target:
+            return h._json({"ok": False, "error": "Choose a model from /api/v1/targets."}, 400)
+        if not isinstance(messages, list) or not 1 <= len(messages) <= 200:
+            return h._json({"ok": False, "error": "Send between 1 and 200 messages."}, 400)
+        try:
+            clean = aiapi.clean_chat_messages(messages)
+            temp = min(2.0, max(0.0, float(body.get("temperature", 0.7))))
+            raw_max = body.get("max_tokens", 1024)
+            max_tokens = 0 if raw_max in (None, 0, "0", "", "none") else min(65536, max(1, int(raw_max)))
+        except OverflowError as e:
+            return h._json({"ok": False, "error": str(e)}, 413)
+        except (TypeError, ValueError) as e:
+            return h._json({"ok": False, "error": str(e) or "Bad temperature or token limit."}, 400)
+        payload = {"messages": clean, "temperature": temp, "stream": True}
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+        try:
+            conn, resp = backend.open_chat(target, payload)
+        except aiapi.AIError as e:
+            return fail(h, e)
+        try:
+            h.send_response(200)
+            for k, v in (("Content-Type", "text/event-stream; charset=utf-8"), ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff"),
+                         ("X-Accel-Buffering", "no"), ("Connection", "close")):
+                h.send_header(k, v)
+            h.end_headers()
+            h.close_connection = True
+            for line in iter(resp.readline, b""):
+                h.wfile.write(line)
+                h.wfile.flush()
+        except OSError:
+            pass  # A cancelled native-app request closes the upstream connection below.
+        finally:
+            conn.close()
+
     import webtools
     webtools.register(ctx, args)
-    ctx.get_routes.update({PREFIX + "status": status, PREFIX + "models": models, PREFIX + "search": search, PREFIX + "files": files, PREFIX + "jobs": job})
+    ctx.get_routes.update({PREFIX + "status": status, PREFIX + "targets": targets, PREFIX + "models": models, PREFIX + "search": search, PREFIX + "files": files, PREFIX + "jobs": job})
     ctx.post_routes.update({PREFIX + "models/load": load, PREFIX + "models/unload": unload, PREFIX + "models/download": download})
+    ctx.post_routes[PREFIX + "chat/completions"] = chat_completions
+    ctx.post_limits[PREFIX + "chat/completions"] = aiapi.MAX_CHAT_BODY_BYTES
 
 
 _ = os

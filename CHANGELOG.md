@@ -30,6 +30,8 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- Native SwiftUI **Nodeyard AI for macOS**: local chat saving, optional server sync, model selection, live replies, attachments, and Keychain-backed server credentials. The shared-key Control API now offers chat-ready targets and streamed chat for the app.
+- Dashboard chat can automatically choose among available AI skills; permanent chat defaults include a default context length.
 - Dashboard **Find Models** now starts with an **Already downloaded** section showing saved models, the machines that contain them, and a direct Run/Load/Chat action. Its inventory refreshes while this tab is open.
 - Model locations stay visible as **last seen** for up to 30 days when Kubernetes temporarily omits a node during restart; the dashboard merges them back into its persisted disk inventory until that node returns.
 - Running dashboard tasks now have a **Cancel** button that stops the nodeyard command and its child processes. The Models tab has **Force stop** to immediately stop split-model servers and pending downloads while keeping saved files and caches.

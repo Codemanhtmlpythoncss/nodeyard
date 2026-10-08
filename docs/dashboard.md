@@ -225,6 +225,8 @@ curl -H "Authorization: Bearer $KEY" 'http://DASHBOARD:9092/api/v1/jobs?id=ab12.
 | Endpoint | |
 |---|---|
 | `GET /api/v1/status` | what is loaded and whether it is ready |
+| `GET /api/v1/targets` | model targets that can receive chat requests |
+| `POST /api/v1/chat/completions` | streamed OpenAI-compatible chat through the selected target |
 | `GET /api/v1/models` | downloaded models and Ollama's, which is loaded, running downloads |
 | `POST /api/v1/models/load` `{"model": "file.gguf"}` | switch to a downloaded model (old files are kept) |
 | `POST /api/v1/models/unload` | free the cluster's memory |
@@ -233,6 +235,8 @@ curl -H "Authorization: Bearer $KEY" 'http://DASHBOARD:9092/api/v1/jobs?id=ab12.
 | `GET /api/v1/jobs?id=ID&since=N` | progress of a task |
 
 `yardcode models ...` uses it ([yardcode/README.md](../yardcode/README.md)).
+
+The native macOS chat app also uses this API and the shared server key. See [macOS app setup](macos.md).
 
 ## Chat settings
 

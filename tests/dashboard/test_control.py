@@ -85,6 +85,17 @@ class Control(unittest.TestCase):
         self.assertIn("ollama", kinds)
         self.assertTrue(all("id" in m and "loaded" in m for m in j["models"]))
 
+    def test_native_chat_api_lists_ready_targets_and_streams(self):
+        s, j = self.call("GET", "/api/v1/targets")
+        self.assertEqual(s, 200)
+        self.assertTrue(any(t["id"] == "split" and t["ready"] for t in j["targets"]))
+        s, raw = self.call("POST", "/api/v1/chat/completions", {"model": "split", "messages": [{"role": "user", "content": "Hello"}]})
+        self.assertEqual(s, 200)
+        self.assertIn(b"data: ", raw)
+        s, j = self.call("POST", "/api/v1/chat/completions", {"messages": [{"role": "user", "content": "Hello"}]})
+        self.assertEqual(s, 400)
+        self.assertIn("Choose a model", j["error"])
+
     def test_loading_a_model_starts_a_task_that_can_be_followed(self):
         s, j = self.call("GET", "/api/v1/models")
         split = [m for m in j["models"] if m["kind"] == "split"]
