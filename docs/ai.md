@@ -61,7 +61,7 @@ nodeyard ai split status
 nodeyard ai split test [--prompt TEXT] [--api-key-file PATH]
 nodeyard ai split switch --model owner/repo:file.gguf [--keep-old] [deploy options]
 nodeyard ai split unload | load
-nodeyard ai split undeploy [--purge]
+nodeyard ai split undeploy [--force] [--purge]
 ```
 
 **NVIDIA graphics cards** speed it up. On the machine with the card (its
@@ -77,8 +77,28 @@ caches from every node (`--keep-old` keeps them), then downloads the new
 model if needed and loads it. `--model local:FILE.gguf` (or just the file
 name) runs a model that is already downloaded on a node, from that node.
 `undeploy` always unloads first, so nothing is left running while it removes
-the model. The dashboard's **AI model** menu (top of the AI page) lists the
-models downloaded on your nodes and switches between them the same way.
+the model. `undeploy --force` immediately removes model-server and download
+pods before removing the split namespace; completed model files and weight
+caches stay on disk unless you also pass `--purge`. The dashboard's **Force
+stop** button does this after confirmation. Running dashboard tasks can also
+be cancelled from their progress window.
+
+The dashboard saves its last disk inventory locally. If a Kubernetes restart
+temporarily hides a node, its models remain listed as **last seen** for up to
+30 days and are refreshed when the node rejoins.
+
+Dashboard chat accepts several text/code/data attachments and PNG, JPEG, WebP,
+GIF or BMP images in one message. Images are resized in the browser and sent
+to the selected model as visual input; OCR needs a vision-capable model. Image
+data is not stored in browser history, so attach images again after a reload.
+
+The dashboard's **AI model** menu (top of the AI page) lists the models
+downloaded on your nodes and switches between them the same way.
+
+In the dashboard's Ollama section, **Load** keeps a model in memory until you
+choose **Unload** or Ollama restarts. The disk inventory is saved by the
+dashboard and in the browser, so recent model locations remain visible while
+unavailable nodes recover; a complete disk scan refreshes that saved list.
 
 It uses [llama.cpp RPC](https://github.com/ggml-org/llama.cpp/tree/master/tools/rpc):
 each node runs an RPC server holding a share of the model's layers, sized

@@ -14,7 +14,7 @@ ny_cmd "ai gate remove" ai_gate_remove "AI" "Experimental: remove the model gate
 ny_cmd "ai gate status" ai_gate_status "AI" "Experimental: show the model gate" ai
 ny_cmd "ai split unload" ai_split_unload "AI" "Experimental: free the split model's memory on every node (keeps the download)" ai
 ny_cmd "ai split load" ai_split_load "AI" "Experimental: load the split model again after an unload" ai
-ny_cmd "ai split undeploy" ai_split_undeploy "AI" "Experimental: remove the split model (unloads it first)" ai
+ny_cmd "ai split undeploy" ai_split_undeploy "AI" "Experimental: stop and remove the split model; --force also cancels downloads" ai
 ny_cmd "ai split switch" ai_split_switch "AI" "Change the running split model: unload the old one, delete its files, run the new one" ai
 ny_cmd_alias "ai split remove" "ai split undeploy"
 ny_cmd "ai split clean" ai_split_clean "AI" "Free disk space: delete old weight caches and unfinished downloads on every node" ai json
@@ -1652,9 +1652,9 @@ split_ai_nodes() {
     return 0
 }
 
-# split_scan_nodes -- all supported nodes, including NotReady machines. A
-# pending helper on an unavailable node is reported per-node instead of making
-# a complete inventory look like an empty one.
+# split_scan_nodes -- all supported nodes, including NotReady machines. The
+# scanner marks unavailable nodes without placing helpers on them, so their
+# last saved inventory can be kept while Ready nodes are checked.
 split_scan_nodes() {
     kctl --request-timeout=5s get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.nodeInfo.architecture}{"\n"}{end}' 2>/dev/null |
         awk '($2 == "amd64" || $2 == "arm64") {print $1}'
@@ -1665,7 +1665,8 @@ split_scan_nodes() {
 # all at once, with /var/lib/nodeyard at /d and the model folder at /m
 # (read-only unless MODE is rw). Prints "== NODE" then that node's output.
 split_on_nodes() {
-    local mode="$1" script="$2" n pod ro="true" mdir main
+    local mode="$1" script="$2" n pod ro="true" mdir main ready skipped_node s
+    local -a skipped=()
     shift 2
     [[ "$mode" == rw ]] && ro="false"
     main="$(kctl --request-timeout=5s get namespace "$SPLIT_NS" -o jsonpath='{.metadata.annotations.nodeyard/main}' 2>/dev/null || true)"
@@ -1683,6 +1684,11 @@ split_on_nodes() {
     local run
     run="$(printf '%s' "$$ ${RANDOM} $(date +%s%N)" | cksum | cut -d' ' -f1)"
     for n in "$@"; do
+        ready="$(kctl --request-timeout=5s get node "$n" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
+        if [[ "$ready" != True ]]; then
+            skipped+=("$n")
+            continue
+        fi
         pod="$(ny_k8s_name "${mode}-${run}-${n}")"
         kctl --request-timeout=5s -n "$SPLIT_HELPER_NS" apply -f - >/dev/null <<YAML || ny_warn "Couldn't start the helper on ${n}."
 apiVersion: v1
@@ -1705,7 +1711,7 @@ spec:
 YAML
     done
     local tries=0 pending
-    while ((tries < 20)); do
+    while ((tries < 50)); do
         pending="$(kctl --request-timeout=5s -n "$SPLIT_HELPER_NS" get pods -l "nodeyard/run=${run}" -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null | grep -cvE '^(Succeeded|Failed)$' || true)"
         [[ "$pending" == 0 ]] && break
         sleep 1
@@ -1713,7 +1719,13 @@ YAML
     done
     for n in "$@"; do
         printf '== %s\n' "$n"
-        kctl --request-timeout=5s -n "$SPLIT_HELPER_NS" logs "$(ny_k8s_name "${mode}-${run}-${n}")" 2>/dev/null || printf 'ERROR could not run on this node (is it under disk pressure?)\n'
+        skipped_node=0
+        for s in "${skipped[@]}"; do [[ "$s" == "$n" ]] && skipped_node=1; done
+        if ((skipped_node)); then
+            printf 'ERROR node is NotReady or missing; kept its last saved disk inventory\n'
+        else
+            kctl --request-timeout=5s -n "$SPLIT_HELPER_NS" logs "$(ny_k8s_name "${mode}-${run}-${n}")" 2>/dev/null || printf 'ERROR could not run on this node (is it under disk pressure?)\n'
+        fi
     done
     # only this call's pods go; the namespace stays (empty) so the next call can reuse it
     kctl --request-timeout=5s -n "$SPLIT_HELPER_NS" delete pods -l "nodeyard/run=${run}" --wait=false >/dev/null 2>&1 || true
@@ -2360,20 +2372,35 @@ ai_split_load() {
     ny_ok "Loading the split model. It takes a minute or two while each node reads its share; follow it with: nodeyard ai split status"
 }
 
+ai_split_undeploy_help() {
+    cat <<'HELP'
+Usage: nodeyard ai split undeploy [--force] [--purge] [--yes]
+
+Stops and removes the split-model deployment. Without --force, model servers
+are unloaded gracefully. --force immediately removes their controllers and
+pods and stops downloads in progress. Completed model files and caches stay
+on disk unless --purge is also given.
+HELP
+}
+
 ai_split_undeploy() {
     ny_need_kube
-    local purge=0
+    local purge=0 force=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --purge)
                 purge=1
                 shift
                 ;;
+            --force)
+                force=1
+                shift
+                ;;
             --yes | -y)
                 NY_YES=1
                 shift
                 ;;
-            *) ny_usage_error "Unknown option: $1" "nodeyard ai split undeploy [--purge]" ;;
+            *) ny_usage_error "Unknown option: $1" "nodeyard ai split undeploy [--force] [--purge]" ;;
         esac
     done
     local deployed=0
@@ -2382,19 +2409,28 @@ ai_split_undeploy() {
         echo "No split model is deployed. (Leftover files? nodeyard ai split undeploy --purge, or: nodeyard ai split clean --models)"
         return 0
     fi
-    ny_confirm "Remove the split model$([[ $purge -eq 1 ]] && echo ' AND delete every downloaded model, unfinished download and weight cache from every node' || true)?" n || {
+    ny_confirm "$([[ $force -eq 1 ]] && echo 'Force stop and remove' || echo 'Remove') the split model$([[ $force -eq 1 ]] && echo ' immediately, including model servers and downloads' || true)$([[ $purge -eq 1 ]] && echo ' AND delete every downloaded model, unfinished download and weight cache from every node' || true)?" n || {
         echo "Cancelled."
         return 0
     }
     if [[ "$NY_DRY_RUN" -eq 1 ]]; then
-        ny_plan_add delete "Delete namespace ${SPLIT_NS}$([[ $purge -eq 1 ]] && echo ' and all model files and caches on every node' || true)"
+        ny_plan_add delete "$([[ $force -eq 1 ]] && echo 'Force stop and delete' || echo 'Delete') namespace ${SPLIT_NS}$([[ $purge -eq 1 ]] && echo ' and all model files and caches on every node' || true)"
         return 0
     fi
-    # Unload first: every model server stops and its memory is back before
-    # anything is deleted, so nothing is left running half-removed.
+    # Normal removal unloads gracefully. Force removal drops all controllers
+    # first, then kills their pods immediately so downloads and model servers
+    # cannot be restarted by Kubernetes while the namespace is being removed.
     if [[ $deployed -eq 1 ]]; then
-        echo "Unloading the model first..."
-        split_stop_servers
+        if [[ $force -eq 1 ]]; then
+            echo "Force stopping model servers and downloads..."
+            kctl --request-timeout=10s -n "$SPLIT_NS" delete deployments,daemonsets,statefulsets,jobs --all --ignore-not-found --wait=false >/dev/null 2>&1 ||
+                ny_warn "Couldn't remove every model controller; Kubernetes may recreate a pod during shutdown."
+            kctl --request-timeout=10s -n "$SPLIT_NS" delete pods --all --grace-period=0 --force --wait=false --ignore-not-found >/dev/null 2>&1 ||
+                ny_warn "Couldn't force-delete every model pod."
+        else
+            echo "Unloading the model first..."
+            split_stop_servers
+        fi
     fi
     local -a nodes=()
     # Purge looks at EVERY usable node, not only the ones running the model

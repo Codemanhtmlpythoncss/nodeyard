@@ -31,7 +31,7 @@ Built ahead of the roadmap, in Python and Bash (the Go agent of phase 5 is not s
 
 - **Web dashboard** (`nodeyard dashboard`, port 9092): live cluster view over Tailscale or your network, a Devices sidebar with
   per-node temperatures and loads, node agents (processes, clocks, GPUs, speed tests), Doctor, Settings, themes, a terminal,
-  confirmed cluster restart and public access through Tailscale Funnel. See [dashboard](dashboard.md).
+  confirmed k3s restarts and full rolling OS reboots, and public access through Tailscale Funnel. See [dashboard](dashboard.md).
 - **AI** (a taste of phases 7 and 8): `ai split` runs one model across several machines (speed-aware planner, parallel
   downloads, disk limits and cleaning, NVIDIA GPU use, switching models), the model gate (no key needed on your own network, put back
   automatically after a redeploy), and a key-protected control API to load models remotely.
@@ -41,7 +41,7 @@ Built ahead of the roadmap, in Python and Bash (the Go agent of phase 5 is not s
 - **yardcode** (`yardcode/`): a terminal AI agent for any OpenAI-compatible model API on macOS and Linux. Installs with nodeyard or alone.
   See [yardcode/README.md](../yardcode/README.md).
 
-Tests: 261 bats tests (`make test`) and the Python tests for the dashboard, node agent, model gate and yardcode (`make test-py`;
+Tests: 266 bats tests (`make test`) and the Python tests for the dashboard, node agent, model gate and yardcode (`make test-py`;
 macOS and Linux, Python 3.8 to 3.13).
 
 Known gaps: web search and the macOS certificate lookup are only exercised on Linux in CI; switching models through the API is

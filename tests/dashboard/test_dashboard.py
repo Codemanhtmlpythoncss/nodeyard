@@ -257,13 +257,16 @@ class DemoAndAnalysis(unittest.TestCase):
 
     def test_short_node_ready_flap_is_info_then_becomes_critical(self):
         node = self.state["nodes"][0]
-        node.update({"ready": False, "ready_since": 995, "ready_reason": "KubeletNotReady",
+        node.update({"ready": False, "ready_since": 1000, "ready_reason": "KubeletNotReady",
                      "ready_message": "kubelet stopped posting node status"})
         with patch.object(analysis.time, "time", return_value=1000):
             alert = next(a for a in analysis.alerts(self.state) if a["kind"] == "node" and a["ref"] == node["name"])
         self.assertEqual(alert["level"], "info")
         self.assertIn("KubeletNotReady", alert["detail"])
-        with patch.object(analysis.time, "time", return_value=1030):
+        with patch.object(analysis.time, "time", return_value=1060):
+            alert = next(a for a in analysis.alerts(self.state) if a["kind"] == "node" and a["ref"] == node["name"])
+        self.assertEqual(alert["level"], "info")
+        with patch.object(analysis.time, "time", return_value=1061):
             alert = next(a for a in analysis.alerts(self.state) if a["kind"] == "node" and a["ref"] == node["name"])
         self.assertEqual(alert["level"], "critical")
         self.assertIn("kubelet stopped posting node status", alert["detail"])

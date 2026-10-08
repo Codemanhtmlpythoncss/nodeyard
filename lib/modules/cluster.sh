@@ -6,6 +6,7 @@
 ny_cmd "worker-info" cluster_worker_info_cmd "Nodes" "Show the address, ports and commands needed to add a worker" nodes json
 ny_cmd "add-node" cluster_add_node_cmd "Nodes" "Install nodeyard on another machine over SSH and join it to this cluster" nodes
 ny_cmd "restart-cluster" cluster_restart_all_cmd "Cluster" "Restart Kubernetes (k3s) on every node: workers one at a time, then this server" nodes
+ny_cmd "reboot-cluster" cluster_reboot_all_cmd "Cluster" "Reboot every machine in the cluster, one at a time" nodes
 ny_cmd "remove-node" cluster_remove_node_cmd "Nodes" "Drain a node and remove it from the cluster" nodes
 ny_cmd "nettest" cluster_nettest_cmd "Health" "Test pod-to-pod, DNS and pod-to-node traffic on every node" nettest
 ny_cmd_alias "net-test" "nettest"
@@ -475,10 +476,14 @@ cluster_restart_all_cmd() {
         ny_die "This machine is a worker, so it can't restart the cluster." "Run it on a server node (the control node)." "$NY_E_PRECONDITION"
     fi
     ny_need_kube
-    local self nodes node
-    self="$(hostname 2>/dev/null || true)"
+    local self nodes node found_self=0
+    self="$(ny_self_name)"
     nodes="$(kctl get nodes -o name 2>/dev/null | sed 's|^node/||' || true)"
     [[ -n "$nodes" ]] || ny_die "No nodes found: is the cluster running?" "" "$NY_E_PRECONDITION"
+    for node in $nodes; do
+        [[ "${node,,}" == "${self,,}" ]] && found_self=1
+    done
+    ((found_self)) || ny_die "This server (${self}) isn't listed as a node in the cluster." "No nodes were restarted. Check /etc/nodeyard/node-name and the Kubernetes node list." "$NY_E_PRECONDITION"
     ny_confirm "Restart Kubernetes on every node? Workloads keep running, but the cluster is unreachable for a minute or two while the server restarts." n || {
         ny_info "Cancelled."
         return 0
@@ -546,6 +551,171 @@ YAML
     ny_ok "Kubernetes restarted on every node."
     kctl get nodes 2>/dev/null | sed 's/^/    /' || true
     return 0
+}
+
+cluster_reboot_all_cmd_help() {
+    cat <<'HELP'
+Usage: nodeyard reboot-cluster [--timeout SECONDS]
+
+Fully reboots every machine in this Kubernetes cluster. Run it on a server
+node. Workers are drained, rebooted one at a time, and returned to Ready
+before the next machine is touched. The control server is scheduled to reboot
+last, 15 seconds after the command reports success.
+
+This restarts the operating system; workloads are interrupted. The drain
+respects pod disruption budgets; if a node cannot be drained or does not come
+back with a new boot ID, the operation stops instead of rebooting more nodes.
+
+  --timeout N  how long to wait for each node to return (default 600 seconds)
+
+The worker reboot is issued by a temporary privileged Kubernetes pod on that
+node. The control server reboots through systemd after all other nodes return.
+HELP
+}
+
+cluster_reboot_all_cmd() {
+    ny_need_root
+    local timeout=600
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --timeout)
+                [[ $# -ge 2 ]] || ny_usage_error "--timeout needs a number of seconds"
+                ny_valid_int "$2" 30 3600 || ny_usage_error "--timeout: ${NY_VALID_MSG}"
+                timeout="$2"
+                shift 2
+                ;;
+            --yes | -y)
+                NY_YES=1
+                shift
+                ;;
+            *) ny_usage_error "Unknown option for 'reboot-cluster': $1" ;;
+        esac
+    done
+    k3s_load_state
+    if [[ "$K3S_ROLE" == agent ]]; then
+        ny_die "This machine is a worker, so it can't reboot the cluster." "Run it on a server node (the control node)." "$NY_E_PRECONDITION"
+    fi
+    ny_need_kube
+
+    local self nodes node found_self=0
+    self="$(ny_self_name)"
+    nodes="$(kctl get nodes -o name 2>/dev/null | sed 's|^node/||' || true)"
+    [[ -n "$nodes" ]] || ny_die "No nodes found: is the cluster running?" "" "$NY_E_PRECONDITION"
+    for node in $nodes; do
+        [[ "${node,,}" == "${self,,}" ]] && found_self=1
+    done
+    ((found_self)) || ny_die "This server (${self}) isn't listed as a node in the cluster." "No machines were rebooted. Check /etc/nodeyard/node-name and the Kubernetes node list." "$NY_E_PRECONDITION"
+    ny_confirm "Fully reboot every machine in this cluster? Workloads will be interrupted; workers reboot one at a time, then this control server reboots last." n || {
+        ny_info "Cancelled."
+        return 0
+    }
+    if ! ny_simulating && [[ "$NY_DRY_RUN" -eq 0 ]]; then
+        command -v systemd-run >/dev/null 2>&1 || ny_die "systemd-run is required to schedule the final control-server reboot." "No machines have been rebooted." "$NY_E_PRECONDITION"
+        command -v systemctl >/dev/null 2>&1 || ny_die "systemctl is required to schedule the final control-server reboot." "No machines have been rebooted." "$NY_E_PRECONDITION"
+    fi
+
+    local ns="nodeyard-reboot"
+    for node in $nodes; do
+        [[ "${node,,}" == "${self,,}" ]] && continue
+        if ny_simulating || [[ "$NY_DRY_RUN" -eq 1 ]]; then
+            ny_plan_add reboot "Drain ${node}, reboot the whole machine, and wait for its boot ID to change and the node to be Ready"
+            continue
+        fi
+        cluster_reboot_node "$node" "$timeout" "$ns"
+    done
+
+    if ny_simulating || [[ "$NY_DRY_RUN" -eq 1 ]]; then
+        ny_plan_add reboot "After every worker is Ready, schedule this control server to reboot in 15 seconds"
+        return 0
+    fi
+
+    kctl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    local unit
+    unit="nodeyard-reboot-cluster-$(date +%s)"
+    ny_step "Scheduling the control server (${self}) to reboot in 15 seconds"
+    ny_run systemd-run --quiet --collect --on-active=15s --unit "$unit" "$(command -v systemctl)" reboot ||
+        ny_die "Couldn't schedule the control-server reboot." "The other machines have already rebooted. Run 'sudo reboot' on this server to finish." "$NY_E_PRECONDITION"
+    ny_ok "Every worker rebooted and returned Ready. The control server will reboot in 15 seconds."
+    return 0
+}
+
+# Reboot a drained worker through a temporary privileged pod. hostPID makes
+# the reboot syscall target the host's PID namespace; CAP_SYS_BOOT is granted
+# only to this short-lived pod in a namespace explicitly marked privileged.
+cluster_reboot_node() {
+    local node="$1" timeout="$2" ns="$3" boot_id helper="nodeyard-reboot" manifest current
+    boot_id="$(kctl get node "$node" -o jsonpath='{.status.nodeInfo.bootID}' 2>/dev/null || true)"
+    [[ -n "$boot_id" ]] || ny_die "Couldn't read the current boot ID for ${node}." "No reboot was attempted." "$NY_E_PRECONDITION"
+    ny_step "Draining ${node} before the operating-system reboot"
+    kctl cordon "$node" >/dev/null || ny_die "Couldn't cordon ${node}; stopping before rebooting it." "" "$NY_E_PRECONDITION"
+    if ! kctl drain "$node" --ignore-daemonsets --delete-emptydir-data --timeout="${timeout}s"; then
+        kctl uncordon "$node" >/dev/null 2>&1 || true
+        ny_die "Couldn't safely drain ${node}; no reboot was attempted." "Check pod disruption budgets and retry." "$NY_E_PRECONDITION"
+    fi
+
+    kctl create namespace "$ns" >/dev/null 2>&1 || true
+    kctl label namespace "$ns" pod-security.kubernetes.io/enforce=privileged --overwrite >/dev/null || {
+        kctl uncordon "$node" >/dev/null 2>&1 || true
+        ny_die "Couldn't prepare the temporary reboot namespace." "${node} has not been rebooted." "$NY_E_PRECONDITION"
+    }
+    kctl -n "$ns" delete pod "$helper" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+    manifest="$(ny_mktemp)"
+    cat >"$manifest" <<YAML
+apiVersion: v1
+kind: Pod
+metadata: {name: ${helper}, namespace: ${ns}}
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 0
+  automountServiceAccountToken: false
+  hostPID: true
+  nodeName: ${node}
+  tolerations: [{operator: Exists}]
+  containers:
+  - name: reboot
+    image: busybox:1.36
+    imagePullPolicy: IfNotPresent
+    command: ["sh", "-c", "sleep 86400"]
+    securityContext: {privileged: true}
+YAML
+    if ! kctl apply -f "$manifest" >/dev/null; then
+        rm -f "$manifest"
+        kctl -n "$ns" delete pod "$helper" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+        kctl uncordon "$node" >/dev/null 2>&1 || true
+        ny_die "Couldn't create the reboot helper on ${node}; no reboot was attempted." "Check cluster permissions and node health." "$NY_E_PRECONDITION"
+    fi
+    rm -f "$manifest"
+    if ! kctl -n "$ns" wait --for=condition=Ready "pod/${helper}" --timeout=120s >/dev/null 2>&1; then
+        kctl -n "$ns" delete pod "$helper" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+        kctl uncordon "$node" >/dev/null 2>&1 || true
+        ny_die "Couldn't start the reboot helper on ${node}; no reboot was attempted." "Check that the node can pull busybox:1.36." "$NY_E_PRECONDITION"
+    fi
+
+    ny_info "Requesting a full reboot of ${node}. Kubernetes may briefly report it unavailable."
+    # Losing the exec stream is expected when the host shuts down. Confirm the
+    # reboot by its boot ID, then require Ready before moving to another node.
+    kctl --request-timeout=15s -n "$ns" exec "$helper" -- reboot -f >/dev/null 2>&1 || true
+    if ! cluster_wait_node_reboot "$node" "$boot_id" "$timeout"; then
+        ny_die "${node} did not return with a new boot ID and Ready status within ${timeout}s." "The node remains cordoned; inspect it before continuing." "$NY_E_PRECONDITION"
+    fi
+    kctl -n "$ns" delete pod "$helper" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    kctl uncordon "$node" >/dev/null || ny_warn "${node} returned, but Kubernetes couldn't uncordon it."
+    return 0
+}
+
+cluster_wait_node_reboot() {
+    local node="$1" old_boot_id="$2" limit="$3" started=$SECONDS status current ready
+    while [[ $((SECONDS - started)) -lt "$limit" ]]; do
+        status="$(kctl --request-timeout=10s get node "$node" -o jsonpath='{.status.nodeInfo.bootID}{"\t"}{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
+        current="${status%%$'\t'*}"
+        ready="${status#*$'\t'}"
+        if [[ -n "$current" && "$current" != "$old_boot_id" && "$ready" == True ]]; then
+            ny_ok "${node} rebooted and is Ready."
+            return 0
+        fi
+        sleep 4
+    done
+    return 1
 }
 
 # cluster_wait_node_ready NODE SECONDS -- waits for the node to go away from Ready (if it does) and come back.

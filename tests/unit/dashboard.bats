@@ -369,6 +369,25 @@ post() { # post PATH JSON -> response body
     printf '%s' "$output" | jq -e '.ok == false' >/dev/null
 }
 
+@test "ai: a running task can be cancelled from its progress window" {
+    start_server
+    run post /api/run '{"action":"split-unload"}'
+    local job
+    job="$(printf '%s' "$output" | jq -r '.job')"
+    [[ -n "$job" && "$job" != null ]] || fail "no task started: $output"
+    run post /api/job/cancel "{\"id\":\"${job}\"}"
+    printf '%s' "$output" | jq -e '.ok and .cancelling' >/dev/null
+    local i status=""
+    for ((i = 0; i < 30; i++)); do
+        status="$(curl -s "http://127.0.0.1:${PORT}/api/job?id=${job}&since=0" | jq -r '.status')"
+        [[ "$status" == cancelled ]] && break
+        sleep 0.1
+    done
+    assert_equal "$status" cancelled
+    run post /api/job/cancel "{\"id\":\"${job}\"}"
+    printf '%s' "$output" | jq -e '.ok == false and (.error | test("already finished"))' >/dev/null
+}
+
 @test "ai: loading and unloading an Ollama model" {
     start_server
     run post /api/ai/ollama-load '{"pod":"ollama-demo-yard-2","model":"llama3.2:3b","load":true}'

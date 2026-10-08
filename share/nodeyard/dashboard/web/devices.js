@@ -4,7 +4,7 @@
   "use strict";
   const { html, setHTML, fmt } = NY;
   const U = NY.ui;
-  const { S, $, chip, bar, tempClass } = U;
+  const { S, $, chip, bar, tempClass, nodeState } = U;
 
   const shell = document.querySelector(".shell"), side = $("#devs"), btn = $("#devsbtn");
   if (!shell || !side || !btn) return;
@@ -48,6 +48,7 @@
 
   function device(n) {
     const h = n.hw || {}, cores = n.cpu_cores || h.cores || 1;
+    const health = nodeState(n);
     const load = h.load && h.load.length ? h.load : null;
     const cpu = n.cpu_used != null && n.cpu_cores ? n.cpu_used / n.cpu_cores : null;
     const mem = n.mem_used != null && n.mem_total ? n.mem_used / n.mem_total : null;
@@ -56,9 +57,9 @@
     const temps = h.temps || [];
     const gpus = h.gpu_live || [];
     const tseries = series(n.name, TEMP, 60), lseries = series(n.name, LOAD, 60);
-    return html`<details class="dev ${n.ready ? "" : "down"}" data-device="${n.name}" ${expanded.has(n.name) ? "open" : ""}>
+    return html`<details class="dev ${!n.ready && !health.checking ? "down" : ""}" data-device="${n.name}" ${expanded.has(n.name) ? "open" : ""}>
       <summary>
-        <i class="dot ${n.ready ? "good" : "bad"}"></i><b class="dev-name">${n.name}</b>
+        <i class="dot ${health.cls}"></i><b class="dev-name">${n.name}</b>${health.recent || !n.ready ? chip(health.label, health.cls) : ""}
         <span class="grow"></span>
         ${temp != null ? chip(fmt.temp(temp), tempClass(temp)) : html`<span class="faint small">no temp</span>`}
       </summary>
@@ -88,8 +89,10 @@
     const loads = d.nodes.filter((n) => n.hw && n.hw.load && n.hw.load.length);
     const busiest = loads.slice().sort((a, b) => b.hw.load[0] / (b.cpu_cores || 1) - a.hw.load[0] / (a.cpu_cores || 1))[0];
     const anyAgent = d.nodes.some((n) => n.hw);
+    const checking = d.nodes.filter((n) => nodeState(n).checking).length;
+    const recovering = d.nodes.filter((n) => nodeState(n).recovering).length;
     setHTML(side, html`
-      <div class="dev-head"><b>Devices</b><span class="faint small">${d.nodes.filter((n) => n.ready).length} of ${d.nodes.length} ready</span><span class="grow"></span>
+      <div class="dev-head"><b>Devices</b><span class="faint small">${d.nodes.filter((n) => n.ready).length} of ${d.nodes.length} ready${checking ? " · " + checking + " checking" : ""}${recovering ? " · " + recovering + " recovering" : ""}</span><span class="grow"></span>
         <button class="btn icon-only small" data-dev-close aria-label="Close the devices panel"><svg class="icon"><use href="#i-x"/></svg></button></div>
       ${hottest || busiest ? html`<div class="dev-sum">
         ${hottest ? html`<span>Hottest <b>${hottest.name}</b> ${chip(fmt.temp(hottest.hw.temp_c), tempClass(hottest.hw.temp_c))}</span>` : ""}
@@ -99,6 +102,8 @@
       <div class="dev-foot">
         <button class="btn small danger" data-dev-restart>Restart Kubernetes…</button>
         <span class="faint small">Restarts k3s on every node, workers first.</span>
+        <button class="btn small danger" data-dev-reboot>Reboot every machine…</button>
+        <span class="faint small">Restarts the operating system on each node, then the control server.</span>
       </div>`);
   }
 
@@ -116,6 +121,10 @@
     if (e.target.closest("[data-dev-restart]")) {
       if (!window.confirm("Restart Kubernetes on every node?\n\nWorkers restart one at a time, then the control node. Containers keep running, but the cluster is unreachable for a minute or two.")) return;
       U.startJob("restart-cluster", {}, () => U.load(true));
+    }
+    if (e.target.closest("[data-dev-reboot]")) {
+      if (!window.confirm("Fully reboot every machine in the Kubernetes cluster?\n\nWorkers are drained and rebooted one at a time; the control server reboots last. Every workload will be interrupted, and the dashboard will go offline briefly.")) return;
+      U.startJob("reboot-cluster", {}, () => U.load(true));
     }
   });
   document.addEventListener("keydown", (e) => {

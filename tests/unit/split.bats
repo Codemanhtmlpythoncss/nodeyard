@@ -338,6 +338,22 @@ switch_stubs() {
     [[ "${lines[1]}" == *"delete namespace ai-split"* ]]
 }
 
+@test "undeploy --force kills model servers and download jobs but keeps saved files" {
+    NY_YES=1
+    kctl() {
+        echo "$*" >>"$KLOG"
+        return 0
+    }
+    run ai_split_undeploy --force --yes
+    assert_success
+    assert_output --partial "Force stopping model servers and downloads"
+    grep -q "delete deployments,daemonsets,statefulsets,jobs --all --ignore-not-found --wait=false" "$KLOG"
+    grep -q "delete pods --all --grace-period=0 --force --wait=false --ignore-not-found" "$KLOG"
+    grep -q "delete namespace ai-split --wait=true --timeout=300s" "$KLOG"
+    run grep -c "on-nodes rw" "$KLOG"
+    assert_output "0"
+}
+
 @test "unloading waits for the server pods and forces any that hang" {
     sleep() { :; }
     kctl() {

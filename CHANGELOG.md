@@ -20,10 +20,17 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 - Settings can adopt the running split model's existing API key as the server key. This fixes older installs where yardcode's valid model key and
   the dashboard's control key drifted apart, without rotating the model's key.
 - Dashboard Settings and the Devices sidebar can restart k3s across the cluster, workers one at a time and the control node last, with a confirmation.
+- `sudo nodeyard reboot-cluster` and matching dashboard buttons now perform a complete rolling OS reboot: drain and reboot workers one at a time, verify a new boot ID and Ready state, then reboot the control server last.
+- Ollama models explicitly loaded from the dashboard stay loaded until Unload or an Ollama restart. Live updates now share requests and defer redraws during clicks and edits. Brief node outages and recoveries stay amber for a minute; longer NotReady states remain critical.
+- Model inventory scans wait for helpers to finish and skip unavailable nodes while retaining their previous locations. The dashboard also saves last-known model locations in the browser and retries incomplete scans with backoff; successful deletes clear saved locations.
+- Chat accepts batches of text and image attachments. Browser-side image resizing keeps requests manageable, and PNG/JPEG/WebP/GIF/BMP images reach vision-capable models for OCR; image uploads are not persisted in browser history.
+- When the selected model emits reasoning tokens, Chat shows them in an expandable panel as they arrive and keeps the panel available after the answer.
 
 ### Added
 
 - Dashboard **Find Models** now starts with an **Already downloaded** section showing saved models, the machines that contain them, and a direct Run/Load/Chat action. Its inventory refreshes while this tab is open.
+- Model locations stay visible as **last seen** for up to 30 days when Kubernetes temporarily omits a node during restart; the dashboard merges them back into its persisted disk inventory until that node returns.
+- Running dashboard tasks now have a **Cancel** button that stops the nodeyard command and its child processes. The Models tab has **Force stop** to immediately stop split-model servers and pending downloads while keeping saved files and caches.
 - Dashboard **Devices sidebar**: per-node temperatures, load, CPU and memory use, sensor readings and short history charts, with the node details one click away.
 - yardcode: **type `/` and the commands appear above the prompt** (filter as you type, Up/Down, Tab or Enter), with the input framed
   between two rules and the permission mode, model and context use on the line below. **Shell mode**: `!` on an empty prompt (or

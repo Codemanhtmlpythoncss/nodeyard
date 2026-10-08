@@ -41,6 +41,7 @@ page.
 | `dashboard run [--port N]` | Run it in this terminal instead (Ctrl-C stops it) |
 | `dashboard agent install\|remove\|status` | The per-node agents (below) |
 | `--demo dashboard run` | A simulated four-node cluster, to look around first |
+| `sudo nodeyard reboot-cluster [--timeout SECONDS]` | Drain and reboot each worker, verify it returns, then reboot the control server last |
 
 It needs `python3` (3.8 or newer; nodeyard offers to install it).
 
@@ -61,7 +62,9 @@ It needs `python3` (3.8 or newer; nodeyard offers to install it).
   addresses, conditions, taints, labels, its biggest programs and its pods.
 - **Devices sidebar**: keep each node's temperature, load, CPU and memory in
   view while using other pages. Expand a node for sensor readings and short
-  history charts, or open its full details. Press `d` or use the Devices button.
+  history charts, or open its full details. Short Ready/NotReady heartbeat
+  flaps show as **Checking in** or **Recovering** for up to a minute; sustained
+  outages remain critical. Press `d` or use the Devices button.
 - **Processes**: what is running on each machine and **what is using the
   memory**: a bar of the biggest consumers (named by pod or service), a card per
   machine with CPU model, per-core **clock speeds**, **temperature**, load,
@@ -108,19 +111,31 @@ The **AI** page has four tabs.
   (tokens per second) is shown under each answer, and there is a Stop button.
   Pick the model at the top (the split model, or any Ollama model on any
   machine), keep several conversations, set a system prompt, creativity and
-  reply length under Settings. Conversations are saved in your browser only.
+  reply length under Settings. Attach, drop or paste up to 10 text/code/data
+  files and images per message. PNG, JPEG, WebP, GIF and BMP images are resized
+  in your browser and sent as visual input; the chat can transcribe them for
+  OCR when you use a vision-capable model. Image data stays in the current
+  browser session, so reattach images after a reload. When a model sends a
+  reasoning stream, an expandable **Model reasoning** panel opens while it is
+  responding and remains available afterward. Conversations are saved in your
+  browser only.
 - **Models**: the split model (Chat, **Unload** to free its memory on every
   machine while keeping the download, **Load** to bring it back, a progress
-  check, a speed test, and Remove) and, if you use Ollama, every model on every
+  check, a speed test, **Force stop** to immediately stop its servers and
+  pending downloads while keeping saved files, and Remove) and, if you use Ollama, every model on every
   node with **Load** / **Unload** from memory, **Download** (a name like
   `llama3.2:3b` or `hf.co/owner/repo:Q4_K_M`) and a button that sets Ollama up
-  across the cluster. Tasks show their live output in a window.
+  across the cluster. Tasks show their live output in a window with a **Cancel**
+  button while they are running.
 - **Find models**: search Hugging Face for GGUF models (sort by downloads,
   likes, trending or recent), open one to see its files with size and whether
   each **fits your cluster's free memory right now** (shared across machines or
   on one), then **Run split** (pick the machines, context length and API name;
   it replaces the running model and keeps the old download), **Run on Ollama**
   or copy the command.
+- **Already downloaded** models stay visible as **last seen** for up to 30 days
+  if Kubernetes briefly omits a node during restart; the inventory refreshes
+  when that node reconnects.
 - **API**: your base URL, model name and key, and copy-ready examples: curl,
   streaming, Python (OpenAI library and plain requests), JavaScript, editor and
   chat-app settings, and Ollama's own API.

@@ -176,7 +176,7 @@ class DemoAI:
                 raise aiapi.AIError("Another change to the model is still running. Wait for it to finish.", 409)
             jid = secrets.token_hex(6)
             job = {"id": jid, "title": title, "status": "running", "rc": None, "lines": [], "started": time.time(), "cmd": "nodeyard " + " ".join(argv),
-                   "exclusive": exclusive}
+                   "exclusive": exclusive, "cancel_requested": False}
             self.jobs[jid] = job
             self.order.append(jid)
         threading.Thread(target=self._play, args=(job, argv, action), daemon=True).start()
@@ -202,6 +202,10 @@ class DemoAI:
         for line in script:
             time.sleep(0.5)
             with self.lock:
+                if job.get("cancel_requested"):
+                    job["lines"].append("Cancelled by user.")
+                    job["status"], job["rc"] = "cancelled", -15
+                    return
                 job["lines"].append(line)
         with self.lock:
             job["status"], job["rc"] = "ok", 0
@@ -228,4 +232,16 @@ class DemoAI:
             j = self.jobs.get(jid)
             if not j:
                 return None
-            return {"id": jid, "title": j["title"], "status": j["status"], "rc": j["rc"], "cmd": j["cmd"], "started": j["started"], "lines": j["lines"][since:], "next": len(j["lines"])}
+            return {"id": jid, "title": j["title"], "status": j["status"], "rc": j["rc"], "cmd": j["cmd"], "started": j["started"],
+                    "lines": j["lines"][since:], "next": len(j["lines"]), "cancelable": j["status"] == "running",
+                    "cancel_requested": j.get("cancel_requested", False)}
+
+    def cancel_job(self, jid):
+        with self.lock:
+            job = self.jobs.get(jid)
+            if not job:
+                raise aiapi.AIError("No such task.", 404)
+            if job["status"] != "running":
+                raise aiapi.AIError("That task has already finished.", 409)
+            job["cancel_requested"] = True
+        return True

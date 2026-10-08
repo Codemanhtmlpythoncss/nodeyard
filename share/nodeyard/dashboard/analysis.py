@@ -57,11 +57,11 @@ def alerts(state):
     for n in state["nodes"]:
         if not n["ready"]:
             reason = n.get("ready_reason") or ""
-            message = n.get("ready_message") or "Its kubelet isn't reporting. Check the machine and its network cable."
+            message = n.get("ready_message") or "Kubernetes isn't receiving heartbeats from this machine. Check its kubelet and network if it doesn't recover."
             detail = (reason + ": " if reason and message and not message.startswith(reason) else "") + message
             since = n.get("ready_since") or 0
             down_for = now - since if since else None
-            if down_for is not None and 0 <= down_for < 20:
+            if down_for is not None and 0 <= down_for <= 60:
                 add("info", "%s briefly stopped reporting" % n["name"],
                     "%s Kubernetes has reported this for %d seconds and is checking whether it continues." % (detail, int(down_for)),
                     "node", n["name"])

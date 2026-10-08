@@ -4,6 +4,8 @@ Everything here sits behind the sign-in. Chat goes straight from this server to 
 (the server API key never reaches the browser). Model search asks Hugging Face. Running or removing a
 model starts one of a short list of nodeyard commands; nothing else can be started from the page.
 """
+import base64
+import concurrent.futures
 import http.client
 import ipaddress
 import json
@@ -11,6 +13,7 @@ import os
 import re
 import secrets
 import select
+import signal
 import shlex
 import socket
 import ssl
@@ -25,7 +28,10 @@ HF_HOST = "huggingface.co"
 SPLIT_NS, SPLIT_SVC, SPLIT_PORT = "ai-split", "llama", 8080
 OLLAMA_NS, OLLAMA_PORT = "ai-inference", 11434
 SPLIT_KEY_NAME = "ai-split-api-key"
-MAX_CHAT_CHARS = 2000000  # a whole conversation, attached files included (the model's context is the real limit)
+MAX_CHAT_CHARS = 2000000  # text for a whole conversation; inline image bytes have a separate limit
+MAX_CHAT_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_CHAT_IMAGES = 8
+MAX_CHAT_BODY_BYTES = 20 * 1024 * 1024
 
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._()+=/-]{0,250}\.gguf$")
@@ -37,6 +43,70 @@ NODE_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
 PART_RE = re.compile(r"^(.*)-(\d{5})-of-(\d{5})\.gguf$")
 QUANT_RE = re.compile(r"(?:^|[-_.])((?:UD-)?(?:IQ\d(?:_[A-Z0-9]+)*|Q\d(?:_[A-Z0-9]+)+|Q\d_\d|BF16|F16|F32|MXFP4))(?=[-_.]|$)", re.I)
+CHAT_IMAGE_RE = re.compile(r"^data:image/(jpeg|png|webp);base64,([A-Za-z0-9+/]*={0,2})$")
+
+
+def clean_chat_messages(messages):
+    """Validate text and inline image parts before forwarding chat to a model."""
+    clean, text_chars, image_bytes, image_count = [], 0, 0, 0
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") not in ("system", "user", "assistant"):
+            raise ValueError("Each message needs a role and text.")
+        role, content = message["role"], message.get("content")
+        if isinstance(content, str):
+            text_chars += len(content)
+            clean.append({"role": role, "content": content})
+            continue
+        if role != "user" or not isinstance(content, list) or not 1 <= len(content) <= 32:
+            raise ValueError("Each message needs a role and text.")
+        parts = []
+        for part in content:
+            if not isinstance(part, dict):
+                raise ValueError("That image or text attachment isn't valid.")
+            if part.get("type") == "text" and isinstance(part.get("text"), str):
+                text_chars += len(part["text"])
+                parts.append({"type": "text", "text": part["text"]})
+                continue
+            image = part.get("image_url")
+            if part.get("type") != "image_url" or not isinstance(image, dict) or not isinstance(image.get("url"), str):
+                raise ValueError("Only text and PNG, JPEG or WebP images can be attached.")
+            match = CHAT_IMAGE_RE.fullmatch(image["url"])
+            if not match:
+                raise ValueError("Images must be attached directly from this device.")
+            encoded = match.group(2)
+            if len(encoded) > ((MAX_CHAT_IMAGE_BYTES + 2) // 3) * 4:
+                raise ValueError("Images are too large. Choose smaller images or fewer files.")
+            try:
+                decoded = base64.b64decode(encoded, validate=True)
+            except (ValueError, base64.binascii.Error):
+                raise ValueError("That image attachment isn't valid.")
+            if not decoded or len(decoded) > MAX_CHAT_IMAGE_BYTES:
+                raise ValueError("Images are too large. Choose smaller images or fewer files.")
+            image_count += 1
+            image_bytes += len(decoded)
+            if image_count > MAX_CHAT_IMAGES or image_bytes > MAX_CHAT_IMAGE_BYTES:
+                raise ValueError("Attach up to 8 images totaling 8 MiB per chat request.")
+            parts.append({"type": "image_url", "image_url": {"url": image["url"]}})
+        clean.append({"role": role, "content": parts})
+    if text_chars > MAX_CHAT_CHARS:
+        raise OverflowError("That conversation (with its files) is too long to send.")
+    return clean
+
+
+def chat_payload_for_target(target, payload):
+    """Ollama's OpenAI-compatible endpoint uses a string image_url value."""
+    if not str(target).startswith("ollama:"):
+        return payload
+    converted = dict(payload)
+    converted["messages"] = []
+    for message in payload.get("messages", []):
+        item = dict(message)
+        if isinstance(item.get("content"), list):
+            item["content"] = [dict(part, image_url=part["image_url"]["url"])
+                               if part.get("type") == "image_url" and isinstance(part.get("image_url"), dict)
+                               else part for part in item["content"]]
+        converted["messages"].append(item)
+    return converted
 SORTS = {"downloads": "downloads", "likes": "likes", "trending": "trendingScore", "recent": "lastModified"}
 
 
@@ -149,7 +219,7 @@ class HuggingFace:
 # write a separate file. Everything else changes the running model, so only
 # one of those runs at a time.
 # Actions that change system files, so they run outside the dashboard's sandbox.
-OUTSIDE_ACTIONS = {"doctor-fix", "cli", "restart-cluster"}
+OUTSIDE_ACTIONS = {"doctor-fix", "cli", "restart-cluster", "reboot-cluster"}
 # Commands the Commands page may run: filled from `nodeyard commands --json` (settings.py).
 # Interactive ones need a real terminal (use the Terminal page for those).
 COMMAND_PATHS = None
@@ -188,7 +258,8 @@ class Jobs:
                 raise AIError("That is already running.", 409)
             jid = secrets.token_hex(6)
             job = {"id": jid, "title": title, "status": "running", "rc": None, "lines": [], "started": time.time(),
-                   "cmd": "nodeyard " + " ".join(argv), "exclusive": exclusive, "outside": outside, "stdin": stdin, "on_done": on_done}
+                   "cmd": "nodeyard " + " ".join(argv), "exclusive": exclusive, "outside": outside, "stdin": stdin,
+                   "on_done": on_done, "process": None, "cancel_requested": False}
             self.jobs[jid] = job
             self.order.append(jid)
             # forget old finished tasks, never running ones
@@ -220,9 +291,16 @@ class Jobs:
         except OSError as e:
             self._add(job, "Couldn't start nodeyard: %s" % e)
             with self.lock:
-                job["status"], job["rc"] = "failed", -1
+                cancelled = job.get("cancel_requested", False)
+                job["status"], job["rc"] = ("cancelled", -signal.SIGTERM) if cancelled else ("failed", -1)
             self._notify_done(job)
             return
+        with self.lock:
+            job["process"] = p
+            cancel_now = job.get("cancel_requested", False)
+        if cancel_now:
+            self._signal_group(p, signal.SIGTERM)
+            self._force_kill_later(p)
         if job.get("stdin"):
             try:
                 p.stdin.write(job["stdin"])
@@ -240,8 +318,55 @@ class Jobs:
             killer.cancel()
             p.stdout.close()
         with self.lock:
-            job["status"], job["rc"] = ("ok" if rc == 0 else "failed"), rc
+            cancelled = job.get("cancel_requested", False) and rc != 0
+            job["process"] = None
+            job["status"], job["rc"] = ("cancelled" if cancelled else "ok" if rc == 0 else "failed"), rc
         self._notify_done(job)
+
+    @staticmethod
+    def _signal_group(process, sig):
+        if process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            try:
+                process.send_signal(sig)
+            except OSError:
+                pass
+
+    @classmethod
+    def _force_kill_later(cls, process):
+        def force_if_running():
+            cls._signal_group(process, signal.SIGKILL)
+
+        timer = threading.Timer(5, force_if_running)
+        timer.daemon = True
+        timer.start()
+
+    def cancel(self, jid):
+        with self.lock:
+            job = self.jobs.get(jid)
+            if not job:
+                raise AIError("No such task.", 404)
+            if job["status"] != "running":
+                raise AIError("That task has already finished.", 409)
+            if job.get("outside"):
+                raise AIError("This task runs outside the dashboard and can't be safely cancelled here.", 409)
+            if job.get("cancel_requested"):
+                return True
+            process = job.get("process")
+            if process is not None and process.poll() is not None:
+                raise AIError("That task has already finished.", 409)
+            job["cancel_requested"] = True
+            job["lines"].append("Cancellation requested; stopping nodeyard and its child processes…")
+            del job["lines"][:-self.MAX_LINES]
+        if process is not None:
+            self._signal_group(process, signal.SIGTERM)
+            self._force_kill_later(process)
+        return True
 
     @staticmethod
     def _notify_done(job):
@@ -259,7 +384,8 @@ class Jobs:
                 return None
             total = len(job["lines"])
             return {"id": jid, "title": job["title"], "status": job["status"], "rc": job["rc"], "cmd": job["cmd"], "started": job["started"],
-                    "lines": job["lines"][since:], "next": total}
+                    "lines": job["lines"][since:], "next": total, "cancelable": job["status"] == "running" and not job.get("outside"),
+                    "cancel_requested": job.get("cancel_requested", False)}
 
     def recent(self):
         with self.lock:
@@ -318,6 +444,8 @@ def build_command(action, p, nodes, key_path):
             ["ai", "split", "clean", "--yes"] + (["--models"] if p.get("models") is True else [])
     if action == "undeploy":
         return "Stop and remove the split model", ["ai", "split", "undeploy", "--yes"]
+    if action == "force-stop":
+        return "Force stop model and cancel downloads", ["ai", "split", "undeploy", "--force", "--yes"]
     if action == "status":
         return "Model status", ["ai", "split", "status"]
     if action == "test":
@@ -356,6 +484,8 @@ def build_command(action, p, nodes, key_path):
         return "nodeyard " + " ".join([path] + extra + flags), path.split() + extra + flags
     if action == "restart-cluster":
         return "Restart Kubernetes on every node", ["restart-cluster", "--yes"]
+    if action == "reboot-cluster":
+        return "Reboot every machine in the cluster", ["reboot-cluster", "--yes"]
     if action == "doctor-fix":
         only = str(p.get("only") or "").strip()
         if only and not CHECK_RE.match(only):
@@ -406,8 +536,9 @@ def build_command(action, p, nodes, key_path):
 # --------------------------------------------------------------------------- live backend
 
 class Live:
-    MODEL_CACHE_TTL = 30
-    MODEL_SCAN_TIMEOUT = 75
+    MODEL_CACHE_TTL = 120
+    MODEL_SCAN_TIMEOUT = 90
+    MODEL_MISSING_NODE_RETENTION = 30 * 24 * 60 * 60
     DOWNLOAD_CACHE_TTL = 2.5
 
     def __init__(self, store, ai_key_file, nodeyard_bin, state_dir=""):
@@ -416,6 +547,7 @@ class Live:
         self.state_dir = state_dir or "/var/lib/nodeyard/dashboard"
         self.jobs = Jobs(nodeyard_bin)
         self.hf = HuggingFace()
+        self.ollama_pool = concurrent.futures.ThreadPoolExecutor(max_workers=16, thread_name_prefix="nodeyard-ollama")
         self.tags_cache = {}
         self.tags_lock = threading.Lock()
         self.models_lock = threading.Lock()
@@ -451,14 +583,30 @@ class Live:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump({"saved_at": cache[0], "inventory": cache[1]}, f, separators=(",", ":"))
                 f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
             os.chmod(tmp, 0o600)
             os.replace(tmp, self._models_cache_path())
+            try:
+                dfd = os.open(self.state_dir, os.O_RDONLY)
+                try:
+                    os.fsync(dfd)
+                finally:
+                    os.close(dfd)
+            except OSError:
+                pass  # Some filesystems don't support syncing directory entries.
+            return True
         except OSError:
             if tmp:
                 try:
                     os.unlink(tmp)
                 except OSError:
                     pass
+            return False
+
+    @staticmethod
+    def _models_save_error():
+        return "The models were found, but the dashboard couldn't save their locations. Check write access to /var/lib/nodeyard/dashboard."
 
     def _forget_models_cache(self, file=None):
         with self.models_lock:
@@ -475,7 +623,8 @@ class Live:
                                                    and not (it.get("kind") == "cache" and it.get("name") == cache_key)])
                                   for n in data.get("nodes", [])]
                 self.models_cache = (time.time(), data)
-                self._save_models_cache(self.models_cache)
+                if not self._save_models_cache(self.models_cache):
+                    self.models_error = self._models_save_error()
             # Keep the last known inventory while a background rescan runs. A
             # download or deploy can take minutes; hiding a good snapshot here
             # made the UI claim that nothing was downloaded during that time.
@@ -552,12 +701,17 @@ class Live:
 
     def ollama_overview(self):
         """Every Ollama pod with the models on its disk and which are loaded in memory right now."""
+        pods = self._ollama_pods()
+        requests = {}
+        for p in pods:
+            requests[(p["name"], "tags")] = self.ollama_pool.submit(self._ollama_json, p, "GET", "/api/tags")
+            requests[(p["name"], "ps")] = self.ollama_pool.submit(self._ollama_json, p, "GET", "/api/ps")
         out = []
-        for p in self._ollama_pods():
+        for p in pods:
             entry = {"pod": p["name"], "node": p["node"], "models": [], "error": ""}
             try:
-                _, tags = self._ollama_json(p, "GET", "/api/tags")
-                _, ps = self._ollama_json(p, "GET", "/api/ps")
+                _, tags = requests[(p["name"], "tags")].result()
+                _, ps = requests[(p["name"], "ps")].result()
                 loaded = {m.get("name"): m for m in ps.get("models", [])}
                 for m in tags.get("models", []):
                     name = m.get("name", "")
@@ -578,7 +732,10 @@ class Live:
         if not pod:
             raise AIError("No such Ollama pod.", 404)
         try:
-            status, data = self._ollama_json(pod, "POST", "/api/generate", {"model": model, "prompt": "", "stream": False, "keep_alive": "30m" if on else 0}, timeout=600 if on else 30)
+            # An explicit Load is meant to stay loaded when the user leaves
+            # this page. Ollama's -1 value keeps it resident until Unload or
+            # the Ollama process itself restarts.
+            status, data = self._ollama_json(pod, "POST", "/api/generate", {"model": model, "prompt": "", "stream": False, "keep_alive": -1 if on else 0}, timeout=600 if on else 30)
         except (OSError, ValueError, http.client.HTTPException) as e:
             raise AIError("Couldn't reach Ollama: %s" % (getattr(e, "strerror", None) or e), 502)
         if status >= 400:
@@ -632,7 +789,7 @@ class Live:
 
     def open_chat(self, target, payload, on_conn=None):
         host, port, headers, model = self._resolve(target)
-        body = dict(payload, model=model, stream=True)
+        body = dict(chat_payload_for_target(target, payload), model=model, stream=True)
         headers = dict(headers, **{"Content-Type": "application/json", "Accept": "text/event-stream", "User-Agent": UA})
         conn = http.client.HTTPConnection(host, port, timeout=900)
         if on_conn:
@@ -667,7 +824,7 @@ class Live:
         if stdin is not None and len(stdin) > 65536:
             raise AIError("The input is too long.")
         exclusive = action not in SHARED_ACTIONS and not (action == "cli" and p.get("dry_run") is True)
-        changes_models = action in {"deploy", "switch", "download", "split-rm", "clean", "undeploy"}
+        changes_models = action in {"deploy", "switch", "download", "split-rm", "clean", "undeploy", "force-stop"}
         on_done = (lambda job: self._model_job_done(action, p, job)) if changes_models else None
         return self.jobs.start(title, argv, exclusive=exclusive, outside=action in OUTSIDE_ACTIONS, stdin=stdin, on_done=on_done)
 
@@ -725,18 +882,44 @@ class Live:
                 error = "Couldn't look at the nodes' disks."
                 if valid:
                     previous_nodes = {n.get("node"): n for n in (self.models_cache or (0, {"nodes": []}))[1].get("nodes", [])}
+                    current_names = {n.get("node") for n in data["nodes"] if n.get("node")}
                     missed = [n.get("node", "unknown") for n in data["nodes"] if n.get("scan_error")]
+                    retained = []
                     if missed:
-                        retained = []
                         for i, node in enumerate(data["nodes"]):
                             previous = previous_nodes.get(node.get("node"))
                             if node.get("scan_error") and previous:
                                 node = dict(previous, scan_error=node["scan_error"], inventory_stale=True)
                                 data["nodes"][i] = node
                                 retained.append(node.get("node", "unknown"))
-                        detail = ("Last saved data was retained for %s." % ", ".join(retained)
-                                  if retained else "No saved data is available for the unreachable machines.")
-                        data["scan_error"] = "Some node disks could not be checked: %s. %s" % (", ".join(missed), detail)
+                    # During a Kubernetes restart, a worker may temporarily
+                    # disappear from the API's node list. Keep its persisted
+                    # inventory as last-seen data instead of replacing the
+                    # cache with a smaller, apparently empty cluster.
+                    now = time.time()
+                    for name, previous in previous_nodes.items():
+                        if not name or name in current_names:
+                            continue
+                        try:
+                            missing_since = float(previous.get("inventory_missing_since", now))
+                        except (TypeError, ValueError):
+                            missing_since = now
+                        if now - missing_since > self.MODEL_MISSING_NODE_RETENTION:
+                            continue
+                        data["nodes"].append(dict(
+                            previous,
+                            scan_error="This machine is not currently listed by Kubernetes.",
+                            inventory_stale=True,
+                            inventory_missing_since=missing_since,
+                        ))
+                        retained.append(name)
+                    if missed or retained:
+                        details = []
+                        if missed:
+                            details.append("disk checks failed on " + ", ".join(missed))
+                        if retained:
+                            details.append("showing last-seen inventory for " + ", ".join(sorted(set(retained))))
+                        data["scan_error"] = "Some model locations may be stale: " + "; ".join(details) + "."
 
             with self.models_lock:
                 # A model may have been downloaded or deleted while the scan ran.
@@ -750,7 +933,8 @@ class Live:
                     self.models_cache = cache
                     self.models_dirty = False
                     self.models_error = ""
-                    self._save_models_cache(cache)
+                    if not self._save_models_cache(cache):
+                        self.models_error = self._models_save_error()
                 else:
                     self.models_error = error
                 return
@@ -816,6 +1000,9 @@ class Live:
 
     def job(self, jid, since):
         return self.jobs.view(jid, since)
+
+    def cancel_job(self, jid):
+        return self.jobs.cancel(jid)
 
 
 # --------------------------------------------------------------------------- the pages' routes
@@ -888,9 +1075,17 @@ def register(ctx, args):
             return h._json({"ok": False, "error": "No such task."}, 404)
         h._json(dict(v, ok=True))
 
+    def cancel_job(h, body):
+        jid = str(body.get("id", ""))[:64]
+        try:
+            backend.cancel_job(jid)
+            h._json({"ok": True, "cancelling": True})
+        except AIError as e:
+            fail(h, e)
+
     def run(h, body):
         action = str(body.get("action", ""))
-        if action in ("cli", "restart-cluster") and h._forwarded() is not None:
+        if action in ("cli", "restart-cluster", "reboot-cluster") and h._forwarded() is not None:
             return h._json({"ok": False, "error": "This only works over Tailscale or your own network, not through public access."}, 403)
         try:
             h._json({"ok": True, "job": backend.run(action, body)})
@@ -940,15 +1135,12 @@ def register(ctx, args):
         msgs = body.get("messages")
         if not isinstance(msgs, list) or not 1 <= len(msgs) <= 200:
             return h._json({"ok": False, "error": "Send between 1 and 200 messages."}, 400)
-        total = 0
-        clean = []
-        for m in msgs:
-            if not isinstance(m, dict) or m.get("role") not in ("system", "user", "assistant") or not isinstance(m.get("content"), str):
-                return h._json({"ok": False, "error": "Each message needs a role and text."}, 400)
-            total += len(m["content"])
-            clean.append({"role": m["role"], "content": m["content"]})
-        if total > MAX_CHAT_CHARS:
-            return h._json({"ok": False, "error": "That conversation (with its files) is too long to send."}, 413)
+        try:
+            clean = clean_chat_messages(msgs)
+        except OverflowError as e:
+            return h._json({"ok": False, "error": str(e)}, 413)
+        except ValueError as e:
+            return h._json({"ok": False, "error": str(e)}, 400)
         try:
             temp = min(2.0, max(0.0, float(body.get("temperature", 0.7))))
             raw_max = body.get("max_tokens", 1024)
@@ -998,5 +1190,6 @@ def register(ctx, args):
     ctx.post_routes["/api/ai/web"] = web
     ctx.get_routes.update({"/api/ai/targets": targets, "/api/ai/search": search, "/api/ai/files": files, "/api/job": job, "/api/ai/ollama": ollama,
                            "/api/ai/models": disk_models})
-    ctx.post_routes.update({"/api/ai/chat": chat, "/api/ai/stop": stop, "/api/run": run, "/api/ai/ollama-load": ollama_load, "/api/ai/reveal-key": reveal})
-    ctx.post_limits["/api/ai/chat"] = 3 * MAX_CHAT_CHARS + 65536  # (JSON escapes; attached files make it big)
+    ctx.post_routes.update({"/api/ai/chat": chat, "/api/ai/stop": stop, "/api/run": run, "/api/job/cancel": cancel_job,
+                            "/api/ai/ollama-load": ollama_load, "/api/ai/reveal-key": reveal})
+    ctx.post_limits["/api/ai/chat"] = MAX_CHAT_BODY_BYTES

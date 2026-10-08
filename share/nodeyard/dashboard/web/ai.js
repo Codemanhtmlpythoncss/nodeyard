@@ -15,32 +15,113 @@
     search: { q: "", sort: "downloads", results: null, loading: false, error: "", files: {}, open: "" }, key: "", useKey: false, locked: false,
     attach: [],
   };
+  const INVENTORY_TTL = 30 * 24 * 60 * 60 * 1000;
+  function readSavedInventory() {
+    try {
+      const saved = JSON.parse(store.get("ai.diskInventory", "") || "null");
+      if (!saved || !Array.isArray(saved.nodes)) return null;
+      const now = Date.now();
+      const nodes = saved.nodes.filter((n) => n && typeof n.node === "string" && now - (+n.last_seen || +saved.saved_at || 0) <= INVENTORY_TTL);
+      return nodes.length ? { saved_at: +saved.saved_at || now, nodes } : null;
+    } catch (e) { return null; }
+  }
+  let savedInventory = readSavedInventory();
+  if (savedInventory) {
+    A.disk = { ok: true, nodes: savedInventory.nodes.map((n) => Object.assign({}, n, { inventory_stale: true,
+      scan_error: n.scan_error || "Showing the last saved location while this machine is checked." })),
+      downloads: [], in_use: "", scanning: true, inventory_stale: true, scan_error: "Checking the saved model locations.", updated: savedInventory.saved_at / 1000 };
+  }
+  function writeSavedInventory(nodes) {
+    const now = Date.now(), saved = [];
+    for (const n of nodes || []) {
+      const items = (n.items || []).filter((it) => it.kind === "model" && typeof it.name === "string").slice(0, 500);
+      if (!items.length || typeof n.node !== "string") continue;
+      const old = savedInventory && savedInventory.nodes.find((x) => x.node === n.node);
+      const stale = !!(n.scan_error || n.inventory_stale);
+      saved.push({ node: n.node, items, last_seen: stale ? +(old && old.last_seen || n.last_seen || now) : now,
+        inventory_stale: stale, scan_error: stale ? (n.scan_error || "Last saved location; this machine could not be checked.") : "" });
+    }
+    savedInventory = saved.length ? { saved_at: now, nodes: saved.slice(0, 100) } : null;
+    store.set("ai.diskInventory", savedInventory ? JSON.stringify(savedInventory) : "");
+    return savedInventory;
+  }
+  function mergeDiskInventory(data) {
+    const saved = savedInventory || readSavedInventory();
+    const old = new Map((saved && saved.nodes || []).map((n) => [n.node, n]));
+    const now = Date.now(), incomplete = !!(data.scanning || data.inventory_stale || data.scan_error);
+    const nodes = (data.nodes || []).map((n) => {
+      const prior = old.get(n.node), stale = !!(data.scanning || data.inventory_stale || n.scan_error || n.inventory_stale);
+      const currentItems = n.items || [];
+      const present = new Set(currentItems.filter((it) => it.kind === "model").map((it) => it.name));
+      const items = currentItems.slice();
+      if (stale && prior) for (const it of prior.items || []) if (!present.has(it.name)) items.push(it);
+      old.delete(n.node);
+      return Object.assign({}, n, { items,
+        inventory_stale: stale && !!prior || !!n.inventory_stale,
+        scan_error: n.scan_error || (stale && prior ? "Last saved location; this machine could not be checked." : ""),
+        last_seen: stale ? +(prior && prior.last_seen || n.last_seen || now) : now });
+    });
+    if (incomplete) for (const prior of old.values()) {
+      if (now - (+prior.last_seen || 0) > INVENTORY_TTL) continue;
+      nodes.push(Object.assign({}, prior, { inventory_stale: true,
+        scan_error: prior.scan_error || "This machine hasn't appeared in the latest disk scan." }));
+    }
+    const merged = Object.assign({}, data, { nodes });
+    const complete = !data.scanning && !data.inventory_stale && !data.scan_error && !nodes.some((n) => n.scan_error || n.inventory_stale);
+    if (complete) writeSavedInventory(nodes);
+    else if (nodes.some((n) => (n.items || []).some((it) => it.kind === "model"))) writeSavedInventory(nodes);
+    return merged;
+  }
+  function forgetSavedModel(file) {
+    const nodes = (A.disk && A.disk.nodes || []).map((n) => Object.assign({}, n, { items: (n.items || []).filter((it) => !(it.kind === "model" && it.name === file)) }));
+    if (A.disk) A.disk = Object.assign({}, A.disk, { nodes });
+    const cached = savedInventory ? savedInventory.nodes.map((n) => Object.assign({}, n, { items: (n.items || []).filter((it) => it.name !== file) })) : [];
+    writeSavedInventory(cached);
+    if (S.view === "ai") U.queueRender();
+  }
   try { A.chats = JSON.parse(store.get("chats", "[]")) || []; } catch (e) { A.chats = []; }
   A.cur = store.get("chat.cur", "") || (A.chats[0] && A.chats[0].id) || "";
   const saveChats = () => {
     // attached files are kept too; if that doesn't fit in the browser's storage, only their names are
     const pack = (keep) => JSON.stringify(A.chats.slice(0, 30).map((c) => Object.assign({}, c, { messages: c.messages.slice(-200).map((m) => ({ role: m.role, content: m.content, meta: m.meta, thinking: m.thinking,
-      files: m.files ? m.files.map((f) => ({ name: f.name, size: f.size, text: keep ? f.text : null })) : undefined })) })));
+      files: m.files ? m.files.map((f) => ({ name: f.name, size: f.size, kind: f.kind, mime: f.mime, width: f.width, height: f.height, text: keep ? f.text : null })) : undefined })) })));
     const put = (v) => { try { localStorage.setItem("nodeyard.chats", v); return true; } catch (e) { return false; } };
     try { put(pack(true)) || put(pack(false)); } catch (e) { /* storage blocked */ }
     store.set("chat.cur", A.cur || "");
   };
 
   // ------------------------------------------------------------------ data
+  let targetsRequest = null, ollamaRequest = null;
   async function loadTargets(force) {
     if (!force && A.targets && Date.now() - A.targetsAt < 8000) return;
-    A.targetsAt = Date.now();
-    try { const r = await getJSON("/api/ai/targets"); A.targets = r.ok ? r : { targets: [], error: r.error, can_run: false, recent: [] }; } catch (e) { return; }
-    if (S.view === "ai") refreshTab();
+    if (targetsRequest) return targetsRequest;
+    targetsRequest = (async () => {
+      try {
+        const r = await getJSON("/api/ai/targets");
+        A.targets = r.ok ? r : { targets: [], error: r.error, can_run: false, recent: [] };
+        A.targetsAt = Date.now();
+      } catch (e) { A.targetsAt = 0; }
+      finally { targetsRequest = null; }
+      if (S.view === "ai") U.queueRender();
+    })();
+    return targetsRequest;
   }
   async function loadOllama(force) {
     if (!force && A.ollama && Date.now() - A.ollamaAt < 6000) return;
-    A.ollamaAt = Date.now();
-    try { const r = await getJSON("/api/ai/ollama"); A.ollama = r.ok ? r.pods : []; } catch (e) { return; }
-    if (S.view === "ai" && (A.tab === "models" || A.tab === "search")) refreshTab();
+    if (ollamaRequest) return ollamaRequest;
+    ollamaRequest = (async () => {
+      try {
+        const r = await getJSON("/api/ai/ollama");
+        A.ollama = r.ok ? r.pods : [];
+        A.ollamaAt = Date.now();
+      } catch (e) { A.ollamaAt = 0; }
+      finally { ollamaRequest = null; }
+      if (S.view === "ai" && (A.tab === "models" || A.tab === "search")) U.queueRender();
+    })();
+    return ollamaRequest;
   }
-  let diskRequest = null, diskPollTimer = null, diskScanStartedAt = 0;
-  const DISK_SCAN_WATCHDOG_MS = 90000, completedDownloadRescans = new Map();
+  let diskRequest = null, diskPollTimer = null, diskScanStartedAt = 0, diskRetryCount = 0;
+  const DISK_SCAN_WATCHDOG_MS = 120000, completedDownloadRescans = new Map();
   function diskHasModel(data, file) {
     return ((data && data.nodes) || []).some((n) => (n.items || []).some((it) => it.kind === "model" && it.name === file));
   }
@@ -54,7 +135,7 @@
       try {
         const r = await getJSON("/api/ai/models" + (refresh ? "?refresh=1" : ""));
         if (r.ok) {
-          A.disk = r; A.diskErr = "";
+          A.disk = mergeDiskInventory(r); A.diskErr = "";
           if (r.scanning) {
             if (!diskScanStartedAt) diskScanStartedAt = Date.now();
             if (Date.now() - diskScanStartedAt > DISK_SCAN_WATCHDOG_MS) {
@@ -75,10 +156,12 @@
             while (completedDownloadRescans.size > 200) completedDownloadRescans.delete(completedDownloadRescans.keys().next().value);
           }
         } else {
+          A.diskAt = Date.now() - 25000;
           A.diskErr = r.error || "Couldn't look at the disks."; diskScanStartedAt = 0;
           if (A.disk) A.disk = Object.assign({}, A.disk, { scanning: false, scan_error: A.diskErr });
         }
       } catch (e) {
+        A.diskAt = Date.now() - 25000;
         A.diskErr = e.message || "Couldn't reach the dashboard server."; diskScanStartedAt = 0;
         if (A.disk) A.disk = Object.assign({}, A.disk, { scanning: false, scan_error: A.diskErr });
       }
@@ -86,8 +169,12 @@
       clearTimeout(diskPollTimer);
       if (A.disk && A.disk.scanning) diskPollTimer = setTimeout(() => loadDisk(true), 4000);
       else if (retryAfterDownload) diskPollTimer = setTimeout(() => loadDisk(true, true), 250);
+      else if (A.diskErr || (A.disk && A.disk.scan_error)) {
+        const delay = Math.min(60000, 5000 * (2 ** Math.min(diskRetryCount++, 4)));
+        diskPollTimer = setTimeout(() => loadDisk(true, true), delay);
+      } else diskRetryCount = 0;
       refreshModelPick();
-      if (S.view === "ai" && (A.tab === "models" || A.tab === "search")) refreshTab();
+      if (S.view === "ai" && (A.tab === "models" || A.tab === "search")) U.queueRender();
     })();
     return diskRequest;
   }
@@ -135,7 +222,7 @@
     if (inCode) out.push(codeBlock(lang, code.join("\n"), -1, bi++));   // (still being written: no Run yet)
     flushPara(); flushList();
     const body = out.join("").replace(/<p>\u0001F(\d+)\u0001<\/p>/g, (m, k) => fileCard(pf.files[+k], mi, +k, pending)).replace(/\u0001F(\d+)\u0001/g, (m, k) => fileCard(pf.files[+k], mi, +k, pending));
-    return (think.trim() ? '<details class="think"><summary>Thinking</summary><div>' + esc(think.trim()).replace(/\n/g, "<br>") + "</div></details>" : "") + body + filesBar(pf, mi, pending);
+    return (think.trim() ? '<details class="think"' + (pending ? " open" : "") + '><summary>' + (pending ? '<span class="spin small"></span> ' : "") + 'Model reasoning</summary><div>' + esc(think.trim()).replace(/\n/g, "<br>") + "</div></details>" : "") + body + filesBar(pf, mi, pending);
   }
 
   // ------------------------------------------------------------------ files the model makes
@@ -439,18 +526,23 @@
   }
 
   // ---- context size, compression and web research
-  const estTokens = (msgs) => Math.round(msgs.reduce((n, m) => n + (m.content || "").length + 16, 0) / 3.5);
+  const estTokens = (msgs) => Math.round(msgs.reduce((n, m) => n + (typeof m.content === "string" ? m.content.length :
+    (m.content || []).reduce((sum, part) => sum + (part.type === "image_url" ? 3584 : (part.text || "").length), 0)) + 16, 0) / 3.5);
+  const imagePayloadBytes = (msgs) => msgs.reduce((sum, m) => sum + (Array.isArray(m.content) ? m.content.reduce((n, part) => {
+    const url = part.type === "image_url" && part.image_url && part.image_url.url;
+    return n + (typeof url === "string" ? Math.floor((url.length - url.indexOf(",") - 1) * 3 / 4) : 0);
+  }, 0) : 0), 0);
   const chatCtx = (t) => (t && t.id === "split" ? +((S.d.ai && S.d.ai.split && S.d.ai.split.ctx) || 0) : 0);
   const SUMMARY_PROMPT = "Summarize the conversation so far so it can continue without the original messages. Use these sections and leave out empty ones: ## Request (what the user wants and any preferences), ## Done so far, ## Files and facts (exact names, numbers, errors), ## Decisions, ## Open questions and next steps. Be concise (under 350 words) but keep every detail needed to carry on. Never invent anything.";
   const WEB_PROMPT = "Some user messages include <web_results>: search results and page excerpts fetched from the internet for that question. Use them for current facts, quote carefully, and mention the source addresses you relied on. If they don't answer the question, say so.";
   // the messages the model gets: system prompt, a summary of what was compressed away, then the rest
-  function chatMessages(c, extra, prune) {
+  function chatMessages(c, extra, prune, dropPriorImages) {
     const sys = [wantFiles(c, extra) ? FILES_PROMPT : "", c.system || "", c.web ? WEB_PROMPT : ""].filter(Boolean).join("\n\n");
     const from = Math.min(c.summaryUpTo || 0, c.messages.length), out = sys ? [{ role: "system", content: sys }] : [];
     if (c.summary && from > 0) out.push({ role: "user", content: "[Summary of the earlier part of our conversation, compressed to save space]\n\n" + c.summary }, { role: "assistant", content: "Understood. I'll continue from that summary." });
     const rest = c.messages.slice(from).concat(extra ? [extra] : []).filter((m) => !m.error && !m.pending);
     const keepFrom = prune ? Math.max(0, rest.length - 4) : 0;   // pruning: old attached files and web pages are left out of what is sent
-    return out.concat(rest.map((m, i) => ({ role: m.role, content: apiContent(m, i < keepFrom) })));
+    return out.concat(rest.map((m, i) => ({ role: m.role, content: apiContent(m, i < keepFrom, dropPriorImages && i < rest.length - 1) })));
   }
   async function streamText(target, messages, maxTok, signal) {
     const r = await fetch("/api/ai/chat", { method: "POST", cache: "no-store", signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ target, messages, temperature: 0.2, max_tokens: maxTok, stream_id: uid() + uid() }) });
@@ -705,8 +797,8 @@
         <div class="chat-settings hide" id="chat-settings"></div>
         <div class="thread" id="thread" aria-live="polite"></div>
         <div class="attach-list hide" id="attach-list"></div>
-        <form class="composer" id="composer"><button type="button" class="btn icon-btn" data-ai="attach" title="Attach text files (code, notes, CSV, JSON, logs…). You can also drop or paste them." aria-label="Attach files"><svg class="icon"><use href="#i-clip"/></svg></button>
-          <input type="file" id="attach-input" multiple hidden>
+        <form class="composer" id="composer"><button type="button" class="btn icon-btn" data-ai="attach" title="Attach several text, code, or image files. Images are sent to vision-capable models for OCR. You can also drop or paste files." aria-label="Attach files"><svg class="icon"><use href="#i-clip"/></svg></button>
+          <input type="file" id="attach-input" accept="text/*,application/json,image/png,image/jpeg,image/webp,image/gif,image/bmp,.yaml,.yml,.toml,.py,.js,.ts,.sh,.log,.csv,.md" multiple hidden>
           <textarea id="prompt" rows="1" placeholder="Message the model…  (Enter to send, Shift+Enter for a new line)" aria-label="Message"></textarea>
           <button class="btn primary" type="submit" id="send">Send</button></form><div class="faint small" id="chat-note"></div><div class="dropzone" id="dropzone">Drop files to attach them</div></section></div>`);
     renderAttach();
@@ -749,33 +841,85 @@
     if (st.agent) postJSON("/api/ai/agent/stop", { chat: st.chat }).catch(() => {}); else postJSON("/api/ai/stop", { id: st.sid }).catch(() => {});
     st.ctrl.abort();
   }
-  // ---- attached files (text only: that's what the model can read)
-  const MAX_FILE = 512 * 1024;
+  // ---- attached text and images. Image pixels are resized before being sent,
+  // so several phone photos fit inside one chat request.
+  const MAX_FILE = 512 * 1024, MAX_IMAGE_SOURCE = 20 * 1024 * 1024, MAX_IMAGE_DATA = 2 * 1024 * 1024;
+  const IMAGE_EXT = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", bmp: "image/bmp" };
+  function extension(name) { const m = String(name || "").toLowerCase().match(/\.([a-z0-9]+)$/); return m ? m[1] : ""; }
+  async function prepareImage(file) {
+    if (file.size > MAX_IMAGE_SOURCE) throw new Error("is over 20 MB");
+    let source, width, height, close = null;
+    if (window.createImageBitmap) {
+      const bitmap = await window.createImageBitmap(file);
+      source = bitmap; width = bitmap.width; height = bitmap.height; close = () => bitmap.close();
+    } else {
+      const url = URL.createObjectURL(file), img = new Image();
+      try {
+        await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = () => reject(new Error("couldn't read this image")); img.src = url; });
+        source = img; width = img.naturalWidth; height = img.naturalHeight;
+      } finally { URL.revokeObjectURL(url); }
+    }
+    try {
+      if (!width || !height || width * height > 80000000) throw new Error("has image dimensions this browser can't safely process");
+      const scale = Math.min(1, 2048 / Math.max(width, height), Math.sqrt(16000000 / (width * height)));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(width * scale)); canvas.height = Math.max(1, Math.round(height * scale));
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("couldn't prepare this image");
+      ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+      const originalType = IMAGE_EXT[extension(file.name)] || file.type;
+      let mime = originalType === "image/png" ? "image/png" : "image/jpeg";
+      let dataUrl = canvas.toDataURL(mime, 0.88);
+      if (dataUrl.length > MAX_IMAGE_DATA * 4 / 3) { mime = "image/jpeg"; dataUrl = canvas.toDataURL(mime, 0.82); }
+      if (dataUrl.length > MAX_IMAGE_DATA * 4 / 3) throw new Error("is too large after resizing; choose a smaller image");
+      return { dataUrl, mime, width: canvas.width, height: canvas.height };
+    } finally { if (close) close(); }
+  }
   async function addFiles(list) {
     for (const f of Array.from(list || [])) {
       if (A.attach.length >= 10) { toast("Up to 10 files at a time."); break; }
-      if (f.size > MAX_FILE) { toast(f.name + " is over 512 KB: too much for the model to read."); continue; }
+      const ext = extension(f.name), imageMime = IMAGE_EXT[ext];
+      if (imageMime) {
+        try {
+          const image = await prepareImage(f);
+          const queuedBytes = A.attach.filter((x) => x.kind === "image").reduce((sum, x) => sum + Math.floor((x.dataUrl.length - x.dataUrl.indexOf(",") - 1) * 3 / 4), 0);
+          const imageBytes = Math.floor((image.dataUrl.length - image.dataUrl.indexOf(",") - 1) * 3 / 4);
+          if (queuedBytes + imageBytes > 8 * 1024 * 1024) { toast("These images are too large together. Remove one or choose smaller files."); continue; }
+          A.attach.push({ name: cleanPath(f.name), size: f.size, kind: "image", mime: image.mime, width: image.width, height: image.height, dataUrl: image.dataUrl });
+        } catch (e) { toast(f.name + " " + (e.message || "couldn't be read")); }
+        continue;
+      }
+      if (f.size > MAX_FILE) { toast(f.name + " is over 512 KB: too much text for one attachment."); continue; }
       let text = null;
       try { const buf = new Uint8Array(await f.arrayBuffer()); text = new TextDecoder("utf-8", { fatal: true }).decode(buf); } catch (e) { text = null; }
-      if (text == null || text.slice(0, 8192).includes("\u0000")) { toast(f.name + " isn't a text file. The model reads text: code, notes, CSV, JSON, logs…"); continue; }
-      A.attach.push({ name: cleanPath(f.name), size: f.size, text });
+      if (text == null || text.slice(0, 8192).includes("\u0000")) { toast(f.name + " isn't supported. Attach text, code, CSV, JSON, logs, or a PNG/JPEG/WebP/GIF/BMP image."); continue; }
+      A.attach.push({ name: cleanPath(f.name), size: f.size, kind: "text", text });
     }
     renderAttach();
   }
   function renderAttach() {
     const el = $("#attach-list"); if (!el) return;
     el.classList.toggle("hide", !A.attach.length);
-    setHTML(el, A.attach.map((f, i) => raw('<span class="att"><svg class="icon"><use href="#i-file"/></svg><span class="mono">' + esc(f.name) + '</span><span class="faint">' + fmt.bytes(f.size) +
-      '</span><button type="button" class="x" data-ai="att-rm" data-i="' + i + '" aria-label="Remove ' + esc(f.name) + '">×</button></span>')));
+    const chips = A.attach.map((f, i) => raw('<span class="att"><svg class="icon"><use href="#i-file"/></svg><span class="mono">' + esc(f.name) + '</span><span class="faint">' + (f.kind === "image" ? "image · OCR" : fmt.bytes(f.size)) +
+      '</span><button type="button" class="x" data-ai="att-rm" data-i="' + i + '" aria-label="Remove ' + esc(f.name) + '">×</button></span>'));
+    if (A.attach.some((f) => f.kind === "image")) chips.push(html`<span class="faint small" style="align-self:center">Image OCR needs a vision-capable model.</span>`);
+    setHTML(el, chips);
   }
-  // what the model gets for a message: its text, then each attached file as a <file> block
-  const apiContent = (m, prune) => {
+  // Text and images use the OpenAI chat format shared by llama.cpp and Ollama.
+  const apiContent = (m, prune, dropImages) => {
     if (m.role !== "user") return m.content;
     let out = m.content || "";
-    if (m.files && m.files.length) out = (out ? out + "\n\n" : "") + m.files.map((f) => prune ? '<file path="' + f.name.replace(/"/g, "'") + '">(omitted to save space)</file>' : '<file path="' + f.name.replace(/"/g, "'") + '">\n' +
-      (f.text == null ? "(not kept by the browser: attach it again)\n" : f.text + (f.text.endsWith("\n") ? "" : "\n")) + "</file>").join("\n\n");
+    const images = [];
+    if (m.files && m.files.length) for (const f of m.files) {
+      if (f.kind === "image") {
+        if (!prune && !dropImages && f.dataUrl) images.push({ type: "image_url", image_url: { url: f.dataUrl } });
+        else out += (out ? "\n\n" : "") + "[Image attachment: " + f.name + (prune ? "; omitted to save context" : dropImages ? "; omitted to keep the request within size limits" : "; not saved in this browser, attach it again to analyze") + "]";
+      } else out += (out ? "\n\n" : "") + '<file path="' + f.name.replace(/"/g, "'") + '">\n' +
+        (f.text == null ? "(not kept by the browser: attach it again)\n" : f.text + (f.text.endsWith("\n") ? "" : "\n")) + "</file>";
+    }
+    if (images.length) out += (out ? "\n\n" : "") + "Inspect the attached image(s) when answering. If the request involves OCR, transcribe visible text in reading order, preserve line breaks, and mark uncertain words.";
     if (m.web && m.web.text && !prune) out += "\n\n<web_results query=\"" + m.web.query.replace(/"/g, "'") + "\">\n" + m.web.text + "\n</web_results>";
-    return out;
+    return images.length ? [{ type: "text", text: out }, ...images] : out;
   };
   function renderChatList() {
     setHTML($("#chat-list"), A.chats.map((c) => raw('<div class="chat-item' + (c.id === A.cur ? " on" : "") + '" data-ai="open-chat" data-id="' + esc(c.id) + '"><span>' + esc(c.title) + (c.remote ? ' <span class="chip small" title="From ' + esc(c.remote.source || "yardcode") + (c.remote.host ? " on " + esc(c.remote.host) : "") + '">' + esc(c.remote.source || "yardcode") + "</span>" : "") + '</span><button class="x" data-ai="del-chat" data-id="' + esc(c.id) + '" aria-label="Delete chat">×</button></div>')));
@@ -844,9 +988,11 @@
     A.autoSend = false;
     if (!regen) {
       text = (text || "").trim(); if (!text && !A.attach.length) return;
-      mine = { role: "user", content: text, files: A.attach.length ? A.attach.slice() : undefined };
+      const hasImages = A.attach.some((f) => f.kind === "image");
+      mine = { role: "user", content: text || (hasImages ? "Please transcribe the visible text in the attached image(s), preserving line breaks and marking anything unclear." : ""), files: A.attach.length ? A.attach.slice() : undefined };
     }
-    if (mine && c.plugins && c.plugins.length && text) return sendAgent(c, mine, text, t);   // plugins: the AI decides when to use tools
+    if (mine && c.plugins && c.plugins.length && text && !(mine.files || []).some((f) => f.kind === "image")) return sendAgent(c, mine, text, t);   // the tool agent accepts text; image turns go to the vision model directly
+    if (mine && c.plugins && c.plugins.length && (mine.files || []).some((f) => f.kind === "image")) toast("This image message goes straight to the model; chat plugins are skipped for this turn.");
     const noLimit = !c.max_tokens;
     if (mine && c.web && text) {   // look things up first, so the model answers with what it found
       A.searching = c.id; refreshChat();
@@ -855,6 +1001,11 @@
       finally { A.searching = null; refreshChat(); }
     }
     let msgs = chatMessages(c, mine);
+    if (imagePayloadBytes(msgs) > 8 * 1024 * 1024) {
+      msgs = chatMessages(c, mine, false, true);
+      toast("Older images in this chat were left out to fit this request. Attach them again if you need them analyzed.");
+    }
+    if (imagePayloadBytes(msgs) > 8 * 1024 * 1024) { toast("This request has too many or too-large images. Remove some attachments and try again."); return; }
     const ctx = chatCtx(t);
     let est = estTokens(msgs);
     if (ctx && c.compress !== "off" && est + Math.min(c.max_tokens || 512, 512) > ctx * 0.75) {   // nearly full: shorten it first
@@ -955,8 +1106,9 @@
         ${sp.ready ? html`<button class="btn primary" data-ai="goto-chat" data-target="split">Chat</button>` : ""}
         ${sp.loaded === false ? html`<button class="btn" data-ai="split-load" ${busy ? raw("disabled") : ""}>Load into memory</button>` : html`<button class="btn" data-ai="split-unload" ${busy ? raw("disabled") : ""}>Unload (free the memory)</button>`}
         <button class="btn" data-ai="split-status">Check progress</button>${sp.ready ? html`<button class="btn" data-ai="split-test">Speed test</button>` : ""}
+        ${sp.loaded !== false || sp.download === "running" ? html`<button class="btn danger" data-ai="split-force-stop" ${busy ? raw("disabled") : ""}>Force stop</button>` : ""}
         <button class="btn danger" data-ai="split-remove" ${busy ? raw("disabled") : ""}>Remove…</button></div>
-      <p class="muted small" style="margin:12px 0 0">${sp.loaded === false ? "The files are still on disk, so loading again takes a minute or two." : "Unloading frees the memory on every machine but keeps the downloaded file."}</p>`, chip(state[0], state[1]));
+      <p class="muted small" style="margin:12px 0 0">${sp.loaded === false ? "The files are still on disk, so loading again takes a minute or two." : "Unloading frees the memory on every machine but keeps the downloaded file."}${sp.download === "running" ? " Force stop also cancels pending downloads." : ""}</p>`, chip(state[0], state[1]));
   }
   function ollamaCard() {
     const has = S.d.pods.some((p) => p.namespace === "ai-inference" && p.name.startsWith("ollama"));
@@ -977,7 +1129,7 @@
       ${pods.filter((p) => p.error).map((p) => html`<p class="small" style="color:var(--warn)">${p.node}: ${p.error}</p>`)}
       <div class="row" style="margin-top:14px;gap:8px"><input class="input grow" id="o-pull" placeholder="Download a model, e.g. llama3.2:3b or hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M" aria-label="Model to download" spellcheck="false">
         <button class="btn primary" data-ai="o-pull">Download to every node</button></div>
-      <p class="muted small" style="margin:8px 0 0">“Load” keeps the model in memory (30 minutes) so the first answer is quick; “Unload” frees it right away.</p>`, html`${plural(pods.length, "node")}`);
+      <p class="muted small" style="margin:8px 0 0">“Load” keeps the model in memory until you unload it or Ollama restarts; this uses that machine's memory. “Unload” frees it right away.</p>`, html`${plural(pods.length, "node")}`);
   }
   // Downloaded split models, unfinished downloads and weight caches on every node, with free disk.
   const cacheKey = (f) => f.replace(/\.gguf$/i, "").toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 40);
@@ -1044,7 +1196,7 @@
     if (!$("#ai-pane")) return;
     const recent = (A.targets && A.targets.recent) || [];
     setHTML($("#ai-pane"), html`${splitCard()}<div class="mt">${diskCard()}</div><div class="mt">${ollamaCard()}</div>
-      ${recent.length ? html`<div class="mt">${card("Recent tasks", html`<div class="tasks">${recent.slice(0, 6).map((j) => html`<div class="row task" data-ai="open-job" data-id="${j.id}"><b>${j.title}</b><span class="grow"></span>${j.status === "running" ? chip("running…", "warn") : j.status === "ok" ? chip("done", "good") : chip("failed", "bad")}<span class="faint small">${ago(j.started)} ago</span></div>`)}</div>`)}</div>` : ""}`);
+      ${recent.length ? html`<div class="mt">${card("Recent tasks", html`<div class="tasks">${recent.slice(0, 6).map((j) => html`<div class="row task" data-ai="open-job" data-id="${j.id}"><b>${j.title}</b><span class="grow"></span>${j.status === "running" ? chip("running…", "warn") : j.status === "ok" ? chip("done", "good") : j.status === "cancelled" ? chip("cancelled", "warn") : chip("failed", "bad")}<span class="faint small">${ago(j.started)} ago</span></div>`)}</div>`)}</div>` : ""}`);
   }
 
   // ------------------------------------------------------------------ search
@@ -1171,7 +1323,7 @@
     const chosen = vals.auto ? [] : nodes.filter((n) => vals["n-" + n.name]).map((n) => n.name);
     if (!vals.auto && !chosen.length) { toast("Pick at least one machine."); return; }
     startJob(sp ? "switch" : "deploy", Object.assign(localNode || localFile ? { local: true } : { repo }, { file, ctx: +vals.ctx || 8192, alias: vals.alias, nodes: chosen, keep_old: !!vals.keep }),
-      () => { loadTargets(true); loadDisk(true); });
+      (job) => { loadTargets(true); if (job.status === "ok" && old && !vals.keep) forgetSavedModel(old); loadDisk(true, true); });
   }
 
   // ------------------------------------------------------------------ API examples
@@ -1251,7 +1403,12 @@
       saveBlob(makeZip(pf.files.map((f) => ({ path: f.path, text: f.content })).concat(pf.folders.map((p) => ({ path: p, dir: true })))), zipName(pf));
     } else if (a === "attach") { const inp = $("#attach-input"); if (inp) inp.click(); }
     else if (a === "att-rm") { A.attach.splice(+el.dataset.i, 1); renderAttach(); }
-    else if (a === "att-dl" && c) { const f = (c.messages[+el.dataset.mi].files || [])[+el.dataset.fi]; if (f && f.text != null) saveText(f.text, baseName(f.name)); else toast("That file wasn't kept by this browser."); }
+    else if (a === "att-dl" && c) {
+      const f = (c.messages[+el.dataset.mi].files || [])[+el.dataset.fi];
+      if (f && f.dataUrl) { const a = document.createElement("a"); a.href = f.dataUrl; a.download = baseName(f.name); a.click(); }
+      else if (f && f.text != null) saveText(f.text, baseName(f.name));
+      else toast("That file wasn't kept by this browser. Attach it again to open or analyze it.");
+    }
     else if (a === "copy-msg" && c) copyText(c.messages[+el.dataset.i].content);
     else if (a === "regen" && c && !A.stream) { while (c.messages.length && c.messages[c.messages.length - 1].role !== "user") c.messages.pop(); send("", true); }
     else if (a === "retry" && c && !A.stream) { while (c.messages.length && c.messages[c.messages.length - 1].role !== "user") c.messages.pop(); send("", true); }
@@ -1266,7 +1423,11 @@
       const sp = S.d.ai && S.d.ai.split, file = sp && sp.model, bytes = file ? fileBytes(file) : 0;
       const v = await dialog("Remove the split model?", html`<p style="margin-top:0">It is <b>unloaded first</b> (its servers stop and every machine gets its memory back), then removed.</p>
         ${file ? html`<label class="check"><input type="checkbox" data-v="files"> <span>Also delete its downloaded file and weight caches from every machine${bytes ? " (frees " + fmt.bytes(bytes, 1) + " and more)" : ""}. Otherwise they stay, so running it again is quick.</span></label>` : ""}`, "Remove it", { danger: true });
-      if (v) startAIJob(el, "undeploy", {}, (j) => { loadTargets(true); if (v.files && file && j.status === "ok") startJob("split-rm", { file }, () => loadDisk(true)); else loadDisk(true); });
+      if (v) startAIJob(el, "undeploy", {}, (j) => { loadTargets(true); if (v.files && file && j.status === "ok") startJob("split-rm", { file }, (removed) => { if (removed.status === "ok") forgetSavedModel(file); loadDisk(true, true); }); else loadDisk(true, true); });
+    }
+    else if (a === "split-force-stop") {
+      const v = await dialog("Force stop the split model?", html`<p style="margin-top:0">This immediately stops model servers and cancels downloads in progress. Completed model files and weight caches stay on disk. Run a saved model again when Kubernetes is ready.</p>`, "Force stop", { danger: true });
+      if (v) startAIJob(el, "force-stop", {}, () => { loadTargets(true); loadDisk(true); });
     }
     else if (a === "ollama-deploy") startAIJob(el, "ollama-deploy", {}, () => { loadOllama(true); loadTargets(true); });
     else if (a === "o-pull") { const name = ($("#o-pull") || {}).value; if (!name || !name.trim()) { toast("Type a model name first."); return; } startAIJob(el, "pull", { name: name.trim() }, () => loadOllama(true)); }
@@ -1277,11 +1438,11 @@
       finally { el.disabled = false; loadOllama(true); loadTargets(true); }
     } else if (a === "open-job") openJob(el.dataset.id);
     else if (a === "o-rm") { const v = await dialog("Delete this Ollama model?", html`<span class="mono">${el.dataset.model}</span> is deleted from every machine that runs Ollama. You can download it again later.`, "Delete", { danger: true }); if (v) startAIJob(el, "ollama-rm", { name: el.dataset.model }, () => loadOllama(true)); }
-    else if (a === "m-rm") { const v = await dialog("Delete this model?", html`<span class="mono">${el.dataset.file}</span>, any unfinished parts of it and its weight caches are deleted from every machine. A download of it that is still running is stopped.`, "Delete", { danger: true }); if (v) startAIJob(el, "split-rm", { file: el.dataset.file }, () => loadDisk(true)); }
+    else if (a === "m-rm") { const file = el.dataset.file, v = await dialog("Delete this model?", html`<span class="mono">${file}</span>, any unfinished parts of it and its weight caches are deleted from every machine. A download of it that is still running is stopped.`, "Delete", { danger: true }); if (v) startAIJob(el, "split-rm", { file }, (j) => { if (j.status === "ok") forgetSavedModel(file); loadDisk(true, true); }); }
     else if (a === "m-run") runModel("", el.dataset.file, +el.dataset.size, "", true);
     else if (a === "clean") startAIJob(el, "clean", {}, () => loadDisk(true));
-    else if (a === "clean-models") { const v = await dialog("Free up space, including models?", html`This also deletes every downloaded model file that isn't running now. The running model stays.`, "Delete them", { danger: true }); if (v) startAIJob(el, "clean", { models: true }, () => loadDisk(true)); }
-    else if (a === "disk-refresh") loadDisk(true, true);
+    else if (a === "clean-models") { const v = await dialog("Free up space, including models?", html`This also deletes every downloaded model file that isn't running now. The running model stays.`, "Delete them", { danger: true }); if (v) startAIJob(el, "clean", { models: true }, () => loadDisk(true, true)); }
+    else if (a === "disk-refresh") { diskRetryCount = 0; loadDisk(true, true); }
     else if (a === "s-download") startAIJob(el, "download", { repo: el.dataset.repo, file: el.dataset.file }, () => { loadDisk(true); });
     else if (a === "s-plan") startAIJob(el, "plan", { repo: el.dataset.repo, file: el.dataset.file });
     else if (a === "s-chip") { A.search.q = el.dataset.q; const i = $("#s-q"); if (i) i.value = A.search.q; A.search.results = null; runSearch(); }

@@ -124,6 +124,8 @@
       ${card("Kubernetes", html`
         <p class="muted small" style="margin-top:0">Restart Kubernetes (k3s) on every machine: workers one at a time, then the control node. Running containers keep running; the cluster is out of reach for a minute or two. Use it when nodes act stuck.</p>
         <button class="btn danger" data-st="k8s-restart">Restart Kubernetes…</button>
+        <p class="muted small">For a complete machine restart, workers are drained and rebooted one at a time, then the control server. This interrupts workloads and takes the whole cluster offline briefly.</p>
+        <button class="btn danger" data-st="k8s-reboot">Reboot every machine…</button>
         <p class="faint small">Takes a few minutes. Only works from your own network or Tailscale.</p>`)}
       ${card("Hugging Face", html`
         <p class="muted small" style="margin-top:0">Only needed for models you have to accept terms for. ${s.hf_token ? chip("token set", "good") : chip("no token")}</p>
@@ -208,6 +210,9 @@
     else if (a === "k8s-restart") {
       if (!window.confirm("Restart Kubernetes on every node?\n\nWorkers restart one at a time, then the control node. Containers keep running, but the cluster is unreachable for a minute or two.")) return;
       startJob("restart-cluster", {}, () => U.load(true));
+    } else if (a === "k8s-reboot") {
+      if (!window.confirm("Fully reboot every machine in the Kubernetes cluster?\n\nWorkers are drained and rebooted one at a time; the control server reboots last. Every workload will be interrupted, and the dashboard will go offline briefly.")) return;
+      startJob("reboot-cluster", {}, () => U.load(true));
     } else if (a === "hf-set") { const r = await post("/api/settings/hf-token", { token: $("#st-hf").value }); if (r.ok) { toast("Token saved."); loadSettings().then(renderSettings); } }
     else if (a === "hf-remove") { const r = await post("/api/settings/hf-token", { remove: true }); if (r.ok) loadSettings().then(renderSettings); }
     else if (a === "svc-apply") {

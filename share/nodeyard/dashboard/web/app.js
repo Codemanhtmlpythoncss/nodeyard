@@ -40,6 +40,13 @@
 
   const nowSrv = () => Date.now() / 1000 + S.skew;
   const ago = (ts) => fmt.ago(ts, nowSrv());
+  const nodeState = (n) => {
+    const since = +n.ready_since || 0, age = nowSrv() - since;
+    const recent = since > 0 && age >= 0 && age <= 60;
+    const checking = !n.ready && recent, recovering = !!n.ready && recent;
+    return { label: checking ? "Checking in" : recovering ? "Recovering" : n.ready ? "Ready" : "Not ready",
+      cls: checking || recovering ? "warn" : n.ready ? "good" : "bad", checking, recovering, recent };
+  };
   const statusClass = (s) => (/^(Running|Succeeded|Completed|Ready|Bound|Normal)$/.test(s) ? "good" : /^(Pending|ContainerCreating|PodInitializing|Terminating|Init:|Released|Available)/.test(s) ? "warn" : "bad");
   const chip = (text, cls) => html`<span class="chip ${cls || ""}">${text}</span>`;
   const statusChip = (s) => chip(s, statusClass(s));
@@ -73,34 +80,65 @@
     if (S.hist.length > 720) S.hist.splice(0, S.hist.length - 720);
   }
   function apply(res) {
+    const changed = !S.online || !S.res || S.res.updated !== res.updated || S.res.ok !== res.ok || S.res.error !== res.error || S.res.mode !== res.mode;
     S.online = true;
     S.skew = res.now - Date.now() / 1000;
     S.res = res;
-    if (res.ok) { S.d = res.state; S.t = res.totals; derive(); pushHistory(res); }
+    if (res.ok && changed) { S.d = res.state; S.t = res.totals; derive(); pushHistory(res); }
     if (res.agents_full && res.agents_full.ok) S.agents = res.agents_full;
+    return changed;
   }
   const needAgents = () => S.view === "processes" || (S.drawer || "").startsWith("node:");
+  let loadInFlight = null, loadQueuedFresh = false;
   async function load(fresh) {
+    if (loadInFlight) {
+      if (fresh) loadQueuedFresh = true;
+      return loadInFlight;
+    }
+    const request = (async () => {
+      let changed = false;
+      try {
+        const res = await getJSON("/api/state" + (fresh ? "?fresh=1" : ""));
+        changed = apply(res);
+        if (res.ok && res.state.agents && res.state.agents.installed && needAgents()) {
+          try { const a = await getJSON("/api/agents"); if (a.ok) S.agents = a; } catch (e) { /* keep the last one */ }
+        }
+      } catch (e) { S.online = false; changed = true; }
+      if (changed) queueRender();
+    })();
+    loadInFlight = request;
     try {
-      const res = await getJSON("/api/state" + (fresh ? "?fresh=1" : ""));
-      apply(res);
-      if (res.ok && res.state.agents && res.state.agents.installed && needAgents()) {
-        try { const a = await getJSON("/api/agents"); if (a.ok) S.agents = a; } catch (e) { /* keep the last one */ }
-      }
-    } catch (e) { S.online = false; }
-    render();
+      await request;
+    } finally {
+      if (loadInFlight === request) loadInFlight = null;
+      if (loadQueuedFresh) { loadQueuedFresh = false; void load(true); }
+    }
+  }
+  function userIsInteracting() {
+    const el = document.activeElement;
+    return pointerHeld || !!(el && (el.matches("input, textarea, select") || el.isContentEditable));
   }
   // Real time: the server pushes a new snapshot the moment it has one (server-sent events).
   // Polling below only covers a stream that is down.
-  let es = null, esAgents = false, esAt = 0, renderQueued = false;
+  let es = null, esAgents = false, esAt = 0, renderQueued = false, pointerHeld = false, renderRetry = null;
   const streamHealthy = () => !!es && es.readyState === 1 && Date.now() - esAt < 25000;
+  function flushQueuedRender() {
+    if (!renderQueued || userIsInteracting()) return;
+    renderQueued = false;
+    clearTimeout(renderRetry);
+    render();
+  }
   function queueRender() {
     if (renderQueued) return;
     renderQueued = true;
-    const go = () => { if (!renderQueued) return; renderQueued = false; render(); };
-    requestAnimationFrame(go); // smooth when the tab is visible...
-    setTimeout(go, 250);       // ...and still updates when the browser pauses animation frames
+    requestAnimationFrame(flushQueuedRender); // smooth when the tab is visible...
+    renderRetry = setTimeout(flushQueuedRender, 250); // ...and still updates when animation frames pause
   }
+  document.addEventListener("pointerdown", () => { pointerHeld = true; }, true);
+  const releasePointer = () => { pointerHeld = false; setTimeout(flushQueuedRender, 80); };
+  document.addEventListener("pointerup", releasePointer, true);
+  document.addEventListener("pointercancel", releasePointer, true);
+  document.addEventListener("focusout", () => setTimeout(flushQueuedRender, 80), true);
   function connectStream() {
     if (!S.live || typeof EventSource === "undefined") return;
     const want = needAgents();
@@ -108,7 +146,7 @@
     if (es) es.close();
     esAgents = want;
     es = new EventSource("/api/stream" + (want ? "?agents=1" : ""));
-    es.addEventListener("state", (ev) => { esAt = Date.now(); let r; try { r = JSON.parse(ev.data); } catch (e) { return; } apply(r); queueRender(); });
+    es.addEventListener("state", (ev) => { esAt = Date.now(); let r; try { r = JSON.parse(ev.data); } catch (e) { return; } if (apply(r)) queueRender(); });
     es.addEventListener("auth", () => { location.href = "/login"; });
     es.onopen = () => { esAt = Date.now(); };
   }
@@ -203,7 +241,9 @@
     },
     update() {
       const d = S.d, t = S.t, al = S.res.alerts, crit = al.filter((a) => a.level === "critical"), warn = al.filter((a) => a.level === "warning");
-      const h = crit.length ? ["bad", plural(crit.length, "critical issue") + (warn.length ? " and " + plural(warn.length, "warning") : "")] : warn.length ? ["warn", plural(warn.length, "thing") + " need" + (warn.length === 1 ? "s" : "") + " attention"] : ["good", "All systems healthy"];
+      const checkingNodes = d.nodes.filter((n) => nodeState(n).checking), recoveringNodes = d.nodes.filter((n) => nodeState(n).recovering);
+      const transientNodes = checkingNodes.length + recoveringNodes.length, confirmedDown = t.nodes - t.nodes_ready - checkingNodes.length;
+      const h = crit.length ? ["bad", plural(crit.length, "critical issue") + (warn.length ? " and " + plural(warn.length, "warning") : "")] : warn.length ? ["warn", plural(warn.length, "thing") + " need" + (warn.length === 1 ? "s" : "") + " attention"] : transientNodes ? ["warn", "Checking on " + plural(transientNodes, "node")] : ["good", "All systems healthy"];
       const cp = d.nodes.filter((n) => n.roles.some((r) => /control-plane|master/.test(r))).length;
       setHTML($("#ov-hero"), html`<div class="hero fade"><div><div class="faint" style="font-size:12px;text-transform:uppercase;letter-spacing:.08em">Cluster</div><h2>${d.cluster.name}</h2>
         <div class="meta">${chip(d.cluster.k3s_version || "k3s", "accent")}${d.cluster.api_server ? html`<span class="chip">API <span class="mono copy" data-copy="${d.cluster.api_server}">${d.cluster.api_server.replace(/^https?:\/\//, "")}</span></span>` : ""}
@@ -215,7 +255,7 @@
       const healthyW = d.workloads.filter((w) => !["Deployment", "StatefulSet", "DaemonSet"].includes(w.kind) || w.ready >= w.desired).length;
       const kpi = (label, value, detail, ring, sp) => html`<div class="card kpi fade">${ring ? html`<div class="ring">${ring}</div>` : ""}<div class="txt"><div class="label">${label}</div><div class="value">${value}</div><div class="detail">${detail}</div></div>${sp ? html`<div class="spark">${sp}</div>` : ""}</div>`;
       setHTML($("#ov-kpi"), html`
-        ${kpi("Nodes", html`${t.nodes_ready}<small> / ${t.nodes} ready</small>`, t.nodes_ready === t.nodes ? "Every node is healthy" : t.nodes - t.nodes_ready + " not ready", donut(frac(t.nodes_ready, t.nodes), { label: t.nodes_ready + "/" + t.nodes, color: t.nodes_ready === t.nodes ? "var(--good)" : "var(--bad)" }))}
+        ${kpi("Nodes", html`${t.nodes_ready}<small> / ${t.nodes} ready</small>`, t.nodes_ready === t.nodes ? (recoveringNodes.length ? recoveringNodes.length + " recently recovered" : "Every node is healthy") : [checkingNodes.length ? checkingNodes.length + " checking in" : "", confirmedDown > 0 ? confirmedDown + " not ready" : ""].filter(Boolean).join(" · "), donut(frac(t.nodes_ready, t.nodes), { label: t.nodes_ready + "/" + t.nodes, color: transientNodes ? "var(--warn)" : t.nodes_ready === t.nodes ? "var(--good)" : "var(--bad)" }))}
         ${kpi("Pods", html`${t.pods_running}<small> running</small>`, t.pods + " total" + (bad ? " · " + bad + " not running" : "") + " · room for " + fmt.num(t.pods_capacity), donut(frac(t.pods_running, t.pods), { color: bad ? "var(--warn)" : "var(--good)" }))}
         ${kpi("CPU", html`${fmt.cores(t.cpu_used)}<small> of ${fmt.num(t.cpu_total)} cores</small>`, fmt.pct(frac(t.cpu_used, t.cpu_total)) + " in use · " + fmt.cores(t.cpu_total - (t.cpu_used || 0)) + " free", donut(frac(t.cpu_used, t.cpu_total)))}
         ${kpi("Memory", html`${fmt.bytes(t.mem_used)}<small> of ${fmt.bytes(t.mem_total)}</small>`, fmt.pct(frac(t.mem_used, t.mem_total)) + " in use · " + fmt.bytes(t.mem_total - (t.mem_used || 0)) + " free", donut(frac(t.mem_used, t.mem_total)))}
@@ -235,12 +275,12 @@
         ${card("Pods running", html`${area("c-pods", ts, [{ name: "Running pods", color: "#34d399", values: pts.map((p) => p.pods) }], { fmt: (v) => Math.round(v), title: "Pods running" })}`, fmt.num(t.pods_running) + " now")}`);
 
       setHTML($("#ov-nc"), html`${d.nodes.length}`);
-      setHTML($("#ov-nodes"), d.nodes.map((n) => html`<div class="card node" data-open="node:${n.name}">
-        <div class="head"><i class="dot ${n.ready ? "good" : "bad"}"></i><span class="name">${n.name}</span><span class="grow"></span><span class="ip copy" data-copy="${n.internal_ip}">${n.internal_ip}</span></div>
+      setHTML($("#ov-nodes"), d.nodes.map((n) => { const health = nodeState(n); return html`<div class="card node" data-open="node:${n.name}">
+        <div class="head"><i class="dot ${health.cls}"></i><span class="name">${n.name}</span><span class="grow"></span><span class="ip copy" data-copy="${n.internal_ip}">${n.internal_ip}</span></div>
         <div class="muted" style="font-size:12.5px">${n.os}</div>
-        <div class="tags">${n.roles.map((r) => chip(r, /control-plane|master|etcd/.test(r) ? "accent" : ""))}${chip(n.arch)}${n.ready ? "" : chip("NotReady", "bad")}${n.unschedulable ? chip("cordoned", "warn") : ""}</div>
+        <div class="tags">${n.roles.map((r) => chip(r, /control-plane|master|etcd/.test(r) ? "accent" : ""))}${chip(n.arch)}${health.recent || !n.ready ? chip(health.label, health.cls) : ""}${n.unschedulable ? chip("cordoned", "warn") : ""}</div>
         ${metric("CPU", frac(n.cpu_used, n.cpu_cores), cpuText(n))}${metric("RAM", frac(n.mem_used, n.mem_total), memText(n))}${n.disk_total ? metric("Disk", frac(n.disk_used, n.disk_total), fmt.bytes(n.disk_used, 0) + " / " + fmt.bytes(n.disk_total, 0)) : ""}
-        <div class="foot"><span>${n.pods_running}/${n.pods_capacity} pods${n.hw && n.hw.temp_c != null ? " · " + fmt.temp(n.hw.temp_c) : ""}${n.hw && n.hw.freq_mhz ? " · " + fmt.mhz(n.hw.freq_mhz) : ""}</span><span>↓ ${fmt.rate(n.net_rx_rate)} · ↑ ${fmt.rate(n.net_tx_rate)}</span></div></div>`));
+        <div class="foot"><span>${n.pods_running}/${n.pods_capacity} pods${n.hw && n.hw.temp_c != null ? " · " + fmt.temp(n.hw.temp_c) : ""}${n.hw && n.hw.freq_mhz ? " · " + fmt.mhz(n.hw.freq_mhz) : ""}</span><span>↓ ${fmt.rate(n.net_rx_rate)} · ↑ ${fmt.rate(n.net_tx_rate)}</span></div></div>`; }));
 
       const withUse = d.pods.filter((p) => p.cpu != null), key = S.topBy;
       const top = withUse.slice().sort((a, b) => (b[key] || 0) - (a[key] || 0)).slice(0, 8), mx = Math.max(...top.map((p) => p[key] || 0), 1e-9);
@@ -524,7 +564,7 @@
       const traffic = d.nodes.map((n) => html`<div class="metric" style="grid-template-columns:70px 1fr auto"><span class="k">${n.name}</span>${bar(((n.net_rx_rate || 0) + (n.net_tx_rate || 0)) / Math.max(...d.nodes.map((x) => (x.net_rx_rate || 0) + (x.net_tx_rate || 0)), 1), "")}<span class="v" style="min-width:150px;font-size:12px">↓ ${fmt.rate(n.net_rx_rate)} ↑ ${fmt.rate(n.net_tx_rate)}</span></div>`);
       setHTML($("#nw-top"), html`
         ${card("Cluster addressing", html`${kvl("API server", ip(c.api_server ? c.api_server.replace(/^https?:\/\//, "") : ""))}${kvl("Pod network", ip(c.pod_cidr))}${kvl("Service network", ip(c.service_cidr))}${kvl("Nodes", d.nodes.length)}${kvl("Services", d.services.length)}${kvl("Ingress hosts", d.ingresses.reduce((s, i) => s + i.hosts.length, 0))}`)}
-        ${card("Node addresses", d.nodes.map((n) => html`<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line);cursor:pointer" data-open="node:${n.name}"><i class="dot ${n.ready ? "good" : "bad"}"></i><b>${n.name}</b><span class="grow"></span>${ip(n.internal_ip)}${n.external_ip ? ip(n.external_ip) : ""}</div>`))}
+        ${card("Node addresses", d.nodes.map((n) => { const health = nodeState(n); return html`<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line);cursor:pointer" data-open="node:${n.name}"><i class="dot ${health.cls}"></i><b>${n.name}</b><span class="grow"></span>${health.recent || !n.ready ? chip(health.label, health.cls) : ""}${ip(n.internal_ip)}${n.external_ip ? ip(n.external_ip) : ""}</div>`; }))}
         ${card("Throughput", traffic, html`↓ ${fmt.rate(t.net_rx_rate)} · ↑ ${fmt.rate(t.net_tx_rate)}`)}`);
 
       const reach = reachable(), hosts = d.ingresses.filter((i) => i.hosts.length);
@@ -646,7 +686,8 @@
     if (kind === "node") {
       const n = S.nodeBy[rest];
       if (!n) notFound = true; else {
-        head = html`<i class="dot ${n.ready ? "good" : "bad"}" style="margin-top:9px"></i><div class="grow"><h2>${n.name}</h2><div class="sub">${n.os} · ${n.arch}</div></div>${closeBtn}`;
+        const health = nodeState(n);
+        head = html`<i class="dot ${health.cls}" style="margin-top:9px"></i><div class="grow"><h2>${n.name}</h2><div class="sub">${n.os} · ${n.arch}</div></div>${health.recent || !n.ready ? chip(health.label, health.cls) : ""}${closeBtn}`;
         const cpu = nodeSeries(0, n.name), mem = nodeSeries(1, n.name), pods = S.d.pods.filter((p) => p.node === n.name);
         const pcols = [{ k: "name", t: "Pod", v: (p) => p.name, r: (p) => html`<b>${p.name}</b>` }, { k: "ns", t: "Namespace", v: (p) => p.namespace, r: (p) => chip(p.namespace) }, { k: "status", t: "Status", v: (p) => p.status, r: (p) => statusChip(p.status) },
           { k: "cpu", t: "CPU", cls: "num", v: (p) => p.cpu, r: (p) => (p.cpu == null ? "–" : fmt.cores(p.cpu)) }, { k: "mem", t: "Memory", cls: "num", v: (p) => p.mem, r: (p) => (p.mem == null ? "–" : fmt.bytes(p.mem)) }];
@@ -881,7 +922,7 @@
   function download(name, text) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }
 
   // ---- tasks (nodeyard commands the page can start): a modal that follows the output
-  let jobTimer = null;
+  let jobTimer = null, activeJobId = "", jobCancelPending = false;
   async function startJob(action, params, onDone) {
     let r;
     try { r = await postJSON("/api/run", Object.assign({ action }, params || {})); } catch (e) { toast(e.message || "Couldn't reach the dashboard server."); return false; }
@@ -891,18 +932,26 @@
   }
   function openJob(id, onDone) {
     let since = 0, lines = [];
+    activeJobId = id;
+    jobCancelPending = false;
     $("#scrim").classList.add("on");
     const m = $("#jobm");
     m.classList.add("on");
+    $("#jobcancel").classList.add("hide");
     setHTML($("#jobbody"), html`<div class="logbox" id="jobout">Starting…</div>`);
     clearInterval(jobTimer);
     const tick = async () => {
       let v;
       try { v = await getJSON("/api/job?id=" + encodeURIComponent(id) + "&since=" + since); } catch (e) { return; }
+      if (activeJobId !== id) return;
       if (!v.ok) { clearInterval(jobTimer); setHTML($("#jobout"), v.error || "Lost track of that task."); return; }
       since = v.next; lines = lines.concat(v.lines);
       $("#jobtitle").textContent = v.title;
-      setHTML($("#jobstatus"), v.status === "running" ? chip("running…", "warn") : v.status === "ok" ? chip("done", "good") : chip("failed (exit " + v.rc + ")", "bad"));
+      setHTML($("#jobstatus"), v.status === "running" ? chip(v.cancel_requested ? "stopping…" : "running…", "warn") : v.status === "ok" ? chip("done", "good") : v.status === "cancelled" ? chip("cancelled", "warn") : chip("failed (exit " + v.rc + ")", "bad"));
+      const cancel = $("#jobcancel"), canCancel = v.status === "running" && v.cancelable;
+      cancel.classList.toggle("hide", !canCancel);
+      cancel.disabled = !canCancel || !!v.cancel_requested || jobCancelPending;
+      cancel.textContent = v.cancel_requested || jobCancelPending ? "Stopping…" : "Cancel";
       const out = $("#jobout");
       if (out) { out.textContent = lines.join("\n") || "(no output yet)"; out.scrollTop = out.scrollHeight; }
       if (v.status !== "running") { clearInterval(jobTimer); load(true); if (onDone) onDone(v); }
@@ -910,12 +959,30 @@
     tick();
     jobTimer = setInterval(tick, 1200);
   }
-  function closeJob() { clearInterval(jobTimer); $("#jobm").classList.remove("on"); if (!S.drawer) $("#scrim").classList.remove("on"); }
+  async function cancelJob() {
+    const id = activeJobId, button = $("#jobcancel");
+    if (!id || jobCancelPending) return;
+    jobCancelPending = true;
+    button.disabled = true;
+    button.textContent = "Stopping…";
+    try {
+      const r = await postJSON("/api/job/cancel", { id });
+      if (!r.ok) throw new Error(r.error || "Couldn't stop that task.");
+      toast("Stopping task…");
+    } catch (e) {
+      jobCancelPending = false;
+      button.disabled = false;
+      button.textContent = "Cancel";
+      toast(e.message || "Couldn't stop that task.");
+    }
+  }
+  function closeJob() { clearInterval(jobTimer); activeJobId = ""; jobCancelPending = false; $("#jobm").classList.remove("on"); if (!S.drawer) $("#scrim").classList.remove("on"); }
 
   function act(name, el) {
     const L = S.logs;
     if (name === "close") closeDrawer();
     else if (name === "job-close") closeJob();
+    else if (name === "job-cancel") cancelJob();
     else if (name === "agent-install") startJob("agent-install");
     else if (name.startsWith("top:")) { S.topBy = name.slice(4); if (S.d) V.overview.update(); }
     else if (name === "logs-load") loadLogs(false);
@@ -980,8 +1047,8 @@
     location.href = "/login";
   });
 
-  NY.ui = { hooks: [], bar, tempClass, S, V, $, $$, store, chip, statusChip, ip, card, table, metric, seg, empty, ago, plural, frac, toast, copyText, getJSON, postJSON, setPath, getPath, syncControls,
-    fillSelect, openDrawer, startJob, openJob, aiSummary, load, go };
+  NY.ui = { hooks: [], bar, tempClass, nodeState, S, V, $, $$, store, chip, statusChip, ip, card, table, metric, seg, empty, ago, plural, frac, toast, copyText, getJSON, postJSON, setPath, getPath, syncControls,
+    fillSelect, openDrawer, startJob, openJob, aiSummary, load, go, queueRender };
   buildNav();
   const saved = store.get("view", "overview");
   if (!location.hash && VIEWS.some((v) => v.id === saved)) S.view = saved;

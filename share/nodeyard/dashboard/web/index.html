@@ -99,7 +99,7 @@
   <p class="muted" style="margin:16px 0 0;font-size:12.5px">Actions that change cluster state ask for confirmation. The Devices sidebar stays read-only.</p>
 </div></div>
 <div class="modal wide" id="jobm" role="dialog" aria-label="Task">
-  <div class="modal-head"><b id="jobtitle">Task</b><span id="jobstatus"></span><span class="spacer"></span><button class="btn small" data-act="job-close">Close</button></div>
+  <div class="modal-head"><b id="jobtitle">Task</b><span id="jobstatus"></span><span class="spacer"></span><button class="btn small danger hide" id="jobcancel" data-act="job-cancel">Cancel</button><button class="btn small" data-act="job-close">Close</button></div>
   <div class="modal-body" id="jobbody"></div>
 </div>
 <div class="modal" id="confirmm" role="dialog" aria-label="Confirm">

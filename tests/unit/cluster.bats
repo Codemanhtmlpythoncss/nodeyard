@@ -263,7 +263,12 @@ OLD_FP="SHA256:OLDoldOLDoldOLDoldOLDoldOLDoldOLDoldOLDold"
 
 # --- restart-cluster -------------------------------------------------------------
 
+cluster_node_names_rule() {
+    ny_rule_first "k3s kubectl get nodes -o name*" 0 'node/yard-1\nnode/yard-2\nnode/yard-3\nnode/yard-4'
+}
+
 @test "restart-cluster plans every worker first, one at a time, and this server last" {
+    cluster_node_names_rule
     run --separate-stderr demo_cmd restart-cluster --yes --dry-run --json
     assert_success
     printf '%s' "$output" | jq -e '[.plan[] | tostring] | (map(test("Restart k3s on yard-")) | any) and (map(test("this server")) | any)
@@ -271,6 +276,7 @@ OLD_FP="SHA256:OLDoldOLDoldOLDoldOLDoldOLDoldOLDoldOLDold"
 }
 
 @test "restart-cluster --workers-only leaves this server alone" {
+    cluster_node_names_rule
     run --separate-stderr demo_cmd restart-cluster --yes --dry-run --json --workers-only
     assert_success
     printf '%s' "$output" | jq -e '[.plan[] | tostring] | (map(test("this server")) | any | not)' >/dev/null
@@ -282,6 +288,33 @@ OLD_FP="SHA256:OLDoldOLDoldOLDoldOLDoldOLDoldOLDoldOLDold"
     run demo_cmd restart-cluster --help
     assert_success
     assert_output --partial "restarted first"
+}
+
+@test "reboot-cluster plans full worker reboots before the control server" {
+    cluster_node_names_rule
+    run --separate-stderr demo_cmd reboot-cluster --yes --dry-run --json
+    assert_success
+    printf '%s' "$output" | jq -e '[.plan[] | tostring] as $p |
+        ($p | map(test("whole machine")) | any) and
+        ($p | map(test("boot ID")) | any) and
+        ($p | map(test("Drain yard-")) | index(true)) < ($p | map(test("control server")) | index(true))' >/dev/null
+}
+
+@test "reboot-cluster refuses to start if this server is not in the Kubernetes node list" {
+    ny_rule_first "k3s kubectl get nodes -o name*" 0 'node/worker-1\nnode/worker-2'
+    run --separate-stderr demo_cmd reboot-cluster --yes --dry-run --json
+    assert_failure
+    assert_output --partial "isn't listed as a node"
+    assert_output --partial "No machines were rebooted"
+}
+
+@test "reboot-cluster rejects unsafe timeout values and documents that it reboots the OS" {
+    run --separate-stderr demo_cmd reboot-cluster --timeout 10 --yes --dry-run
+    assert_failure
+    run demo_cmd reboot-cluster --help
+    assert_success
+    assert_output --partial "Fully reboots every machine"
+    assert_output --partial "workloads are interrupted"
 }
 
 # --- menu header -------------------------------------------------------------------

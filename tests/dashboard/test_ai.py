@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "share", "nodeyard", "dashboard"))
@@ -57,10 +58,13 @@ class Commands(unittest.TestCase):
 
     def test_fixed_actions(self):
         self.assertEqual(self.build("undeploy")[1], ["ai", "split", "undeploy", "--yes"])
+        self.assertEqual(self.build("force-stop")[1], ["ai", "split", "undeploy", "--force", "--yes"])
         self.assertEqual(self.build("split-unload")[1], ["ai", "split", "unload", "--yes"])
         self.assertEqual(self.build("split-load")[1], ["ai", "split", "load", "--yes"])
         self.assertEqual(self.build("agent-install")[1], ["dashboard", "agent", "install", "--yes"])
         self.assertEqual(self.build("test")[1], ["ai", "split", "test", "--api-key-file", KEY])
+        self.assertEqual(self.build("reboot-cluster")[1], ["reboot-cluster", "--yes"])
+        self.assertIn("reboot-cluster", aiapi.OUTSIDE_ACTIONS)
 
     def test_unknown_actions_are_refused(self):
         for action in ("", "shell", "rm", "deploy ", "ai"):
@@ -112,6 +116,28 @@ class TaskRunner(unittest.TestCase):
         self.wait(jobs, first)
         self.wait(jobs, jobs.start("Now fine", []))
 
+    def test_running_task_can_be_cancelled_and_its_process_group_is_stopped(self):
+        jobs = aiapi.Jobs(self.fake_nodeyard("sleep 30 &\nwait"))
+        jid = jobs.start("Long task", [])
+
+        self.assertTrue(jobs.view(jid, 0)["cancelable"])
+        self.assertTrue(jobs.cancel(jid))
+        v = self.wait(jobs, jid, timeout=3)
+
+        self.assertEqual(v["status"], "cancelled")
+        self.assertTrue(v["cancel_requested"])
+        self.assertFalse(v["cancelable"])
+        self.assertIn("Cancellation requested", "\n".join(v["lines"]))
+
+    def test_finished_task_cannot_be_cancelled(self):
+        jobs = aiapi.Jobs(self.fake_nodeyard("exit 0"))
+        jid = jobs.start("Quick task", [])
+        self.wait(jobs, jid)
+
+        with self.assertRaises(aiapi.AIError) as cm:
+            jobs.cancel(jid)
+        self.assertEqual(cm.exception.code, 409)
+
     def test_no_nodeyard_means_no_tasks(self):
         for path in ("", "/nonexistent/nodeyard"):
             with self.assertRaises(aiapi.AIError) as cm:
@@ -162,6 +188,48 @@ class HuggingFaceParsing(unittest.TestCase):
                 self.hf([]).files(repo)
 
 
+class ChatInputValidation(unittest.TestCase):
+    def test_text_and_multiple_inline_images_are_kept_for_the_model(self):
+        image = "data:image/png;base64,aGVsbG8="
+        messages = [{"role": "user", "content": [
+            {"type": "text", "text": "Read these labels"},
+            {"type": "image_url", "image_url": {"url": image, "detail": "high"}},
+            {"type": "image_url", "image_url": {"url": image}},
+        ]}]
+
+        clean = aiapi.clean_chat_messages(messages)
+
+        self.assertEqual(clean, [{"role": "user", "content": [
+            {"type": "text", "text": "Read these labels"},
+            {"type": "image_url", "image_url": {"url": image}},
+            {"type": "image_url", "image_url": {"url": image}},
+        ]}])
+
+    def test_remote_or_malformed_images_are_refused(self):
+        for url in ("https://example.com/image.png", "data:image/svg+xml;base64,PHN2Zz4=", "data:image/png;base64,%%%", "data:image/png;base64,aaaaa"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                aiapi.clean_chat_messages([{"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}}]}])
+
+    def test_images_are_only_allowed_in_user_messages_and_have_a_count_limit(self):
+        image = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,YQ=="}}
+        with self.assertRaises(ValueError):
+            aiapi.clean_chat_messages([{"role": "assistant", "content": [image]}])
+        with self.assertRaises(ValueError):
+            aiapi.clean_chat_messages([{"role": "user", "content": [image] * (aiapi.MAX_CHAT_IMAGES + 1)}])
+
+    def test_ollama_gets_its_string_image_url_format(self):
+        messages = aiapi.clean_chat_messages([{"role": "user", "content": [
+            {"type": "text", "text": "Read this"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,YQ==", "detail": "high"}},
+        ]}])
+
+        ollama = aiapi.chat_payload_for_target("ollama:pod-1:model", {"messages": messages})
+        split = aiapi.chat_payload_for_target("split", {"messages": messages})
+
+        self.assertEqual(ollama["messages"][0]["content"][1]["image_url"], "data:image/png;base64,YQ==")
+        self.assertEqual(split["messages"], messages)
+
+
 class FakeStore:
     def __init__(self, state):
         self._state = state
@@ -186,6 +254,17 @@ class ModelInventory(unittest.TestCase):
             self.assertTrue(live.models_dirty)
             self.assertEqual(live.models_cache[1]["nodes"][0]["items"][0]["name"], "one.gguf")
             self.assertEqual(live._load_models_cache()[1]["nodes"][0]["items"][0]["name"], "one.gguf")
+
+    def test_inventory_save_failure_is_reported_instead_of_silently_losing_locations(self):
+        with tempfile.TemporaryDirectory() as d:
+            live = self.live(d)
+            live.jobs.bin = self.fake_nodeyard('echo \'{"ok":true,"nodes":[{"node":"debian-1","items":[{"kind":"model","name":"one.gguf","bytes":12}]}]}\'')
+            with patch.object(live, "_save_models_cache", return_value=False):
+                live._refresh_models(0)
+
+            self.assertIn("couldn't save their locations", live.models_error)
+            self.assertEqual(live.models_cache[1]["nodes"][0]["items"][0]["name"], "one.gguf")
+            self.assertIn("couldn't save their locations", live.disk_models()["scan_error"])
 
     def test_failed_refresh_preserves_the_last_known_models(self):
         with tempfile.TemporaryDirectory() as d:
@@ -263,6 +342,32 @@ class ModelInventory(unittest.TestCase):
             self.assertTrue(node["inventory_stale"])
             self.assertIn("offline-1", live.models_cache[1]["scan_error"])
 
+    def test_restart_keeps_models_from_nodes_missing_during_kubernetes_recovery(self):
+        with tempfile.TemporaryDirectory() as d:
+            live = self.live(d)
+            previous = {"ok": True, "nodes": [
+                {"node": "debian-1", "items": [{"kind": "model", "name": "saved.gguf", "bytes": 128}]},
+                {"node": "archlinux-2", "items": [{"kind": "model", "name": "other.gguf", "bytes": 256}]},
+            ]}
+            live.models_cache = (time.time(), previous)
+            live._save_models_cache(live.models_cache)
+
+            # A new dashboard process starts while Kubernetes has only
+            # returned its control node; both workers rejoin after restart.
+            restarted = self.live(d)
+            restarted.jobs.bin = self.fake_nodeyard(
+                'echo \'{"ok":true,"nodes":[{"node":"k8s-control","items":[]}]}\''
+            )
+            restarted._refresh_models(0)
+
+            nodes = {node["node"]: node for node in restarted.models_cache[1]["nodes"]}
+            self.assertEqual(nodes["debian-1"]["items"][0]["name"], "saved.gguf")
+            self.assertEqual(nodes["archlinux-2"]["items"][0]["name"], "other.gguf")
+            self.assertTrue(nodes["debian-1"]["inventory_stale"])
+            self.assertTrue(nodes["archlinux-2"]["inventory_stale"])
+            self.assertIn("debian-1", restarted.models_cache[1]["scan_error"])
+            self.assertEqual(restarted._load_models_cache()[1]["nodes"], restarted.models_cache[1]["nodes"])
+
     def fake_nodeyard(self, body):
         path = os.path.join(tempfile.mkdtemp(), "nodeyard")
         self.addCleanup(lambda: __import__("shutil").rmtree(os.path.dirname(path), ignore_errors=True))
@@ -299,6 +404,31 @@ class Resolving(unittest.TestCase):
             self.live(self.state(ready=False))._resolve("split")
         self.assertEqual(cm.exception.code, 503)
 
+    def test_ollama_explicit_load_stays_resident_until_unloaded(self):
+        live = self.live(self.state())
+        live._ollama_pods = lambda: [{"name": "ollama-abc", "ip": "10.42.0.9", "node": "n1"}]
+        requests = []
+        live._ollama_json = lambda pod, method, path, body=None, timeout=5: (requests.append(body or {}) or (200, {}))
+
+        live.ollama_load("ollama-abc", "llama3.2:3b", True)
+        live.ollama_load("ollama-abc", "llama3.2:3b", False)
+
+        self.assertEqual([request["keep_alive"] for request in requests], [-1, 0])
+
+    def test_ollama_overview_reports_loaded_models_on_each_pod(self):
+        live = self.live(self.state())
+        live._ollama_pods = lambda: [{"name": "ollama-abc", "ip": "10.42.0.9", "node": "n1"}]
+        def reply(pod, method, path, body=None, timeout=5):
+            if path == "/api/tags":
+                return 200, {"models": [{"name": "llama3.2:3b", "size": 100, "details": {}}]}
+            return 200, {"models": [{"name": "llama3.2:3b", "size_vram": 80, "expires_at": "never"}]}
+        live._ollama_json = reply
+
+        result = live.ollama_overview()
+
+        self.assertTrue(result[0]["models"][0]["loaded"])
+        self.assertEqual(result[0]["models"][0]["memory"], 80)
+
     def test_ollama_targets_must_be_real_pods(self):
         host, port, headers, model = self.live(self.state())._resolve("ollama:ollama-abc:llama3.2:3b")
         self.assertEqual((host, port, headers, model), ("10.42.0.9", 11434, {}, "llama3.2:3b"))
@@ -313,6 +443,18 @@ class Resolving(unittest.TestCase):
 
 
 class DemoBackend(unittest.TestCase):
+    def test_demo_running_tasks_can_be_cancelled(self):
+        backend = demoai.DemoAI(FakeStore({"nodes": []}))
+        jid = backend.run("switch", {"local": True, "file": "one.gguf"})
+        self.assertTrue(backend.job(jid, 0)["cancelable"])
+        self.assertTrue(backend.cancel_job(jid))
+
+        deadline = time.time() + 2
+        while time.time() < deadline and backend.job(jid, 0)["status"] == "running":
+            time.sleep(0.02)
+
+        self.assertEqual(backend.job(jid, 0)["status"], "cancelled")
+
     def test_the_demo_chat_streams_events_and_ends(self):
         stream = demoai.FakeStream("Hello there friend.", delay=0)
         lines = []
