@@ -4,8 +4,11 @@ nodeyard is built in phases; each minor release completes one. This page
 says what's done, what's next, and what is known not to work yet, so work
 can pick up cleanly at any point.
 
-**Current release: 0.1.0 (Phase 1, foundation).** The main branch is ahead of it: see
-[Done since 0.1.0](#done-since-010-unreleased) for what is built but not released yet.
+**Last formal version: 0.1.0 (Phase 1, foundation).** `main` contains many later commits
+that have not been assigned a release number; the version string tracks formal software
+versions, not the number of Git commits. The `main` branch is the install/update source,
+identified by its commit SHA, so updates do not require release tags. See
+[Done since 0.1.0](#done-since-010-unreleased) for the unreleased work.
 
 ## Roadmap
 
@@ -38,7 +41,7 @@ Built ahead of the roadmap, in Python and Bash (the Go agent of phase 5 is not s
 - **yardcode** (`yardcode/`): a terminal AI agent for any OpenAI-compatible model API on macOS and Linux. Installs with nodeyard or alone.
   See [yardcode/README.md](../yardcode/README.md).
 
-Tests: 251 bats tests (`make test`) and the Python tests for the dashboard, node agent, model gate and yardcode (`make test-py`;
+Tests: 261 bats tests (`make test`) and the Python tests for the dashboard, node agent, model gate and yardcode (`make test-py`;
 macOS and Linux, Python 3.8 to 3.13).
 
 Known gaps: web search and the macOS certificate lookup are only exercised on Linux in CI; switching models through the API is
@@ -63,7 +66,7 @@ tested against the demo and read-only against a real cluster; no screenshots of 
 - doctor with 24 checks and undoable fixes.
 - Secret redaction in logs, output and plans; secrets store.
 - Demo mode with a simulated four-node cluster.
-- install.sh / uninstall.sh, self-update from verified releases.
+- install.sh / uninstall.sh, self-update by GitHub source commit.
 - 122 bats unit tests, passing on macOS and Linux; multi-distro harness
   passing on Debian 12/13, Ubuntu 22.04/24.04, Fedora 42, Rocky 9,
   AlmaLinux 10, openSUSE Leap 15.6 and Tumbleweed, and Arch (run locally

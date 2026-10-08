@@ -566,7 +566,7 @@ post() { # post PATH JSON -> response body
 @test "the web page's scripts are valid JavaScript" {
     command -v node >/dev/null || skip "node isn't installed"
     local f
-    for f in app.js charts.js theme.js login.js; do
+    for f in app.js charts.js theme.js login.js ai.js; do
         run node --check "${NY_REPO_ROOT}/share/nodeyard/dashboard/web/${f}"
         assert_success
     done

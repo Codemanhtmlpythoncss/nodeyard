@@ -494,3 +494,31 @@ switch_stubs() {
     [ "${NY_CMD_FN["ai key"]}" = "ai_split_key" ]
     [ "${NY_CMD_FN["ai split key"]}" = "ai_split_key" ]
 }
+
+@test "model inventory includes supported offline nodes and marks incomplete scans" {
+    NY_JSON=1
+    split_scan_nodes() { printf '%s\n' debian-1 debian-offline; }
+    split_on_nodes() {
+        printf '== debian-1\nDISK 1000 500\nMODEL 42 one.gguf\n== debian-offline\nERROR could not run on this node\n'
+    }
+    split_in_use() { printf '|\n'; }
+
+    run ai_split_models
+
+    assert_success
+    assert_output --partial '"node":"debian-1"'
+    assert_output --partial '"name":"one.gguf"'
+    assert_output --partial '"node":"debian-offline"'
+    assert_output --partial '"scan_error":"Disk scan did not finish on this node"'
+}
+
+@test "disk scans include supported architectures even when their nodes are not ready" {
+    kctl() {
+        printf '%s\n' 'debian-1 amd64 True' 'debian-offline arm64 False' 'legacy-node arm False'
+    }
+
+    run split_scan_nodes
+
+    assert_success
+    assert_output $'debian-1\ndebian-offline'
+}

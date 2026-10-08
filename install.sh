@@ -7,10 +7,9 @@
 #   curl -fsSLO https://raw.githubusercontent.com/Codemanhtmlpythoncss/nodeyard/main/install.sh
 #   less install.sh && sudo bash install.sh
 #
-# It downloads the release for this machine from GitHub, checks its SHA-256
-# against the release's SHA256SUMS, installs it under /usr/local/lib/nodeyard
-# and links /usr/local/bin/nodeyard. Running it again updates in place, and
-# re-running the same version changes nothing.
+# It downloads the current source from GitHub over HTTPS, installs it under
+# /usr/local/lib/nodeyard and links /usr/local/bin/nodeyard. Running it again
+# updates in place; use --force to reinstall the same version.
 
 set -euo pipefail
 
@@ -22,14 +21,16 @@ YES=0
 DRY_RUN=0
 FORCE=0
 NO_DEPS=0
+SOURCE_COMMIT="${NODEYARD_SOURCE_COMMIT:-}"
+REF="main"
 
 usage() {
     cat <<'USAGE'
 Usage: install.sh [options]
 
 Options:
-  --version X.Y.Z   Install this release (default: the latest)
-  --from-dir DIR    Install from an unpacked release or a git checkout
+  --version X.Y.Z   Install the source at tag vX.Y.Z (default: main)
+  --from-dir DIR    Install from an unpacked source archive or git checkout
   --prefix DIR      Install under DIR instead of /usr/local
   --no-deps         Don't offer to install required packages (jq, curl...)
   --force           Reinstall even if this version is already installed
@@ -52,6 +53,8 @@ while [[ $# -gt 0 ]]; do
         --version)
             [[ $# -ge 2 ]] || die "--version needs a value"
             VERSION="${2#v}"
+            [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || die "--version must look like 1.2.3"
+            REF="tags/v${VERSION}"
             shift 2
             ;;
         --from-dir)
@@ -130,10 +133,6 @@ confirm() {
     [[ -z "$reply" || "$reply" =~ ^[Yy] ]]
 }
 
-sha256() {
-    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
-}
-
 source_version() { # DIR -> version from its base.sh
     sed -n 's/^NY_VERSION="\(.*\)"$/\1/p' "$1/lib/core/base.sh" 2>/dev/null | head -n1
 }
@@ -145,41 +144,43 @@ trap 'rm -rf "$TMP"' EXIT
 
 if [[ -n "$FROM_DIR" ]]; then
     [[ -f "${FROM_DIR}/bin/nodeyard" && -d "${FROM_DIR}/lib" ]] ||
-        die "${FROM_DIR} doesn't look like nodeyard (no bin/nodeyard)." "Point --from-dir at an unpacked release or a git checkout."
+        die "${FROM_DIR} doesn't look like nodeyard (no bin/nodeyard)." "Point --from-dir at an unpacked source archive or a git checkout."
     SRC="$(cd "$FROM_DIR" && pwd -P)"
     VERSION="$(source_version "$SRC")"
+    if [[ -z "$SOURCE_COMMIT" && -d "${SRC}/.git" ]] && command -v git >/dev/null 2>&1; then
+        SOURCE_COMMIT="$(git -C "$SRC" rev-parse HEAD 2>/dev/null || true)"
+    fi
 else
     command -v curl >/dev/null 2>&1 || die "curl is needed to download nodeyard." "Install curl with your package manager, then try again."
     command -v tar >/dev/null 2>&1 || die "tar is needed to unpack nodeyard." "Install tar with your package manager, then try again."
     case "$(uname -m)" in
-        x86_64 | amd64) ARCH=amd64 ;;
-        aarch64 | arm64) ARCH=arm64 ;;
-        *) die "There is no nodeyard release for $(uname -m) yet (only amd64 and arm64)." "You can still install from a git checkout: git clone https://github.com/${REPO} && sudo bash nodeyard/install.sh --from-dir nodeyard" ;;
+        x86_64 | amd64 | aarch64 | arm64) ;;
+        *) die "There is no nodeyard build for $(uname -m) yet (only amd64 and arm64)." "Install from a git checkout: git clone https://github.com/${REPO} && sudo bash nodeyard/install.sh --from-dir nodeyard" ;;
     esac
-    if [[ -z "$VERSION" ]]; then
-        url="$(curl -fsSIL --proto '=https' -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" 2>/dev/null || true)"
-        [[ "$url" == */tag/v* ]] || die "Could not find the latest nodeyard release." "Check this machine's internet connection, or pass --version X.Y.Z."
-        VERSION="${url##*/tag/v}"
-    fi
-    base="https://github.com/${REPO}/releases/download/v${VERSION}"
-    name="nodeyard-${VERSION}-linux-${ARCH}.tar.gz"
-    step "Downloading nodeyard ${VERSION} (${ARCH})"
-    curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "${TMP}/SHA256SUMS" "${base}/SHA256SUMS" ||
-        die "Could not download ${base}/SHA256SUMS." "Check the version exists: https://github.com/${REPO}/releases"
-    curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "${TMP}/${name}" "${base}/${name}" ||
-        die "Could not download ${name}." "Check the version exists: https://github.com/${REPO}/releases"
-    want="$(awk -v n="$name" '$2 == n || $2 == "*"n {print $1}' "${TMP}/SHA256SUMS")"
-    [[ "$want" =~ ^[0-9a-f]{64}$ ]] || die "The release has no checksum for ${name}."
-    [[ "$(sha256 "${TMP}/${name}")" == "$want" ]] ||
-        die "Checksum mismatch for ${name}; nothing was installed." "Try again. If it keeps happening, report it at https://github.com/${REPO}/issues"
-    step "Checksum verified"
+    SOURCE_COMMIT="$(curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 \
+        "https://api.github.com/repos/${REPO}/commits/${REF}" 2>/dev/null |
+        sed -n 's/^[[:space:]]*"sha": "\([0-9a-f]\{40\}\)".*/\1/p' | head -n1 || true)"
+    [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+        die "Could not find source ref ${REF} for ${REPO}." "Check this machine's internet connection and the repository's main branch."
+    step "Downloading nodeyard source at ${SOURCE_COMMIT:0:12}"
+    curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 \
+        -o "${TMP}/source.tar.gz" "https://github.com/${REPO}/archive/${SOURCE_COMMIT}.tar.gz" ||
+        die "Could not download nodeyard source at ${SOURCE_COMMIT:0:12}." "Check this machine's internet connection, then try again."
     mkdir -p "${TMP}/src"
-    tar -xzf "${TMP}/${name}" -C "${TMP}/src"
-    SRC="${TMP}/src"
-    [[ -f "${SRC}/bin/nodeyard" ]] || SRC="$(find "${TMP}/src" -maxdepth 2 -path '*/bin/nodeyard' -exec dirname {} \; | head -n1)/.."
-    [[ -f "${SRC}/bin/nodeyard" ]] || die "The release archive looks incomplete." "Report it at https://github.com/${REPO}/issues"
+    tar -xzf "${TMP}/source.tar.gz" -C "${TMP}/src"
+    SRC="$(find "${TMP}/src" -maxdepth 3 -path '*/bin/nodeyard' -print -quit | sed 's#/bin/nodeyard$##')"
+    [[ -n "$SRC" && -f "${SRC}/install.sh" ]] || die "The source archive looks incomplete." "Report it at https://github.com/${REPO}/issues"
+    actual_version="$(source_version "$SRC")"
+    [[ -n "$actual_version" ]] || die "Could not read nodeyard's version from the source archive."
+    if [[ -n "$VERSION" && "$VERSION" != "$actual_version" ]]; then
+        die "Tag v${VERSION} contains nodeyard ${actual_version}." "Use the version that is in that source tag."
+    fi
+    VERSION="$actual_version"
 fi
 [[ -n "$VERSION" ]] || die "Could not tell which nodeyard version this is."
+if [[ -n "$SOURCE_COMMIT" && ! "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+    die "Invalid source commit metadata." "Re-run the installer from a clean source checkout or archive."
+fi
 
 INSTALLED="$(source_version "$DEST" || true)"
 if [[ "$INSTALLED" == "$VERSION" && "$FORCE" -eq 0 ]]; then
@@ -207,6 +208,10 @@ run mkdir -p "$new"
 for item in bin lib share completions yardcode install.sh uninstall.sh remote-install.sh LICENSE CHANGELOG.md README.md; do
     [[ -e "${SRC}/${item}" ]] && run cp -R "${SRC}/${item}" "${new}/"
 done
+if [[ -n "$SOURCE_COMMIT" ]]; then
+    printf '%s\n' "$SOURCE_COMMIT" >"${TMP}/source-commit"
+    run cp "${TMP}/source-commit" "${new}/.source-commit"
+fi
 run chmod -R u=rwX,go=rX "$new"
 run chmod 0755 "${new}/bin/nodeyard"
 [[ -f "${new}/share/nodeyard/demo/shim.sh" || "$DRY_RUN" -eq 1 ]] && run chmod 0755 "${new}/share/nodeyard/demo/shim.sh"

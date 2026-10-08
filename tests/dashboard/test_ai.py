@@ -89,9 +89,11 @@ class TaskRunner(unittest.TestCase):
 
     def test_output_and_exit_status(self):
         jobs = aiapi.Jobs(self.fake_nodeyard('echo "args: $*"; echo second line; exit 0'))
-        jid = jobs.start("Demo", ["ai", "split", "status"])
+        done = []
+        jid = jobs.start("Demo", ["ai", "split", "status"], on_done=lambda job: done.append((job["status"], job["rc"])))
         v = self.wait(jobs, jid)
         self.assertEqual((v["status"], v["rc"]), ("ok", 0))
+        self.assertEqual(done, [("ok", 0)])
         self.assertEqual(v["lines"], ["args: --no-color ai split status", "second line"])
         self.assertEqual(jobs.view(jid, 1)["lines"], ["second line"])
 
@@ -166,6 +168,108 @@ class FakeStore:
 
     def snapshot(self):
         return {"state": self._state}
+
+
+class ModelInventory(unittest.TestCase):
+    def live(self, state_dir):
+        return aiapi.Live(FakeStore({"nodes": [], "pods": [], "services": []}), "", "", state_dir=state_dir)
+
+    def test_invalidation_keeps_the_saved_inventory_visible_until_refresh(self):
+        with tempfile.TemporaryDirectory() as d:
+            live = self.live(d)
+            data = {"ok": True, "nodes": [{"node": "debian-1", "items": [{"kind": "model", "name": "one.gguf", "bytes": 12}]}]}
+            live.models_cache = (time.time(), data)
+            live._save_models_cache(live.models_cache)
+
+            live._forget_models_cache()
+
+            self.assertTrue(live.models_dirty)
+            self.assertEqual(live.models_cache[1]["nodes"][0]["items"][0]["name"], "one.gguf")
+            self.assertEqual(live._load_models_cache()[1]["nodes"][0]["items"][0]["name"], "one.gguf")
+
+    def test_failed_refresh_preserves_the_last_known_models(self):
+        with tempfile.TemporaryDirectory() as d:
+            live = self.live(d)
+            previous = {"ok": True, "nodes": [{"node": "debian-1", "items": [{"kind": "model", "name": "one.gguf", "bytes": 12}]}]}
+            live.models_cache = (time.time(), previous)
+
+            live._refresh_models(0)
+
+            self.assertIs(live.models_cache[1], previous)
+            self.assertTrue(live.models_error)
+
+    def test_timed_out_refresh_preserves_the_last_known_models(self):
+        with tempfile.TemporaryDirectory() as d:
+            live = self.live(d)
+            previous = {"ok": True, "nodes": [{"node": "debian-1", "items": [{"kind": "model", "name": "one.gguf", "bytes": 12}]}]}
+            live.models_cache = (time.time(), previous)
+            live.jobs.bin = self.fake_nodeyard("exec sleep 2")
+            live.MODEL_SCAN_TIMEOUT = 0.03
+
+            live._refresh_models(0)
+
+            self.assertIs(live.models_cache[1], previous)
+            self.assertTrue(live.models_error)
+
+    def test_delete_removes_the_model_from_the_persisted_inventory(self):
+        with tempfile.TemporaryDirectory() as d:
+            live = self.live(d)
+            data = {"ok": True, "nodes": [{"node": "debian-1", "items": [
+                {"kind": "model", "name": "one.gguf", "bytes": 12},
+                {"kind": "cache", "name": "one", "bytes": 8},
+            ]}]}
+            live.models_cache = (time.time(), data)
+            live._save_models_cache(live.models_cache)
+
+            live._forget_models_cache("one.gguf")
+
+            items = live._load_models_cache()[1]["nodes"][0]["items"]
+            self.assertEqual(items, [])
+
+    def test_failed_delete_keeps_the_saved_model_location(self):
+        with tempfile.TemporaryDirectory() as d:
+            live = self.live(d)
+            data = {"ok": True, "nodes": [{"node": "debian-1", "items": [{"kind": "model", "name": "one.gguf", "bytes": 12}]}]}
+            live.models_cache = (time.time(), data)
+
+            live._model_job_done("split-rm", {"file": "one.gguf"}, {"status": "failed"})
+
+            self.assertEqual(live.models_cache[1]["nodes"][0]["items"][0]["name"], "one.gguf")
+            self.assertTrue(live.models_dirty)
+
+    def test_partial_node_scan_is_kept_and_reported(self):
+        with tempfile.TemporaryDirectory() as d:
+            live = self.live(d)
+            script = self.fake_nodeyard('echo \'{"ok":true,"nodes":[{"node":"offline-1","items":[],"scan_error":"Disk scan did not finish on this node"}]}\'')
+            live.jobs.bin = script
+
+            live._refresh_models(0)
+
+            self.assertIn("offline-1", live.models_cache[1]["scan_error"])
+
+    def test_partial_scan_retains_last_known_items_for_an_unreachable_node(self):
+        with tempfile.TemporaryDirectory() as d:
+            live = self.live(d)
+            previous = {"ok": True, "nodes": [{"node": "offline-1", "items": [
+                {"kind": "model", "name": "saved.gguf", "bytes": 128},
+            ]}]}
+            live.models_cache = (time.time(), previous)
+            live.jobs.bin = self.fake_nodeyard('echo \'{"ok":true,"nodes":[{"node":"offline-1","items":[],"scan_error":"Disk scan did not finish on this node"}]}\'')
+
+            live._refresh_models(0)
+
+            node = live.models_cache[1]["nodes"][0]
+            self.assertEqual(node["items"][0]["name"], "saved.gguf")
+            self.assertTrue(node["inventory_stale"])
+            self.assertIn("offline-1", live.models_cache[1]["scan_error"])
+
+    def fake_nodeyard(self, body):
+        path = os.path.join(tempfile.mkdtemp(), "nodeyard")
+        self.addCleanup(lambda: __import__("shutil").rmtree(os.path.dirname(path), ignore_errors=True))
+        with open(path, "w") as f:
+            f.write("#!/bin/sh\n" + body + "\n")
+        os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
+        return path
 
 
 class Resolving(unittest.TestCase):

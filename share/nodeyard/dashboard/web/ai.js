@@ -37,25 +37,57 @@
     if (!force && A.ollama && Date.now() - A.ollamaAt < 6000) return;
     A.ollamaAt = Date.now();
     try { const r = await getJSON("/api/ai/ollama"); A.ollama = r.ok ? r.pods : []; } catch (e) { return; }
-    if (S.view === "ai" && A.tab === "models") refreshTab();
+    if (S.view === "ai" && (A.tab === "models" || A.tab === "search")) refreshTab();
   }
-  let diskRequest = null, diskPollTimer = null;
+  let diskRequest = null, diskPollTimer = null, diskScanStartedAt = 0;
+  const DISK_SCAN_WATCHDOG_MS = 90000, completedDownloadRescans = new Map();
+  function diskHasModel(data, file) {
+    return ((data && data.nodes) || []).some((n) => (n.items || []).some((it) => it.kind === "model" && it.name === file));
+  }
   async function loadDisk(force, refresh) {
     const dl = A.disk && A.disk.downloads && A.disk.downloads.some((d) => d.state === "running");
     if (!force && A.diskAt && Date.now() - A.diskAt < (dl ? 5000 : 30000)) return;
     if (diskRequest) return diskRequest;
     A.diskAt = Date.now();
     diskRequest = (async () => {
+      let retryAfterDownload = false;
       try {
         const r = await getJSON("/api/ai/models" + (refresh ? "?refresh=1" : ""));
-        if (r.ok) { A.disk = r; A.diskErr = ""; }
-        else A.diskErr = r.error || "Couldn't look at the disks.";
-      } catch (e) { A.diskErr = e.message || "Couldn't reach the dashboard server."; }
+        if (r.ok) {
+          A.disk = r; A.diskErr = "";
+          if (r.scanning) {
+            if (!diskScanStartedAt) diskScanStartedAt = Date.now();
+            if (Date.now() - diskScanStartedAt > DISK_SCAN_WATCHDOG_MS) {
+              const message = "The disk scan is taking too long. Showing the saved inventory; retry when the machines are responding.";
+              A.disk = Object.assign({}, r, { scanning: false, scan_error: r.scan_error || message });
+              A.diskErr = message; diskScanStartedAt = 0;
+            }
+          } else diskScanStartedAt = 0;
+          if (A.disk && !A.disk.scanning) {
+            (r.downloads || []).filter((d) => d.state === "done" && d.file).forEach((d) => {
+              if (diskHasModel(r, d.file)) { completedDownloadRescans.delete(d.job); return; }
+              // A Kubernetes download can finish just before its file is visible
+              // to the disk helper. Retry briefly rather than leaving a model
+              // out of the library after a successful download.
+              const tries = completedDownloadRescans.get(d.job) || 0;
+              if (tries < 8) { completedDownloadRescans.set(d.job, tries + 1); retryAfterDownload = true; }
+            });
+            while (completedDownloadRescans.size > 200) completedDownloadRescans.delete(completedDownloadRescans.keys().next().value);
+          }
+        } else {
+          A.diskErr = r.error || "Couldn't look at the disks."; diskScanStartedAt = 0;
+          if (A.disk) A.disk = Object.assign({}, A.disk, { scanning: false, scan_error: A.diskErr });
+        }
+      } catch (e) {
+        A.diskErr = e.message || "Couldn't reach the dashboard server."; diskScanStartedAt = 0;
+        if (A.disk) A.disk = Object.assign({}, A.disk, { scanning: false, scan_error: A.diskErr });
+      }
       finally { diskRequest = null; }
       clearTimeout(diskPollTimer);
       if (A.disk && A.disk.scanning) diskPollTimer = setTimeout(() => loadDisk(true), 4000);
+      else if (retryAfterDownload) diskPollTimer = setTimeout(() => loadDisk(true, true), 250);
       refreshModelPick();
-      if (S.view === "ai" && A.tab === "models") refreshTab();
+      if (S.view === "ai" && (A.tab === "models" || A.tab === "search")) refreshTab();
     })();
     return diskRequest;
   }
@@ -237,7 +269,7 @@
       loadDisk();
       selectTab(A.tab);
     },
-    update() { loadRemoteChats(); loadTargets(); if (A.tab === "models") { loadOllama(); loadDisk(); } refreshTab(); },
+    update() { loadRemoteChats(); loadTargets(); if (A.tab === "models" || A.tab === "search") { loadOllama(); loadDisk(); } refreshTab(); },
   };
   function selectTab(t) {
     A.tab = t; store.set("ai.tab", t);
@@ -245,6 +277,7 @@
     A.built = null;
     refreshTab();
     if (t === "models") { loadOllama(true); loadDisk(true); }
+    else if (t === "search") { loadDisk(); loadOllama(); }
   }
   function refreshTab() {
     if (S.view !== "ai" || !$("#ai-pane")) return;
@@ -284,7 +317,11 @@
   function installed() {
     const seen = {};
     ((A.disk && A.disk.nodes) || []).forEach((n) => n.items.forEach((it) => {
-      if (it.kind === "model" && (!seen[it.name] || it.bytes > seen[it.name].size)) seen[it.name] = { file: it.name, size: it.bytes, node: n.node };
+      if (it.kind !== "model") return;
+      const m = seen[it.name] || (seen[it.name] = { file: it.name, size: 0, node: n.node, nodes: [], unverified: [] });
+      if ((it.bytes || 0) > m.size) { m.size = it.bytes || 0; m.node = n.node; }
+      if (!m.nodes.includes(n.node)) m.nodes.push(n.node);
+      if (n.scan_error && !m.unverified.includes(n.node)) m.unverified.push(n.node);
     }));
     return Object.values(seen).sort((a, b) => a.file.localeCompare(b.file));
   }
@@ -296,7 +333,7 @@
     const opts = list.map((m) => { A.pick[m.file] = m; return '<option value="' + esc(m.file) + '"' + (m.file === shown ? " selected" : "") + ">" + esc(m.file.replace(/\.gguf$/i, "") + " · " + fmt.bytes(m.size, 1) + " · " + m.node + (m.file === running ? " · " + state : "")) + "</option>"; });
     if (A.wanted && A.disk && !A.pick[A.wanted.file]) { A.wanted = null; store.set("ai.wanted", ""); }
     const scanningEmpty = A.disk && A.disk.scanning && !((A.disk.nodes || []).some((n) => (n.items || []).some((it) => it.kind === "model")));
-    const none = !A.disk || scanningEmpty ? "Looking at the disks…" : !list.length ? "No models downloaded" : "No model running: pick one";
+    const none = !A.disk || scanningEmpty ? "Looking at the disks…" : A.disk.scan_error ? "Disk scan incomplete · refresh Models" : !list.length ? "No GGUF models saved" : "No model running: pick one";
     const htmlStr = (shown && A.pick[shown] ? "" : '<option value="" selected>' + esc(running ? running.replace(/\.gguf$/i, "") + " · " + state : none) + "</option>") + opts.join("");
     if (sel.dataset.sig !== htmlStr) { sel.dataset.sig = htmlStr; sel.innerHTML = htmlStr; }
     sel.disabled = !!busy || !list.length;
@@ -947,18 +984,19 @@
   const etaText = (t) => (t < 90 ? Math.round(t) + " s" : t < 3600 ? Math.round(t / 60) + " min" : Math.floor(t / 3600) + " h " + Math.round((t % 3600) / 60) + " min");
   function diskCard() {
     const D = A.disk;
-    if (!D) return card("Downloaded models", A.diskErr ? html`<div class="empty"><b>Couldn't look at the disks</b>${A.diskErr}</div>` : html`<div class="empty"><div class="spin"></div>Looking at each machine's disk…</div>`);
+    if (!D) return card("Downloaded models", A.diskErr ? html`<div class="empty"><b>Couldn't check model storage</b><div class="muted small">${A.diskErr}</div><button class="btn small mt" data-ai="disk-refresh">Retry scan</button></div>` : html`<div class="empty"><div class="spin"></div>Checking model storage…</div>`);
     const hasInventory = (D.nodes || []).some((n) => (n.items || []).length);
-    if (D.scanning && !hasInventory) return card("Downloaded models", html`<div class="empty"><div class="spin"></div>Looking at each machine's disk…</div>`);
+    if (D.scanning && !hasInventory) return card("Downloaded models", html`<div class="empty"><div class="spin"></div><b>Checking model storage</b><div class="muted small">Looking for saved models on each machine. This refreshes automatically.</div>${D.scan_error ? html`<div class="note small mt">${D.scan_error}</div>` : ""}</div>`);
     const kindName = { model: "Model file", partial: "Unfinished download", cache: "Weight cache" };
     const rows = [], byModel = {};
     let reclaim = 0;
     D.nodes.forEach((n) => n.items.forEach((it) => {
       if (it.kind === "disk") return;
       if (it.kind === "model") {
-        const m = byModel[it.name] || (byModel[it.name] = { file: it.name, size: 0, nodes: [] });
+        const m = byModel[it.name] || (byModel[it.name] = { file: it.name, size: 0, nodes: [], unverified: [] });
         m.size = Math.max(m.size, it.bytes || 0);
         if (!m.nodes.includes(n.node)) m.nodes.push(n.node);
+        if (n.scan_error && !m.unverified.includes(n.node)) m.unverified.push(n.node);
         return;
       }
       const base = it.kind === "partial" ? it.name.replace(/\.(part\d*|joining|copying)$/, "") : it.name;
@@ -980,7 +1018,7 @@
         raw('<button class="btn small danger" data-ai="m-rm" data-file="' + esc(r.base) + '">' + (r.busy ? "Stop + delete" : "Delete") + "</button>")) },
     ];
     const dls = (D.downloads || []).filter((d) => d.state !== "done");
-    return card("Downloaded models", html`${D.scanning ? html`<div class="muted small" style="margin-bottom:10px"><span class="spin small"></span> Refreshing the saved disk inventory…</div>` : ""}${D.scan_error ? html`<div class="note small">The latest disk scan failed: ${D.scan_error}. Showing the last saved inventory.</div>` : ""}<div class="disks">${disks.map((d) => { const used = 1 - d.free / Math.max(1, d.cap); return html`<div><div class="row"><b>${d.node}</b><span class="grow"></span><span class="muted small">${fmt.bytes(d.free)} free of ${fmt.bytes(d.cap)}</span></div><div class="bar ${used > 0.9 ? "bad" : used > 0.8 ? "warn" : ""}"><i style="width:${(used * 100).toFixed(1)}%"></i></div></div>`; })}</div>
+    return card("Downloaded models", html`${D.scanning ? html`<div class="muted small" style="margin-bottom:10px"><span class="spin small"></span> Refreshing the saved disk inventory…</div>` : ""}${D.scan_error ? html`<div class="note small">The inventory is partial: ${D.scan_error}</div>` : ""}<div class="disks">${disks.map((d) => { const used = 1 - d.free / Math.max(1, d.cap); return html`<div><div class="row"><b>${d.node}</b><span class="grow"></span><span class="muted small">${fmt.bytes(d.free)} free of ${fmt.bytes(d.cap)}</span></div><div class="bar ${used > 0.9 ? "bad" : used > 0.8 ? "warn" : ""}"><i style="width:${(used * 100).toFixed(1)}%"></i></div></div>`; })}</div>
       ${dls.map((d) => html`<div class="mt"><div class="row"><span class="mono small grow" style="word-break:break-all">${d.file}</span><span class="muted small">${d.state === "stuck" ? "stuck: not enough disk" : d.state === "failed" ? "failed" : d.note ? d.note : fmt.bytes(d.got) + " of " + fmt.bytes(d.size) + (d.rate ? " · " + fmt.rate(d.rate) : "") + (d.eta != null ? " · about " + etaText(d.eta) + " left" : "")} · ${d.node}</span></div><div class="bar ${d.state === "running" ? "" : "bad"}"><i style="width:${d.size ? Math.min(100, (100 * d.got) / d.size).toFixed(1) : 0}%"></i></div></div>`)}
       <div class="ai-model-list">${models.length ? models.map((m) => {
         const active = m.file === D.in_use || !!(split && split.model === m.file);
@@ -992,8 +1030,8 @@
             : '<button class="btn small" disabled>Starting…</button>')
           : '<button class="btn small primary" data-ai="m-run" data-file="' + esc(m.file) + '" data-size="' + m.size + '"' + (aiBusy ? ' disabled' : '') + '>Run model</button>';
         const remove = active ? "" : ' <button class="btn small danger" data-ai="m-rm" data-file="' + esc(m.file) + '">Delete</button>';
-        return html`<article class="ai-model-row"><div class="ai-model-icon" aria-hidden="true">AI</div><div class="ai-model-main"><div class="ai-model-heading"><b class="ai-model-name">${m.file}</b>${active ? chip(split && split.model === m.file && split.ready ? "Serving" : "In use", split && split.model === m.file && split.ready ? "good" : "warn") : ""}</div><div class="muted small">${fmt.bytes(m.size)} model file · saved on ${plural(locations.length, "machine")}</div><div class="ai-model-locations">${locations.map((node) => html`<span class="ai-model-location"><i></i>${node}</span>`)}</div></div><div class="ai-model-actions">${raw(run + remove)}</div></article>`;
-      }) : html`<div class="empty">Nothing downloaded yet<div class="muted small">Download a model from Find models, then run it here.</div></div>`}</div>
+        return html`<article class="ai-model-row"><div class="ai-model-icon" aria-hidden="true">AI</div><div class="ai-model-main"><div class="ai-model-heading"><b class="ai-model-name">${m.file}</b>${active ? chip(split && split.model === m.file && split.ready ? "Serving" : "In use", split && split.model === m.file && split.ready ? "good" : "warn") : ""}</div><div class="muted small">${fmt.bytes(m.size)} model file · saved on ${plural(locations.length, "machine")}</div><div class="ai-model-locations">${locations.map((node) => html`<span class="ai-model-location ${m.unverified.includes(node) ? "stale" : ""}" title="${m.unverified.includes(node) ? "Last saved location; this machine could not be checked" : "Verified in the latest scan"}"><i></i>${node}${m.unverified.includes(node) ? " · last seen" : ""}</span>`)}</div></div><div class="ai-model-actions">${raw(run + remove)}</div></article>`;
+      }) : html`<div class="empty"><b>${D.scan_error ? "Some machine disks could not be checked" : "No saved GGUF models found"}</b><div class="muted small">${D.scan_error || "This list shows GGUF files managed by nodeyard. Ollama models appear in the Ollama section."}</div><button class="btn small mt" data-ai="disk-refresh">Retry disk scan</button></div>`}</div>
       ${rows.length ? html`<details class="ai-disk-details"><summary>Storage details <span class="muted small">${plural(rows.length, "item")}</span></summary><div class="mt">${U.table("disk-items", cols, rows, { k: "size", empty: "No unfinished downloads or weight caches." })}</div></details>` : ""}
       <div class="row wrap" style="margin-top:14px;gap:8px">
         <button class="btn primary" data-ai="clean">Free up space${reclaim ? " (" + fmt.bytes(reclaim) + ")" : ""}</button>
@@ -1024,8 +1062,39 @@
     return { free, big, need, split: free >= need * 1.05 ? "fits" : free >= need ? "tight" : "no", single: big >= size * 1.1 + 0.5 * GiB ? "fits" : "no" };
   };
   const verdict = (v) => (v === "fits" ? chip("fits", "good") : v === "tight" ? chip("tight", "warn") : chip("too big", "bad"));
+  function downloadedSearchCard() {
+    const D = A.disk, models = installed(), split = S.d.ai && S.d.ai.split, busy = A.targets && A.targets.busy;
+    const ollama = {}, ollamaPods = A.ollama || [];
+    ollamaPods.forEach((p) => (p.models || []).forEach((m) => {
+      const saved = ollama[m.name] || (ollama[m.name] = { name: m.name, size: 0, nodes: [], pods: [] });
+      saved.size = Math.max(saved.size, m.size || 0);
+      if (p.node && !saved.nodes.includes(p.node)) saved.nodes.push(p.node);
+      saved.pods.push({ pod: p.pod, node: p.node, loaded: !!m.loaded });
+    }));
+    const ollamaModels = Object.values(ollama).sort((a, b) => a.name.localeCompare(b.name));
+    const hasInventory = D && (D.nodes || []).some((n) => (n.items || []).length);
+    if (!D && A.diskErr) return card("Already downloaded", html`<div class="empty"><b>Couldn't check model storage</b><div class="muted small">${A.diskErr}</div><button class="btn small mt" data-ai="disk-refresh">Retry scan</button></div>`);
+    if ((!D || (D.scanning && !hasInventory)) && !ollamaModels.length) return card("Already downloaded", html`<div class="empty"><div class="spin"></div><b>Checking your model library</b><div class="muted small">Looking for GGUF files and Ollama models on your machines…</div>${D && D.scan_error ? html`<div class="note small mt">${D.scan_error}</div>` : ""}</div>`);
+    if (!models.length && !ollamaModels.length) {
+      const downloads = (D && D.downloads || []).filter((d) => d.state === "running");
+      return card("Already downloaded", html`<div class="empty"><b>${D && D.scan_error ? "Some machine disks could not be checked" : downloads.length ? "Your download is in progress" : "No saved models found yet"}</b><div class="muted small">${D && D.scan_error || (downloads.length ? "Completed downloads appear here automatically when the files are ready." : "Download a GGUF or Ollama model from Find models, then run or chat with it here.")}</div>${downloads.map((d) => html`<div class="ai-download-pending"><div class="row"><span class="mono small">${d.file}</span><span class="grow"></span><span class="muted small">${d.node}</span></div><div class="bar"><i style="width:${d.size ? Math.min(100, 100 * d.got / d.size).toFixed(1) : 0}%"></i></div></div>`)}<button class="btn small mt" data-ai="disk-refresh">Refresh library</button></div>`);
+    }
+    return card("Already downloaded", html`<div class="ai-model-list">${models.map((m) => {
+      const active = !!(split && split.model === m.file) || m.file === D.in_use;
+      const run = active ? (split && split.model === m.file && split.loaded === false
+        ? '<button class="btn small" data-ai="m-load"' + (busy ? ' disabled' : '') + '>Load into memory</button>'
+        : split && split.model === m.file && split.ready
+          ? '<button class="btn small primary" data-ai="goto-chat" data-target="split">Chat</button>'
+          : '<button class="btn small" disabled>Starting…</button>')
+        : '<button class="btn small primary" data-ai="m-run" data-file="' + esc(m.file) + '" data-size="' + m.size + '"' + (busy ? ' disabled' : '') + '>Run model</button>';
+      return html`<article class="ai-model-row"><div class="ai-model-icon" aria-hidden="true">AI</div><div class="ai-model-main"><div class="ai-model-heading"><b class="ai-model-name">${m.file}</b>${active ? chip(split && split.ready && split.model === m.file ? "Serving" : "In use", split && split.ready && split.model === m.file ? "good" : "warn") : ""}</div><div class="muted small">${fmt.bytes(m.size)} · saved on ${plural(m.nodes.length, "machine")}</div><div class="ai-model-locations">${m.nodes.slice().sort().map((node) => html`<span class="ai-model-location ${m.unverified.includes(node) ? "stale" : ""}" title="${m.unverified.includes(node) ? "Last saved location; this machine could not be checked" : "Verified in the latest scan"}"><i></i>${node}${m.unverified.includes(node) ? " · last seen" : ""}</span>`)}</div></div><div class="ai-model-actions">${raw(run)}</div></article>`;
+    })}${ollamaModels.map((m) => {
+      const target = m.pods.find((p) => p.loaded) || m.pods[0];
+      return html`<article class="ai-model-row"><div class="ai-model-icon ollama-model-icon" aria-hidden="true">OL</div><div class="ai-model-main"><div class="ai-model-heading"><b class="ai-model-name">${m.name}</b>${chip("Ollama", "violet")}${m.pods.some((p) => p.loaded) ? chip("In memory", "good") : ""}</div><div class="muted small">${m.size ? fmt.bytes(m.size) + " · " : ""}saved on ${plural(m.nodes.length, "machine")}</div><div class="ai-model-locations">${m.nodes.slice().sort().map((node) => html`<span class="ai-model-location"><i></i>${node}</span>`)}</div></div><div class="ai-model-actions">${raw('<button class="btn small primary" data-ai="o-chat" data-pod="' + esc(target.pod) + '" data-model="' + esc(m.name) + '">Chat</button>')}</div></article>`;
+    })}</div><p class="muted small" style="margin:10px 0 0">GGUF models can be run across the cluster. Ollama models stay managed by Ollama and open in their own chat.</p>`, plural(models.length + ollamaModels.length, "model"));
+  }
   function buildSearch() {
-    setHTML($("#ai-pane"), html`<div class="toolbar"><input class="input grow" id="s-q" placeholder="Search Hugging Face for GGUF models: qwen coder, llama 3.2, gemma…" value="${A.search.q}" aria-label="Search models" spellcheck="false" style="min-width:280px">
+    setHTML($("#ai-pane"), html`<div id="s-downloaded" style="margin-bottom:18px"></div><div class="toolbar"><input class="input grow" id="s-q" placeholder="Search Hugging Face for GGUF models: qwen coder, llama 3.2, gemma…" value="${A.search.q}" aria-label="Search models" spellcheck="false" style="min-width:280px">
       <span class="seg" id="s-sort">${[["downloads", "Most downloaded"], ["likes", "Most liked"], ["trending", "Trending"], ["recent", "Recent"]].map(([v, l]) => raw('<button data-ai-sort="' + v + '">' + l + "</button>"))}</span></div>
       <div class="row wrap" id="s-chips" style="gap:6px;margin-bottom:14px">${["qwen coder", "llama 3.2", "gemma 3", "mistral", "deepseek", "phi", "abliterated"].map((s) => raw('<button class="chip btnlike" data-ai="s-chip" data-q="' + esc(s) + '">' + esc(s) + "</button>"))}</div>
       <div id="s-results"></div>`);
@@ -1041,6 +1110,7 @@
     A.search.loading = false; refreshSearch();
   }
   function refreshSearch() {
+    const saved = $("#s-downloaded"); if (saved) setHTML(saved, downloadedSearchCard());
     const el = $("#s-results"); if (!el) return;
     $$("#s-sort button").forEach((b) => b.classList.toggle("on", b.dataset.aiSort === A.search.sort));
     const s = A.search;

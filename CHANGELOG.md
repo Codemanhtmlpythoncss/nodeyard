@@ -9,6 +9,8 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Changed
 
+- The installer and `nodeyard update` now use the HTTPS `main` source at a recorded commit, so updates no longer depend on GitHub releases or tags. `--version` remains available for tag-based installs.
+- Model storage scans are bounded and include supported nodes even while they are NotReady. The dashboard keeps the last saved inventory during refreshes, retains last-known model locations for unreachable nodes, reports incomplete scans, retries after Kubernetes downloads finish, and shows Ollama downloads in Find models alongside GGUF files.
 - **License**: nodeyard and yardcode are now "All rights reserved" instead of MIT. You can read the source and run it on your own machines; copying,
   redistributing, selling, hosting for others and making clones are not allowed without written permission. Copies already received under MIT stay MIT.
 - **One server API key** for everything: yardcode, the control API and every model use the same key (dashboard Settings > Server API key, or
@@ -21,6 +23,7 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- Dashboard **Find Models** now starts with an **Already downloaded** section showing saved models, the machines that contain them, and a direct Run/Load/Chat action. Its inventory refreshes while this tab is open.
 - Dashboard **Devices sidebar**: per-node temperatures, load, CPU and memory use, sensor readings and short history charts, with the node details one click away.
 - yardcode: **type `/` and the commands appear above the prompt** (filter as you type, Up/Down, Tab or Enter), with the input framed
   between two rules and the permission mode, model and context use on the line below. **Shell mode**: `!` on an empty prompt (or

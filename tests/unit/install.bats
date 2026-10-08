@@ -59,6 +59,31 @@ install_it() {
     assert_output --partial "already installed"
 }
 
+@test "installer saves the source commit for later commit-based updates" {
+    export NODEYARD_SOURCE_COMMIT="0123456789abcdef0123456789abcdef01234567"
+    run install_it --force
+    assert_success
+    [ "$(cat "${PREFIX}/lib/nodeyard/.source-commit")" = "$NODEYARD_SOURCE_COMMIT" ]
+}
+
+@test "update checks main's source commit without consulting GitHub releases" {
+    ny_cmd() { :; }
+    source "${NY_REPO_ROOT}/lib/modules/tool.sh"
+    NY_HOME="${BATS_TEST_TMPDIR}/prefix/lib/nodeyard"
+    mkdir -p "$NY_HOME"
+    NY_REPO="Codemanhtmlpythoncss/nodeyard"
+    tool_source_commit() { printf '%s\n' "$1" >"${BATS_TEST_TMPDIR}/lookup-ref"; printf '%s\n' "0123456789abcdef0123456789abcdef01234567"; }
+    ny_deps_ensure() { :; }
+    ny_simulating() { return 0; }
+    ny_download() { printf '%s\n' "$1" >"${BATS_TEST_TMPDIR}/archive-url"; : >"$2"; }
+
+    run tool_update_cmd --check
+
+    assert_success
+    [ "$(cat "${BATS_TEST_TMPDIR}/lookup-ref")" = main ]
+    [ "$(cat "${BATS_TEST_TMPDIR}/archive-url")" = "https://github.com/${NY_REPO}/archive/0123456789abcdef0123456789abcdef01234567.tar.gz" ]
+}
+
 @test "--dry-run installs nothing" {
     run install_it --dry-run
     assert_success

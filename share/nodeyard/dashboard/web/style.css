@@ -392,13 +392,19 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .ai-model-row { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 13px; border: 1px solid var(--line); border-radius: 14px; background: linear-gradient(120deg, var(--panel2), var(--panel)); transition: border-color .16s, transform .16s, box-shadow .16s; }
 .ai-model-row:hover { border-color: var(--line2); transform: translateY(-1px); box-shadow: 0 8px 22px var(--glow); }
 .ai-model-icon { display: grid; place-items: center; width: 42px; height: 42px; border: 1px solid var(--line2); border-radius: 12px; color: var(--text); font-size: 11px; font-weight: 800; letter-spacing: .04em; background: linear-gradient(145deg, var(--accent), var(--accent2)); box-shadow: 0 5px 16px var(--glow); }
+.ai-model-icon.ollama-model-icon { background: linear-gradient(145deg, #0f766e, #22c55e); }
 .ai-model-main { min-width: 0; }
 .ai-model-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; min-width: 0; }
 .ai-model-name { min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
 .ai-model-locations { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
 .ai-model-location { display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 11px; }
 .ai-model-location i { width: 5px; height: 5px; border-radius: 50%; background: var(--good); box-shadow: 0 0 7px var(--good); }
+.ai-model-location.stale { color: var(--warn); border-color: var(--warn); }
+.ai-model-location.stale i { background: var(--warn); box-shadow: none; }
 .ai-model-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
+.ai-download-pending { max-width: 680px; margin: 14px auto 0; padding: 11px 13px; text-align: left; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.ai-download-pending .row { gap: 10px; }
+.ai-download-pending .mono { min-width: 0; overflow-wrap: anywhere; }
 .ai-disk-details { margin-top: 14px; border-top: 1px solid var(--line); }
 .ai-disk-details > summary { display: flex; align-items: center; gap: 8px; padding: 12px 2px 0; cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 600; }
 .ai-disk-details > summary:hover { color: var(--text); }

@@ -121,25 +121,23 @@ tool_update_cmd_help() {
     cat <<'HELP'
 Usage: nodeyard update [--check] [--version X.Y.Z] [--force]
 
-Updates nodeyard from its GitHub releases: downloads the release for this
-machine, verifies its SHA-256 checksum, shows the changelog entries you
-are about to get, and installs it after you confirm. It never installs an
-older version unless --force is given. A git checkout is updated with
-'git pull' instead.
+Updates nodeyard from the latest source commit on GitHub's main branch,
+shows the changelog entries you are about to get, and installs it after
+you confirm. It never installs an older version unless --force is given.
+A git checkout is updated with 'git pull' instead.
 
 Options:
   --check        Only report whether an update is available
-  --version V    Install this release instead of the latest
+  --version V    Install source from tag vV instead of main
   --force        Reinstall or downgrade
 HELP
 }
 
-tool_latest_version() {
-    local url
-    url="$(curl -fsSIL --proto '=https' -o /dev/null -w '%{url_effective}' "https://github.com/${NY_REPO}/releases/latest" 2>/dev/null || true)"
-    url="${url%/}"
-    [[ "$url" == */tag/v* ]] || return 1
-    printf '%s\n' "${url##*/tag/v}"
+tool_source_commit() {
+    local ref="$1"
+    curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 \
+        "https://api.github.com/repos/${NY_REPO}/commits/${ref}" 2>/dev/null |
+        sed -n 's/^[[:space:]]*"sha": "\([0-9a-f]\{40\}\)".*/\1/p' | head -n1 || true
 }
 
 # tool_changelog_between FILE FROM TO -- the changelog entries after FROM up to TO.
@@ -150,7 +148,7 @@ tool_changelog_between() {
 }
 
 tool_update_cmd() {
-    local check=0 version="" force=0
+    local check=0 version="" requested_version="" force=0 ref=main commit installed_commit tmp src cmp actual_version prefix
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --check)
@@ -160,7 +158,8 @@ tool_update_cmd() {
             --version)
                 ny_need_value "$1" $#
                 [[ "${2#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || ny_usage_error "--version must look like 1.2.3"
-                version="${2#v}"
+                requested_version="${2#v}"
+                ref="tags/v${requested_version}"
                 shift 2
                 ;;
             --force)
@@ -188,15 +187,42 @@ tool_update_cmd() {
     fi
 
     ny_deps_ensure "updating" curl tar gzip find
-    if [[ -z "$version" ]]; then
-        version="$(tool_latest_version)" || ny_die "Could not find the latest release of ${NY_REPO}." \
-            "Check this machine's internet connection, or see https://github.com/${NY_REPO}/releases"
+    commit="$(tool_source_commit "$ref")"
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] ||
+        ny_die "Could not find source ref ${ref} of ${NY_REPO}." "Check this machine's internet connection and the repository's main branch."
+    installed_commit="$(cat "${NY_HOME}/.source-commit" 2>/dev/null || true)"
+    if [[ "$commit" == "$installed_commit" && "$force" -eq 0 ]]; then
+        ny_ok "Already up to date (${commit:0:12})."
+        return 0
     fi
-    local cmp
+
+    tmp="$(ny_mktemp -d)"
+    local archive="https://github.com/${NY_REPO}/archive/${commit}.tar.gz"
+    if ny_simulating; then
+        ny_download "$archive" "${tmp}/source.tar.gz"
+        if [[ "$check" -eq 1 ]]; then
+            ny_info "Source update available: main at ${commit:0:12}"
+        else
+            ny_plan_add run "Install nodeyard source at ${commit:0:12}" "commit=$commit"
+        fi
+        return 0
+    fi
+    ny_download "$archive" "${tmp}/source.tar.gz"
+    mkdir -p "${tmp}/src"
+    tar -xzf "${tmp}/source.tar.gz" -C "${tmp}/src"
+    src="$(find "${tmp}/src" -maxdepth 3 -path '*/bin/nodeyard' -print -quit | sed 's#/bin/nodeyard$##')"
+    [[ -n "$src" && -f "${src}/install.sh" ]] || ny_die "The downloaded source archive looks incomplete." "Report it at https://github.com/${NY_REPO}/issues"
+    actual_version="$(sed -n 's/^NY_VERSION="\(.*\)"$/\1/p' "${src}/lib/core/base.sh" | head -n1)"
+    [[ "$actual_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] ||
+        ny_die "Could not read nodeyard's version from the source archive."
+    if [[ -n "$requested_version" && "$actual_version" != "$requested_version" ]]; then
+        ny_die "Tag v${requested_version} contains nodeyard ${actual_version}." "Use the version that is in that source tag."
+    fi
+    version="$actual_version"
     cmp="$(ny_version_cmp "$version" "$NY_VERSION")"
-    ny_info "Installed: ${NY_VERSION}   Available: ${version}"
-    if [[ "$cmp" -le 0 && "$force" -eq 0 ]]; then
-        if [[ "$cmp" -eq 0 ]]; then ny_ok "Already up to date."; else ny_ok "The installed version is newer than ${version}; not downgrading (use --force to)."; fi
+    ny_info "Installed: ${NY_VERSION}   Source: ${version} at ${commit:0:12}"
+    if [[ "$cmp" -lt 0 && "$force" -eq 0 ]]; then
+        ny_ok "The installed version is newer than ${version}; not downgrading (use --force to)."
         return 0
     fi
     if [[ "$check" -eq 1 ]]; then
@@ -204,33 +230,16 @@ tool_update_cmd() {
         return 0
     fi
     ny_need_root
-    ny_detect_arch
-    local base="https://github.com/${NY_REPO}/releases/download/v${version}"
-    local name="nodeyard-${version}-linux-${NY_ARCH}.tar.gz"
-    local tmp sha
-    tmp="$(ny_mktemp -d)"
-    ny_download "${base}/SHA256SUMS" "${tmp}/SHA256SUMS"
-    if ny_simulating; then
-        ny_download "${base}/${name}" "${tmp}/${name}"
-        ny_plan_add run "Install nodeyard ${version} with its install.sh"
-        return 0
-    fi
-    sha="$(awk -v n="$name" '$2 == n || $2 == "*"n {print $1}' "${tmp}/SHA256SUMS")"
-    [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || ny_die "The release ${version} has no checksum for ${name}." "This architecture may not be published for that release."
-    ny_download "${base}/${name}" "${tmp}/${name}" "$sha"
-    mkdir -p "${tmp}/src"
-    tar -xzf "${tmp}/${name}" -C "${tmp}/src"
-    local src="${tmp}/src"
-    [[ -f "${src}/install.sh" ]] || src="$(find "${tmp}/src" -maxdepth 2 -name install.sh -exec dirname {} \; | head -n1)"
-    [[ -n "$src" && -f "${src}/install.sh" ]] || ny_die "The downloaded release looks incomplete (no install.sh)." "Report it at https://github.com/${NY_REPO}/issues"
     if [[ -f "${src}/CHANGELOG.md" ]]; then
         printf '\n%s\n' "$(ny_color bold "What's new since ${NY_VERSION}")"
         tool_changelog_between "${src}/CHANGELOG.md" "$NY_VERSION" | head -n 80
         printf '\n'
     fi
-    ny_confirm "Install nodeyard ${version}?" y || return 0
-    bash "${src}/install.sh" --from-dir "$src" --yes || ny_die "Installing ${version} failed; the previous version is still in place." "See the output above."
-    ny_ok "nodeyard updated: ${NY_VERSION} -> ${version}"
+    ny_confirm "Install nodeyard source at ${commit:0:12}?" y || return 0
+    prefix="${NY_HOME%/lib/nodeyard}"
+    NODEYARD_SOURCE_COMMIT="$commit" bash "${src}/install.sh" --from-dir "$src" --prefix "$prefix" --yes --force ||
+        ny_die "Installing source at ${commit:0:12} failed; the previous version is still in place." "See the output above."
+    ny_ok "nodeyard updated from source commit ${commit:0:12} (version ${version})"
 }
 
 # --- uninstall ---------------------------------------------------------------

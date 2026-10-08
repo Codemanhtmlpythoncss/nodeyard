@@ -23,11 +23,10 @@ On each machine:
 curl -fsSL https://raw.githubusercontent.com/Codemanhtmlpythoncss/nodeyard/main/install.sh | sudo bash
 ```
 
-The installer downloads the latest release, checks its SHA-256 against the
-release's `SHA256SUMS`, installs to `/usr/local/lib/nodeyard`, links
-`/usr/local/bin/nodeyard`, and offers to install the few packages nodeyard
-needs (jq, curl...). Prefer to read it first? Download it, read it, then
-run `sudo bash install.sh`.
+The installer fetches the current source commit from `main` over HTTPS,
+installs to `/usr/local/lib/nodeyard`, links `/usr/local/bin/nodeyard`, and
+offers to install the few packages nodeyard needs (jq, curl...). Prefer to
+read it first? Download it, read it, then run `sudo bash install.sh`.
 
 Check the machine:
 

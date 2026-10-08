@@ -219,9 +219,9 @@ class Jobs:
                                  env=env, text=True, errors="replace", bufsize=1, start_new_session=True)
         except OSError as e:
             self._add(job, "Couldn't start nodeyard: %s" % e)
-            self._notify_done(job)
             with self.lock:
                 job["status"], job["rc"] = "failed", -1
+            self._notify_done(job)
             return
         if job.get("stdin"):
             try:
@@ -239,9 +239,9 @@ class Jobs:
         finally:
             killer.cancel()
             p.stdout.close()
-        self._notify_done(job)
         with self.lock:
             job["status"], job["rc"] = ("ok" if rc == 0 else "failed"), rc
+        self._notify_done(job)
 
     @staticmethod
     def _notify_done(job):
@@ -407,6 +407,7 @@ def build_command(action, p, nodes, key_path):
 
 class Live:
     MODEL_CACHE_TTL = 30
+    MODEL_SCAN_TIMEOUT = 75
     DOWNLOAD_CACHE_TTL = 2.5
 
     def __init__(self, store, ai_key_file, nodeyard_bin, state_dir=""):
@@ -475,14 +476,14 @@ class Live:
                                   for n in data.get("nodes", [])]
                 self.models_cache = (time.time(), data)
                 self._save_models_cache(self.models_cache)
-            else:
-                self.models_cache = None
-                try:
-                    os.unlink(self._models_cache_path())
-                except OSError:
-                    pass
+            # Keep the last known inventory while a background rescan runs. A
+            # download or deploy can take minutes; hiding a good snapshot here
+            # made the UI claim that nothing was downloaded during that time.
 
     def _model_job_done(self, action, params, job):
+        if job.get("status") != "ok":
+            self._forget_models_cache()
+            return
         if action == "split-rm":
             self._forget_models_cache(str(params.get("file") or ""))
         else:
@@ -685,7 +686,14 @@ class Live:
             refreshing = self.models_refreshing
             error = self.models_error
         if start:
-            threading.Thread(target=self._refresh_models, args=(generation,), name="nodeyard-ai-disk-scan", daemon=True).start()
+            try:
+                threading.Thread(target=self._refresh_models, args=(generation,), name="nodeyard-ai-disk-scan", daemon=True).start()
+            except RuntimeError as exc:
+                with self.models_lock:
+                    self.models_refreshing = False
+                    self.models_error = "Couldn't start the disk scan: %s" % exc
+                refreshing = False
+                error = self.models_error
         downloads = self._downloads()
         if not cache:
             if not refreshing:
@@ -693,7 +701,8 @@ class Live:
             data = {"ok": True, "nodes": [], "in_use": ""}
         else:
             data = dict(cache[1])
-        data.update({"downloads": downloads, "scanning": refreshing, "updated": cache[0] if cache else None})
+        data.update({"downloads": downloads, "scanning": refreshing, "updated": cache[0] if cache else None,
+                     "inventory_stale": bool(stale or refreshing)})
         if error:
             data["scan_error"] = error
         return data
@@ -708,12 +717,26 @@ class Live:
                 env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/tmp", "LANG": "C.UTF-8", "NODEYARD_COLOR": "never"}
                 try:
                     out = subprocess.run([self.jobs.bin, "--no-color", "ai", "split", "models", "--json"], stdin=subprocess.DEVNULL,
-                                         capture_output=True, text=True, timeout=240, env=env)
+                                         capture_output=True, text=True, timeout=self.MODEL_SCAN_TIMEOUT, env=env)
                     data = json.loads(out.stdout.strip().splitlines()[-1]) if out.stdout.strip() else None
                 except (OSError, subprocess.SubprocessError, ValueError, IndexError):
                     data = None
                 valid = isinstance(data, dict) and bool(data.get("ok")) and isinstance(data.get("nodes"), list)
                 error = "Couldn't look at the nodes' disks."
+                if valid:
+                    previous_nodes = {n.get("node"): n for n in (self.models_cache or (0, {"nodes": []}))[1].get("nodes", [])}
+                    missed = [n.get("node", "unknown") for n in data["nodes"] if n.get("scan_error")]
+                    if missed:
+                        retained = []
+                        for i, node in enumerate(data["nodes"]):
+                            previous = previous_nodes.get(node.get("node"))
+                            if node.get("scan_error") and previous:
+                                node = dict(previous, scan_error=node["scan_error"], inventory_stale=True)
+                                data["nodes"][i] = node
+                                retained.append(node.get("node", "unknown"))
+                        detail = ("Last saved data was retained for %s." % ", ".join(retained)
+                                  if retained else "No saved data is available for the unreachable machines.")
+                        data["scan_error"] = "Some node disks could not be checked: %s. %s" % (", ".join(missed), detail)
 
             with self.models_lock:
                 # A model may have been downloaded or deleted while the scan ran.

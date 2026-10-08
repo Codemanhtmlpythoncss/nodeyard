@@ -3,18 +3,25 @@
 ## Upgrading nodeyard
 
 ```bash
-sudo nodeyard update --check     # is there a newer release?
-sudo nodeyard update             # download, verify, show what's new, install
-sudo nodeyard update --version 0.2.0
+sudo nodeyard update --check     # is main at a newer source commit?
+sudo nodeyard update             # show what's new, then install
+sudo nodeyard update --version 0.2.0  # use source from tag v0.2.0, if present
 ```
 
-`update` downloads the release for your machine from GitHub, checks its
-SHA-256 against the release's `SHA256SUMS`, shows the changelog entries
-between your version and the new one, and installs after you confirm. It
-won't install an older version unless you add `--force`. Running from a
-git clone, it uses `git pull` instead.
+`update` resolves `main` to a Git commit, downloads that commit's source
+archive over HTTPS, shows the changelog entries, and installs after you
+confirm. It records the commit so later checks can tell whether the source
+changed even when the semantic version has not. It won't install an older
+version unless you add `--force`. Running from a git clone, it uses `git pull`.
 
-Re-running the one-line installer does the same thing.
+To update from a machine that still has the old release-based updater, run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Codemanhtmlpythoncss/nodeyard/main/install.sh | sudo bash -s -- --yes --force
+```
+
+The installer follows `main` too. Source installs trust GitHub's HTTPS
+connection and repository contents; they do not use a release checksum.
 
 Read the [changelog](../CHANGELOG.md) before upgrading across several
 versions: until 1.0, minor versions may change commands or config.

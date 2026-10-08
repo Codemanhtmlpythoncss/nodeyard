@@ -1,7 +1,6 @@
 # nodeyard
 
 [![CI](https://github.com/Codemanhtmlpythoncss/nodeyard/actions/workflows/ci.yml/badge.svg)](https://github.com/Codemanhtmlpythoncss/nodeyard/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/Codemanhtmlpythoncss/nodeyard?include_prereleases&sort=semver)](https://github.com/Codemanhtmlpythoncss/nodeyard/releases)
 [![License: All rights reserved](https://img.shields.io/badge/license-all%20rights%20reserved-red.svg)](LICENSE)
 
 **Set up and run a homelab cluster of Linux machines from one command.**
@@ -12,9 +11,9 @@ undo for every change it makes.
 
 ![The nodeyard menu](docs/media/menu.svg)
 
-> **Status: early development.** `v0.1.0` is the latest tagged release.
-> The `main` branch has newer, unreleased work; see the [changelog](CHANGELOG.md).
-> The foundation release includes the k3s cluster, AI and operations features.
+> **Status: early development.** There are currently no published GitHub releases or version tags.
+> Install and `nodeyard update` follow the latest source commit on `main`; see the [changelog](CHANGELOG.md).
+> The current source includes the k3s cluster, AI and operations features.
 > Static IPs and a
 > network device view, a remote installer for your laptop, a floating
 > virtual IP, web dashboards, website hosting and more are on the
@@ -106,14 +105,16 @@ On each machine:
 curl -fsSL https://raw.githubusercontent.com/Codemanhtmlpythoncss/nodeyard/main/install.sh | sudo bash
 ```
 
-The installer verifies the release's SHA-256 checksum, installs to
+The installer fetches the current `main` source over HTTPS, installs to
 `/usr/local/lib/nodeyard`, and offers to install the few packages nodeyard
 needs. Running it again updates in place. To read it first:
 `curl -fsSLO https://raw.githubusercontent.com/Codemanhtmlpythoncss/nodeyard/main/install.sh`,
 then `sudo bash install.sh`.
 
-The one-line installer installs the latest published release. Features listed
-above from `main` become part of a release when they are tagged and published.
+Update an existing install directly from source with:
+`curl -fsSL https://raw.githubusercontent.com/Codemanhtmlpythoncss/nodeyard/main/install.sh | sudo bash -s -- --yes --force`.
+The normal `sudo nodeyard update` command also follows `main` and remembers the
+source commit it installed.
 
 ## Quick start
 

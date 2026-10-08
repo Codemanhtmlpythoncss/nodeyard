@@ -28,9 +28,11 @@ what's planned. To report a problem, see [SECURITY.md](../SECURITY.md).
 - Pinned third-party tools are listed in `share/nodeyard/versions.lock`
   with their SHA-256, and nodeyard refuses a download whose checksum
   doesn't match.
-- nodeyard's own releases ship a `SHA256SUMS` file, signed with Sigstore
-  (keyless, tied to this repository's release workflow); `install.sh` and
-  `nodeyard update` verify the checksum.
+- The installer and `nodeyard update` resolve `main` to a commit through the
+  GitHub API and fetch that immutable source archive over HTTPS. They do not
+  verify a separate signed checksum; installing as root trusts GitHub's TLS
+  connection and the repository's source at that commit. The release workflow
+  can still produce Sigstore-signed checksums for published release assets.
 - Known gap: k3s's and Ollama's installer scripts are fetched from their
   official URLs but are not yet pinned to a checksum. Pinning k3s (binary
   plus its published checksums) comes in 0.4, Ollama in 0.7.

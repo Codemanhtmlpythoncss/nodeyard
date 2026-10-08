@@ -1642,13 +1642,22 @@ ai_gate_status() {
 #
 # A plain (unprivileged) busybox pod per node that only sees /var/lib/nodeyard
 # (and the model folder). Used by `ai split clean`, `undeploy --purge` and
-# `ai split models`. The pods and their namespace are always deleted again.
+# `ai split models`. Each scan's pods are deleted; the empty namespace is reused.
 SPLIT_HELPER_NS="nodeyard-cleanup"
 
 # split_ai_nodes -- Ready amd64/arm64 nodes (the ones split models can use)
 split_ai_nodes() {
     kctl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.nodeInfo.architecture}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null |
         awk '($2 == "amd64" || $2 == "arm64") && $3 == "True" {print $1}'
+    return 0
+}
+
+# split_scan_nodes -- all supported nodes, including NotReady machines. A
+# pending helper on an unavailable node is reported per-node instead of making
+# a complete inventory look like an empty one.
+split_scan_nodes() {
+    kctl --request-timeout=5s get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.nodeInfo.architecture}{"\n"}{end}' 2>/dev/null |
+        awk '($2 == "amd64" || $2 == "arm64") {print $1}'
     return 0
 }
 
@@ -1659,28 +1668,29 @@ split_on_nodes() {
     local mode="$1" script="$2" n pod ro="true" mdir main
     shift 2
     [[ "$mode" == rw ]] && ro="false"
-    main="$(kctl get namespace "$SPLIT_NS" -o jsonpath='{.metadata.annotations.nodeyard/main}' 2>/dev/null || true)"
-    mdir="$(kctl get namespace "$SPLIT_NS" -o jsonpath='{.metadata.annotations.nodeyard/model-dir}' 2>/dev/null || true)"
+    main="$(kctl --request-timeout=5s get namespace "$SPLIT_NS" -o jsonpath='{.metadata.annotations.nodeyard/main}' 2>/dev/null || true)"
+    mdir="$(kctl --request-timeout=5s get namespace "$SPLIT_NS" -o jsonpath='{.metadata.annotations.nodeyard/model-dir}' 2>/dev/null || true)"
     [[ "$mdir" =~ ^/[A-Za-z0-9._/-]+$ && "$mdir" != *..* ]] || mdir="$SPLIT_DEFAULT_MODEL_DIR"
     # A namespace still being deleted refuses new pods: wait for it to go.
     local w=0
-    while ((w < 60)) && [[ "$(kctl get namespace "$SPLIT_HELPER_NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)" == Terminating ]]; do
-        sleep 2
+    while ((w < 10)) && [[ "$(kctl --request-timeout=5s get namespace "$SPLIT_HELPER_NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)" == Terminating ]]; do
+        sleep 1
         w=$((w + 1))
     done
-    kctl create namespace "$SPLIT_HELPER_NS" >/dev/null 2>&1 || true
+    kctl --request-timeout=5s create namespace "$SPLIT_HELPER_NS" >/dev/null 2>&1 || true
     # Each call's pods have their own names and label: the dashboard scans the
     # disks in the background, and two scans must not delete each other's pods.
     local run
     run="$(printf '%s' "$$ ${RANDOM} $(date +%s%N)" | cksum | cut -d' ' -f1)"
     for n in "$@"; do
         pod="$(ny_k8s_name "${mode}-${run}-${n}")"
-        kctl -n "$SPLIT_HELPER_NS" apply -f - >/dev/null <<YAML || ny_warn "Couldn't start the helper on ${n}."
+        kctl --request-timeout=5s -n "$SPLIT_HELPER_NS" apply -f - >/dev/null <<YAML || ny_warn "Couldn't start the helper on ${n}."
 apiVersion: v1
 kind: Pod
 metadata: {name: ${pod}, namespace: ${SPLIT_HELPER_NS}, labels: {app.kubernetes.io/managed-by: nodeyard, nodeyard/run: "${run}"}}
 spec:
   restartPolicy: Never
+  activeDeadlineSeconds: 45
   nodeSelector: {kubernetes.io/hostname: ${n}}
   tolerations: [{operator: Exists}]
   containers:
@@ -1695,18 +1705,18 @@ spec:
 YAML
     done
     local tries=0 pending
-    while ((tries < 90)); do
-        pending="$(kctl -n "$SPLIT_HELPER_NS" get pods -l "nodeyard/run=${run}" -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null | grep -cvE '^(Succeeded|Failed)$' || true)"
+    while ((tries < 20)); do
+        pending="$(kctl --request-timeout=5s -n "$SPLIT_HELPER_NS" get pods -l "nodeyard/run=${run}" -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null | grep -cvE '^(Succeeded|Failed)$' || true)"
         [[ "$pending" == 0 ]] && break
-        sleep 2
+        sleep 1
         tries=$((tries + 1))
     done
     for n in "$@"; do
         printf '== %s\n' "$n"
-        kctl -n "$SPLIT_HELPER_NS" logs "$(ny_k8s_name "${mode}-${run}-${n}")" 2>/dev/null || printf 'ERROR could not run on this node (is it under disk pressure?)\n'
+        kctl --request-timeout=5s -n "$SPLIT_HELPER_NS" logs "$(ny_k8s_name "${mode}-${run}-${n}")" 2>/dev/null || printf 'ERROR could not run on this node (is it under disk pressure?)\n'
     done
     # only this call's pods go; the namespace stays (empty) so the next call can reuse it
-    kctl -n "$SPLIT_HELPER_NS" delete pods -l "nodeyard/run=${run}" --wait=false >/dev/null 2>&1 || true
+    kctl --request-timeout=5s -n "$SPLIT_HELPER_NS" delete pods -l "nodeyard/run=${run}" --wait=false >/dev/null 2>&1 || true
     return 0
 }
 
@@ -1854,18 +1864,21 @@ ai_split_models() {
     ny_need_kube
     [[ $# -eq 0 ]] || ny_usage_error "Unexpected argument: $1"
     local -a nodes=()
-    mapfile -t nodes < <(split_ai_nodes)
+    mapfile -t nodes < <(split_scan_nodes)
+    ((${#nodes[@]} > 0)) || ny_die "No supported cluster nodes were returned by Kubernetes." "Check the cluster with: sudo nodeyard status" "$NY_E_PRECONDITION"
     local scan keep file
     scan="$(split_on_nodes ro "$SPLIT_SCAN_SCRIPT" "${nodes[@]}")"
     keep="$(split_in_use)"
     file="${keep%%|*}"
     if [[ "$NY_JSON" -eq 1 ]]; then
         ny_json_out "$(awk -v file="$file" '
+            function close_node() { if (!open) return; printf "]"; if (bad) printf ",\"scan_error\":\"Disk scan did not finish on this node\""; printf "}" }
             BEGIN { printf "{\"ok\":true,\"in_use\":\"%s\",\"nodes\":[", file }
-            /^== / { if (open) printf "]}"; printf "%s{\"node\":\"%s\",\"items\":[", (nn++ ? "," : ""), $2; open = 1; ni = 0; next }
+            /^== / { close_node(); printf "%s{\"node\":\"%s\",\"items\":[", (nn++ ? "," : ""), $2; open = 1; ni = 0; bad = 0; next }
+            /^ERROR/ { bad = 1; next }
             $1 == "DISK" { printf "%s{\"kind\":\"disk\",\"capacity\":%s,\"free\":%s}", (ni++ ? "," : ""), $2, $3; next }
             $1 ~ /^(MODEL|PARTIAL|CACHE)$/ { printf "%s{\"kind\":\"%s\",\"bytes\":%s,\"name\":\"%s\"}", (ni++ ? "," : ""), tolower($1), $2, $3 }
-            END { if (open) printf "]}"; printf "]}" }' <<<"$scan")"
+            END { close_node(); printf "]}" }' <<<"$scan")"
         return 0
     fi
     awk -v file="$file" '
