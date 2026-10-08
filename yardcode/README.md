@@ -16,7 +16,7 @@ No sudo: it installs for you in `~/.local` (as root: `/usr/local`). Or copy the 
 anywhere on your PATH. nodeyard's own installer installs it too. Remove it: `sh install.sh --uninstall`.
 
 ```sh
-yardcode login            # the model API address (host, host:port or URL) and key
+yardcode login            # the model API address and the nodeyard server API key
 yardcode                  # start working in this folder
 yardcode "explain this project"
 git diff | yardcode -p "review this"      # one answer, then exit
@@ -33,14 +33,18 @@ git diff | yardcode -p "review this"      # one answer, then exit
 | **Long chats** | automatic **context compression**: old tool output is trimmed, then the model summarizes the earlier conversation (`/compact`, `/context`) |
 | **Control** | `--max-tokens none` (no reply limit), plan / accept-edits / bypass modes (shift+tab), `/rewind` and `/undo` put files back, esc interrupts, `--show-thinking` or `/think live` to watch the model's reasoning as it writes it |
 | **Extend** | plugins (a Python file or a JSON file), MCP servers, hooks, custom `/commands`, custom sub-agents, `YARDCODE.md` instructions (`AGENTS.md` and `CLAUDE.md` work too) |
-| **Cluster** | `/models`, `/model`, `/load`, `/unload`, `/download`, `/search`: load models on your nodeyard cluster from here, with the model's API key |
+| **Cluster** | `/models`, `/model`, `/load`, `/unload`, `/download`, `/search`: manage models on your nodeyard cluster with one server API key |
 
 Type `/help` for every command. `@file` includes a file, `!cmd` runs a command yourself, `#note` remembers something.
 
 ## Load models remotely
 
-The nodeyard dashboard has a key-protected control API (`/api/v1`, same API key as the model), so this works from any machine that can
+The nodeyard dashboard has a key-protected control API (`/api/v1`, using the server API key shared with nodeyard models), so this works from any machine that can
 reach the dashboard (default: the API's host, port 9092; set another with `yardcode config control_url http://host:9092`):
+
+If the key already works with a running split model but the dashboard rejects
+it, use **Settings > Server API key > Use the running model's key**. This adopts
+the current model key as the server key without restarting the model.
 
 ```sh
 yardcode models                       # what is downloaded and what is loaded

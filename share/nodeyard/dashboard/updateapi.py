@@ -4,7 +4,7 @@ updating the dashboard (and nodeyard) and then running `yardcode update` anywher
   GET /api/v1/yardcode          {"version", "hash", "files"}   what is installed here
   GET /api/v1/yardcode/bundle   the program (bin/ and src/) as one .tar.gz
 
-Protected like the rest of /api/v1: the model's API key, or a signed-in dashboard session.
+Protected like the rest of /api/v1: the server API key, or a signed-in dashboard session.
 """
 import hashlib
 import io

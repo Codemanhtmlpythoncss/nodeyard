@@ -202,6 +202,12 @@ class Settings:
             raise SettingsError(self._last_error(out), 500)
         return {}
 
+    def adopt_model_key(self):
+        rc, out = self._run(["ai", "key", "--adopt-model", "--yes"], timeout=60)
+        if rc:
+            raise SettingsError(self._last_error(out), 500)
+        return {}
+
     def set_hf_token(self, body):
         if body.get("remove") is True:
             rc, out = self._run(["ai", "hf", "token", "--remove"])
@@ -432,6 +438,7 @@ def register(ctx, args):
         "/api/settings/signout-all": wrap(lambda h, b: s.signout_all()),
         "/api/settings/weak-password": wrap(lambda h, b: s.set_weak(b)),
         "/api/settings/model-key": wrap(lambda h, b: s.set_model_key(b)),
+        "/api/settings/adopt-model-key": wrap(lambda h, b: s.adopt_model_key()),
         "/api/settings/hf-token": wrap(lambda h, b: s.set_hf_token(b)),
         "/api/settings/service": wrap(lambda h, b: s.apply_service(b)),
         "/api/settings/background": wrap(lambda h, b: {"background": s.set_background(b)}),

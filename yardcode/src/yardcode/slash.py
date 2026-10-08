@@ -1062,7 +1062,7 @@ def c_doctor(app, arg):
             res, eng = web_search("test", 1, app.agent.ctx)
             ok("Web search works (%s), running on %s" % (eng, where))
             if app.modelapi.available and not app.settings.get("api_key"):
-                app.tui.w("      %s" % S.muted("Add the model's API key (yardcode login) and searches run on the server instead of this network."))
+                app.tui.w("      %s" % S.muted("Add the server API key (yardcode login) and searches run on the server instead of this network."))
     except Exception as e:
         bad("Web search failed on %s: %s" % (where, str(e)[:140]), "Check the internet connection, or set search.searxng_url / search.brave_key")
     for tool in ("git", "rg", "pdftotext"):

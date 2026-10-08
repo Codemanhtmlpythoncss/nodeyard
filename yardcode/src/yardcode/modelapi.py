@@ -69,7 +69,7 @@ class ModelAPI:
         if resp.status == 401:
             if not self.key:
                 raise ModelAPIError("This needs the server's API key. Run: yardcode login   (the dashboard shows it under Settings > Server API key)", 401)
-            raise ModelAPIError("The dashboard says that isn't the server's API key. %s" % (said or "Check it with: yardcode login"), 401)
+            raise ModelAPIError("The dashboard rejected this key. If it still works with your running model, choose Settings > Server API key > Use the running model's key, or on the server run: sudo nodeyard ai key --adopt-model. %s" % (said or "Then run yardcode login again."), 401)
         if resp.status == 403:
             raise ModelAPIError("The dashboard won't use the control API: %s" % (said or "it answered 403."), 403)
         if resp.status == 429:

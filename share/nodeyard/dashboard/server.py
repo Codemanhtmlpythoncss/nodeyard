@@ -204,7 +204,7 @@ class Handler(BaseHTTPRequestHandler):
         """True if the request may go on; otherwise the answer has been sent."""
         v1 = getattr(self.ctx, "v1_gate", None)
         if v1 is not None and self.path.startswith("/api/v1/"):
-            return v1(self)    # the control API: the model's API key (or a signed-in session)
+            return v1(self)    # the control API: the server API key (or a signed-in session)
         if self.ctx.auth is None:
             if not self._host_ok():
                 self._json({"ok": False, "error": "This dashboard only answers on localhost."}, 403)
@@ -481,7 +481,7 @@ def main():
     ap.add_argument("--interval", type=float, default=2.0, help="seconds between cluster reads")
     ap.add_argument("--cluster-name", default="")
     ap.add_argument("--agent-token-file", default="", help="token the node agents expect (processes, CPU clocks, temperatures)")
-    ap.add_argument("--ai-key-file", default="", help="the split model's API key file (chat uses it; it never reaches the browser)")
+    ap.add_argument("--ai-key-file", default="", help="the server API key file (chat uses it; it never reaches the browser)")
     ap.add_argument("--nodeyard-bin", default="", help="nodeyard itself, so signed-in users can run and remove models from the page")
     ap.add_argument("--nodeyard-version", default="")
     ap.add_argument("--terminal-user", default="", help="the account the Terminal page's shell runs as (never root); empty = no terminal")

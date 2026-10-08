@@ -1,7 +1,7 @@
 """Sharing chats with the nodeyard dashboard: each finished turn is saved on the server, so the conversation shows in the dashboard's
 AI tab (and can be continued there), and any chat in the AI tab that came from yardcode can be continued here with /chats.
 
-Needs the dashboard's control API (the model's API key); it never gets in the way: when the server can't be reached the chat simply
+Needs the dashboard's control API (the server API key); it never gets in the way: when the server can't be reached the chat simply
 isn't shared this time. Turn it off with: yardcode config sync_chats false
 """
 import socket

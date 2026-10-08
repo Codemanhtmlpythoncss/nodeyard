@@ -1,7 +1,7 @@
 """The dashboard's AI features: chat with running models, search for models, run them.
 
 Everything here sits behind the sign-in. Chat goes straight from this server to the model's own API
-(the model's API key never reaches the browser). Model search asks Hugging Face. Running or removing a
+(the server API key never reaches the browser). Model search asks Hugging Face. Running or removing a
 model starts one of a short list of nodeyard commands; nothing else can be started from the page.
 """
 import http.client
@@ -148,7 +148,7 @@ class HuggingFace:
 # write a separate file. Everything else changes the running model, so only
 # one of those runs at a time.
 # Actions that change system files, so they run outside the dashboard's sandbox.
-OUTSIDE_ACTIONS = {"doctor-fix", "cli"}
+OUTSIDE_ACTIONS = {"doctor-fix", "cli", "restart-cluster"}
 # Commands the Commands page may run: filled from `nodeyard commands --json` (settings.py).
 # Interactive ones need a real terminal (use the Terminal page for those).
 COMMAND_PATHS = None
@@ -342,6 +342,8 @@ def build_command(action, p, nodes, key_path):
             raise AIError("Too many or too long options.")
         flags = (["--yes"] if p.get("yes") is True else []) + (["--dry-run"] if p.get("dry_run") is True else []) + (["--json"] if p.get("json") is True else [])
         return "nodeyard " + " ".join([path] + extra + flags), path.split() + extra + flags
+    if action == "restart-cluster":
+        return "Restart Kubernetes on every node", ["restart-cluster", "--yes"]
     if action == "doctor-fix":
         only = str(p.get("only") or "").strip()
         if only and not CHECK_RE.match(only):
@@ -374,7 +376,7 @@ def build_command(action, p, nodes, key_path):
     if action == "gate-remove":
         return "Remove the model gate", ["ai", "gate", "remove", "--yes"]
     if action == "key-rotate":
-        return "New API key for the model", ["ai", "split", "key", "--rotate", "--yes"]
+        return "New server API key for every model", ["ai", "key", "--rotate", "--yes"]
     if action == "cluster-name":
         name = need("name", CLUSTER_RE)
         return "Rename the cluster to " + name, ["config", "set", "cluster.name", name]
@@ -409,7 +411,7 @@ class Live:
         return st
 
     def api_key(self):
-        """The model's API key, read fresh from its root-only file (empty if none)."""
+        """The server-wide API key, read fresh from its root-only file (empty if none)."""
         if not self.ai_key_file:
             return ""
         try:
@@ -420,7 +422,7 @@ class Live:
 
     def ensure_key_file(self):
         if not self.ai_key_file:
-            raise AIError("This dashboard doesn't know where the model's API key lives.", 501)
+            raise AIError("This dashboard doesn't know where the server API key lives.", 501)
         if not os.path.exists(self.ai_key_file):
             os.makedirs(os.path.dirname(self.ai_key_file), mode=0o700, exist_ok=True)
             fd = os.open(self.ai_key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -718,8 +720,8 @@ def register(ctx, args):
 
     def run(h, body):
         action = str(body.get("action", ""))
-        if action == "cli" and h._forwarded() is not None:
-            return h._json({"ok": False, "error": "Running any command only works over Tailscale or your own network, not through public access."}, 403)
+        if action in ("cli", "restart-cluster") and h._forwarded() is not None:
+            return h._json({"ok": False, "error": "This only works over Tailscale or your own network, not through public access."}, 403)
         try:
             h._json({"ok": True, "job": backend.run(action, body)})
         except AIError as e:

@@ -34,7 +34,7 @@ DEFAULTS = {
     "env": {},
     "system_prompt_extra": "",
     "check_updates": False,
-    "sync_chats": True,          # share finished chats with the nodeyard dashboard (needs the model's API key)
+    "sync_chats": True,          # share finished chats with the nodeyard dashboard (needs the server API key)
     "trusted_projects": [],
 }
 

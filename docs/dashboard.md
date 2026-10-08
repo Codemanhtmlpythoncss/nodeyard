@@ -59,6 +59,9 @@ It needs `python3` (3.8 or newer; nodeyard offers to install it).
   clock speed, temperature, load, network, OS and age, sortable. Click one for
   its history charts (CPU, memory, temperature, clock), memory breakdown,
   addresses, conditions, taints, labels, its biggest programs and its pods.
+- **Devices sidebar**: keep each node's temperature, load, CPU and memory in
+  view while using other pages. Expand a node for sensor readings and short
+  history charts, or open its full details. Press `d` or use the Devices button.
 - **Processes**: what is running on each machine and **what is using the
   memory**: a bar of the biggest consumers (named by pod or service), a card per
   machine with CPU model, per-core **clock speeds**, **temperature**, load,
@@ -76,6 +79,9 @@ It needs `python3` (3.8 or newer; nodeyard offers to install it).
   **Storage**, **Events** and **Alerts** (a node not ready, hot, out of memory
   or disk, a crashing or stuck pod, a workload with missing replicas...).
 - **AI**: see below.
+
+Settings also has a confirmed **Restart Kubernetes** action. Workers restart one
+at a time before the control node; the dashboard waits for nodes to return.
 
 Also: search everything with `Ctrl K` or `/` (names, IP addresses, ports),
 numbers `1`-`9` and `0` switch sections, `r` refreshes, `Space` pauses live
@@ -119,8 +125,8 @@ The **AI** page has four tabs.
   streaming, Python (OpenAI library and plain requests), JavaScript, editor and
   chat-app settings, and Ollama's own API.
 
-Chat goes from the dashboard server to the model's own API; the model's API
-key never reaches your browser unless you press *Reveal the key* on the API tab.
+Chat goes from the dashboard server to the model's own API; the server API key
+never reaches your browser unless you press *Reveal* in Settings.
 
 ### No API key on your own network
 
@@ -186,12 +192,14 @@ downloading, loading, or unloaded (press Load).
 
 ## Control API
 
-Other programs can see and switch the model with the model's API key (Settings > Server API key). It works from any network the dashboard
-answers on (also through public access) and the key is always needed. Deleting models, running commands and changing settings are not
+Other programs can see and switch models with the server API key (Settings > Server API key). It works from any network the dashboard
+answers on (also through public access) and the same key applies to yardcode, the control API and split-model deployments. If an older
+deployment has a working model key that the dashboard refuses, use **Use the running model's key** in Settings > Server API key to adopt it.
+The model is not restarted. Deleting models, running commands and changing settings are not
 in it: those need the dashboard's password.
 
 ```sh
-KEY=...   # the model API key
+KEY=...   # the server API key
 curl -H "Authorization: Bearer $KEY" http://DASHBOARD:9092/api/v1/status
 curl -H "Authorization: Bearer $KEY" http://DASHBOARD:9092/api/v1/models
 curl -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"model":"qwen2.5-coder-7b.gguf"}' \

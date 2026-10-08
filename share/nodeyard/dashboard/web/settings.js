@@ -118,7 +118,13 @@
         <div id="st-key-shown"></div>
         ${field("Or set your own", html`<input class="input mono" id="st-key" placeholder="at least 16 characters" spellcheck="false" autocomplete="off">`)}
         <button class="btn" data-st="key-set">Use this key</button>
+        ${s.split ? html`<div class="row wrap" style="gap:8px;margin-top:12px"><button class="btn" data-st="key-adopt">Use the running model's key</button></div>
+          <p class="faint small">If yardcode's key works with this model but the dashboard refuses it, adopt the model's current key as the shared server key. The model keeps using the same key.</p>` : ""}
         <p class="faint small">Changing it restarts the model's front end (about a minute). Apps using the old key need the new one.</p>`)}
+      ${card("Kubernetes", html`
+        <p class="muted small" style="margin-top:0">Restart Kubernetes (k3s) on every machine: workers one at a time, then the control node. Running containers keep running; the cluster is out of reach for a minute or two. Use it when nodes act stuck.</p>
+        <button class="btn danger" data-st="k8s-restart">Restart Kubernetes…</button>
+        <p class="faint small">Takes a few minutes. Only works from your own network or Tailscale.</p>`)}
       ${card("Hugging Face", html`
         <p class="muted small" style="margin-top:0">Only needed for models you have to accept terms for. ${s.hf_token ? chip("token set", "good") : chip("no token")}</p>
         ${field("Access token", html`<input class="input mono" id="st-hf" placeholder="hf_…" spellcheck="false" autocomplete="off">`, raw('Make one at <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener noreferrer">huggingface.co/settings/tokens</a> (read access is enough).'))}
@@ -130,7 +136,7 @@
         <button class="btn primary" data-st="svc-apply">Apply and restart</button>
         <p class="faint small">The dashboard restarts (a few seconds) and the page reconnects by itself. Careful: “local” means only the server itself can open it.</p>`)}
       ${card("Model gate", html`
-        <p class="muted small" style="margin-top:0">${s.gate ? html`${chip("on", "good")} Requests from these networks need no API key; everywhere else still does.` : html`${chip("off")} The model's API key is needed from everywhere.`}</p>
+        <p class="muted small" style="margin-top:0">${s.gate ? html`${chip("on", "good")} Requests from these networks need no API key; everywhere else still does.` : html`${chip("off")} The server API key is needed from everywhere.`}</p>
         ${field("No key needed from (one network per line)", html`<textarea class="input mono" id="st-gate" rows="6" spellcheck="false">${gateNets}</textarea>`)}
         <div class="row wrap" style="gap:8px"><button class="btn primary" data-st="gate-apply" ${s.split ? "" : raw("disabled")}>${s.gate ? "Update the gate" : "Turn the gate on"}</button>${s.gate ? html`<button class="btn danger" data-st="gate-remove">Turn it off</button>` : ""}</div>
         ${s.split ? "" : html`<p class="faint small">Run a split model first.</p>`}`)}
@@ -155,7 +161,7 @@
       ${url ? html`<div class="faint small" style="margin:-4px 0 8px 100px">${need}</div>` : ""}`;
     return html`<p class="muted small" style="margin-top:0">Reach these from anywhere on the internet (a phone on mobile data, a work laptop), with no Tailscale needed there. Through Tailscale Funnel, with a real HTTPS certificate.</p>
       ${row("Dashboard", p.dashboard, "dashboard", "Asks for the dashboard password. Wrong passwords from the internet can't lock you out at home.")}
-      ${row("Model API", p.api, "api", "Always needs the model's API key from the internet, even though your own network doesn't.")}
+      ${row("Model API", p.api, "api", "Every request from the internet needs the server API key, even if your own network doesn't.")}
       <p class="faint small">Anyone can find a public address, so use a strong dashboard password (Sign-in → Make a random one). Turning the dashboard on needs one.</p>`;
   }
   V.settings = {
@@ -194,7 +200,15 @@
       if (r.ok) setHTML($("#st-key-shown"), html`<div class="cmd mt"><span class="mono">${r.key}</span><button class="btn small" data-copy="${r.key}">Copy</button></div>`);
     } else if (a === "key-rotate") startJob("key-rotate", {}, () => setHTML($("#st-key-shown"), ""));
     else if (a === "key-set") { const r = await post("/api/settings/model-key", { key: $("#st-key").value }); if (r.ok) { $("#st-key").value = ""; toast("New key saved; the model restarts with it."); } }
-    else if (a === "hf-set") { const r = await post("/api/settings/hf-token", { token: $("#st-hf").value }); if (r.ok) { toast("Token saved."); loadSettings().then(renderSettings); } }
+    else if (a === "key-adopt") {
+      if (!window.confirm("Use the running model's current API key as the server-wide key?\n\nThe model won't restart or change keys. Yardcode and the dashboard control API will use this key too.")) return;
+      const r = await post("/api/settings/adopt-model-key", {});
+      if (r.ok) { toast("The server key now matches the running model. Keep using your current key in yardcode."); loadSettings().then(renderSettings); }
+    }
+    else if (a === "k8s-restart") {
+      if (!window.confirm("Restart Kubernetes on every node?\n\nWorkers restart one at a time, then the control node. Containers keep running, but the cluster is unreachable for a minute or two.")) return;
+      startJob("restart-cluster", {}, () => U.load(true));
+    } else if (a === "hf-set") { const r = await post("/api/settings/hf-token", { token: $("#st-hf").value }); if (r.ok) { toast("Token saved."); loadSettings().then(renderSettings); } }
     else if (a === "hf-remove") { const r = await post("/api/settings/hf-token", { remove: true }); if (r.ok) loadSettings().then(renderSettings); }
     else if (a === "svc-apply") {
       const port = +$("#st-port").value, body = { listen: $("#st-listen").value, port, interval: +$("#st-int").value };
@@ -211,7 +225,7 @@
     else if (a === "limit-set") { const v = ($('[data-limit="' + el.dataset.node + '"]') || {}).value; startJob("disk-limit", { node: el.dataset.node, gib: v ? String(v) : "off" }, () => { U.load(true); loadSettings().then(renderSettings); }); }
     else if (a === "public-on") {
       const what = el.dataset.what, label = what === "api" ? "the model API" : "the dashboard";
-      const ok = window.confirm("Make " + label + " reachable from anywhere on the internet?\n\n" + (what === "api" ? "Every request from the internet must carry the model's API key." : "Anyone who finds the address sees the sign-in page; the password protects it.") + "\n\nYou can turn it off again here.");
+      const ok = window.confirm("Make " + label + " reachable from anywhere on the internet?\n\n" + (what === "api" ? "Every request from the internet must carry the server API key." : "Anyone who finds the address sees the sign-in page; the password protects it.") + "\n\nYou can turn it off again here.");
       if (ok) startJob("public-on", { what }, async () => { await post("/api/settings/public-refresh"); loadSettings().then(renderSettings); });
     } else if (a === "public-off") startJob("public-off", { what: el.dataset.what }, async () => { await post("/api/settings/public-refresh"); loadSettings().then(renderSettings); });
     else if (a === "name-set") startJob("cluster-name", { name: $("#st-name").value.trim() });

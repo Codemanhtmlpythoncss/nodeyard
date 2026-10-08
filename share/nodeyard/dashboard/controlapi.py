@@ -1,4 +1,4 @@
-"""The control API: see, load, unload and download models from any program, with the model's API key.
+"""The control API: see, load, unload and download models from any program, with the server API key.
 
     curl -H "Authorization: Bearer $KEY" http://DASHBOARD:9092/api/v1/models
     curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"model":"qwen2.5-coder-7b.gguf"}' http://DASHBOARD:9092/api/v1/models/load
@@ -13,7 +13,7 @@ Endpoints (all JSON):
   GET  /api/v1/files?repo=owner/name     the GGUF files of one repo, with whether they fit
   GET  /api/v1/jobs?id=ID&since=N        progress lines of a task
 
-The key is the model's API key (Authorization: Bearer ...); a signed-in dashboard session works too. Nobody gets in
+The server API key (Authorization: Bearer ...) works for the control API and every model; a signed-in dashboard session works too. Nobody gets in
 without one of them, from any network, because loading a model changes what the whole cluster runs. Deleting
 models, running commands and changing settings are NOT in this API: those need the dashboard's password.
 """
@@ -72,7 +72,7 @@ class KeyGate:
             with self.lock:
                 self.fails.setdefault(ip, []).append(now)
             time.sleep(0.3)
-            h._json({"ok": False, "error": "That isn't this server's API key. It is the one under Settings > Server API key in the dashboard (not the dashboard password). If the model was deployed with its own key, set that same key there: Settings > Server API key > Or set your own."}, 401)
+            h._json({"ok": False, "error": "That isn't this server's API key. It is under Settings > Server API key (not the dashboard password). If it works with the running model, choose Settings > Server API key > Use the running model's key to make it the shared key."}, 401)
             return False
         if ctx.auth.valid(h._token()):   # the dashboard's own page, signed in
             return True

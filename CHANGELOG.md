@@ -15,9 +15,13 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   `nodeyard ai key --show|--rotate|--stdin`). A model deployed with its own key now stores it as the server key (and a model deployed without one
   gets the server key), so the dashboard no longer says "refused the key" for a key the model accepts. yardcode now tells apart a wrong key (401),
   a control API that is off (403) and too many tries (429), and checks the key right after `yardcode login`.
+- Settings can adopt the running split model's existing API key as the server key. This fixes older installs where yardcode's valid model key and
+  the dashboard's control key drifted apart, without rotating the model's key.
+- Dashboard Settings and the Devices sidebar can restart k3s across the cluster, workers one at a time and the control node last, with a confirmation.
 
 ### Added
 
+- Dashboard **Devices sidebar**: per-node temperatures, load, CPU and memory use, sensor readings and short history charts, with the node details one click away.
 - yardcode: **type `/` and the commands appear above the prompt** (filter as you type, Up/Down, Tab or Enter), with the input framed
   between two rules and the permission mode, model and context use on the line below. **Shell mode**: `!` on an empty prompt (or
   `/shell`) gives a real shell prompt: your own `$SHELL` with the terminal attached (vim, ssh, top, sudo, Ctrl-C all work), `cd` and
@@ -61,7 +65,7 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   accept-edits modes, sessions with `/rewind`, hooks, MCP servers, plugins, sub-agents, `YARDCODE.md` instructions, and automatic
   **context compression**. `--max-tokens none` removes the reply limit. Installs with nodeyard, or alone with
   `yardcode/install.sh` or the single-file `make yardcode`. See [yardcode/README.md](yardcode/README.md).
-- **Control API** (`/api/v1` on the dashboard, protected by the model's API key from any network): list, load, unload and download
+- **Control API** (`/api/v1` on the dashboard, protected by the server API key from any network): list, load, unload and download
   models remotely (`yardcode models load NAME`, or curl). Key-guessing is rate limited; deleting models and running commands stay
   behind the dashboard password.
 - Dashboard chat: **No limit** for the reply length, **context compression** (automatic near the model's context length, or
@@ -83,7 +87,7 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   Job per file with progress lines. Deploys reuse a finished download.
 - `ai split key --rotate|--stdin` and `ai hf token` (gated models).
 - **Dashboard**: Doctor page (checks + one-click fixes), Settings page
-  (password, sign out everywhere, model API key, Hugging Face token,
+  (password, sign out everywhere, server API key, Hugging Face token,
   listen/port/refresh, model gate networks, node agents, disk limits, cluster
   name, theme) and a custom background picture with blur and darken.
   AI > Models has a Downloaded models card with per-file download progress,

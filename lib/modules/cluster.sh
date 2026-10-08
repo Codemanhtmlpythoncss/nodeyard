@@ -4,6 +4,7 @@
 
 ny_cmd "worker-info" cluster_worker_info_cmd "Nodes" "Show the address, ports and commands needed to add a worker" nodes json
 ny_cmd "add-node" cluster_add_node_cmd "Nodes" "Install nodeyard on another machine over SSH and join it to this cluster" nodes
+ny_cmd "restart-cluster" cluster_restart_all_cmd "Cluster" "Restart Kubernetes (k3s) on every node: workers one at a time, then this server" nodes
 ny_cmd "remove-node" cluster_remove_node_cmd "Nodes" "Drain a node and remove it from the cluster" nodes
 ny_cmd "nettest" cluster_nettest_cmd "Health" "Test pod-to-pod, DNS and pod-to-node traffic on every node" nettest
 ny_cmd_alias "net-test" "nettest"
@@ -427,6 +428,138 @@ ny_self_bundle() {
         [[ -e "${NY_HOME}/${item}" ]] && items+=("$item")
     done
     tar -czf "$dest" -C "$NY_HOME" "${items[@]}"
+}
+
+cluster_restart_all_cmd_help() {
+    cat <<'HELP'
+Usage: nodeyard restart-cluster [--workers-only] [--timeout SECONDS]
+
+Restarts Kubernetes (k3s) on every machine of the cluster. Run it on a server
+node. Workers are restarted first, one at a time, each by a short helper pod
+that asks that machine's init system to restart k3s (no SSH needed), and
+nodeyard waits until the node is Ready again before the next one. This
+server is restarted last; kubectl is unavailable for a minute or two, then
+nodeyard waits for every node to be Ready.
+
+  --workers-only   leave this server alone
+  --timeout N      how long to wait for each node to come back (default 300)
+Running containers keep running while k3s restarts.
+HELP
+}
+
+cluster_restart_all_cmd() {
+    ny_need_root
+    local workers_only=0 timeout=300
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --workers-only)
+                workers_only=1
+                shift
+                ;;
+            --timeout)
+                [[ $# -ge 2 ]] || ny_usage_error "--timeout needs a number of seconds"
+                ny_valid_int "$2" 30 3600 || ny_usage_error "--timeout: ${NY_VALID_MSG}"
+                timeout="$2"
+                shift 2
+                ;;
+            --yes | -y)
+                NY_YES=1
+                shift
+                ;;
+            *) ny_usage_error "Unknown option for 'restart-cluster': $1" ;;
+        esac
+    done
+    k3s_load_state
+    if [[ "$K3S_ROLE" == agent ]]; then
+        ny_die "This machine is a worker, so it can't restart the cluster." "Run it on a server node (the control node)." "$NY_E_PRECONDITION"
+    fi
+    ny_need_kube
+    local self nodes node
+    self="$(hostname 2>/dev/null || true)"
+    nodes="$(kctl get nodes -o name 2>/dev/null | sed 's|^node/||' || true)"
+    [[ -n "$nodes" ]] || ny_die "No nodes found: is the cluster running?" "" "$NY_E_PRECONDITION"
+    ny_confirm "Restart Kubernetes on every node? Workloads keep running, but the cluster is unreachable for a minute or two while the server restarts." n || {
+        ny_info "Cancelled."
+        return 0
+    }
+    local ns="nodeyard-restart"
+    for node in $nodes; do
+        [[ "${node,,}" == "${self,,}" ]] && continue
+        ny_step "Restarting k3s on ${node}"
+        if ny_simulating || [[ "$NY_DRY_RUN" -eq 1 ]]; then
+            ny_plan_add restart "Restart k3s on ${node} with a helper pod, then wait until it is Ready"
+            continue
+        fi
+        kctl create namespace "$ns" >/dev/null 2>&1 || true
+        kctl -n "$ns" delete pod "restart-${node}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+        local manifest
+        manifest="$(ny_mktemp)"
+        cat >"$manifest" <<YAML
+apiVersion: v1
+kind: Pod
+metadata: {name: restart-${node}, namespace: ${ns}}
+spec:
+  restartPolicy: Never
+  hostPID: true
+  nodeName: ${node}
+  tolerations: [{operator: Exists}]
+  containers:
+  - name: r
+    image: busybox:1.36
+    securityContext: {privileged: true}
+    command: ["nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "sh", "-c"]
+    args:
+    - |
+      U=k3s-agent
+      systemctl is-active k3s-agent >/dev/null 2>&1 || systemctl is-enabled k3s-agent >/dev/null 2>&1 || U=k3s
+      if command -v systemctl >/dev/null 2>&1; then systemctl restart --no-block "\$U"; else rc-service "\$U" restart >/dev/null 2>&1 & fi
+      echo "asked the machine to restart \$U"
+YAML
+        kctl apply -f "$manifest" >/dev/null || {
+            ny_warn "Couldn't start the helper pod on ${node}; skipping it."
+            continue
+        }
+        kctl -n "$ns" wait --for=jsonpath='{.status.phase}'=Succeeded "pod/restart-${node}" --timeout=120s >/dev/null 2>&1 ||
+            ny_warn "The helper pod on ${node} didn't finish; checking the node anyway."
+        kctl -n "$ns" logs "restart-${node}" 2>/dev/null | sed 's/^/    /' || true
+        kctl -n "$ns" delete pod "restart-${node}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+        cluster_wait_node_ready "$node" "$timeout" || ny_warn "${node} didn't report Ready within ${timeout}s; carrying on."
+    done
+    if [[ "$workers_only" -eq 0 ]]; then
+        ny_step "Restarting k3s on this server (${self})"
+        if ny_simulating || [[ "$NY_DRY_RUN" -eq 1 ]]; then
+            ny_plan_add restart "Restart k3s on this server, then wait for every node to be Ready"
+            return 0
+        fi
+        ny_run systemctl restart "$(k3s_service_name)" || ny_die "Couldn't restart $(k3s_service_name)."
+        local t0=$SECONDS
+        until kctl get nodes >/dev/null 2>&1; do
+            [[ $((SECONDS - t0)) -lt "$timeout" ]] || ny_die "Kubernetes didn't answer again within ${timeout}s." "Check: sudo nodeyard logs" "$NY_E_PRECONDITION"
+            sleep 3
+        done
+        for node in $nodes; do
+            cluster_wait_node_ready "$node" "$timeout" || ny_warn "${node} isn't Ready yet."
+        done
+    fi
+    kctl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    ny_ok "Kubernetes restarted on every node."
+    kctl get nodes 2>/dev/null | sed 's/^/    /' || true
+    return 0
+}
+
+# cluster_wait_node_ready NODE SECONDS -- waits for the node to go away from Ready (if it does) and come back.
+cluster_wait_node_ready() {
+    local node="$1" limit="$2" t0=$SECONDS st
+    sleep 8
+    while [[ $((SECONDS - t0)) -lt "$limit" ]]; do
+        st="$(kctl get node "$node" --no-headers 2>/dev/null | awk '{print $2}' || true)"
+        if [[ "$st" == Ready ]]; then
+            ny_ok "${node} is Ready."
+            return 0
+        fi
+        sleep 4
+    done
+    return 1
 }
 
 cluster_remove_node_cmd_help() {

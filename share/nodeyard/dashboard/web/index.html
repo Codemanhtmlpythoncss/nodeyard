@@ -71,6 +71,7 @@
       <div><h1 id="title">Overview</h1><div class="sub" id="subtitle"></div></div>
       <div class="spacer"></div>
       <button class="search" id="searchbtn" aria-label="Search"><svg class="icon"><use href="#i-search"/></svg><span class="label">Search nodes, pods, IPs…</span><span class="kbd">Ctrl K</span></button>
+      <button class="btn device-toggle" id="devsbtn" aria-label="Toggle device monitoring" aria-pressed="true" title="Toggle device monitoring (D)"><svg class="icon"><use href="#i-hardware"/></svg><span>Devices</span></button>
       <span class="pill" id="status"><i class="dot"></i><span>Connecting…</span></span>
       <button class="btn icon-only" id="refresh" aria-label="Refresh now" title="Refresh now (r)"><svg class="icon"><use href="#i-refresh"/></svg></button>
       <a class="btn icon-only" id="export" href="/api/export" download aria-label="Download a JSON snapshot" title="Download a JSON snapshot"><svg class="icon"><use href="#i-download"/></svg></a>
@@ -78,6 +79,7 @@
     </header>
     <div class="content" id="content"><div class="loading"><div><div class="spin"></div>Reading your cluster…</div></div></div>
   </div>
+  <aside class="devices" id="devs" aria-label="Device monitoring" aria-hidden="false"></aside>
 </div>
 
 <div class="scrim" id="scrim"></div>
@@ -89,11 +91,12 @@
     <dt><span class="kbd">Ctrl K</span> or <span class="kbd">/</span></dt><dd>Search everything: nodes, pods, services, IP addresses</dd>
     <dt><span class="kbd">1</span> – <span class="kbd">0</span></dt><dd>Jump to Overview, Nodes, Processes, Pods, Workloads, Network, Storage, AI, Events, Alerts</dd>
     <dt><span class="kbd">r</span></dt><dd>Refresh now</dd>
+    <dt><span class="kbd">d</span></dt><dd>Toggle the Devices sidebar</dd>
     <dt><span class="kbd">Space</span></dt><dd>Pause or resume live updates</dd>
     <dt><span class="kbd">t</span></dt><dd>Switch between dark, light and automatic theme</dd>
     <dt><span class="kbd">Esc</span></dt><dd>Close this panel, the details drawer or search</dd>
   </dl>
-  <p class="muted" style="margin:16px 0 0;font-size:12.5px">The dashboard is read-only: it can look at your cluster but never change it.</p>
+  <p class="muted" style="margin:16px 0 0;font-size:12.5px">Actions that change cluster state ask for confirmation. The Devices sidebar stays read-only.</p>
 </div></div>
 <div class="modal wide" id="jobm" role="dialog" aria-label="Task">
   <div class="modal-head"><b id="jobtitle">Task</b><span id="jobstatus"></span><span class="spacer"></span><button class="btn small" data-act="job-close">Close</button></div>
@@ -109,6 +112,7 @@
 <noscript><p style="padding:24px">The nodeyard dashboard needs JavaScript. It loads nothing from the internet.</p></noscript>
 <script src="charts.js"></script>
 <script src="app.js"></script>
+<script src="devices.js"></script>
 <script src="ai.js"></script>
 <script src="settings.js"></script>
 <script src="hardware.js"></script>

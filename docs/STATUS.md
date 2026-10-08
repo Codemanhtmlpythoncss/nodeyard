@@ -26,9 +26,9 @@ can pick up cleanly at any point.
 
 Built ahead of the roadmap, in Python and Bash (the Go agent of phase 5 is not started):
 
-- **Web dashboard** (`nodeyard dashboard`, port 9092): live cluster view over Tailscale or your network, node agents (processes,
-  clocks, temperatures, GPUs, speed tests), Doctor, Settings, themes, a terminal, a command runner, and public access through
-  Tailscale Funnel. See [dashboard](dashboard.md).
+- **Web dashboard** (`nodeyard dashboard`, port 9092): live cluster view over Tailscale or your network, a Devices sidebar with
+  per-node temperatures and loads, node agents (processes, clocks, GPUs, speed tests), Doctor, Settings, themes, a terminal,
+  confirmed cluster restart and public access through Tailscale Funnel. See [dashboard](dashboard.md).
 - **AI** (a taste of phases 7 and 8): `ai split` runs one model across several machines (speed-aware planner, parallel
   downloads, disk limits and cleaning, NVIDIA GPU use, switching models), the model gate (no key needed on your own network, put back
   automatically after a redeploy), and a key-protected control API to load models remotely.

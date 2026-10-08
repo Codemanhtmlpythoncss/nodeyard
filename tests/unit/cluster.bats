@@ -261,6 +261,29 @@ OLD_FP="SHA256:OLDoldOLDoldOLDoldOLDoldOLDoldOLDoldOLDold"
         and (map(test("delete secret -n kube-system yard-3.node-password.k3s")) | any)' >/dev/null
 }
 
+# --- restart-cluster -------------------------------------------------------------
+
+@test "restart-cluster plans every worker first, one at a time, and this server last" {
+    run --separate-stderr demo_cmd restart-cluster --yes --dry-run --json
+    assert_success
+    printf '%s' "$output" | jq -e '[.plan[] | tostring] | (map(test("Restart k3s on yard-")) | any) and (map(test("this server")) | any)
+        and (map(test("this server")) | index(true)) > (map(test("Restart k3s on yard-")) | index(true))' >/dev/null
+}
+
+@test "restart-cluster --workers-only leaves this server alone" {
+    run --separate-stderr demo_cmd restart-cluster --yes --dry-run --json --workers-only
+    assert_success
+    printf '%s' "$output" | jq -e '[.plan[] | tostring] | (map(test("this server")) | any | not)' >/dev/null
+}
+
+@test "restart-cluster rejects unknown options and has help" {
+    run --separate-stderr demo_cmd restart-cluster --bogus
+    assert_failure
+    run demo_cmd restart-cluster --help
+    assert_success
+    assert_output --partial "restarted first"
+}
+
 # --- menu header -------------------------------------------------------------------
 
 @test "the menu header names the interface that holds the address, not the default route's" {

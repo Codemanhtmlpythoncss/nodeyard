@@ -1,7 +1,7 @@
 """Chats kept on the server, so a conversation started in yardcode shows up in the dashboard's AI tab (and the other way round) and
 can be continued in either place.
 
-Protected like the rest of /api/v1: the model's API key, or a signed-in dashboard session.
+Protected like the rest of /api/v1: the server API key, or a signed-in dashboard session.
 
   GET  /api/v1/chats                  every chat (id, title, source, updated, count...)
   GET  /api/v1/chat?id=ID             one chat with all its messages

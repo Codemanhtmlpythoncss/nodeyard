@@ -12,8 +12,10 @@ undo for every change it makes.
 
 ![The nodeyard menu](docs/media/menu.svg)
 
-> **Status: early development.** 0.1.0 is the foundation release: the k3s
-> cluster, AI and operations features below work today. Static IPs and a
+> **Status: early development.** `v0.1.0` is the latest tagged release.
+> The `main` branch has newer, unreleased work; see the [changelog](CHANGELOG.md).
+> The foundation release includes the k3s cluster, AI and operations features.
+> Static IPs and a
 > network device view, a remote installer for your laptop, a floating
 > virtual IP, web dashboards, website hosting and more are on the
 > [roadmap](docs/STATUS.md). nodeyard is the successor to
@@ -41,7 +43,7 @@ More in [yardcode/README.md](yardcode/README.md). nodeyard's own installer insta
 
 ## Features
 
-**Today (0.1.0)**
+**Current main branch (unreleased)**
 
 - **Guided menu and wizards**: a status line with this machine's role and
   the cluster's health, a first-run quick-start that detects your hardware
@@ -65,7 +67,8 @@ More in [yardcode/README.md](yardcode/README.md). nodeyard's own installer insta
 - **A web dashboard** on `localhost:9092` (through an SSH tunnel): total
   resources and usage over time, every node's IP address and load, pods
   with live usage and logs, services and the addresses to reach them,
-  storage, events, alerts and AI models. Read-only.
+  storage, events, alerts and AI models. Settings includes confirmed cluster
+  operations; a Devices sidebar shows each node's temperatures and load.
 - **One config file** for the whole cluster, validated with clear errors,
   exportable and importable, with a drift check.
 - **Safe with secrets**: tokens and passwords never appear in logs,
@@ -108,6 +111,9 @@ The installer verifies the release's SHA-256 checksum, installs to
 needs. Running it again updates in place. To read it first:
 `curl -fsSLO https://raw.githubusercontent.com/Codemanhtmlpythoncss/nodeyard/main/install.sh`,
 then `sudo bash install.sh`.
+
+The one-line installer installs the latest published release. Features listed
+above from `main` become part of a release when they are tagged and published.
 
 ## Quick start
 

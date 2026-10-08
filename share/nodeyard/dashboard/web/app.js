@@ -1,4 +1,4 @@
-// The nodeyard dashboard. Read-only: it only ever fetches /api/* from the local server.
+// The nodeyard dashboard. It reads /api/* from the local server; explicit operations are confirmed before running.
 (function () {
   "use strict";
   const { esc, html, raw, setHTML, fmt, bar, donut, spark, area, level, PALETTE } = NY;
@@ -816,6 +816,7 @@
     v.update();
     syncControls();
     updateDrawer(false);
+    (NY.ui.hooks || []).forEach((f) => { try { f(); } catch (e) { /* a side panel must never break the page */ } });
     if (!rebuilt) $$(".tablewrap").forEach((el, i) => { if (keep[i]) { el.scrollLeft = keep[i][0]; el.scrollTop = keep[i][1]; } });
   }
   function setRoute() {
@@ -978,7 +979,7 @@
     location.href = "/login";
   });
 
-  NY.ui = { S, V, $, $$, store, chip, statusChip, ip, card, table, metric, seg, empty, ago, plural, frac, toast, copyText, getJSON, postJSON, setPath, getPath, syncControls,
+  NY.ui = { hooks: [], bar, tempClass, S, V, $, $$, store, chip, statusChip, ip, card, table, metric, seg, empty, ago, plural, frac, toast, copyText, getJSON, postJSON, setPath, getPath, syncControls,
     fillSelect, openDrawer, startJob, openJob, aiSummary, load, go };
   buildNav();
   const saved = store.get("view", "overview");
