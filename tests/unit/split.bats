@@ -470,3 +470,27 @@ switch_stubs() {
     run grep -c "^GATE" "$KLOG"
     assert_output "0"
 }
+
+@test "the server API key: a model deployed without a key gets it, one given a key keeps its own" {
+    printf '%s' "server-key-0123456789abcdef" | ny_secret_set "$SPLIT_KEY_SECRET"
+    split_parse_flags
+    [ "$SPLIT_API_KEY" = "server-key-0123456789abcdef" ]
+    printf '%s' "my-own-key-0123456789abcdef" >"${BATS_TEST_TMPDIR}/k"
+    split_parse_flags --api-key-file "${BATS_TEST_TMPDIR}/k"
+    [ "$SPLIT_API_KEY" = "my-own-key-0123456789abcdef" ]
+}
+
+@test "ai key --show prints the server API key, and says how to make one when there is none" {
+    run ai_split_key --show
+    assert_failure
+    assert_output --partial "no server API key"
+    printf '%s' "server-key-0123456789abcdef" | ny_secret_set "$SPLIT_KEY_SECRET"
+    run ai_split_key --show
+    assert_success
+    assert_output "server-key-0123456789abcdef"
+}
+
+@test "ai key is a command next to ai split key" {
+    [ "${NY_CMD_FN["ai key"]}" = "ai_split_key" ]
+    [ "${NY_CMD_FN["ai split key"]}" = "ai_split_key" ]
+}

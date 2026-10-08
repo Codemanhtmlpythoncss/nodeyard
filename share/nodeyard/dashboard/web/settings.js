@@ -112,8 +112,8 @@
           <span class="faint small" style="display:block;margin-top:4px">PNG, JPEG or WebP, up to 8 MB. Stored on the server and only shown to signed-in browsers.</span></div>
         ${bg ? html`${field(html`Blur <span class="faint" id="st-blur-v">${bg.blur}px</span>`, html`<input type="range" id="st-blur" min="0" max="40" value="${bg.blur}" class="range">`)}
           ${field(html`Darken <span class="faint" id="st-dim-v">${bg.dim}%</span>`, html`<input type="range" id="st-dim" min="0" max="95" value="${bg.dim}" class="range">`, "Darker keeps text easy to read.")}` : ""}`)}
-      ${card("Model API key", html`
-        <p class="muted small" style="margin-top:0">Apps use this key to talk to the split model. It is <b>not</b> the dashboard password.${s.gate ? " From your own networks (see Model gate) no key is needed." : ""}</p>
+      ${card("Server API key", html`
+        <p class="muted small" style="margin-top:0">One key for the whole server: yardcode, the control API and every model use it. It is <b>not</b> the dashboard password.${s.gate ? " From your own networks (see Model gate) no key is needed." : ""}</p>
         <div class="row wrap" style="gap:8px"><button class="btn" data-st="key-reveal">Reveal</button><button class="btn" data-st="key-rotate">Make a new one</button></div>
         <div id="st-key-shown"></div>
         ${field("Or set your own", html`<input class="input mono" id="st-key" placeholder="at least 16 characters" spellcheck="false" autocomplete="off">`)}

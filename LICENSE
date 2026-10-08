@@ -1,21 +1,40 @@
-MIT License
+nodeyard and yardcode: All Rights Reserved
 
-Copyright (c) 2026 the nodeyard contributors
+Copyright (c) 2026 Codemanhtmlpythoncss (the nodeyard author). All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This software is NOT open source. The source is public so that you can read it and
+run it on your own machines. Nothing else is allowed unless the author gives written
+permission first.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+YOU MAY
+  1. Read the source code.
+  2. Download, install and run the software on machines that you own or control, for
+     yourself or for your own organisation's internal use, as it is published.
+  3. Keep the copies you need to do that (installed copies and ordinary backups).
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+YOU MAY NOT, without the author's written permission
+  1. Copy the software or any part of it, except as allowed above.
+  2. Redistribute, publish, upload, mirror or share it, in whole or in part, in
+     source or any other form, with or without changes.
+  3. Sell, rent, lease, license or sublicense it, or charge money for it, for access
+     to it, or for a service that is built on it (including hosting it for others).
+  4. Modify it and give or sell the result to anyone, or make a new program, fork,
+     rewrite or "clone" that copies its code, text, structure or design.
+  5. Remove or change this license, copyright notices or the author's name.
+  6. Use the code, text or documentation to train or fine-tune a machine learning
+     model.
+
+Versions released earlier under the MIT License stay MIT for the people who already
+received them under that license. This license applies to every version published
+or changed from the date of this file onwards.
+
+NO WARRANTY. The software is provided "as is", without warranty of any kind, express or
+implied, including merchantability, fitness for a particular purpose and
+non-infringement. The author is not liable for any claim, damages or other liability
+arising from the software or its use.
+
+Third-party tools that nodeyard can install or call (k3s, kubectl, llama.cpp, Ollama,
+gum and others) are not part of this software and keep their own licenses.
+
+To ask for permission, open an issue at
+https://github.com/Codemanhtmlpythoncss/nodeyard or contact the author through GitHub.

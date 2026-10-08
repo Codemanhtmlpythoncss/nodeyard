@@ -21,7 +21,8 @@ ny_cmd "ai split clean" ai_split_clean "AI" "Free disk space: delete old weight 
 ny_cmd "ai split models" ai_split_models "AI" "List downloaded model files, caches and free disk on every node" ai json
 ny_cmd "ai split rm" ai_split_rm "AI" "Delete a downloaded split model (file + caches) from every node" ai
 ny_cmd "ai split download" ai_split_download "AI" "Download a model file in the background (several can run at once)" ai
-ny_cmd "ai split key" ai_split_key "AI" "Change the split model's API key (rotate or set) and apply it" ai
+ny_cmd "ai split key" ai_split_key "AI" "Change the server API key (rotate or set) and apply it to the model" ai
+ny_cmd "ai key" ai_split_key "AI" "The server API key: one key for yardcode, the control API and every model (show, rotate or set)" ai
 ny_cmd "ai hf token" ai_hf_token "AI" "Store a Hugging Face token for gated models" ai
 ny_cmd "ai gpu setup" ai_gpu_setup "AI" "Let containers on this machine use its NVIDIA card (run on that machine)" ai
 ny_cmd "ai gpu enable" ai_gpu_enable "AI" "Check a node's NVIDIA card works in containers and use it for models" ai
@@ -1100,6 +1101,10 @@ split_parse_flags() {
     ny_valid_int "$SPLIT_CTX" 512 1048576 || ny_usage_error "--ctx: ${NY_VALID_MSG}"
     ny_valid_enum "$SPLIT_THINK" on off || ny_usage_error "--think: ${NY_VALID_MSG}"
     [[ -z "$SPLIT_ALIAS" || "$SPLIT_ALIAS" =~ ^[A-Za-z0-9._:-]+$ ]] || ny_usage_error "--alias may only contain letters, digits, '.', '_', ':' and '-'."
+    # One key for the whole server: a model deployed without --api-key uses the server API key when there is one.
+    if [[ -z "$SPLIT_API_KEY" ]] && ny_secret_exists "$SPLIT_KEY_SECRET" && [[ -r "$(ny_path "$(ny_secret_path "$SPLIT_KEY_SECRET")")" ]]; then
+        SPLIT_API_KEY="$(ny_secret_get "$SPLIT_KEY_SECRET")"
+    fi
     SPLIT_MODEL_AUTO=0
     if [[ "$SPLIT_MODEL_SPEC" == "auto" ]]; then
         SPLIT_MODEL_AUTO=1
@@ -1228,6 +1233,12 @@ ai_split_deploy() {
 split_apply() {
     local manifest
     manifest="$(ny_mktemp)"
+    # The key the model is given is also the server API key (dashboard, yardcode and the control API check it), so they always agree.
+    if [[ -n "$SPLIT_API_KEY" && "$NY_DRY_RUN" -ne 1 ]] && ! ny_simulating; then
+        if ! ny_secret_exists "$SPLIT_KEY_SECRET" || [[ "$(ny_secret_get "$SPLIT_KEY_SECRET")" != "$SPLIT_API_KEY" ]]; then
+            printf '%s' "$SPLIT_API_KEY" | ny_secret_set "$SPLIT_KEY_SECRET"
+        fi
+    fi
     split_manifest "$manifest"
     if [[ "$NY_DRY_RUN" -eq 1 ]]; then
         ny_plan_add apply "Apply the split-model deployment (main node ${PLAN_NAMES[0]})"
@@ -2044,14 +2055,16 @@ SPLIT_HF_SECRET="hf-token"
 
 ai_split_key_help() {
     cat <<'HELP'
-Usage: nodeyard ai split key --rotate | --stdin
+Usage: nodeyard ai key --show | --rotate | --stdin      (same as: nodeyard ai split key)
 
-Changes the split model's API key (stored in /etc/nodeyard/secrets/ai-split-api-key,
-which is NOT the dashboard password) and gives the running model the new one:
-  --rotate   make a new random key
+The server API key: one key for the whole server. yardcode, the dashboard's control API
+and the split model all use it. It is stored in /etc/nodeyard/secrets/ai-split-api-key
+and is NOT the dashboard password.
+  --show     print the key
+  --rotate   make a new random key and give the running model the new one
   --stdin    read the new key from standard input (at least 16 characters)
-Apps that use the old key need the new one afterwards. The dashboard's chat
-picks it up by itself.
+A model deployed later gets the same key. Apps that use the old key need the new one
+after a change. The dashboard's chat picks it up by itself.
 HELP
 }
 
@@ -2062,12 +2075,18 @@ ai_split_key() {
         case "$1" in
             --rotate) mode=rotate ;;
             --stdin) mode=stdin ;;
+            --show) mode=show ;;
             --yes | -y) NY_YES=1 ;;
-            *) ny_usage_error "Unknown option: $1" "nodeyard ai split key --rotate | --stdin" ;;
+            *) ny_usage_error "Unknown option: $1" "nodeyard ai key --show | --rotate | --stdin" ;;
         esac
         shift
     done
-    [[ -n "$mode" ]] || ny_usage_error "Say --rotate or --stdin." "nodeyard ai split key --rotate | --stdin"
+    [[ -n "$mode" ]] || ny_usage_error "Say --show, --rotate or --stdin." "nodeyard ai key --show | --rotate | --stdin"
+    if [[ "$mode" == show ]]; then
+        ny_secret_exists "$SPLIT_KEY_SECRET" || ny_die "There is no server API key yet." "Make one: sudo nodeyard ai key --rotate" "$NY_E_PRECONDITION"
+        printf '%s\n' "$(ny_secret_get "$SPLIT_KEY_SECRET")"
+        return 0
+    fi
     local key
     if [[ "$mode" == rotate ]]; then
         key="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"

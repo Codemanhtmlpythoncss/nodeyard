@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Codemanhtmlpythoncss/nodeyard/actions/workflows/ci.yml/badge.svg)](https://github.com/Codemanhtmlpythoncss/nodeyard/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/Codemanhtmlpythoncss/nodeyard?include_prereleases&sort=semver)](https://github.com/Codemanhtmlpythoncss/nodeyard/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: All rights reserved](https://img.shields.io/badge/license-all%20rights%20reserved-red.svg)](LICENSE)
 
 **Set up and run a homelab cluster of Linux machines from one command.**
 Raspberry Pis, mini PCs and old laptops on one switch become a
@@ -163,4 +163,4 @@ is expected to follow the [code of conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
-[MIT](LICENSE)
+[All rights reserved](LICENSE). You can read the code and install and run it on your own machines. You can't copy it, redistribute it, sell it, host it for others or build a copy of it without written permission.

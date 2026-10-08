@@ -7,6 +7,15 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ## [Unreleased]
 
+### Changed
+
+- **License**: nodeyard and yardcode are now "All rights reserved" instead of MIT. You can read the source and run it on your own machines; copying,
+  redistributing, selling, hosting for others and making clones are not allowed without written permission. Copies already received under MIT stay MIT.
+- **One server API key** for everything: yardcode, the control API and every model use the same key (dashboard Settings > Server API key, or
+  `nodeyard ai key --show|--rotate|--stdin`). A model deployed with its own key now stores it as the server key (and a model deployed without one
+  gets the server key), so the dashboard no longer says "refused the key" for a key the model accepts. yardcode now tells apart a wrong key (401),
+  a control API that is off (403) and too many tries (429), and checks the key right after `yardcode login`.
+
 ### Added
 
 - yardcode: **type `/` and the commands appear above the prompt** (filter as you type, Up/Down, Tab or Enter), with the input framed

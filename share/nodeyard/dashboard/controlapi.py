@@ -32,7 +32,7 @@ WINDOW, LIMIT = 300.0, 12
 
 
 class KeyGate:
-    """Checks the Authorization header against the model's key, and slows down anyone who guesses."""
+    """Checks the Authorization header against the server's API key, and slows down anyone who guesses."""
 
     def __init__(self, backend):
         self.backend = backend
@@ -56,7 +56,7 @@ class KeyGate:
             supplied = auth[7:].strip()
             key = self.backend.api_key() if hasattr(self.backend, "api_key") else self.backend.reveal_key()
             if not key:
-                h._json({"ok": False, "error": "No model API key is set on this cluster, so this API is off. Set one: sudo nodeyard ai split key --rotate"}, 403)
+                h._json({"ok": False, "error": "This server has no API key yet, so the control API is off. Make one in the dashboard (Settings > Server API key) or run: sudo nodeyard ai key --rotate"}, 403)
                 return False
             ip = self._ip(h)
             now = time.time()
@@ -72,11 +72,11 @@ class KeyGate:
             with self.lock:
                 self.fails.setdefault(ip, []).append(now)
             time.sleep(0.3)
-            h._json({"ok": False, "error": "That isn't the model's API key."}, 401)
+            h._json({"ok": False, "error": "That isn't this server's API key. It is the one under Settings > Server API key in the dashboard (not the dashboard password). If the model was deployed with its own key, set that same key there: Settings > Server API key > Or set your own."}, 401)
             return False
         if ctx.auth.valid(h._token()):   # the dashboard's own page, signed in
             return True
-        h._json({"ok": False, "error": "Send the model's API key: Authorization: Bearer KEY (see Settings > Model API key)."}, 401, {"WWW-Authenticate": "Bearer"})
+        h._json({"ok": False, "error": "Send the server's API key: Authorization: Bearer KEY (see Settings > Server API key)."}, 401, {"WWW-Authenticate": "Bearer"})
         return False
 
 

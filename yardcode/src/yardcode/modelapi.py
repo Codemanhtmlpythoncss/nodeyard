@@ -1,6 +1,6 @@
 """Loading models on a nodeyard cluster from here, through the dashboard's key-protected control API.
 
-The same API key that unlocks the model unlocks this. Endpoints (all under /api/v1 on the dashboard):
+The server's API key (one key for every model; the dashboard shows it under Settings > Server API key) unlocks this. Endpoints (all under /api/v1 on the dashboard):
   GET  /status                    what is loaded and whether it is ready
   GET  /models                    downloaded models (and Ollama's), which one is loaded
   POST /models/load               {"model": "file.gguf" | "ollama-name"}  -> {"job": id}
@@ -65,10 +65,15 @@ class ModelAPI:
             data = json.loads(raw.decode("utf-8", "replace")) if raw.strip() else {}
         except ValueError:
             raise ModelAPIError("The dashboard answered with something that isn't JSON (is %s really the nodeyard dashboard?)." % self.base, resp.status)
-        if resp.status in (401, 403):
+        said = data.get("error") or ""
+        if resp.status == 401:
             if not self.key:
-                raise ModelAPIError("Loading models needs the model's API key. Run: yardcode login   (the dashboard's Settings page shows the key)", resp.status)
-            raise ModelAPIError("The dashboard refused the key. Use the model's API key: yardcode login", resp.status)
+                raise ModelAPIError("This needs the server's API key. Run: yardcode login   (the dashboard shows it under Settings > Server API key)", 401)
+            raise ModelAPIError("The dashboard says that isn't the server's API key. %s" % (said or "Check it with: yardcode login"), 401)
+        if resp.status == 403:
+            raise ModelAPIError("The dashboard won't use the control API: %s" % (said or "it answered 403."), 403)
+        if resp.status == 429:
+            raise ModelAPIError(said or "Too many wrong keys. Wait a few minutes.", 429)
         if resp.status == 404 and not data.get("error"):
             raise ModelAPIError("That nodeyard dashboard has no /api/v1 control API yet (update nodeyard on the server).", 404)
         if resp.status >= 400 or data.get("ok") is False:

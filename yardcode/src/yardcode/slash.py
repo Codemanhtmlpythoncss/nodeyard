@@ -434,7 +434,7 @@ def c_login(app, arg):
         base = normalize_base(base)
         if not base:
             return
-        key = input(S.accent("  API key (Enter to keep %s): " % ("the saved one" if st.get("api_key") else "none"))).strip()
+        key = input(S.accent("  Server API key, the one under Settings > Server API key (Enter to keep %s): " % ("the saved one" if st.get("api_key") else "none"))).strip()
     except (EOFError, KeyboardInterrupt):
         app.tui.w()
         return
@@ -454,6 +454,12 @@ def c_login(app, arg):
         app.tui.w(S.warn("  Connected, but the model is still loading."))
     else:
         app.tui.warn("Saved, but %s didn't answer. Check the address and that the model is running." % base)
+    if app.modelapi.available:
+        try:
+            app.modelapi.status()
+            app.tui.w(S.ok("  %s The dashboard accepted the key (model loading, shared chats and web search through the server work)." % S.g("check")))
+        except ModelAPIError as e:
+            app.tui.warn(str(e))
 
 
 @cmd("logout", "Forget the saved API key", group="Settings")

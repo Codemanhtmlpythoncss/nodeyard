@@ -186,7 +186,7 @@ downloading, loading, or unloaded (press Load).
 
 ## Control API
 
-Other programs can see and switch the model with the model's API key (Settings > Model API key). It works from any network the dashboard
+Other programs can see and switch the model with the model's API key (Settings > Server API key). It works from any network the dashboard
 answers on (also through public access) and the key is always needed. Deleting models, running commands and changing settings are not
 in it: those need the dashboard's password.
 

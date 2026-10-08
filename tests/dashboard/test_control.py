@@ -70,6 +70,7 @@ class Control(unittest.TestCase):
         self.assertIn("API key", j["error"])
         s, j = self.call("GET", "/api/v1/models", key="wrong-key")
         self.assertEqual(s, 401)
+        self.assertIn("server's API key", j["error"])         # one server-wide key, in the wording too
         s, j = self.call("POST", "/api/v1/models/load", {"model": "x"}, key=None)
         self.assertEqual(s, 401)
 
