@@ -884,9 +884,10 @@
   let jobTimer = null;
   async function startJob(action, params, onDone) {
     let r;
-    try { r = await postJSON("/api/run", Object.assign({ action }, params || {})); } catch (e) { return; }
-    if (!r.ok) { toast(r.error || "Couldn't start that."); return; }
+    try { r = await postJSON("/api/run", Object.assign({ action }, params || {})); } catch (e) { toast(e.message || "Couldn't reach the dashboard server."); return false; }
+    if (!r.ok) { toast(r.error || "Couldn't start that."); return false; }
     openJob(r.job, onDone);
+    return true;
   }
   function openJob(id, onDone) {
     let since = 0, lines = [];

@@ -206,7 +206,7 @@ class DemoAI:
         with self.lock:
             job["status"], job["rc"] = "ok", 0
 
-    def disk_models(self):
+    def disk_models(self, force=False):
         G = GiB
         return {"ok": True, "in_use": "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf", "nodes": [
             {"node": "yard-1", "items": [{"kind": "disk", "capacity": 900 * G, "free": 801 * G},

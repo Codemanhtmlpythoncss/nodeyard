@@ -15,6 +15,7 @@ import shlex
 import socket
 import ssl
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -173,7 +174,7 @@ class Jobs:
         with self.lock:
             return next((j for j in self.jobs.values() if j["status"] == "running" and j["exclusive"]), None)
 
-    def start(self, title, argv, exclusive=True, outside=False, stdin=None):
+    def start(self, title, argv, exclusive=True, outside=False, stdin=None, on_done=None):
         if not self.bin or not os.access(self.bin, os.X_OK):
             raise AIError("This dashboard can't run nodeyard commands (nodeyard wasn't found).", 501)
         with self.lock:
@@ -187,7 +188,7 @@ class Jobs:
                 raise AIError("That is already running.", 409)
             jid = secrets.token_hex(6)
             job = {"id": jid, "title": title, "status": "running", "rc": None, "lines": [], "started": time.time(),
-                   "cmd": "nodeyard " + " ".join(argv), "exclusive": exclusive, "outside": outside, "stdin": stdin}
+                   "cmd": "nodeyard " + " ".join(argv), "exclusive": exclusive, "outside": outside, "stdin": stdin, "on_done": on_done}
             self.jobs[jid] = job
             self.order.append(jid)
             # forget old finished tasks, never running ones
@@ -218,6 +219,7 @@ class Jobs:
                                  env=env, text=True, errors="replace", bufsize=1, start_new_session=True)
         except OSError as e:
             self._add(job, "Couldn't start nodeyard: %s" % e)
+            self._notify_done(job)
             with self.lock:
                 job["status"], job["rc"] = "failed", -1
             return
@@ -237,8 +239,18 @@ class Jobs:
         finally:
             killer.cancel()
             p.stdout.close()
+        self._notify_done(job)
         with self.lock:
             job["status"], job["rc"] = ("ok" if rc == 0 else "failed"), rc
+
+    @staticmethod
+    def _notify_done(job):
+        callback = job.pop("on_done", None)
+        if callback:
+            try:
+                callback(job)
+            except Exception:  # noqa: BLE001 -- a cache refresh must not break job reporting
+                pass
 
     def view(self, jid, since):
         with self.lock:
@@ -394,15 +406,87 @@ def build_command(action, p, nodes, key_path):
 # --------------------------------------------------------------------------- live backend
 
 class Live:
-    def __init__(self, store, ai_key_file, nodeyard_bin):
+    MODEL_CACHE_TTL = 30
+    DOWNLOAD_CACHE_TTL = 2.5
+
+    def __init__(self, store, ai_key_file, nodeyard_bin, state_dir=""):
         self.store = store
         self.ai_key_file = ai_key_file or ""
+        self.state_dir = state_dir or "/var/lib/nodeyard/dashboard"
         self.jobs = Jobs(nodeyard_bin)
         self.hf = HuggingFace()
         self.tags_cache = {}
         self.tags_lock = threading.Lock()
         self.models_lock = threading.Lock()
-        self.models_cache = None
+        self.models_cache = self._load_models_cache()
+        self.models_refreshing = False
+        self.models_generation = 0
+        self.models_dirty = False
+        self.models_error = ""
+        self.downloads_lock = threading.Lock()
+        self.downloads_cache = []
+        self.downloads_at = 0
+        self.downloads_refreshing = False
+
+    def _models_cache_path(self):
+        return os.path.join(self.state_dir, "ai-disk-models.json")
+
+    def _load_models_cache(self):
+        try:
+            with open(self._models_cache_path(), "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            at, data = float(saved.get("saved_at", 0)), saved.get("inventory")
+            if at > 0 and isinstance(data, dict) and data.get("ok") and isinstance(data.get("nodes"), list):
+                return (at, data)
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        return None
+
+    def _save_models_cache(self, cache):
+        tmp = ""
+        try:
+            os.makedirs(self.state_dir, mode=0o700, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=".ai-disk-models-", dir=self.state_dir)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"saved_at": cache[0], "inventory": cache[1]}, f, separators=(",", ":"))
+                f.write("\n")
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, self._models_cache_path())
+        except OSError:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+    def _forget_models_cache(self, file=None):
+        with self.models_lock:
+            self.models_generation += 1
+            self.models_dirty = True
+            self.models_error = ""
+            if file and self.models_cache:
+                base = file[:-5] if file.lower().endswith(".gguf") else file
+                cache_key = re.sub(r"[^a-z0-9-]", "-", base.lower())[:40]
+                data = dict(self.models_cache[1])
+                data["nodes"] = [dict(n, items=[it for it in n.get("items", [])
+                                                   if not (it.get("kind") == "model" and it.get("name") == file)
+                                                   and not (it.get("kind") == "partial" and re.sub(r"\.(part\d*|joining|copying)$", "", it.get("name", "")) == file)
+                                                   and not (it.get("kind") == "cache" and it.get("name") == cache_key)])
+                                  for n in data.get("nodes", [])]
+                self.models_cache = (time.time(), data)
+                self._save_models_cache(self.models_cache)
+            else:
+                self.models_cache = None
+                try:
+                    os.unlink(self._models_cache_path())
+                except OSError:
+                    pass
+
+    def _model_job_done(self, action, params, job):
+        if action == "split-rm":
+            self._forget_models_cache(str(params.get("file") or ""))
+        else:
+            self._forget_models_cache()
 
     def _state(self):
         st = self.store.snapshot()["state"]
@@ -582,33 +666,96 @@ class Live:
         if stdin is not None and len(stdin) > 65536:
             raise AIError("The input is too long.")
         exclusive = action not in SHARED_ACTIONS and not (action == "cli" and p.get("dry_run") is True)
-        return self.jobs.start(title, argv, exclusive=exclusive, outside=action in OUTSIDE_ACTIONS, stdin=stdin)
+        changes_models = action in {"deploy", "switch", "download", "split-rm", "clean", "undeploy"}
+        on_done = (lambda job: self._model_job_done(action, p, job)) if changes_models else None
+        return self.jobs.start(title, argv, exclusive=exclusive, outside=action in OUTSIDE_ACTIONS, stdin=stdin, on_done=on_done)
 
     # -- what is on each node's disk ------------------------------------------------
 
-    def disk_models(self):
-        """`nodeyard ai split models --json`: model files, unfinished downloads,
-        weight caches and free disk per node. Cached for 15 s (it starts a small
-        pod on every node)."""
+    def disk_models(self, force=False):
+        """Return the last inventory immediately; refresh cluster disks in the background."""
         now = time.time()
         with self.models_lock:
-            if self.models_cache and now - self.models_cache[0] < 15:
-                return dict(self.models_cache[1], downloads=self._downloads())
+            cache = self.models_cache
+            stale = self.models_dirty or not cache or now - cache[0] >= self.MODEL_CACHE_TTL
+            start = (force or stale) and not self.models_refreshing
+            if start:
+                self.models_refreshing = True
+                generation = self.models_generation
+            refreshing = self.models_refreshing
+            error = self.models_error
+        if start:
+            threading.Thread(target=self._refresh_models, args=(generation,), name="nodeyard-ai-disk-scan", daemon=True).start()
+        downloads = self._downloads()
+        if not cache:
+            if not refreshing:
+                raise AIError(error or "Couldn't look at the nodes' disks.", 502)
+            data = {"ok": True, "nodes": [], "in_use": ""}
+        else:
+            data = dict(cache[1])
+        data.update({"downloads": downloads, "scanning": refreshing, "updated": cache[0] if cache else None})
+        if error:
+            data["scan_error"] = error
+        return data
+
+    def _refresh_models(self, generation):
+        while True:
             if not self.jobs.bin or not os.access(self.jobs.bin, os.X_OK):
-                raise AIError("This dashboard can't run nodeyard commands (nodeyard wasn't found).", 501)
-            env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/tmp", "LANG": "C.UTF-8", "NODEYARD_COLOR": "never"}
-            try:
-                out = subprocess.run([self.jobs.bin, "--no-color", "ai", "split", "models", "--json"], stdin=subprocess.DEVNULL,
-                                     capture_output=True, text=True, timeout=240, env=env)
-                data = json.loads(out.stdout.strip().splitlines()[-1]) if out.stdout.strip() else None
-            except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+                error = "This dashboard can't run nodeyard commands (nodeyard wasn't found)."
+                valid = False
                 data = None
-            if not isinstance(data, dict) or not data.get("ok"):
-                raise AIError("Couldn't look at the nodes' disks.", 502)
-            self.models_cache = (now, data)
-            return dict(data, downloads=self._downloads())
+            else:
+                env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/tmp", "LANG": "C.UTF-8", "NODEYARD_COLOR": "never"}
+                try:
+                    out = subprocess.run([self.jobs.bin, "--no-color", "ai", "split", "models", "--json"], stdin=subprocess.DEVNULL,
+                                         capture_output=True, text=True, timeout=240, env=env)
+                    data = json.loads(out.stdout.strip().splitlines()[-1]) if out.stdout.strip() else None
+                except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+                    data = None
+                valid = isinstance(data, dict) and bool(data.get("ok")) and isinstance(data.get("nodes"), list)
+                error = "Couldn't look at the nodes' disks."
+
+            with self.models_lock:
+                # A model may have been downloaded or deleted while the scan ran.
+                # Discard that result and rescan so stale locations never return.
+                if generation != self.models_generation:
+                    generation = self.models_generation
+                    continue
+                self.models_refreshing = False
+                if valid:
+                    cache = (time.time(), data)
+                    self.models_cache = cache
+                    self.models_dirty = False
+                    self.models_error = ""
+                    self._save_models_cache(cache)
+                else:
+                    self.models_error = error
+                return
 
     def _downloads(self):
+        """Return cached download progress and refresh it off the request thread."""
+        now = time.time()
+        with self.downloads_lock:
+            start = now - self.downloads_at >= self.DOWNLOAD_CACHE_TTL and not self.downloads_refreshing
+            if start:
+                self.downloads_refreshing = True
+            result = list(self.downloads_cache)
+        if start:
+            threading.Thread(target=self._refresh_downloads, name="nodeyard-ai-download-status", daemon=True).start()
+        return result
+
+    def _refresh_downloads(self):
+        try:
+            result = self._query_downloads()
+        except Exception:  # noqa: BLE001 -- don't leave the background refresh stuck
+            result = []
+        finally:
+            with self.downloads_lock:
+                self.downloads_cache = result
+                self.downloads_at = time.time()
+                self.downloads_refreshing = False
+
+    def _query_downloads(self):
         """Download Jobs with their progress (from their last log line)."""
         try:
             jobs = self.store.source.client.get("/apis/batch/v1/namespaces/ai-split/jobs?labelSelector=app.kubernetes.io%2Fcomponent%3Dmodel-download", timeout=5)
@@ -655,7 +802,7 @@ def register(ctx, args):
         import demoai
         backend = demoai.DemoAI(ctx.store)
     else:
-        backend = Live(ctx.store, getattr(args, "ai_key_file", ""), getattr(args, "nodeyard_bin", ""))
+        backend = Live(ctx.store, getattr(args, "ai_key_file", ""), getattr(args, "nodeyard_bin", ""), getattr(args, "state_dir", ""))
     ctx.ai = backend
 
     def fail(h, e):
@@ -685,7 +832,7 @@ def register(ctx, args):
 
     def disk_models(h, q):
         try:
-            h._json(dict(backend.disk_models(), ok=True))
+            h._json(dict(backend.disk_models(force=q.get("refresh", [""])[0] == "1"), ok=True))
         except AIError as e:
             fail(h, e)
 

@@ -10,7 +10,7 @@
   const num = (n) => (n == null ? "–" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "k" : String(n));
 
   const A = {
-    blocks: {}, wanted: (() => { try { return JSON.parse(store.get("ai.wanted", "") || "null"); } catch (e) { return null; } })(), loadingModel: null, 
+    blocks: {}, wanted: (() => { try { return JSON.parse(store.get("ai.wanted", "") || "null"); } catch (e) { return null; } })(), loadingModel: null,
     tab: store.get("ai.tab", "chat"), targets: null, targetsAt: 0, ollama: null, ollamaAt: 0, disk: null, diskAt: 0, diskErr: "", chats: [], cur: null, stream: null,
     search: { q: "", sort: "downloads", results: null, loading: false, error: "", files: {}, open: "" }, key: "", useKey: false, locked: false,
     attach: [],
@@ -39,13 +39,25 @@
     try { const r = await getJSON("/api/ai/ollama"); A.ollama = r.ok ? r.pods : []; } catch (e) { return; }
     if (S.view === "ai" && A.tab === "models") refreshTab();
   }
-  async function loadDisk(force) {
+  let diskRequest = null, diskPollTimer = null;
+  async function loadDisk(force, refresh) {
     const dl = A.disk && A.disk.downloads && A.disk.downloads.some((d) => d.state === "running");
     if (!force && A.diskAt && Date.now() - A.diskAt < (dl ? 5000 : 30000)) return;
+    if (diskRequest) return diskRequest;
     A.diskAt = Date.now();
-    try { const r = await getJSON("/api/ai/models"); if (r.ok) { A.disk = r; A.diskErr = ""; } else A.diskErr = r.error || "Couldn't look at the disks."; } catch (e) { return; }
-    refreshModelPick();
-    if (S.view === "ai" && A.tab === "models") refreshTab();
+    diskRequest = (async () => {
+      try {
+        const r = await getJSON("/api/ai/models" + (refresh ? "?refresh=1" : ""));
+        if (r.ok) { A.disk = r; A.diskErr = ""; }
+        else A.diskErr = r.error || "Couldn't look at the disks.";
+      } catch (e) { A.diskErr = e.message || "Couldn't reach the dashboard server."; }
+      finally { diskRequest = null; }
+      clearTimeout(diskPollTimer);
+      if (A.disk && A.disk.scanning) diskPollTimer = setTimeout(() => loadDisk(true), 4000);
+      refreshModelPick();
+      if (S.view === "ai" && A.tab === "models") refreshTab();
+    })();
+    return diskRequest;
   }
   const targetList = () => (A.targets && A.targets.targets) || [];
   const findTarget = (id) => targetList().find((t) => t.id === id);
@@ -246,6 +258,23 @@
     const sp = S.d && S.d.ai && S.d.ai.split;
     setHTML($("#ai-status"), A.targets && A.targets.targets.length ? chip(plural(A.targets.targets.filter((t) => t.ready).length, "model") + " ready", "good") : (sp ? chip(sp.loaded === false ? "model unloaded" : sp.download === "running" ? "downloading" : "model loading" + (sp.load && sp.load.phase === "loading" ? " " + sp.load.pct.toFixed(0) + "%" : ""), "warn") : chip("no models running")));
   }
+  async function startAIJob(button, action, params, onDone) {
+    if (button && button.dataset.aiStarting === "1") return;
+    const oldHTML = button && button.innerHTML;
+    if (button) {
+      button.dataset.aiStarting = "1";
+      button.disabled = true;
+      button.textContent = "Starting…";
+    }
+    try { await startJob(action, params, onDone); }
+    finally {
+      if (button) {
+        delete button.dataset.aiStarting;
+        button.disabled = false;
+        button.innerHTML = oldHTML;
+      }
+    }
+  }
   const plural = (n, w) => n + " " + w + (n === 1 ? "" : "s");
 
   // ------------------------------------------------------------------ the AI model menu
@@ -266,7 +295,8 @@
     const state = sp && sp.loaded === false ? "unloaded" : sp && sp.ready ? "running" : "loading";
     const opts = list.map((m) => { A.pick[m.file] = m; return '<option value="' + esc(m.file) + '"' + (m.file === shown ? " selected" : "") + ">" + esc(m.file.replace(/\.gguf$/i, "") + " · " + fmt.bytes(m.size, 1) + " · " + m.node + (m.file === running ? " · " + state : "")) + "</option>"; });
     if (A.wanted && A.disk && !A.pick[A.wanted.file]) { A.wanted = null; store.set("ai.wanted", ""); }
-    const none = !A.disk ? "Looking at the disks…" : !list.length ? "No models downloaded" : "No model running: pick one";
+    const scanningEmpty = A.disk && A.disk.scanning && !((A.disk.nodes || []).some((n) => (n.items || []).some((it) => it.kind === "model")));
+    const none = !A.disk || scanningEmpty ? "Looking at the disks…" : !list.length ? "No models downloaded" : "No model running: pick one";
     const htmlStr = (shown && A.pick[shown] ? "" : '<option value="" selected>' + esc(running ? running.replace(/\.gguf$/i, "") + " · " + state : none) + "</option>") + opts.join("");
     if (sel.dataset.sig !== htmlStr) { sel.dataset.sig = htmlStr; sel.innerHTML = htmlStr; }
     sel.disabled = !!busy || !list.length;
@@ -906,6 +936,8 @@
   function diskCard() {
     const D = A.disk;
     if (!D) return card("Downloaded models", A.diskErr ? html`<div class="empty"><b>Couldn't look at the disks</b>${A.diskErr}</div>` : html`<div class="empty"><div class="spin"></div>Looking at each machine's disk…</div>`);
+    const hasInventory = (D.nodes || []).some((n) => (n.items || []).length);
+    if (D.scanning && !hasInventory) return card("Downloaded models", html`<div class="empty"><div class="spin"></div>Looking at each machine's disk…</div>`);
     const kindName = { model: "Model file", partial: "Unfinished download", cache: "Weight cache" };
     const rows = [];
     let reclaim = 0;
@@ -927,14 +959,14 @@
         raw('<button class="btn small danger" data-ai="m-rm" data-file="' + esc(r.base) + '">' + (r.busy ? "Stop + delete" : "Delete") + "</button>")) },
     ];
     const dls = (D.downloads || []).filter((d) => d.state !== "done");
-    return card("Downloaded models", html`<div class="disks">${disks.map((d) => { const used = 1 - d.free / Math.max(1, d.cap); return html`<div><div class="row"><b>${d.node}</b><span class="grow"></span><span class="muted small">${fmt.bytes(d.free)} free of ${fmt.bytes(d.cap)}</span></div><div class="bar ${used > 0.9 ? "bad" : used > 0.8 ? "warn" : ""}"><i style="width:${(used * 100).toFixed(1)}%"></i></div></div>`; })}</div>
+    return card("Downloaded models", html`${D.scanning ? html`<div class="muted small" style="margin-bottom:10px"><span class="spin small"></span> Refreshing the saved disk inventory…</div>` : ""}${D.scan_error ? html`<div class="note small">The latest disk scan failed: ${D.scan_error}. Showing the last saved inventory.</div>` : ""}<div class="disks">${disks.map((d) => { const used = 1 - d.free / Math.max(1, d.cap); return html`<div><div class="row"><b>${d.node}</b><span class="grow"></span><span class="muted small">${fmt.bytes(d.free)} free of ${fmt.bytes(d.cap)}</span></div><div class="bar ${used > 0.9 ? "bad" : used > 0.8 ? "warn" : ""}"><i style="width:${(used * 100).toFixed(1)}%"></i></div></div>`; })}</div>
       ${dls.map((d) => html`<div class="mt"><div class="row"><span class="mono small grow" style="word-break:break-all">${d.file}</span><span class="muted small">${d.state === "stuck" ? "stuck: not enough disk" : d.state === "failed" ? "failed" : d.note ? d.note : fmt.bytes(d.got) + " of " + fmt.bytes(d.size) + (d.rate ? " · " + fmt.rate(d.rate) : "") + (d.eta != null ? " · about " + etaText(d.eta) + " left" : "")} · ${d.node}</span></div><div class="bar ${d.state === "running" ? "" : "bad"}"><i style="width:${d.size ? Math.min(100, (100 * d.got) / d.size).toFixed(1) : 0}%"></i></div></div>`)}
       <div class="mt">${U.table("disk-models", cols, rows, { k: "size", empty: "Nothing downloaded", emptySub: "Download a model from Find models." })}</div>
       <div class="row wrap" style="margin-top:14px;gap:8px">
         <button class="btn primary" data-ai="clean">Free up space${reclaim ? " (" + fmt.bytes(reclaim) + ")" : ""}</button>
         <button class="btn" data-ai="clean-models">…including unused models</button>
         <button class="btn" data-ai-tab-link="search">Download another</button>
-        <button class="btn" data-ai="disk-refresh">Refresh</button></div>
+        <button class="btn" data-ai="disk-refresh" ${D.scanning ? raw("disabled") : ""}>${D.scanning ? "Refreshing…" : "Refresh"}</button></div>
       <p class="muted small" style="margin:10px 0 0">Every machine keeps a weight cache (its share of a model) so loading is quick. “Free up space” deletes caches of models that aren't running and unfinished downloads nothing is working on. The running model is never touched.</p>`, html`${plural(D.nodes.length, "machine")}`);
   }
   function renderModels() {
@@ -1122,34 +1154,35 @@
     else if (a === "retry" && c && !A.stream) { while (c.messages.length && c.messages[c.messages.length - 1].role !== "user") c.messages.pop(); send("", true); }
     else if (a === "goto-chat") { newChat(el.dataset.target); selectTab("chat"); }
     else if (a === "o-chat") { newChat("ollama:" + el.dataset.pod + ":" + el.dataset.model); selectTab("chat"); }
-    else if (a === "split-unload") { const v = await dialog("Unload the split model?", html`Every machine gets its memory back. The downloaded file stays on disk, so loading again takes a minute or two. Chat stops working until you load it.`, "Unload"); if (v) startJob("split-unload", {}, () => loadTargets(true)); }
-    else if (a === "split-load") startJob("split-load", {}, () => loadTargets(true));
-    else if (a === "split-status") startJob("status");
-    else if (a === "split-test") startJob("test");
+    else if (a === "split-unload") { const v = await dialog("Unload the split model?", html`Every machine gets its memory back. The downloaded file stays on disk, so loading again takes a minute or two. Chat stops working until you load it.`, "Unload"); if (v) startAIJob(el, "split-unload", {}, () => loadTargets(true)); }
+    else if (a === "split-load") startAIJob(el, "split-load", {}, () => loadTargets(true));
+    else if (a === "split-status") startAIJob(el, "status");
+    else if (a === "split-test") startAIJob(el, "test");
     else if (a === "split-remove") {
       const sp = S.d.ai && S.d.ai.split, file = sp && sp.model, bytes = file ? fileBytes(file) : 0;
       const v = await dialog("Remove the split model?", html`<p style="margin-top:0">It is <b>unloaded first</b> (its servers stop and every machine gets its memory back), then removed.</p>
         ${file ? html`<label class="check"><input type="checkbox" data-v="files"> <span>Also delete its downloaded file and weight caches from every machine${bytes ? " (frees " + fmt.bytes(bytes, 1) + " and more)" : ""}. Otherwise they stay, so running it again is quick.</span></label>` : ""}`, "Remove it", { danger: true });
-      if (v) startJob("undeploy", {}, (j) => { loadTargets(true); if (v.files && file && j.status === "ok") startJob("split-rm", { file }, () => loadDisk(true)); else loadDisk(true); });
+      if (v) startAIJob(el, "undeploy", {}, (j) => { loadTargets(true); if (v.files && file && j.status === "ok") startJob("split-rm", { file }, () => loadDisk(true)); else loadDisk(true); });
     }
-    else if (a === "ollama-deploy") startJob("ollama-deploy", {}, () => { loadOllama(true); loadTargets(true); });
-    else if (a === "o-pull") { const name = ($("#o-pull") || {}).value; if (!name || !name.trim()) { toast("Type a model name first."); return; } startJob("pull", { name: name.trim() }, () => loadOllama(true)); }
+    else if (a === "ollama-deploy") startAIJob(el, "ollama-deploy", {}, () => { loadOllama(true); loadTargets(true); });
+    else if (a === "o-pull") { const name = ($("#o-pull") || {}).value; if (!name || !name.trim()) { toast("Type a model name first."); return; } startAIJob(el, "pull", { name: name.trim() }, () => loadOllama(true)); }
     else if (a === "o-load" || a === "o-unload") {
       el.disabled = true; el.textContent = a === "o-load" ? "Loading…" : "Unloading…";
-      try { const r = await postJSON("/api/ai/ollama-load", { pod: el.dataset.pod, model: el.dataset.model, load: a === "o-load" }); if (!r.ok) toast(r.error || "That didn't work."); } catch (err) { /* signed out */ }
-      loadOllama(true); loadTargets(true);
+      try { const r = await postJSON("/api/ai/ollama-load", { pod: el.dataset.pod, model: el.dataset.model, load: a === "o-load" }); if (!r.ok) toast(r.error || "That didn't work."); }
+      catch (err) { toast(err.message || "Couldn't reach Ollama."); }
+      finally { el.disabled = false; loadOllama(true); loadTargets(true); }
     } else if (a === "open-job") openJob(el.dataset.id);
-    else if (a === "o-rm") { const v = await dialog("Delete this Ollama model?", html`<span class="mono">${el.dataset.model}</span> is deleted from every machine that runs Ollama. You can download it again later.`, "Delete", { danger: true }); if (v) startJob("ollama-rm", { name: el.dataset.model }, () => loadOllama(true)); }
-    else if (a === "m-rm") { const v = await dialog("Delete this model?", html`<span class="mono">${el.dataset.file}</span>, any unfinished parts of it and its weight caches are deleted from every machine. A download of it that is still running is stopped.`, "Delete", { danger: true }); if (v) startJob("split-rm", { file: el.dataset.file }, () => loadDisk(true)); }
-    else if (a === "clean") startJob("clean", {}, () => loadDisk(true));
-    else if (a === "clean-models") { const v = await dialog("Free up space, including models?", html`This also deletes every downloaded model file that isn't running now. The running model stays.`, "Delete them", { danger: true }); if (v) startJob("clean", { models: true }, () => loadDisk(true)); }
-    else if (a === "disk-refresh") loadDisk(true);
-    else if (a === "s-download") startJob("download", { repo: el.dataset.repo, file: el.dataset.file }, () => { loadDisk(true); });
-    else if (a === "s-plan") startJob("plan", { repo: el.dataset.repo, file: el.dataset.file });
+    else if (a === "o-rm") { const v = await dialog("Delete this Ollama model?", html`<span class="mono">${el.dataset.model}</span> is deleted from every machine that runs Ollama. You can download it again later.`, "Delete", { danger: true }); if (v) startAIJob(el, "ollama-rm", { name: el.dataset.model }, () => loadOllama(true)); }
+    else if (a === "m-rm") { const v = await dialog("Delete this model?", html`<span class="mono">${el.dataset.file}</span>, any unfinished parts of it and its weight caches are deleted from every machine. A download of it that is still running is stopped.`, "Delete", { danger: true }); if (v) startAIJob(el, "split-rm", { file: el.dataset.file }, () => loadDisk(true)); }
+    else if (a === "clean") startAIJob(el, "clean", {}, () => loadDisk(true));
+    else if (a === "clean-models") { const v = await dialog("Free up space, including models?", html`This also deletes every downloaded model file that isn't running now. The running model stays.`, "Delete them", { danger: true }); if (v) startAIJob(el, "clean", { models: true }, () => loadDisk(true)); }
+    else if (a === "disk-refresh") loadDisk(true, true);
+    else if (a === "s-download") startAIJob(el, "download", { repo: el.dataset.repo, file: el.dataset.file }, () => { loadDisk(true); });
+    else if (a === "s-plan") startAIJob(el, "plan", { repo: el.dataset.repo, file: el.dataset.file });
     else if (a === "s-chip") { A.search.q = el.dataset.q; const i = $("#s-q"); if (i) i.value = A.search.q; A.search.results = null; runSearch(); }
     else if (a === "s-files") showFiles(el.dataset.repo);
     else if (a === "s-run") runModel(el.dataset.repo, el.dataset.file, +el.dataset.size);
-    else if (a === "s-ollama") { if (!S.d.pods.some((p) => p.namespace === "ai-inference" && p.name.startsWith("ollama"))) { toast("Set up Ollama first (Models tab)."); selectTab("models"); return; } const v = await dialog("Download into Ollama?", html`<span class="mono">${el.dataset.name}</span> is downloaded onto every machine that runs Ollama. Large models can take a while.`, "Download"); if (v) startJob("pull", { name: el.dataset.name }, () => loadOllama(true)); }
+    else if (a === "s-ollama") { if (!S.d.pods.some((p) => p.namespace === "ai-inference" && p.name.startsWith("ollama"))) { toast("Set up Ollama first (Models tab)."); selectTab("models"); return; } const v = await dialog("Download into Ollama?", html`<span class="mono">${el.dataset.name}</span> is downloaded onto every machine that runs Ollama. Large models can take a while.`, "Download"); if (v) startAIJob(el, "pull", { name: el.dataset.name }, () => loadOllama(true)); }
     else if (a === "s-copy") copyText("sudo nodeyard ai split deploy --model " + el.dataset.repo + ":" + el.dataset.file);
     else if (a === "reveal-key") { try { const r = await postJSON("/api/ai/reveal-key", {}); if (r.ok) { A.key = r.key; A.useKey = true; renderApi(); } else toast(r.error || "Couldn't read the key."); } catch (err) { /* signed out */ } }
     else if (a === "use-key") { A.useKey = el.checked; renderApi(); }
