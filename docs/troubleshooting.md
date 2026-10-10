@@ -64,6 +64,24 @@ freed space**: by default k3s starts evicting at 95% full and continues
 until 15% of the disk is free, which on a big shared disk can be tens of
 GB. `doctor --fix` makes it reclaim only 2 GiB.
 
+### A node that keeps dropping out and recovering (e.g. debian-1)
+
+The dashboard treats the first 60 seconds of NotReady as "briefly stopped reporting" (info) and only then raises a
+critical alert, using Kubernetes' own reason and message, so short flaps don't page you. To find out what a flapping
+node really is, look at each layer in turn and write down the time of each drop:
+
+1. **Kubernetes' view**: `sudo k3s kubectl describe node debian-1` (Conditions: reason, message, last transition) and
+   `sudo k3s kubectl get events -A --field-selector involvedObject.name=debian-1`.
+2. **Network path**: Nodes › Connections shows Wi-Fi/LAN and Tailscale separately. If one path drops at the same times,
+   the flap is the network (cable, Wi-Fi, Tailscale), not the machine.
+3. **The machine**: on debian-1, `journalctl -u k3s-agent --since "-1h"` (lease renewal or API timeouts) and
+   `journalctl -k --since "-1h" | grep -i -E "oom|link|nvidia"`. Alerts also say when a pod was OOMKilled, and
+   Hardware shows OOM kills and memory pressure.
+4. **Load**: a split model's RPC server on a busy or memory-starved node can delay the kubelet's heartbeats. Unload the
+   model (AI › Models) for a while: if the flaps stop, give the node a smaller share (`--reserve debian-1=GiB`).
+
+Only restart services once one of these shows the cause; a node that recovers by itself doesn't need a restart.
+
 ## Ports 80/443
 
 **k3s took ports 80/443 I needed**: Traefik and ServiceLB bind them on

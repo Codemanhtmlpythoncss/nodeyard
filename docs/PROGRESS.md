@@ -45,7 +45,7 @@ repository keeps only what the apps need). The checks named below ran before tha
 | 11 | Device discovery, LAN/Tailscale monitoring | Tested (dashboard), built (Mac) | `dashboard/connections.py`, `agents.py`, `kube.py`, `web/connections.js`, `macos/…/ManagementViews.swift` | Scratch checks (11): discovery, identity across changes, verify-before-switch, failover, overrides across restarts, reset, validation, parallel checks; browser on the demo | Live check on the real cluster (Tailscale on every node) |
 | 12 | Setup guides in the app and the dashboard | Done | `macos/…/SetupGuideView.swift`, `web/guide.js` (sidebar › Setup guide) | Both rendered | |
 | 13 | App icon from the website logo | Tested | `scripts/build-nodeyard-ai-icon.swift` | Iconset rendered and checked: the dashboard favicon on the macOS 824/1024 grid | |
-| 14 | Debian-1 readiness/recovery investigation | Not started | | | |
+| 14 | Debian-1 readiness/recovery investigation | Needs manual verification | `docs/troubleshooting.md`, `analysis.py` (60 s flap filter, existing), Connections card, OOMKilled alerts | Code review only | No cluster access: run the procedure in troubleshooting.md on k8s-control |
 | 15 | AI section debugging pass (user priority) | In progress | `web/ai.js`, `web/app.js`, `agentapi.py`, `aiapi.py` | Browser on the demo dashboard with injected failures (HTTP 502, dropped connection, mid-stream error, prompt progress); `test_agentapi`, `test_ai` | Found and fixed: skills chat ignored the chosen Ollama model; job completion callbacks skipped when the progress window was closed (deleted models came back); no first-token feedback; raw "Failed to fetch" errors |
 
 ## Local install checklist (per change)
