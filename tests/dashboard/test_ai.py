@@ -347,6 +347,17 @@ class ModelInventory(unittest.TestCase):
             nodes = {n["node"]: [it["name"] for it in n["items"]] for n in live.models_cache[1]["nodes"]}
             self.assertEqual(nodes, {"debian-1": [], "pi-4": ["one.gguf", "two.gguf"]})
 
+    def test_deleted_models_are_announced_until_a_scan_finds_them_again(self):
+        with tempfile.TemporaryDirectory() as d:
+            live = self.live(d)
+            live.models_cache = (time.time(), {"ok": True, "nodes": [{"node": "debian-1", "items": [{"kind": "model", "name": "one.gguf", "bytes": 1}]}]})
+            live._model_job_done("split-rm", {"file": "one.gguf"}, {"status": "ok", "lines": ["  pi-4: not reached (NotReady or offline)"]})
+            live.models_refreshing = True   # (don't start a real scan)
+            self.assertEqual([(x["file"], x["kept_on"]) for x in live.disk_models()["deleted"]], [("one.gguf", ["pi-4"])])
+            live.jobs.bin = self.fake_nodeyard('echo \'{"ok":true,"nodes":[{"node":"debian-1","items":[{"kind":"model","name":"one.gguf","bytes":5}]}]}\'')
+            live._refresh_models(live.models_generation)
+            self.assertEqual(live.models_deleted, {})
+
     def test_deleting_one_model_never_touches_another(self):
         with tempfile.TemporaryDirectory() as d:
             live = self.live(d)

@@ -62,13 +62,17 @@
   function mergeDiskInventory(data) {
     const saved = savedInventory || readSavedInventory();
     const old = new Map((saved && saved.nodes || []).map((n) => [n.node, n]));
+    // Models the server deleted recently (from any tab, the Mac app or the CLI through the dashboard) are never
+    // brought back from this browser's saved list, except on nodes the delete couldn't reach.
+    const gone = new Map((data.deleted || []).map((d) => [d.file, d]));
+    const deletedOn = (name, node) => { const d = gone.get(name); return !!d && !(d.kept_on || []).includes(node); };
     const now = Date.now(), incomplete = !!(data.scanning || data.inventory_stale || data.scan_error);
     const nodes = (data.nodes || []).map((n) => {
       const prior = old.get(n.node), stale = !!(data.scanning || data.inventory_stale || n.scan_error || n.inventory_stale);
       const currentItems = n.items || [];
       const present = new Set(currentItems.filter((it) => it.kind === "model").map((it) => it.name));
       const items = currentItems.slice();
-      if (stale && prior) for (const it of prior.items || []) if (!present.has(it.name)) items.push(it);
+      if (stale && prior) for (const it of prior.items || []) if (!present.has(it.name) && !deletedOn(it.name, n.node)) items.push(it);
       old.delete(n.node);
       return Object.assign({}, n, { items,
         inventory_stale: stale && !!prior || !!n.inventory_stale,
@@ -77,7 +81,7 @@
     });
     if (incomplete) for (const prior of old.values()) {
       if (now - (+prior.last_seen || 0) > INVENTORY_TTL) continue;
-      nodes.push(Object.assign({}, prior, { inventory_stale: true,
+      nodes.push(Object.assign({}, prior, { items: (prior.items || []).filter((it) => !deletedOn(it.name, prior.node)), inventory_stale: true,
         scan_error: prior.scan_error || "This machine hasn't appeared in the latest disk scan." }));
     }
     const merged = Object.assign({}, data, { nodes });
@@ -719,7 +723,7 @@
     const t0 = performance.now(); let raf = 0, usage = null;
     const paint = () => { raf = 0; paintLast(); };
     try {
-      const r = await fetch("/api/ai/agent", { method: "POST", cache: "no-store", signal: ctrl.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ chat: c.id, text: apiContent(mine), plugins: c.plugins, auto_skills: c.skills_auto !== false, history, max_tokens: c.max_tokens || 0 }) });
+      const r = await fetch("/api/ai/agent", { method: "POST", cache: "no-store", signal: ctrl.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ chat: c.id, target: c.target || "split", text: apiContent(mine), plugins: c.plugins, auto_skills: c.skills_auto !== false, history, max_tokens: c.max_tokens || 0 }) });
       if (r.status === 401) { location.href = "/login"; return; }
       if (!r.ok) { let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ } throw new Error(j.error || "The AI helper didn't start (HTTP " + r.status + ")."); }
       const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "";
@@ -745,7 +749,7 @@
         }
       }
     } catch (e) {
-      if (e.name !== "AbortError") msg.error = e.message || "Something went wrong.";
+      if (e.name !== "AbortError") msg.error = netError(e, "Something went wrong.");
     } finally {
       msg.pending = false; msg.perm = null;
       if (!msg.error && !msg.content && !msg.tools.length) msg.error = ctrl.signal.aborted ? "Stopped." : "The AI sent an empty answer.";
@@ -1018,10 +1022,27 @@
   }
   const webChips = (m) => m.web && m.web.sources && m.web.sources.length ? '<details class="srcs"><summary>Searched the web · ' + m.web.sources.length + " source" + (m.web.sources.length === 1 ? "" : "s") + "</summary>" +
     m.web.sources.map((x) => '<a href="' + esc(x.url) + '" target="_blank" rel="noopener noreferrer nofollow">' + esc(x.title || x.url) + '</a>').join("") + "</details>" : "";
+  // The browser's own wording for a dropped connection ("Failed to fetch", "Load failed", "NetworkError…") means nothing to people.
+  const netError = (e, fallback) => (e && e.name === "TypeError" && /fetch|network|load failed/i.test(e.message || "")
+    ? "The connection to the dashboard dropped before the answer arrived (network or server restart). The model may still be busy; try again in a moment."
+    : (e && e.message) || fallback);
+  // While the model reads the prompt (minutes on CPU nodes) say so, with the time so far, instead of bare dots.
+  const waitText = (m) => {
+    const secs = Math.max(0, Math.round((Date.now() - (m.t0 || Date.now())) / 1000)), p = m.progress;
+    if (p && p.total > 0) return "Reading the prompt: " + Math.min(p.processed, p.total).toLocaleString() + " of " + p.total.toLocaleString() + " tokens (" + Math.min(100, Math.round((100 * p.processed) / p.total)) + "%) · " + secs + " s";
+    return secs < 3 ? "Thinking…" : "Waiting for the first token · " + secs + " s";
+  };
+  const waitHint = (m) => (Date.now() - (m.t0 || Date.now()) > 30000 ? "Big models on CPU nodes read the whole conversation before the first word, which can take a few minutes. Stop cancels it." : "");
+  const waitHTML = (m) => '<div class="wait"><span class="typing"><i></i><i></i><i></i></span> <span class="wait-t muted small">' + esc(waitText(m)) + '</span><div class="wait-h faint small">' + esc(waitHint(m)) + "</div></div>";
+  function tickWait(m) {
+    const node = $("#thread .msg.assistant:last-child .wait-t"); if (!node) return;
+    node.textContent = waitText(m);
+    const hint = node.parentNode.querySelector(".wait-h"); if (hint) hint.textContent = waitHint(m);
+  }
   const msgHTML = (m, i, last) => {
     if (m.role === "user") return '<div class="msg user"><div class="bubble">' + esc(m.content || "").replace(/\n/g, "<br>") + webChips(m) + (m.files && m.files.length ? '<div class="att-chips">' + m.files.map((f, k) =>
       '<button class="att" data-ai="att-dl" data-mi="' + i + '" data-fi="' + k + '" title="Download"><svg class="icon"><use href="#i-file"/></svg><span>' + esc(f.name) + '</span><span class="dim">' + fmt.bytes(f.size) + "</span></button>").join("") + "</div>" : "") + "</div></div>";
-    const body = m.error ? (m.content ? md(m.content, i, false) : "") + '<div class="err">' + esc(m.error) + '</div><button class="btn small" data-ai="retry">Try again</button>' : (m.content || m.thinking ? md((m.thinking ? "<think>" + m.thinking + "</think>" : "") + m.content, i, !!m.pending) : '<span class="typing"><i></i><i></i><i></i></span>');
+    const body = m.error ? (m.content ? md(m.content, i, false) : "") + '<div class="err">' + esc(m.error) + '</div><button class="btn small" data-ai="retry">Try again</button>' : (m.content || m.thinking ? md((m.thinking ? "<think>" + m.thinking + "</think>" : "") + m.content, i, !!m.pending) : m.pending ? waitHTML(m) : '<span class="typing"><i></i><i></i><i></i></span>');
     const meta = m.meta ? '<div class="meta">' + esc(m.meta) + "</div>" : "";
     const tools = !m.pending && !m.error && m.content ? '<div class="tools"><button data-ai="copy-msg" data-i="' + i + '">Copy</button>' + (last ? '<button data-ai="regen">Regenerate</button>' : "") + "</div>" : "";
     return '<div class="msg assistant" data-i="' + i + '"><div class="avatar">AI</div><div class="bubble">' + toolsHTML(m) + '<div class="md">' + body + (m.pending && m.content ? '<span class="caret"></span>' : "") + "</div>" + meta + tools + "</div></div>";
@@ -1117,12 +1138,13 @@
       c.messages.push(mine); A.attach = []; renderAttach();
       if (c.title === "New chat") c.title = (text || mine.files.map((f) => f.name).join(", ")).slice(0, 48);
     }
-    const msg = { role: "assistant", content: "", thinking: "", pending: true };
+    const msg = { role: "assistant", content: "", thinking: "", pending: true, t0: Date.now() };
     c.messages.push(msg);
     renderThread(); renderChatList();
     const ctrl = new AbortController(), sid = uid() + uid();
     A.stream = { ctrl, chat: c.id, sid };
     paintSend();
+    const waitTimer = setInterval(() => { if (!msg.content && !msg.thinking && A.cur === c.id) tickWait(msg); }, 1000);
     const t0 = performance.now(); let first = 0, chunks = 0, timings = null, raf = 0;
     const paint = () => { raf = 0; paintLast(); };
     try {
@@ -1141,6 +1163,11 @@
           let j; try { j = JSON.parse(payload); } catch (e) { continue; }
           if (j.error) throw new Error(typeof j.error === "string" ? j.error : j.error.message || "The model reported an error.");
           if (j.timings) timings = j.timings;
+          if (j.prompt_progress && !msg.content) {   // llama.cpp: how much of the prompt it has read
+            const pp = j.prompt_progress;
+            msg.progress = { processed: +pp.processed || 0, total: +pp.total || 0, cache: +pp.cache || 0 };
+            if (A.cur === c.id) tickWait(msg);
+          }
           const d = j.choices && j.choices[0] && j.choices[0].delta;
           if (d && (d.content || d.reasoning_content)) {
             if (!first) first = performance.now();
@@ -1152,9 +1179,10 @@
         }
       }
     } catch (e) {
-      if (e.name !== "AbortError") msg.error = (e.message || "Something went wrong.") + (msg.content ? "" : "");
+      if (e.name !== "AbortError") msg.error = netError(e, "Something went wrong.");
     } finally {
-      msg.pending = false;
+      clearInterval(waitTimer);
+      msg.pending = false; delete msg.progress;
       if (!msg.error && !msg.content && !msg.thinking) msg.error = ctrl.signal.aborted ? "Stopped." : "The model sent an empty answer.";
       const secs = (performance.now() - (first || t0)) / 1000, tps = timings && timings.predicted_per_second ? timings.predicted_per_second : (chunks > 1 && secs > 0 ? (chunks - 1) / secs : 0);
       if (!msg.error || msg.content) msg.meta = [tps ? tps.toFixed(1) + " tokens/s" : "", (timings && timings.predicted_n ? timings.predicted_n : chunks) + " tokens", ((performance.now() - t0) / 1000).toFixed(1) + " s", t.name].filter(Boolean).join(" · ");

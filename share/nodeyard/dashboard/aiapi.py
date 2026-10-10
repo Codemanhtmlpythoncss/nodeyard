@@ -601,6 +601,7 @@ class Live:
         self.downloads_at = 0
         self.downloads_refreshing = False
         self.lifecycle = None   # lifecycle.Lifecycle, set by lifecycle.register
+        self.models_deleted = {}  # file -> (time, nodes it is still on): so no browser shows a deleted model again
 
     def jobs_running(self):
         return self.jobs.running() is not None
@@ -721,7 +722,12 @@ class Live:
         if action == "split-rm":
             # "  NODE: not reached (...)": that node was NotReady or gone, so its copy stays listed (as last seen).
             skipped = {m.group(1) for m in (NOT_REACHED_RE.match(line) for line in job.get("lines", [])) if m}
-            self._forget_models_cache(str(params.get("file") or ""), keep_nodes=skipped)
+            file = str(params.get("file") or "")
+            with self.models_lock:
+                self.models_deleted[file] = (time.time(), sorted(skipped))
+                for old in [f for f, (at, _) in self.models_deleted.items() if time.time() - at > 7 * 24 * 3600][:100]:
+                    self.models_deleted.pop(old, None)
+            self._forget_models_cache(file, keep_nodes=skipped)
         else:
             self._forget_models_cache()
 
@@ -966,8 +972,10 @@ class Live:
             data = {"ok": True, "nodes": [], "in_use": ""}
         else:
             data = dict(cache[1])
+        with self.models_lock:
+            deleted = [{"file": f, "at": at, "kept_on": kept} for f, (at, kept) in self.models_deleted.items()]
         data.update({"downloads": downloads, "scanning": refreshing, "updated": cache[0] if cache else None,
-                     "inventory_stale": bool(stale or refreshing)})
+                     "inventory_stale": bool(stale or refreshing), "deleted": deleted})
         if error:
             data["scan_error"] = error
         return data
@@ -1037,6 +1045,10 @@ class Live:
                     continue
                 self.models_refreshing = False
                 if valid:
+                    # A deleted model that a scan finds again (downloaded again) is no longer "deleted".
+                    found = {it.get("name") for n in data["nodes"] if not n.get("scan_error") for it in n.get("items", []) if it.get("kind") == "model"}
+                    for f in [f for f in self.models_deleted if f in found]:
+                        self.models_deleted.pop(f, None)
                     cache = (time.time(), data)
                     self.models_cache = cache
                     self.models_dirty = False
@@ -1265,7 +1277,11 @@ def register(ctx, args):
             threading.Thread(target=watch, args=(h, conn, done), daemon=True).start()
         try:
             try:
-                conn, resp = backend.open_chat(str(body.get("target", "")), dict({"messages": clean, "temperature": temp}, **({"max_tokens": max_tokens} if max_tokens else {})), on_conn=on_conn)
+                target = str(body.get("target", ""))
+                payload = dict({"messages": clean, "temperature": temp}, **({"max_tokens": max_tokens} if max_tokens else {}))
+                if target == "split":
+                    payload["return_progress"] = True   # llama.cpp says how far it has read the prompt (the page shows it)
+                conn, resp = backend.open_chat(target, payload, on_conn=on_conn)
             except AIError as e:
                 return fail(h, e)
             try:

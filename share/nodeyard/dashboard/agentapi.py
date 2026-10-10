@@ -143,16 +143,20 @@ class Agents:
         return [pid for pid in selected if available[pid]["available"]]
 
     # ---- processes ----------------------------------------------------------------------------------------
-    def _model(self):
-        """Where the model is, from inside this machine: address, port and the key if it needs one."""
+    def _model(self, target="split"):
+        """Where the chat's model is, from inside this machine: address, port and the key if it needs one.
+        The chat's own choice (the split model or one Ollama model on one node), never a hard-wired default."""
         backend = self.ctx.ai
-        host, port, headers, model = backend._resolve("split")
+        try:
+            host, port, headers, model = backend._resolve(target)
+        except Exception as e:  # noqa: BLE001 -- aiapi.AIError: say it the same way to the page
+            raise AgentError(str(e), getattr(e, "code", 400))
         key = (headers.get("Authorization") or "").replace("Bearer ", "", 1).strip()
         return "http://%s:%d/v1" % (host, port), key, model
 
-    def _argv(self, plugins, max_tokens):
+    def _argv(self, plugins, max_tokens, target="split"):
         tools = sorted({t for p in plugins for t in BY_ID[p][3]})
-        base, key, model = self._model()
+        base, key, model = self._model(target)
         code = any(BY_ID[p][4] for p in plugins)
         env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "YARDCODE_API_KEY": key, "YARDCODE_HOME": "/tmp/yardcode-dash",
                "YARDCODE_DATA": "/tmp/yardcode-dash-data", "HOME": "/tmp"}
@@ -165,9 +169,10 @@ class Agents:
             cmd += ["--cwd", "/tmp"]
         return cmd, env
 
-    def get(self, h, cid, plugins, max_tokens, create=True):
+    def get(self, h, cid, plugins, max_tokens, create=True, target="split"):
         owner = h._token() or "local"
-        sig = ",".join(sorted(plugins)) + "|" + str(max_tokens or 0)
+        # A different model (or the split model running something else) needs a new helper.
+        sig = ",".join(sorted(plugins)) + "|" + str(max_tokens or 0) + "|" + target + "|" + self._model_id(target)
         with self.lock:
             pr = self.procs.get(cid)
             if pr and (pr.owner != owner or not pr.alive or pr.signature != sig):
@@ -182,15 +187,24 @@ class Agents:
                 else:
                     if not self.bin:
                         raise AgentError("yardcode isn't installed next to nodeyard on this server.", 501)
-                    argv, env = self._argv(plugins, max_tokens)
+                    argv, env = self._argv(plugins, max_tokens, target)
                     pr = Proc(owner, sig, argv, env)
                 self.procs[cid] = pr
             return pr, owner
+
+    def _model_id(self, target):
+        if target != "split" or self.demo:
+            return ""
+        st = (self.ctx.store.snapshot().get("state") or {})
+        return ((st.get("ai") or {}).get("split") or {}).get("model", "")
 
     # ---- the routes ------------------------------------------------------------------------------------------
     def run(self, h, body):
         cid = str(body.get("chat") or "")[:64]
         text = str(body.get("text") or "")
+        target = str(body.get("target") or "split")[:240]
+        if target != "split" and not target.startswith("ollama:"):
+            return h._json({"ok": False, "error": "Choose a model for this chat first."}, 400)
         try:
             plugins = self.request_plugins(h, body)
         except AgentError as e:
@@ -201,7 +215,7 @@ class Agents:
         if len(text) > 200000:
             return h._json({"ok": False, "error": "That message is too long."}, 413)
         try:
-            pr, _ = self.get(h, cid, plugins, int(body.get("max_tokens") or 0))
+            pr, _ = self.get(h, cid, plugins, int(body.get("max_tokens") or 0), target=target)
         except AgentError as e:
             return h._json({"ok": False, "error": str(e)}, e.code)
         fresh = not getattr(pr, "started", False)
@@ -224,6 +238,8 @@ class Agents:
             h.send_header(k, v)
         h.end_headers()
         h.close_connection = True
+        lifecycle = getattr(self.ctx, "lifecycle", None)
+        token = lifecycle.begin(target) if lifecycle else None   # the model is in use until this turn ends
         try:
             while not pr.q.empty():   # leftovers of an interrupted turn
                 pr.q.get_nowait()
@@ -249,6 +265,8 @@ class Agents:
                 pass
         finally:
             pr.busy = False
+            if lifecycle:
+                lifecycle.end(token)
 
     # ---- running the code the AI wrote (the Run button on code blocks) -------------------------------------------------------
     RUNNERS = {"python": ["python3", "-u", "-c"], "bash": ["bash", "-c"], "node": ["node", "-e"]}

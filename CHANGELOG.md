@@ -28,6 +28,14 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   with no way to unload it), treats "not found" as already gone and fails when a node couldn't delete it.
 - The split model's readiness check allows 5 s for `/health`, so a busy CPU node no longer flaps NotReady mid-answer.
 - Toggles and menus on the dashboard show their saved result immediately instead of waiting for you to click elsewhere.
+- Chat with AI skills on (the default) used the split model even when the chat had an Ollama model selected, and failed
+  with "No split model is deployed" when none was running. The skills helper now uses the chat's own model.
+- What happens when a task finishes (forgetting a deleted model, refreshing the lists) no longer depends on its progress
+  window staying open. Closing it early left deleted models in the browser's saved list, where they kept coming back.
+- The server now tells every browser which models were deleted, so another tab or client can't bring them back from its
+  saved list (except on nodes the delete couldn't reach).
+- While the model reads a long prompt, chat shows how far it has got ("Reading the prompt: 1,000 of 4,000 tokens") and
+  the time so far, with a hint after 30 s, instead of only dots. A dropped connection says so in plain words.
 
 ### Changed
 

@@ -42,6 +42,7 @@ claims the states that were checked.
 | 12 | Setup guides in the app and the dashboard | Not started | | | |
 | 13 | App icon from the website logo | In progress | `scripts/build-nodeyard-ai-icon.swift`, `NodeyardMark.swift` | | Follow the macOS icon grid |
 | 14 | Debian-1 readiness/recovery investigation | Not started | | | |
+| 15 | AI section debugging pass (user priority) | In progress | `web/ai.js`, `web/app.js`, `agentapi.py`, `aiapi.py` | Browser on the demo dashboard with injected failures (HTTP 502, dropped connection, mid-stream error, prompt progress); `test_agentapi`, `test_ai` | Found and fixed: skills chat ignored the chosen Ollama model; job completion callbacks skipped when the progress window was closed (deleted models came back); no first-token feedback; raw "Failed to fetch" errors |
 
 ## Local install checklist (per change)
 

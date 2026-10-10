@@ -624,3 +624,4 @@ body.term-full .tbox { flex: 1; height: auto; }
 @media (max-width: 560px) {
   .chat-main { height: calc(100dvh - 178px); min-height: 380px; }
 }
+.wait { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; } .wait .wait-h:empty { display: none; } .wait .wait-h { flex-basis: 100%; }

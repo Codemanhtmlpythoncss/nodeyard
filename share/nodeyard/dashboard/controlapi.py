@@ -266,6 +266,8 @@ def register(ctx, args):
         except (TypeError, ValueError) as e:
             return h._json({"ok": False, "error": str(e) or "Bad temperature or token limit."}, 400)
         payload = {"messages": clean, "temperature": temp, "stream": True}
+        if body.get("return_progress") is True and target == "split":
+            payload["return_progress"] = True   # llama.cpp's prompt-reading progress, for clients that ask
         if max_tokens:
             payload["max_tokens"] = max_tokens
         tools = body.get("tools")

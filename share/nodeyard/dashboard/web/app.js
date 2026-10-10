@@ -963,7 +963,39 @@
     openJob(r.job, onDone);
     return true;
   }
+  // What runs when a task finishes must not depend on its progress window staying open: closing the
+  // window early used to skip it (e.g. a deleted model stayed in the saved model list).
+  const jobWatchers = new Map();
+  function watchJob(id, onDone) {
+    if (!onDone) return;
+    const list = jobWatchers.get(id);
+    if (list) { list.push(onDone); return; }
+    jobWatchers.set(id, [onDone]);
+    const started = Date.now();
+    let misses = 0;
+    const finish = (v) => {
+      const callbacks = jobWatchers.get(id) || [];
+      jobWatchers.delete(id);
+      callbacks.forEach((cb) => { try { cb(v); } catch (e) { /* one callback must not stop the others */ } });
+    };
+    const poll = async () => {
+      let v = null;
+      try { v = await getJSON("/api/job?id=" + encodeURIComponent(id) + "&since=999999"); } catch (e) { v = null; }
+      if (v && !v.ok) return finish({ id, status: "failed", rc: null, lines: [v.error || "Lost track of that task."] });
+      if (v && v.status !== "running") {
+        // the callbacks get the whole output (they read it, e.g. which nodes a delete couldn't reach)
+        let full = v;
+        try { full = await getJSON("/api/job?id=" + encodeURIComponent(id) + "&since=0"); } catch (e) { /* use the short answer */ }
+        return finish(full && full.ok ? full : v);
+      }
+      misses = v ? 0 : misses + 1;
+      if (misses > 40 || Date.now() - started > 3 * 3600 * 1000) return finish({ id, status: "unknown", rc: null, lines: ["Lost track of that task; refresh to see its result."] });
+      setTimeout(poll, v ? 1500 : Math.min(15000, 1500 * misses));
+    };
+    setTimeout(poll, 1000);
+  }
   function openJob(id, onDone) {
+    watchJob(id, onDone);
     let since = 0, lines = [];
     activeJobId = id;
     jobCancelPending = false;
@@ -987,7 +1019,7 @@
       cancel.textContent = v.cancel_requested || jobCancelPending ? "Stopping…" : "Cancel";
       const out = $("#jobout");
       if (out) { out.textContent = lines.join("\n") || "(no output yet)"; out.scrollTop = out.scrollHeight; }
-      if (v.status !== "running") { clearInterval(jobTimer); load(true); if (onDone) onDone(v); }
+      if (v.status !== "running") { clearInterval(jobTimer); load(true); }
     };
     tick();
     jobTimer = setInterval(tick, 1200);
