@@ -23,7 +23,7 @@
     { id: "alerts", label: "Alerts", icon: "alerts", sub: "Things that need your attention" },
     { id: "doctor", label: "Doctor", icon: "doctor", sub: "Checks for common problems, with one-click fixes" },
     { id: "commands", label: "Commands", icon: "commands", sub: "Every nodeyard command, runnable from here" },
-    { id: "terminal", label: "Terminal", icon: "terminal", sub: "A shell on the server" },
+    { id: "terminal", label: "Terminal", icon: "terminal", sub: "Shells on every device" },
     { id: "settings", label: "Settings", icon: "settings", sub: "Passwords, keys, the dashboard itself and how it looks" },
     { id: "guide", label: "Setup guide", icon: "help", sub: "Setting up and using this dashboard, step by step" },
   ];
@@ -694,7 +694,9 @@
         const cpu = nodeSeries(0, n.name), mem = nodeSeries(1, n.name), pods = S.d.pods.filter((p) => p.node === n.name);
         const pcols = [{ k: "name", t: "Pod", v: (p) => p.name, r: (p) => html`<b>${p.name}</b>` }, { k: "ns", t: "Namespace", v: (p) => p.namespace, r: (p) => chip(p.namespace) }, { k: "status", t: "Status", v: (p) => p.status, r: (p) => statusChip(p.status) },
           { k: "cpu", t: "CPU", cls: "num", v: (p) => p.cpu, r: (p) => (p.cpu == null ? "–" : fmt.cores(p.cpu)) }, { k: "mem", t: "Memory", cls: "num", v: (p) => p.mem, r: (p) => (p.mem == null ? "–" : fmt.bytes(p.mem)) }];
-        main = html`<div class="grid" style="grid-template-columns:repeat(3,1fr);gap:10px;text-align:center">
+        main = html`<div class="row wrap" style="gap:8px;margin-bottom:12px"><button class="btn small" data-term-goto="node:${n.name}" data-method="kube" title="A shell on this node in the Terminal page">Terminal</button>
+          <button class="btn small" data-term-goto="node:${n.name}" data-method="diagnose" title="Read-only checks for a node that drops out, then a root shell">Run checks</button></div>
+          <div class="grid" style="grid-template-columns:repeat(3,1fr);gap:10px;text-align:center">
           <div class="card" style="padding:12px">${donut(frac(n.cpu_used, n.cpu_cores), { size: 78 })}<div class="muted" style="font-size:12px;margin-top:4px">CPU · ${cpuText(n)}</div></div>
           <div class="card" style="padding:12px">${donut(frac(n.mem_used, n.mem_total), { size: 78 })}<div class="muted" style="font-size:12px;margin-top:4px">Memory · ${memText(n)}</div></div>
           <div class="card" style="padding:12px">${n.disk_total ? donut(frac(n.disk_used, n.disk_total), { size: 78 }) : donut(0, { size: 78, label: "–" })}<div class="muted" style="font-size:12px;margin-top:4px">Disk · ${n.disk_total ? fmt.bytes(n.disk_used, 0) + " / " + fmt.bytes(n.disk_total, 0) : "n/a"}</div></div></div>

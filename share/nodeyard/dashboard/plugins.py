@@ -40,8 +40,9 @@ PLUGINS = [
      ["dashboard chat"], "read-only", True, [], ["wikipedia", "arxiv", "weather", "calculator", "tasks"]),
     ("files-code", "Python, files and shell", "Runs Python and edits files and runs commands in a work folder, as the terminal user (never root).",
      ["dashboard chat"], "asks before every change", True, ["/api/ai/run-code"], ["python", "files"]),
-    ("terminal", "Terminal", "An interactive shell on this server as the terminal user, over Tailscale or your own network only.",
-     ["dashboard"], "full shell (you type every command)", True, ["/api/term/"], []),
+    ("terminal", "Terminals", "Interactive shells on this server (as the terminal user), on every cluster node through Kubernetes "
+     "(as that user or root) and on Tailscale devices over SSH, over Tailscale or your own network only.",
+     ["dashboard", "Mac app"], "full shell (you type every command; node shells can be root)", True, ["/api/term/"], []),
     ("devices", "Device connections", "Finds each machine's Wi-Fi/LAN and Tailscale addresses and checks them; per-device overrides.",
      ["dashboard", "Mac app"], "read-only checks; settings change only how devices are reached", True, ["/api/devices/"], []),
     ("models", "Model management", "Downloads, runs, switches, unloads and deletes models (split llama.cpp and Ollama), and automatic unloading.",
@@ -133,7 +134,11 @@ class Registry:
             user = getattr(self.args, "terminal_user", "") or ""
             if demo:
                 return "ok", "Demo: no shell is started."
-            return ("ok", "Shells run as %s" % user) if user else ("unavailable", "No terminal user is configured.")
+            t = getattr(self.ctx, "terminals", None)
+            kube_ok = bool(t and t.kubectl)
+            if not user:
+                return ("warn", "Root node shells only: no terminal user is configured.") if kube_ok else ("unavailable", "No terminal user is configured.")
+            return "ok", "Shells run as %s%s" % (user, "; node shells through Kubernetes" if kube_ok else "")
         if pid == "devices":
             c = getattr(self.ctx, "connections", None)
             if not c:

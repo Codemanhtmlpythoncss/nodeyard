@@ -582,6 +582,25 @@ input.range { display: block; width: 100%; margin-top: 8px; accent-color: var(--
 .tcur { background: var(--accent); color: var(--bg) !important; border-radius: 1px; }
 body.term-full .term-card { position: fixed; inset: 8px; z-index: 60; margin: 0; display: flex; flex-direction: column; }
 body.term-full .tbox { flex: 1; height: auto; }
+html.embed .side, html.embed .top, html.embed .devices, html.embed .mobile-tabs { display: none !important; }
+html.embed .shell, html.embed .shell.devs-on { display: block; }
+html.embed .content { padding-bottom: 16px; }
+html.embed .tbox { height: calc(100vh - 150px); }
+/* the Terminal page's device list and tabs */
+.tgroup { margin-top: 12px; }
+.tgh { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; padding: 4px 2px; border-bottom: 1px solid var(--line); }
+.trow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 9px 2px; border-bottom: 1px solid var(--line); }
+.trow:last-child { border-bottom: 0; }
+.trow.off .tname > b { color: var(--muted); }
+.tname { flex: 1 1 220px; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.tname > div { flex-basis: 100%; overflow-wrap: anywhere; }
+.tact { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.btn.warn { background: rgba(251, 191, 36, .14); border-color: rgba(251, 191, 36, .4); color: var(--warn); } .btn.warn:hover { background: rgba(251, 191, 36, .24); }
+.input.small { padding: 3px 8px; font-size: 12px; border-radius: 8px; width: 9.5em; }
+.term-tabs { flex-wrap: wrap; max-width: 100%; }
+.term-tabs button { display: inline-flex; align-items: center; gap: 6px; }
+.tdot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: none; }
+.tdot.live { background: var(--good); } .tdot.new { background: var(--accent); box-shadow: 0 0 0 3px rgba(91, 141, 239, .25); } .tdot.dead { background: var(--bad); opacity: .6; }
 
 /* Commands page */
 .cmd-grid { display: grid; grid-template-columns: minmax(240px, 340px) 1fr; gap: 16px; align-items: start; }
@@ -636,3 +655,4 @@ body.term-full .tbox { flex: 1; height: auto; }
 .plugins { display: grid; gap: 10px; } .plugin { padding: 10px 0; border-top: 1px solid var(--line); } .plugin:first-child { border-top: 0; }
 .plug-toggle { white-space: nowrap; } .warnline { color: var(--warn); }
 .audit { display: grid; gap: 4px; max-height: 360px; overflow: auto; }
+.tintent { border-style: solid; border-color: var(--accent); margin: 8px 0 4px; }
