@@ -10,7 +10,9 @@ final class ChatStore {
 
     init() {
         let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? fm.temporaryDirectory
-        root = support.appendingPathComponent("NodeyardAI", isDirectory: true)
+        // Test mode (see TestMode) keeps its chats apart from the real ones.
+        root = TestMode.isOn ? fm.temporaryDirectory.appendingPathComponent("NodeyardAI-test-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+                             : support.appendingPathComponent("NodeyardAI", isDirectory: true)
         chatsDirectory = root.appendingPathComponent("Chats", isDirectory: true)
         attachmentsDirectory = root.appendingPathComponent("Attachments", isDirectory: true)
         defaultsURL = root.appendingPathComponent("defaults.json")

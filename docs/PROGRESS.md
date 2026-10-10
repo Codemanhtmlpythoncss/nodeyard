@@ -37,10 +37,10 @@ claims the states that were checked.
 | 7 | Research Mode (sources, citations, report) | Not started | | | |
 | 8 | Browser automation plugin | Not started | | | |
 | 9 | Desktop computer use plugin (screenshots, windows) | Not started | | | |
-| 10 | macOS management app (website parity) | Not started | | | |
+| 10 | macOS management app (website parity) | Implemented; rendered with live demo data | `macos/…/ManagementClient.swift`, `ManagementState.swift`, `ManagementViews.swift`, `ModelsManageView.swift`, `JSONValue.swift` | Swift build (0 warnings); every Manage screen rendered against the demo dashboard (test mode + `NODEYARD_AI_SNAPSHOT_DIR`) | Live sign-in on the real dashboard (needs your password); Terminal/Commands/Settings pages not ported (see parity table) |
 | 11 | Device discovery, LAN/Tailscale monitoring | Not started | | | |
-| 12 | Setup guides in the app and the dashboard | Not started | | | |
-| 13 | App icon from the website logo | In progress | `scripts/build-nodeyard-ai-icon.swift`, `NodeyardMark.swift` | | Follow the macOS icon grid |
+| 12 | Setup guides in the app and the dashboard | In progress (app guide done) | `macos/…/SetupGuideView.swift` | Rendered | Dashboard guide |
+| 13 | App icon from the website logo | Tested | `scripts/build-nodeyard-ai-icon.swift` | Iconset rendered and checked: the dashboard favicon on the macOS 824/1024 grid | |
 | 14 | Debian-1 readiness/recovery investigation | Not started | | | |
 | 15 | AI section debugging pass (user priority) | In progress | `web/ai.js`, `web/app.js`, `agentapi.py`, `aiapi.py` | Browser on the demo dashboard with injected failures (HTTP 502, dropped connection, mid-stream error, prompt progress); `test_agentapi`, `test_ai` | Found and fixed: skills chat ignored the chosen Ollama model; job completion callbacks skipped when the progress window was closed (deleted models came back); no first-token feedback; raw "Failed to fetch" errors |
 
@@ -62,3 +62,26 @@ claims the states that were checked.
 
 | Commit | What | Tests |
 |---|---|---|
+
+## Website ↔ Mac app parity
+
+| Website section | Mac app (Manage) | Backend | Status |
+|---|---|---|---|
+| Overview | Overview: totals, AI model, alerts, events | `/api/state` | Done |
+| Nodes (+ Devices sidebar restart/reboot) | Nodes: table, details, Restart Kubernetes, Reboot every machine | `/api/state`, `/api/run` | Done |
+| Processes | Not ported | `/api/agents` | Gap |
+| Pods (with logs) | Pods: filter, details, logs | `/api/state`, `/api/logs` | Done |
+| Workloads | Workloads | `/api/state` | Done |
+| Network | Network (services) | `/api/state` | Done (no ingress list yet) |
+| Storage | Storage: node disks, volumes | `/api/state` | Done |
+| Hardware | Hardware: CPU, memory, temperature, GPUs, OOM kills | `/api/state` (agents) | Done (no speed-test button yet) |
+| AI › Chat | Chat workspace | `/api/v1/chat/completions` | Done (separate client, synced chats) |
+| AI › Models | AI models: split controls, automatic unloading, downloads, run/switch (keeps old file unless asked), delete, Ollama, free space | `/api/ai/*`, `/api/run`, `/api/v1/lifecycle` | Done |
+| AI › Find models (Hugging Face search, download) | Not ported | `/api/ai/search`, `/api/ai/files` | Gap |
+| AI › API examples | Not ported | | Gap |
+| Events | Events (warnings filter) | `/api/state` | Done |
+| Alerts | Alerts | `/api/state` | Done |
+| Doctor | Doctor: checks, fix one, fix all | `/api/doctor`, `/api/run` | Done |
+| Commands | Not ported (use the website) | `/api/commands`, `/api/run` | Gap |
+| Terminal | Not ported (needs a PTY over WebSocket) | `terminal.py` | Gap |
+| Settings | Only the app's own settings and automatic unloading | `/api/settings/*` | Gap (passwords, keys, public access stay on the website) |

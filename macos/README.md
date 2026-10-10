@@ -2,9 +2,36 @@
 
 Nodeyard AI is a native SwiftUI chat client for the Nodeyard dashboard. It uses the server-wide API key, streams replies through the cluster, and keeps chats on the Mac with optional server sync.
 
-## Run or package
+## Install or update
 
-Requires macOS 13 or later and Swift 6. Build a regular `.app` bundle from the repository root:
+Requires macOS 13 or later and Swift 6 (the Xcode Command Line Tools are enough). From the repository root:
+
+```sh
+sh scripts/install-macos-ai-app.sh
+```
+
+It builds the app in a private temporary folder, checks the
+bundle (identifier, executable, icon, signature), then replaces `/Applications/Nodeyard AI.app`; the old copy is put back
+if anything fails. Chats, settings and Keychain items are not touched. `--relaunch` also quits a running copy and opens the
+new one. Settings › About shows the installed version, build number and source commit (also in the bundle's
+`Info.plist` as `NodeyardSourceCommit`).
+
+The app is signed ad hoc, so after an update macOS may ask once more to use the Keychain item and for Accessibility
+access (computer use). Set `NODEYARD_AI_SIGN_IDENTITY` to a certificate you own to keep those permissions across updates.
+
+## Manage the cluster (website parity)
+
+The toolbar switches between **Chat** (⌘1), a quick **Models** list (⌘2) and **Manage** (⌘3). Manage mirrors the website:
+Overview, Nodes (with Restart Kubernetes and Reboot every machine), Pods (with logs), Workloads, Network, Storage,
+Hardware, AI models (split model controls, automatic unloading, downloaded models with Run and Delete, Ollama load,
+unload and delete, free up space), Alerts, Events, Doctor (checks and fixes), Tasks (live output, cancel) and the
+in-app **Setup guide**. Every action uses the dashboard's own API and allow-list, and destructive ones ask first.
+
+Management needs the dashboard password (the website's sign-in), stored in Keychain only if you tick Remember; the
+session cookie stays in memory. Chat, model status and automatic unloading work with the server API key alone. The
+website's Terminal, Commands and Settings pages are not in the app; use the website for those.
+
+## Build only
 
 ```sh
 ./scripts/build-macos-ai-app.sh
@@ -17,7 +44,7 @@ You can choose another bundle path by passing it to the script:
 ./scripts/build-macos-ai-app.sh "$HOME/Applications/Nodeyard AI.app"
 ```
 
-The bundle is unsigned, so it is intended for local use or internal sharing. A full Xcode installation is not required; Swift and the macOS SDK from Command Line Tools are enough.
+The bundle is signed ad hoc, so it is intended for local use or internal sharing. A full Xcode installation is not required; Swift and the macOS SDK from Command Line Tools are enough.
 
 The build generates a branded multi-resolution `AppIcon.icns` and uses the same gradient node-network mark in the sidebar.
 

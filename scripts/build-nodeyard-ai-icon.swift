@@ -28,30 +28,46 @@ func renderIcon(pixels: Int, to url: URL) throws {
     context.setShouldAntialias(true)
     context.interpolationQuality = .high
 
+    // The dashboard's favicon (share/nodeyard/dashboard/web/index.html), drawn on the macOS icon grid:
+    // an 824 px rounded tile centred on the 1024 px canvas, with a soft shadow. SVG units (32 x 32,
+    // y down) map onto the tile; CoreGraphics' y axis points up.
+    let tileRect = CGRect(x: 100, y: 100, width: 824, height: 824)
+    let unit = tileRect.width / 32
+    func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: tileRect.minX + x * unit, y: 1024 - (tileRect.minY + y * unit)) }
+    let tile = CGPath(roundedRect: tileRect, cornerWidth: 185, cornerHeight: 185, transform: nil)
+
+    context.saveGState()
+    context.setShadow(offset: CGSize(width: 0, height: -12), blur: 28, color: NSColor.black.withAlphaComponent(0.28).cgColor)
+    context.addPath(tile)
+    context.setFillColor(CGColor(red: 0.3, green: 0.6, blue: 0.95, alpha: 1))
+    context.fillPath()
+    context.restoreGState()
+
     let colors = [
         CGColor(red: 0.486, green: 0.549, blue: 1, alpha: 1), // website accent #7c8cff
         CGColor(red: 0.133, green: 0.827, blue: 0.933, alpha: 1), // website accent #22d3ee
     ] as CFArray
     let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1])!
-    let tile = CGPath(roundedRect: CGRect(x: 0, y: 0, width: 1024, height: 1024), cornerWidth: 256, cornerHeight: 256, transform: nil)
+    context.saveGState()
     context.addPath(tile)
     context.clip()
-    context.drawLinearGradient(gradient, start: CGPoint(x: 0, y: 1024), end: CGPoint(x: 1024, y: 0), options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+    context.drawLinearGradient(gradient, start: point(0, 0), end: point(32, 32), options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+    context.restoreGState()
 
-    let nodes = [CGPoint(x: 256, y: 768), CGPoint(x: 768, y: 683), CGPoint(x: 384, y: 256)]
-    context.setStrokeColor(NSColor.white.withAlphaComponent(0.88).cgColor)
-    context.setLineWidth(86)
+    // <g stroke="white" stroke-width="2" stroke-linecap="round" fill="none">
+    context.setStrokeColor(NSColor.white.cgColor)
+    context.setLineWidth(2 * unit)
     context.setLineCap(.round)
     context.setLineJoin(.round)
-    context.addLines(between: [CGPoint(x: 341, y: 725), CGPoint(x: 683, y: 683)])
-    context.addLines(between: [CGPoint(x: 299, y: 683), CGPoint(x: 384, y: 341)])
-    context.addLines(between: [CGPoint(x: 725, y: 597), CGPoint(x: 469, y: 299)])
-    context.strokePath()
-
-    for point in nodes {
-        let radius: CGFloat = 94
-        context.strokeEllipse(in: CGRect(x: point.x - radius, y: point.y - radius, width: radius * 2, height: radius * 2))
+    for (cx, cy) in [(9.0, 10.0), (23.0, 12.0), (13.0, 23.0)] {   // <circle r="2.4">
+        let c = point(cx, cy), r = 2.4 * unit
+        context.strokeEllipse(in: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r))
     }
+    // <path d="M11 10.5l10 1.2M10 12.4l2 8.2M21.8 14l-7 7.2"/>
+    context.addLines(between: [point(11, 10.5), point(21, 11.7)])
+    context.addLines(between: [point(10, 12.4), point(12, 20.6)])
+    context.addLines(between: [point(21.8, 14), point(14.8, 21.2)])
+    context.strokePath()
 
     graphics.flushGraphics()
     NSGraphicsContext.restoreGraphicsState()

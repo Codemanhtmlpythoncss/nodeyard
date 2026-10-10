@@ -39,6 +39,15 @@ struct AppSettingsView: View {
                             .font(.caption).foregroundStyle(.orange)
                     }
                 }
+                Section("Management") {
+                    ManagementSettingsRow()
+                }
+                Section("About") {
+                    let info = Bundle.main.infoDictionary ?? [:]
+                    Text("Nodeyard AI \(info["CFBundleShortVersionString"] as? String ?? "?") (build \(info["CFBundleVersion"] as? String ?? "?"), source \(info["NodeyardSourceCommit"] as? String ?? "unknown"))")
+                        .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    Text("Setup guide: Manage › Setup guide (⌘3).").font(.caption).foregroundStyle(.secondary)
+                }
                 Section("New chat defaults") {
                     TextField("System prompt", text: $state.defaults.systemPrompt, axis: .vertical).lineLimit(3...6)
                     HStack {
@@ -148,5 +157,24 @@ struct ChatSettingsView: View {
             chat.contextLength = contextLength; chat.browserUse = browserUse; chat.computerUse = computerUse
         }
         dismiss()
+    }
+}
+
+/// Sign-in state for the website's management features, and a way to forget the saved password.
+private struct ManagementSettingsRow: View {
+    @EnvironmentObject private var mgmt: ManagementState
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(mgmt.signedIn ? "Signed in to the dashboard" : (mgmt.authEnabled ? "Not signed in" : "This dashboard has no sign-in"),
+                      systemImage: mgmt.signedIn ? "checkmark.circle.fill" : "person.crop.circle.badge.questionmark")
+                    .foregroundStyle(mgmt.signedIn ? Color.green : Color.secondary)
+                Spacer()
+                if mgmt.signedIn { Button("Sign out") { Task { await mgmt.signOut(forget: false) } } }
+                if mgmt.savedPassword { Button("Forget saved password", role: .destructive) { Task { await mgmt.signOut(forget: true) } } }
+            }
+            Text("Managing the cluster (Manage, ⌘3) uses the dashboard password from the website's sign-in page. \(mgmt.savedPassword ? "It is saved in this Mac's Keychain." : "It is not saved; you sign in when you open Manage.") The server API key above is separate and is never used as a password.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
 }

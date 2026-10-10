@@ -3,17 +3,20 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var state: AppState
-    @State private var showModels = false
     @State private var showSettings = false
     @State private var showChatSettings = false
 
     var body: some View {
         NavigationSplitView {
-            sidebar
-                .navigationSplitViewColumnWidth(min: 240, ideal: 285, max: 360)
+            Group {
+                if state.workspace == .manage { ManageSidebar() } else { sidebar }
+            }
+            .navigationSplitViewColumnWidth(min: 220, ideal: 270, max: 360)
+            .toolbar { ToolbarItem(placement: .automatic) { Button { showSettings = true } label: { Image(systemName: "gearshape") }.help("Settings") } }
         } detail: {
             Group {
-                if showModels { ModelsView() }
+                if state.workspace == .manage { ManageDetail() }
+                else if state.workspace == .models { ModelsView() }
                 else if state.currentChat != nil { ChatDetailView(showSettings: $showChatSettings) }
                 else { EmptyState(title: "No chat selected", icon: "bubble.left.and.bubble.right", message: "Create a chat to start talking to your cluster.") }
             }
@@ -70,7 +73,7 @@ struct ContentView: View {
                 }
                 .accessibilityElement(children: .combine)
                 Spacer()
-                Button { state.createChat(); showModels = false } label: { Image(systemName: "square.and.pencil") }
+                Button { state.createChat(); state.workspace = .chat } label: { Image(systemName: "square.and.pencil") }
                     .help("New chat (⌘N)").keyboardShortcut("n", modifiers: .command)
                 Button { state.syncNow() } label: { Image(systemName: state.isSyncing ? "arrow.triangle.2.circlepath" : "arrow.clockwise") }
                     .help("Sync server chats")
@@ -109,10 +112,9 @@ struct ContentView: View {
                 Circle().fill(state.isConnected ? .green : .orange).frame(width: 8, height: 8)
                 Text(state.isConnected ? "Connected" : "Not connected").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button { showModels = true } label: { Label("Models", systemImage: "cpu") }.buttonStyle(.plain)
+                Button { state.workspace = .manage } label: { Label("Manage", systemImage: "server.rack") }.buttonStyle(.plain)
             }.padding(12)
         }
-        .toolbar { ToolbarItem(placement: .automatic) { Button { showSettings = true } label: { Image(systemName: "gearshape") }.help("Settings") } }
     }
 
     @ViewBuilder private func chatMenu(_ chat: ChatRecord) -> some View {
@@ -128,9 +130,11 @@ struct ContentView: View {
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .principal) {
-            Picker("Workspace", selection: $showModels) { Text("Chat").tag(false); Text("Models").tag(true) }.pickerStyle(.segmented).frame(width: 170)
+            Picker("Workspace", selection: $state.workspace) {
+                Text("Chat").tag(AppState.Workspace.chat); Text("Models").tag(AppState.Workspace.models); Text("Manage").tag(AppState.Workspace.manage)
+            }.pickerStyle(.segmented).frame(width: 250).help("Chat (⌘1), quick model list (⌘2), or manage the whole cluster like the website (⌘3)")
         }
-        if !showModels, let chat = state.currentChat {
+        if state.workspace == .chat, let chat = state.currentChat {
             ToolbarItem(placement: .automatic) {
                 Menu {
                     if state.readyTargets.isEmpty { Text("No ready models").foregroundStyle(.secondary) }
@@ -140,7 +144,7 @@ struct ContentView: View {
                         } label: { if target.id == chat.modelTarget { Label(target.name, systemImage: "checkmark") } else { Text(target.name) } }
                     }
                     Divider()
-                    Button("Manage models…") { showModels = true }
+                    Button("Manage models…") { state.workspace = .manage; state.manage.section = .models }
                 } label: {
                     Label(chat.modelName.isEmpty ? "Choose model" : chat.modelName, systemImage: "cpu").lineLimit(1)
                 }.help("Select a ready model")
@@ -325,8 +329,13 @@ private struct MessageCard: View {
                         VStack(alignment: .leading, spacing: 5) {
                             HStack(spacing: 7) {
                                 ProgressView().controlSize(.small)
-                                Text(elapsed < 5 ? "Thinking…" : "Waiting for the first token · \(elapsed)s")
-                                    .foregroundStyle(.secondary)
+                                if let progress = state.promptProgress[message.id] {
+                                    Text("Reading the prompt: \(progress.processed.formatted()) of \(progress.total.formatted()) tokens (\(min(100, progress.processed * 100 / max(1, progress.total)))%) · \(elapsed)s")
+                                        .foregroundStyle(.secondary).monospacedDigit()
+                                } else {
+                                    Text(elapsed < 5 ? "Thinking…" : "Waiting for the first token · \(elapsed)s")
+                                        .foregroundStyle(.secondary)
+                                }
                             }.font(.callout)
                             if elapsed >= 30 {
                                 Text("The model is taking a while to start. Check that it is ready in Models, or stop and try again.")

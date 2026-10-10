@@ -8,9 +8,10 @@ struct NodeyardAIApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(state)
+                .environmentObject(state.manage)
                 .frame(minWidth: 920, minHeight: 640)
                 .preferredColorScheme(state.defaults.appearance == "system" ? nil : (state.defaults.appearance == "light" ? .light : .dark))
-                .task { state.refresh() }
+                .task { state.refresh(); await TestSnapshots.runIfRequested(state) }
         }
         .windowStyle(.titleBar)
         .commands {
@@ -25,6 +26,15 @@ struct NodeyardAIApp: App {
                 Divider()
                 Button("Refresh Models") { state.refresh() }.keyboardShortcut("r", modifiers: .command)
                 Button("Sync Saved Chats") { state.syncNow() }.keyboardShortcut("s", modifiers: [.command, .option])
+            }
+            CommandMenu("Manage") {
+                Button("Chat") { state.workspace = .chat }.keyboardShortcut("1", modifiers: .command)
+                Button("Models") { state.workspace = .models }.keyboardShortcut("2", modifiers: .command)
+                Button("Manage Cluster") { state.workspace = .manage }.keyboardShortcut("3", modifiers: .command)
+                Divider()
+                ForEach(ManageSection.allCases) { section in
+                    Button(section.title) { state.workspace = .manage; state.manage.section = section }
+                }
             }
         }
     }

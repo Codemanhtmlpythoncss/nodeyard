@@ -7,7 +7,7 @@ import UserNotifications
 final class AppState: ObservableObject {
     @Published var chats: [ChatRecord]
     @Published var currentChatID: String? {
-        didSet { if let currentChatID { UserDefaults.standard.set(currentChatID, forKey: "nodeyard.lastChat") } }
+        didSet { if let currentChatID, !TestMode.isOn { UserDefaults.standard.set(currentChatID, forKey: "nodeyard.lastChat") } }
     }
     @Published var targets: [ModelTarget] = []
     @Published var inventory: ModelInventory?
@@ -37,6 +37,14 @@ final class AppState: ObservableObject {
     @Published var renameChatID: String?
     @Published var renameDraft = ""
     @Published var pendingToolApproval: ToolApproval?
+    @Published var workspace: Workspace = .chat
+    /// How far the model has read the prompt, per answer still waiting for its first token (llama.cpp only).
+    @Published var promptProgress: [String: PromptProgress] = [:]
+    struct PromptProgress: Equatable { var processed: Int; var total: Int }
+
+    enum Workspace: String, CaseIterable { case chat, models, manage }
+    /// The website's management features (dashboard sign-in), sharing this app's address and key.
+    let manage: ManagementState
 
     let store = ChatStore()
     private var client: NodeyardClient
@@ -46,9 +54,9 @@ final class AppState: ObservableObject {
 
     init() {
         defaults = store.loadDefaults()
-        let savedAddress = UserDefaults.standard.string(forKey: "nodeyard.serverAddress") ?? "http://localhost:9092"
+        let savedAddress = TestMode.isOn ? TestMode.address : (UserDefaults.standard.string(forKey: "nodeyard.serverAddress") ?? "http://localhost:9092")
         let address = NodeyardClient.migratedDashboardAddress(from: savedAddress) ?? savedAddress
-        if address != savedAddress {
+        if address != savedAddress && !TestMode.isOn {
             UserDefaults.standard.set(address, forKey: "nodeyard.serverAddress")
             info = "Updated the saved model endpoint to the Nodeyard dashboard on port 9092."
         }
@@ -56,6 +64,7 @@ final class AppState: ObservableObject {
         serverAddress = address
         apiKey = key
         client = NodeyardClient(baseAddress: address, apiKey: key)
+        manage = ManagementState(address: address, apiKey: key)
         chats = store.loadChats()
         let last = UserDefaults.standard.string(forKey: "nodeyard.lastChat")
         currentChatID = chats.first(where: { $0.id == last && !$0.archived })?.id ?? chats.first(where: { !$0.archived })?.id
@@ -123,7 +132,7 @@ final class AppState: ObservableObject {
 
     func setServerAddress(_ address: String) {
         serverAddress = address.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        UserDefaults.standard.set(serverAddress, forKey: "nodeyard.serverAddress")
+        if !TestMode.isOn { UserDefaults.standard.set(serverAddress, forKey: "nodeyard.serverAddress") }
         reconnectClient()
     }
 
@@ -187,7 +196,13 @@ final class AppState: ObservableObject {
     }
 
     private func performSend(chatID: String, retry: Bool) async {
-        guard let chatIndex = chats.firstIndex(where: { $0.id == chatID }) else { return }
+        guard let chatIndex = chats.firstIndex(where: { $0.id == chatID }) else { return }   // (valid until the first await)
+        // The chat list can change while an answer streams (a new chat goes to the top, another is deleted), so the
+        // chat is looked up by its id every time instead of keeping its position. If it was deleted, stop quietly.
+        func ci() throws -> Int {
+            guard let i = chats.firstIndex(where: { $0.id == chatID }) else { throw CancellationError() }
+            return i
+        }
         let text = composer.trimmingCharacters(in: .whitespacesAndNewlines)
         let editing = editingMessageID
         if !retry && text.isEmpty && stagedAttachments.isEmpty { return }
@@ -218,7 +233,7 @@ final class AppState: ObservableObject {
             var actionCount = 0
             while true {
                 try Task.checkCancellation()
-                let snapshot = chats[chatIndex]
+                let snapshot = chats[try ci()]
                 let messages = try openAIMessages(for: snapshot, excludingMessageID: responseID)
                 let availableTools = toolRounds < 4 ? modelTools(for: snapshot) : []
                 let activeResponseID = responseID
@@ -227,47 +242,54 @@ final class AppState: ObservableObject {
                     self?.appendStream(piece, reasoning: false, to: activeResponseID, chatID: chatID)
                 }, onReasoning: { [weak self] piece in
                     self?.appendStream(piece, reasoning: true, to: activeResponseID, chatID: chatID)
+                }, onProgress: { [weak self] processed, total in
+                    self?.promptProgress[activeResponseID] = PromptProgress(processed: processed, total: total)
                 })
+                promptProgress[activeResponseID] = nil
                 finalStats = stats
                 guard !stats.toolCalls.isEmpty else { break }
                 guard !availableTools.isEmpty, toolRounds < 4, actionCount + stats.toolCalls.count <= 6 else {
                     appendStream("I stopped at the safe tool-use limit. Ask me to continue if you want another step.", reasoning: false, to: responseID, chatID: chatID)
                     break
                 }
-                if let i = chats[chatIndex].messages.firstIndex(where: { $0.id == responseID }) {
-                    chats[chatIndex].messages[i].toolCalls = stats.toolCalls
-                    if chats[chatIndex].messages[i].content.isEmpty {
-                        chats[chatIndex].messages[i].content = "Using \(stats.toolCalls.map { $0.function.name.replacingOccurrences(of: "_", with: " ") }.joined(separator: ", "))…"
+                if let i = chats[try ci()].messages.firstIndex(where: { $0.id == responseID }) {
+                    chats[try ci()].messages[i].toolCalls = stats.toolCalls
+                    if chats[try ci()].messages[i].content.isEmpty {
+                        chats[try ci()].messages[i].content = "Using \(stats.toolCalls.map { $0.function.name.replacingOccurrences(of: "_", with: " ") }.joined(separator: ", "))…"
                     }
                 }
                 for call in stats.toolCalls {
                     try Task.checkCancellation()
                     let result = await executeTool(call)
-                    chats[chatIndex].messages.append(ChatMessage(role: "tool", content: result, toolCallID: call.id, toolName: call.function.name))
+                    chats[try ci()].messages.append(ChatMessage(role: "tool", content: result, toolCallID: call.id, toolName: call.function.name))
                 }
                 actionCount += stats.toolCalls.count
                 toolRounds += 1
                 response = ChatMessage(role: "assistant", content: "")
                 responseID = response.id
-                chats[chatIndex].messages.append(response)
-                persist(chatIndex: chatIndex)
+                chats[try ci()].messages.append(response)
+                persist(chatIndex: try ci())
             }
-            if let i = chats[chatIndex].messages.firstIndex(where: { $0.id == responseID }) {
-                chats[chatIndex].messages[i].duration = Date().timeIntervalSince(streamStarted ?? Date())
-                chats[chatIndex].messages[i].tokensPerSecond = finalStats.tokensPerSecond
-                chats[chatIndex].messages[i].tokenCount = finalStats.tokens
-                response = chats[chatIndex].messages[i]
+            if let i = chats[try ci()].messages.firstIndex(where: { $0.id == responseID }) {
+                chats[try ci()].messages[i].duration = Date().timeIntervalSince(streamStarted ?? Date())
+                chats[try ci()].messages[i].tokensPerSecond = finalStats.tokensPerSecond
+                chats[try ci()].messages[i].tokenCount = finalStats.tokens
+                response = chats[try ci()].messages[i]
             }
-            persist(chatIndex: chatIndex)
+            persist(chatIndex: try ci())
             if defaults.syncChats { await sync(chatID: chatID) }
-            if defaults.notifications { notify(title: "Nodeyard AI replied", body: chats[chatIndex].title) }
+            if defaults.notifications { notify(title: "Nodeyard AI replied", body: chats[try ci()].title) }
         } catch is CancellationError {
-            info = "Generation stopped. The partial answer is saved."
-            persist(chatIndex: chatIndex)
+            if let i = chats.firstIndex(where: { $0.id == chatID }) {
+                info = "Generation stopped. The partial answer is saved."
+                persist(chatIndex: i)
+            }
         } catch {
             self.error = error.localizedDescription
-            if chats[chatIndex].messages.last?.id == response.id && chats[chatIndex].messages.last?.content.isEmpty == true { chats[chatIndex].messages.removeLast() }
-            persist(chatIndex: chatIndex)
+            if let i = chats.firstIndex(where: { $0.id == chatID }) {
+                if chats[i].messages.last?.role == "assistant" && chats[i].messages.last?.content.isEmpty == true && chats[i].messages.last?.toolCalls == nil { chats[i].messages.removeLast() }
+                persist(chatIndex: i)
+            }
         }
     }
 
@@ -384,6 +406,7 @@ final class AppState: ObservableObject {
     }
 
     private func appendStream(_ piece: String, reasoning: Bool, to messageID: String, chatID: String) {
+        if promptProgress[messageID] != nil { promptProgress[messageID] = nil }
         guard let ci = chats.firstIndex(where: { $0.id == chatID }), let mi = chats[ci].messages.firstIndex(where: { $0.id == messageID }) else { return }
         if reasoning { chats[ci].messages[mi].reasoning += piece } else { chats[ci].messages[mi].content += piece }
         if chats[ci].messages[mi].content.count % 160 == 0 { try? store.save(chats[ci]) }
@@ -486,7 +509,10 @@ final class AppState: ObservableObject {
         do { try await client.saveRemote(chat) } catch { info = "Saved on this Mac; server sync will retry after you reconnect." }
     }
 
-    private func reconnectClient() { client = NodeyardClient(baseAddress: serverAddress, apiKey: apiKey) }
+    private func reconnectClient() {
+        client = NodeyardClient(baseAddress: serverAddress, apiKey: apiKey)
+        manage.reconnect(address: serverAddress, apiKey: apiKey)
+    }
     private func persist(chatIndex i: Int) { chats[i].updated = Date(); do { try store.save(chats[i]) } catch { self.error = "Couldn't save chat: \(error.localizedDescription)" } }
     private func update(_ chat: ChatRecord, _ operation: (inout ChatRecord) -> Void) { guard let i = chats.firstIndex(where: { $0.id == chat.id }) else { return }; operation(&chats[i]); persist(chatIndex: i) }
     private func safeFilename(_ text: String) -> String { String(text.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" ? $0 : "-" }.prefix(80)) }

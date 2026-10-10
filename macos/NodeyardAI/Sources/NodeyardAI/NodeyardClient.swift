@@ -136,7 +136,8 @@ final class NodeyardClient {
     }
 
     func streamChat(model: String, messages: [OpenAIMessage], temperature: Double, maxTokens: Int, tools: [[String: Any]] = [],
-                    onContent: @escaping (String) -> Void, onReasoning: @escaping (String) -> Void) async throws -> StreamStats {
+                    onContent: @escaping (String) -> Void, onReasoning: @escaping (String) -> Void,
+                    onProgress: ((Int, Int) -> Void)? = nil) async throws -> StreamStats {
         let encodedMessages = try JSONEncoder().encode(messages)
         var payload: [String: Any] = [
             "model": model,
@@ -145,6 +146,7 @@ final class NodeyardClient {
         ]
         if maxTokens > 0 { payload["max_tokens"] = maxTokens }
         if !tools.isEmpty { payload["tools"] = tools; payload["tool_choice"] = "auto" }
+        if model == "split" && onProgress != nil { payload["return_progress"] = true }   // llama.cpp: how far it has read the prompt
         var req = try request("POST", "/api/v1/chat/completions", body: payload)
         req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         let bytes: URLSession.AsyncBytes
@@ -170,7 +172,16 @@ final class NodeyardClient {
                 guard line.hasPrefix("data: ") else { continue }
                 let chunk = String(line.dropFirst(6))
                 if chunk == "[DONE]" { break }
-                guard let json = chunk.data(using: .utf8), let part = try? JSONDecoder().decode(StreamDelta.self, from: json) else { continue }
+                guard let json = chunk.data(using: .utf8) else { continue }
+                if let any = JSON.parse(json) {
+                    // An error in the middle of the stream (the model server restarted, ran out of memory...) is a failure,
+                    // not an empty answer.
+                    let failure = any["error"]
+                    if !failure.isNull { throw NodeyardError.server(failure["message"].string ?? failure.string ?? "The model reported an error.") }
+                    let progress = any["prompt_progress"]
+                    if !progress.isNull, let total = progress["total"].int, total > 0 { onProgress?(progress["processed"].int ?? 0, total) }
+                }
+                guard let part = try? JSONDecoder().decode(StreamDelta.self, from: json) else { continue }
                 if let usage = part.usage?.completion_tokens { stats.tokens = usage }
                 if let speed = part.timings?.predicted_per_second { stats.tokensPerSecond = speed }
                 for choice in part.choices ?? [] {

@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC2292  # plain POSIX sh on purpose (macOS ships bash 3.2 as sh's only bash)
 set -eu
 
 repo=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -24,10 +25,17 @@ case "$arch" in arm64 | x86_64) ;; *)
     exit 1
     ;;
 esac
-build="$project/.build/direct"
-mkdir -p "$build"
+# Compile from a private copy outside the repository: a synced folder (iCloud Desktop & Documents) can touch
+# files while swiftc reads them, which makes it stop with "was modified during the build".
+build=$(mktemp -d "${TMPDIR:-/tmp}/nodeyard-ai-build.XXXXXX")
+trap 'rm -rf "$build"' EXIT
+src="$build/src"
+rm -rf "$src"
+mkdir -p "$src"
+cp "$project"/Sources/NodeyardAI/*.swift "$src/"
+cp "$repo/scripts/build-nodeyard-ai-icon.swift" "$build/build-nodeyard-ai-icon.swift"
 swiftc -O -sdk "$sdk" -target "$arch-apple-macosx13.0" -swift-version 6 -module-cache-path "$build/ModuleCache" \
-    "$project"/Sources/NodeyardAI/*.swift -o "$build/NodeyardAI"
+    "$src"/*.swift -o "$build/NodeyardAI"
 binary="$build/NodeyardAI"
 test -x "$binary" || {
     printf '%s\n' 'Swift build did not produce the app executable.' >&2
@@ -42,11 +50,20 @@ mkdir -p "$resources"
 iconset="$resources/AppIcon.iconset"
 icon_builder="$build/build-nodeyard-ai-icon"
 swiftc -O -sdk "$sdk" -target "$arch-apple-macosx13.0" -swift-version 6 -module-cache-path "$build/ModuleCache" \
-    "$repo/scripts/build-nodeyard-ai-icon.swift" -o "$icon_builder"
+    "$build/build-nodeyard-ai-icon.swift" -o "$icon_builder"
 "$icon_builder" "$iconset"
 /usr/bin/iconutil -c icns "$iconset" -o "$resources/AppIcon.icns"
 rm -rf "$iconset"
-cat >"$app/Contents/Info.plist" <<'PLIST'
+# Version: the marketing version, a build number from the commit count, and the exact source commit, so an
+# installed copy can be checked against the repository (`plutil -p ".../Info.plist"`).
+version=${NODEYARD_AI_VERSION:-1.1.0}
+build_number=$(git -C "$repo" rev-list --count HEAD 2>/dev/null || echo 1)
+commit=$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo unknown)
+if [ -n "$(git -C "$repo" status --porcelain -- macos scripts/build-macos-ai-app.sh scripts/build-nodeyard-ai-icon.swift 2>/dev/null)" ]; then
+    commit="$commit-modified"
+fi
+built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+cat >"$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -60,8 +77,11 @@ cat >"$app/Contents/Info.plist" <<'PLIST'
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>Nodeyard AI</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>${version}</string>
+  <key>CFBundleVersion</key><string>${build_number}</string>
+  <key>NodeyardSourceCommit</key><string>${commit}</string>
+  <key>NodeyardBuiltAt</key><string>${built_at}</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAppTransportSecurity</key>
@@ -69,4 +89,10 @@ cat >"$app/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
-printf 'Built %s\n' "$app"
+/usr/bin/plutil -lint "$app/Contents/Info.plist" >/dev/null
+# Sign the whole bundle (ad hoc unless NODEYARD_AI_SIGN_IDENTITY names a certificate), so the Info.plist and the
+# icon are sealed and macOS sees one consistent app. With ad-hoc signing, macOS asks for Accessibility access
+# again after each update; a stable certificate keeps it.
+/usr/bin/codesign --force --sign "${NODEYARD_AI_SIGN_IDENTITY:--}" --identifier com.nodeyard.ai "$app" >/dev/null 2>&1 ||
+    printf '%s\n' 'warning: could not sign the app bundle; it still runs locally.' >&2
+printf 'Built %s (version %s, build %s, commit %s)\n' "$app" "$version" "$build_number" "$commit"
