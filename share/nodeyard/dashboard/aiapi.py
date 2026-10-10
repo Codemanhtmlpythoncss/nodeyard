@@ -47,6 +47,7 @@ CHAT_IMAGE_RE = re.compile(r"^data:image/(jpeg|png|webp);base64,([A-Za-z0-9+/]*=
 CHAT_TOOL_NAMES = frozenset(("browser_search", "browser_open", "computer_read_screen", "computer_click",
                             "computer_set_text", "computer_press_key", "computer_open_app"))
 CHAT_TOOL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
+NOT_REACHED_RE = re.compile(r"^\s+([a-z0-9][-a-z0-9.]*): not reached\b")
 
 
 def clean_chat_messages(messages):
@@ -487,6 +488,12 @@ def build_command(action, p, nodes, key_path):
         return "Unload the split model (free its memory)", ["ai", "split", "unload", "--yes"]
     if action == "split-load":
         return "Load the split model", ["ai", "split", "load", "--yes"]
+    if action == "split-auto-unload":   # started by lifecycle.py, never by the page itself
+        try:
+            idle = max(0, int(p.get("idle") or 0))
+        except (TypeError, ValueError):
+            idle = 0
+        return "Automatic unload: idle for %d min" % round(idle / 60), ["ai", "split", "unload", "--yes"]
     if action == "ollama-rm":
         name = need("name", MODEL_RE)
         return "Delete %s from every Ollama node" % name, ["ai", "model", "rm", name, "--yes"]
@@ -593,6 +600,48 @@ class Live:
         self.downloads_cache = []
         self.downloads_at = 0
         self.downloads_refreshing = False
+        self.lifecycle = None   # lifecycle.Lifecycle, set by lifecycle.register
+
+    def jobs_running(self):
+        return self.jobs.running() is not None
+
+    def split_slots(self):
+        """llama.cpp's /slots: is a request being worked on, and the newest task number (it grows with every request)."""
+        host, port, headers, _ = self._resolve("split")
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        try:
+            conn.request("GET", "/slots", headers=dict(headers, **{"Accept": "application/json", "User-Agent": UA}))
+            resp = conn.getresponse()
+            raw = resp.read(1024 * 1024)
+        except (OSError, http.client.HTTPException) as e:
+            raise AIError("Couldn't read the model's activity: %s" % (getattr(e, "strerror", None) or e), 502)
+        finally:
+            conn.close()
+        if resp.status != 200:
+            raise AIError("The model's activity endpoint (/slots) answered HTTP %d." % resp.status, 502)
+        try:
+            slots = json.loads(raw)
+        except ValueError:
+            raise AIError("The model's activity endpoint sent something unreadable.", 502)
+        if not isinstance(slots, list):
+            raise AIError("The model's activity endpoint sent something unexpected.", 502)
+        tasks = [s.get("id_task") for s in slots if isinstance(s, dict) and isinstance(s.get("id_task"), int)]
+        return {"processing": any(isinstance(s, dict) and s.get("is_processing") for s in slots), "task": max(tasks) if tasks else None}
+
+    def ollama_keep_alive(self, pod_name, model, keep_alive):
+        """Set how long Ollama keeps a model loaded after its last use (-1 = until unloaded, 0 = unload now)."""
+        if not MODEL_RE.match(model or ""):
+            raise AIError("Bad model name.")
+        pod = next((p for p in self._ollama_pods() if p["name"] == pod_name), None)
+        if not pod:
+            raise AIError("No such Ollama pod.", 404)
+        try:
+            status, data = self._ollama_json(pod, "POST", "/api/generate", {"model": model, "prompt": "", "stream": False, "keep_alive": keep_alive},
+                                             timeout=600 if keep_alive != 0 else 30)
+        except (OSError, ValueError, http.client.HTTPException) as e:
+            raise AIError("Couldn't reach Ollama: %s" % (getattr(e, "strerror", None) or e), 502)
+        if status >= 400:
+            raise AIError("Ollama said: %s" % (data.get("error") if isinstance(data, dict) else status), 502)
 
     def _models_cache_path(self):
         return os.path.join(self.state_dir, "ai-disk-models.json")
@@ -641,7 +690,9 @@ class Live:
     def _models_save_error():
         return "The models were found, but the dashboard couldn't save their locations. Check write access to /var/lib/nodeyard/dashboard."
 
-    def _forget_models_cache(self, file=None):
+    def _forget_models_cache(self, file=None, keep_nodes=()):
+        """Rescan soon; with FILE, drop it from the saved inventory now, except on KEEP_NODES
+        (nodes the delete couldn't reach: their copy is still there as far as anyone knows)."""
         with self.models_lock:
             self.models_generation += 1
             self.models_dirty = True
@@ -650,11 +701,12 @@ class Live:
                 base = file[:-5] if file.lower().endswith(".gguf") else file
                 cache_key = re.sub(r"[^a-z0-9-]", "-", base.lower())[:40]
                 data = dict(self.models_cache[1])
-                data["nodes"] = [dict(n, items=[it for it in n.get("items", [])
-                                                   if not (it.get("kind") == "model" and it.get("name") == file)
-                                                   and not (it.get("kind") == "partial" and re.sub(r"\.(part\d*|joining|copying)$", "", it.get("name", "")) == file)
-                                                   and not (it.get("kind") == "cache" and it.get("name") == cache_key)])
-                                  for n in data.get("nodes", [])]
+                data["nodes"] = [n if n.get("node") in keep_nodes else
+                                 dict(n, items=[it for it in n.get("items", [])
+                                                if not (it.get("kind") == "model" and it.get("name") == file)
+                                                and not (it.get("kind") == "partial" and re.sub(r"\.(part\d*|joining|copying)$", "", it.get("name", "")) == file)
+                                                and not (it.get("kind") == "cache" and it.get("name") == cache_key)])
+                                 for n in data.get("nodes", [])]
                 self.models_cache = (time.time(), data)
                 if not self._save_models_cache(self.models_cache):
                     self.models_error = self._models_save_error()
@@ -667,7 +719,9 @@ class Live:
             self._forget_models_cache()
             return
         if action == "split-rm":
-            self._forget_models_cache(str(params.get("file") or ""))
+            # "  NODE: not reached (...)": that node was NotReady or gone, so its copy stays listed (as last seen).
+            skipped = {m.group(1) for m in (NOT_REACHED_RE.match(line) for line in job.get("lines", [])) if m}
+            self._forget_models_cache(str(params.get("file") or ""), keep_nodes=skipped)
         else:
             self._forget_models_cache()
 
@@ -759,20 +813,12 @@ class Live:
         return out
 
     def ollama_load(self, pod_name, model, on):
-        if not MODEL_RE.match(model or ""):
-            raise AIError("Bad model name.")
-        pod = next((p for p in self._ollama_pods() if p["name"] == pod_name), None)
-        if not pod:
-            raise AIError("No such Ollama pod.", 404)
-        try:
-            # An explicit Load is meant to stay loaded when the user leaves
-            # this page. Ollama's -1 value keeps it resident until Unload or
-            # the Ollama process itself restarts.
-            status, data = self._ollama_json(pod, "POST", "/api/generate", {"model": model, "prompt": "", "stream": False, "keep_alive": -1 if on else 0}, timeout=600 if on else 30)
-        except (OSError, ValueError, http.client.HTTPException) as e:
-            raise AIError("Couldn't reach Ollama: %s" % (getattr(e, "strerror", None) or e), 502)
-        if status >= 400:
-            raise AIError("Ollama said: %s" % (data.get("error") if isinstance(data, dict) else status), 502)
+        # An explicit Load stays loaded until Unload (keep-alive -1), or, with automatic
+        # unloading on, until it has been idle for the chosen time (lifecycle.py).
+        keep = (self.lifecycle.load_keep_alive() if self.lifecycle else -1) if on else 0
+        self.ollama_keep_alive(pod_name, model, keep)
+        if self.lifecycle:
+            self.lifecycle.set_pinned(pod_name, model, on)
 
     def reveal_key(self):
         key = self.api_key()
@@ -821,6 +867,26 @@ class Live:
         raise AIError("Unknown model.", 404)
 
     def open_chat(self, target, payload, on_conn=None):
+        lc = self.lifecycle
+        token = lc.begin(target) if lc else None
+        try:
+            conn, resp = self._open_chat(target, payload, on_conn)
+        except BaseException:
+            if lc:
+                lc.end(token)
+            raise
+        if lc:
+            close = conn.close
+
+            def close_and_record():
+                try:
+                    close()
+                finally:
+                    lc.end(token)   # (ends once: later calls are ignored)
+            conn.close = close_and_record
+        return conn, resp
+
+    def _open_chat(self, target, payload, on_conn=None):
         host, port, headers, model = self._resolve(target)
         body = dict(chat_payload_for_target(target, payload), model=model, stream=True)
         headers = dict(headers, **{"Content-Type": "application/json", "Accept": "text/event-stream", "User-Agent": UA})
@@ -865,6 +931,9 @@ class Live:
         exclusive = action not in SHARED_ACTIONS and not (action == "cli" and p.get("dry_run") is True)
         changes_models = action in {"deploy", "switch", "download", "split-rm", "clean", "undeploy", "force-stop"}
         on_done = (lambda job: self._model_job_done(action, p, job)) if changes_models else None
+        if action == "ollama-rm" and self.lifecycle:
+            name = str(p.get("name") or "")
+            on_done = lambda job: [self.lifecycle.set_pinned(pod, name, False) for pod, model in self.lifecycle.pinned() if model == name]  # noqa: E731
         return self.jobs.start(title, argv, exclusive=exclusive, outside=action in OUTSIDE_ACTIONS, stdin=stdin, on_done=on_done)
 
     # -- what is on each node's disk ------------------------------------------------

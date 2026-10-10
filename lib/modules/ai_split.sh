@@ -955,9 +955,13 @@ ${main_fetch}
         - "8080"
         env: [{name: LD_LIBRARY_PATH, value: /opt/llama}${main_env}]
         ports: [{containerPort: 8080}]
+        # A busy CPU node can take longer than the 1 s default to answer /health
+        # while it generates; a short timeout made the model flap NotReady mid-answer.
         readinessProbe:
           httpGet: {path: /health, port: 8080}
           periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
         volumeMounts:
         - {name: bin, mountPath: /opt/llama}
         - {name: models, mountPath: /models}$([[ -n "$SPLIT_API_KEY" ]] && printf '\n        - {name: api-key, mountPath: /secrets, readOnly: true}' || true)
@@ -2053,24 +2057,46 @@ ai_split_rm() {
         ny_plan_add delete "Delete ${file}, its parts and its weight caches on every node"
         return 0
     fi
-    split_delete_files "$file"
-    ny_ok "Deleted ${file}."
+    split_delete_files "$file" || ny_die "${file} couldn't be deleted on every node (see above)." "Deletes on the other nodes stand. Check that node (is it under disk pressure?) and run the same delete again." "$NY_E_PARTIAL"
+    if [[ -n "$SPLIT_RM_SKIPPED" ]]; then
+        ny_ok "Deleted ${file} where the nodes could be reached."
+    else
+        ny_ok "Deleted ${file}."
+    fi
     return 0
 }
 
 # split_delete_files FILE -- deletes one model's file, unfinished parts and
 # weight caches on every node (and stops its download), saying what it freed.
+# Fails if a Ready node couldn't run the delete; a node that is NotReady or
+# gone is reported ("not reached") and left in SPLIT_RM_SKIPPED, because its
+# copy can't be checked until it is back.
+SPLIT_RM_SKIPPED=""
 split_delete_files() {
     local file="$1"
     [[ "$file" =~ ^[A-Za-z0-9._+-]+\.gguf$ ]] || return 1
     kctl -n "$SPLIT_NS" delete job "$(split_job_name "$file")" --ignore-not-found --wait=true >/dev/null 2>&1 || true
     local -a nodes=()
-    mapfile -t nodes < <(split_ai_nodes)
-    local key out
+    mapfile -t nodes < <(split_scan_nodes)
+    ((${#nodes[@]} > 0)) || {
+        ny_warn "Kubernetes listed no nodes to delete ${file} from."
+        return 1
+    }
+    local key out failed
     key="$(split_cache_key "$file")"
     out="$(split_on_nodes rw "set -- \$(df -Pk /m | tail -1); b=\$4; rm -f '/m/${file}' '/m/${file}'.part* '/m/${file}.joining' '/m/${file}.copying'; rm -rf '/d/rpc-cache/${key}'; sync; set -- \$(df -Pk /m | tail -1); echo \"FREED \$(( (\$4 - b) * 1024 ))\"" "${nodes[@]}")"
-    awk '/^== / {n = $2} /^FREED/ && $2 > 1048576 {printf "  %-16s freed %.1f GiB\n", n, $2 / 1073741824} /^ERROR/ {print "  " n ": " $0}' <<<"$out"
-    return 0
+    awk '/^== / {n = $2} /^FREED/ && $2 > 1048576 {printf "  %-16s freed %.1f GiB\n", n, $2 / 1073741824}' <<<"$out"
+    # Each node either confirms (FREED) or is skipped (NotReady) or failed.
+    SPLIT_RM_SKIPPED="$(awk '/^== / {n = $2} /^ERROR node is NotReady/ {printf "%s ", n}' <<<"$out")"
+    failed="$(awk '/^== / {if (n != "" && !ok && !skip) printf "%s ", n; n = $2; ok = 0; skip = 0} /^FREED/ {ok = 1} /^ERROR node is NotReady/ {skip = 1} END {if (n != "" && !ok && !skip) printf "%s ", n}' <<<"$out")"
+    local n
+    for n in $SPLIT_RM_SKIPPED; do
+        printf '  %s: not reached (NotReady or offline); its copy, if any, stays until you delete it again\n' "$n"
+    done
+    for n in $failed; do
+        printf '  %s: delete failed (%s)\n' "$n" "$(awk -v n="$n" '/^== / {on = ($2 == n)} on && /^ERROR/ {sub(/^ERROR /, ""); print; exit}' <<<"$out")"
+    done
+    [[ -z "$failed" ]]
 }
 
 # ---------- the model's API key and the Hugging Face token ----------
@@ -2529,7 +2555,7 @@ ai_split_switch() {
         ny_ok "Unloaded: every node has its memory back."
         if [[ "$old" != "$SPLIT_FILE" && $keep_old -eq 0 ]]; then
             echo "Deleting ${old} and its weight caches..."
-            split_delete_files "$old"
+            split_delete_files "$old" || ny_warn "Some of ${old}'s files couldn't be deleted (see above); the new model runs anyway. Delete it later: nodeyard ai split rm ${old}"
         fi
         # (no new plan here: the memory figures lag a minute behind the unload,
         # and the plan above already counted the old model's memory as free)

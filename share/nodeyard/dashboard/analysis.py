@@ -129,6 +129,13 @@ def alerts(state):
         elif p["status"] == "Pending" and p["created"] and now - p["created"] > 300:
             add("warning", "%s has been Pending for %d min" % (p["name"], (now - p["created"]) // 60),
                 "It can't be scheduled: usually not enough memory or CPU on any node.", "pod", ref)
+        elif p.get("last_reason") == "OOMKilled" and p["restarts"] and p.get("last_finished") and now - p["last_finished"] < 24 * 3600:
+            model = p["namespace"] in ("ai-split", "ai-inference")
+            add("warning", "%s ran out of memory and restarted" % p["name"],
+                ("Kubernetes killed it for using more memory than allowed (OOMKilled, %d restart%s). A model server that restarts "
+                 "reloads the model, which interrupts answers. Use a smaller context or quant, or spread the model over more nodes."
+                 if model else "Kubernetes killed it for using more memory than allowed (OOMKilled, %d restart%s).") % (p["restarts"], "" if p["restarts"] == 1 else "s"),
+                "pod", ref)
         elif p["restarts"] >= 5 and p["status"] == "Running":
             add("info", "%s restarted %d times" % (p["name"], p["restarts"]), "It's running now; check its logs for why it restarted.", "pod", ref)
     for w in state["workloads"]:

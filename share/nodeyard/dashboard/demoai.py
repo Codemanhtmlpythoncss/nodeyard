@@ -121,6 +121,8 @@ class DemoAI:
         self.lock = threading.Lock()
         self.loaded = {("ollama-demo-yard-1", "llama3.2:3b")}
         self.models = {"llama3.2:3b": 2 * GiB, "qwen2.5-coder:7b": int(4.7 * GiB), "phi4-mini:3.8b": int(2.5 * GiB)}
+        self.lifecycle = None
+        self.task = 0
 
     # ---- chat ----------------------------------------------------------------
     def targets(self):
@@ -142,9 +144,31 @@ class DemoAI:
         last = last.split("<file ", 1)[0] or last
         stream = FakeStream(pick_answer(last))
         conn = FakeConn(stream)
+        self.task += 1
+        if self.lifecycle:
+            token, close = self.lifecycle.begin(target), conn.close
+
+            def close_and_record():
+                try:
+                    close()
+                finally:
+                    self.lifecycle.end(token)
+            conn.close = close_and_record
         if on_conn:
             on_conn(conn)
         return conn, stream
+
+    def jobs_running(self):
+        with self.lock:
+            return any(j["status"] == "running" and j.get("exclusive", True) for j in self.jobs.values())
+
+    def split_slots(self):
+        return {"processing": False, "task": self.task}
+
+    def ollama_keep_alive(self, pod, model, keep_alive):
+        if (pod, model) not in {(e["pod"], m["name"]) for e in self.ollama_overview() for m in e["models"]}:
+            raise aiapi.AIError("No such model on that Ollama.", 404)
+        (self.loaded.add if keep_alive != 0 else self.loaded.discard)((pod, model))
 
     # ---- Ollama ---------------------------------------------------------------
     def ollama_overview(self):
@@ -163,6 +187,8 @@ class DemoAI:
         if (pod, model) not in {(e["pod"], m["name"]) for e in self.ollama_overview() for m in e["models"]}:
             raise aiapi.AIError("No such model on that Ollama.", 404)
         (self.loaded.add if on else self.loaded.discard)((pod, model))
+        if self.lifecycle:
+            self.lifecycle.set_pinned(pod, model, on)
 
     def reveal_key(self):
         return "demo-api-key-0000-0000-0000-0000"

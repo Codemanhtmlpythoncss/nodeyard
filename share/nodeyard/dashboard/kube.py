@@ -179,9 +179,12 @@ def build_pod(pod, usage):
         if cs.get("ready"):
             ready_n += 1
         restarts += cs.get("restartCount", 0)
+        last = (cs.get("lastState") or {}).get("terminated") or {}
         containers.append({
             "name": c["name"], "image": c.get("image", ""), "ready": bool(cs.get("ready")),
             "restarts": cs.get("restartCount", 0), "state": kind, "reason": detail.get("reason", ""),
+            # why it last stopped (e.g. OOMKilled): the evidence for a model that keeps reloading
+            "last_reason": last.get("reason", ""), "last_finished": parse_time(last.get("finishedAt")),
         })
     owners = meta.get("ownerReferences") or []
     owner = owners[0]["kind"] + "/" + owners[0]["name"] if owners else ""
@@ -190,6 +193,8 @@ def build_pod(pod, usage):
     return {
         "namespace": meta.get("namespace", ""), "name": meta.get("name", ""), "status": pod_status(pod),
         "ready": "%d/%d" % (ready_n, len(spec.get("containers", []))), "restarts": restarts,
+        "last_reason": next((c["last_reason"] for c in containers if c["last_reason"]), ""),
+        "last_finished": max([c["last_finished"] for c in containers if c["last_finished"]] or [0]),
         "node": spec.get("nodeName", ""), "ip": st.get("podIP", ""), "host_ip": st.get("hostIP", ""),
         "host_network": bool(spec.get("hostNetwork")), "created": parse_time(meta.get("creationTimestamp")),
         "started": parse_time(st.get("startTime")), "owner": owner, "qos": st.get("qosClass", ""),
@@ -637,7 +642,8 @@ class KubeSource:
                 "node_port": node_port, "auth": "--api-key-file" in args,
                 "download": ("done" if job and job.get("status", {}).get("succeeded") else ("running" if job else "none")),
                 "shares": [{"node": labels[i], "mib": shares[i], "gpu": i >= len(rpc)} for i in range(len(shares))],
-                "pods": [{"name": p["name"], "node": p["node"], "status": p["status"], "ready": p["ready"], "restarts": p["restarts"]}
+                "pods": [{"name": p["name"], "node": p["node"], "status": p["status"], "ready": p["ready"], "restarts": p["restarts"],
+                          "last_reason": p.get("last_reason", ""), "last_finished": p.get("last_finished", 0)}
                          for p in split_pods],
             }
         oll = [p for p in pods if p["namespace"] == "ai-inference"]

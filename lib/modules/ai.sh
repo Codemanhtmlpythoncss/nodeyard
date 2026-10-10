@@ -485,15 +485,34 @@ ai_model_rm_cmd() {
     [[ -n "$AI_M_NAME" ]] || ny_usage_error "Say which model to delete." "nodeyard ai model rm MODEL [--node NODE]"
     ai_model_targets "$AI_M_NODE"
     ny_confirm "Delete ${AI_M_NAME} from ${AI_M_NODE:-every AI node}?" y || return 0
-    local i
+    local i out deleted=0 absent=0 failed=0
     if [[ "${#AI_T_PODS[@]}" -gt 0 ]]; then
         for ((i = 0; i < ${#AI_T_PODS[@]}; i++)); do
-            ny_run "$(ny_path "$NY_K3S_BIN")" kubectl exec -n "$AI_NAMESPACE" "${AI_T_PODS[i]}" -- ollama rm "$AI_M_NAME" ||
-                ny_warn "Delete failed on ${AI_T_NODES[i]}."
+            # Unload it first: Ollama deletes the files of a model that is in memory but
+            # keeps the memory in use, and the model then no longer shows to unload it.
+            # shellcheck disable=SC2016 # expanded by the pod's shell, on purpose
+            if out="$(ny_run "$(ny_path "$NY_K3S_BIN")" kubectl exec -n "$AI_NAMESPACE" "${AI_T_PODS[i]}" -- \
+                sh -c 'ollama stop "$1" >/dev/null 2>&1; ollama rm "$1"' sh "$AI_M_NAME" 2>&1)"; then
+                deleted=$((deleted + 1))
+                printf '  %-16s deleted\n' "${AI_T_NODES[i]}"
+            elif grep -qi "not found" <<<"$out"; then
+                absent=$((absent + 1))
+                printf '  %-16s not there\n' "${AI_T_NODES[i]}"
+            else
+                failed=$((failed + 1))
+                ny_warn "Delete failed on ${AI_T_NODES[i]}: $(tail -n 1 <<<"$out")"
+            fi
         done
+        ((failed == 0)) || ny_die "${AI_M_NAME} couldn't be deleted on ${failed} node(s)." "Check those Ollama pods (nodeyard ai status), then delete it again." "$NY_E_PARTIAL"
+        ((deleted > 0)) || {
+            ny_warn "${AI_M_NAME} wasn't on any Ollama node."
+            return 0
+        }
+        ny_ok "Deleted ${AI_M_NAME} from ${deleted} node(s)."
         return 0
     fi
     have ollama && {
+        ny_run ollama stop "$AI_M_NAME" >/dev/null 2>&1 || true
         ny_run ollama rm "$AI_M_NAME"
         return 0
     }

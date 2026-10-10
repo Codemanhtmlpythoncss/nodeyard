@@ -332,6 +332,35 @@ class ModelInventory(unittest.TestCase):
             self.assertEqual(live.models_cache[1]["nodes"][0]["items"][0]["name"], "one.gguf")
             self.assertTrue(live.models_dirty)
 
+    def test_delete_keeps_the_copy_on_a_node_it_could_not_reach(self):
+        with tempfile.TemporaryDirectory() as d:
+            live = self.live(d)
+            data = {"ok": True, "nodes": [{"node": "debian-1", "items": [{"kind": "model", "name": "one.gguf", "bytes": 12}]},
+                                          {"node": "pi-4", "items": [{"kind": "model", "name": "one.gguf", "bytes": 12},
+                                                                     {"kind": "model", "name": "two.gguf", "bytes": 9}]}]}
+            live.models_cache = (time.time(), data)
+            lines = ["  debian-1         freed 7.0 GiB", "  pi-4: not reached (NotReady or offline); its copy, if any, stays until you delete it again",
+                     "OK Deleted one.gguf where the nodes could be reached."]
+
+            live._model_job_done("split-rm", {"file": "one.gguf"}, {"status": "ok", "lines": lines})
+
+            nodes = {n["node"]: [it["name"] for it in n["items"]] for n in live.models_cache[1]["nodes"]}
+            self.assertEqual(nodes, {"debian-1": [], "pi-4": ["one.gguf", "two.gguf"]})
+
+    def test_deleting_one_model_never_touches_another(self):
+        with tempfile.TemporaryDirectory() as d:
+            live = self.live(d)
+            data = {"ok": True, "nodes": [{"node": "debian-1", "items": [
+                {"kind": "model", "name": "one.gguf", "bytes": 12}, {"kind": "model", "name": "one.gguf.bak.gguf", "bytes": 3},
+                {"kind": "model", "name": "two.gguf", "bytes": 9}, {"kind": "cache", "name": "two", "bytes": 4},
+                {"kind": "partial", "name": "one.gguf.part3", "bytes": 1}]}]}
+            live.models_cache = (time.time(), data)
+
+            live._model_job_done("split-rm", {"file": "one.gguf"}, {"status": "ok", "lines": ["OK Deleted one.gguf."]})
+
+            left = [it["name"] for it in live.models_cache[1]["nodes"][0]["items"]]
+            self.assertEqual(left, ["one.gguf.bak.gguf", "two.gguf", "two"])
+
     def test_partial_node_scan_is_kept_and_reported(self):
         with tempfile.TemporaryDirectory() as d:
             live = self.live(d)

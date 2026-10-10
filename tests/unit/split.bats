@@ -218,6 +218,55 @@ cluster() {
     assert_failure
 }
 
+@test "split rm says Deleted only when every Ready node confirmed the delete" {
+    split_in_use() { echo "run.gguf|run|"; }
+    split_scan_nodes() { printf '%s\n' a b c; }
+    kctl() { return 0; }
+    split_on_nodes() { printf '== a\nFREED 2147483648\n== b\nERROR could not run on this node (is it under disk pressure?)\n== c\nFREED 0\n'; }
+    run ai_split_rm old.gguf --yes
+    assert_failure
+    assert_output --partial "b: delete failed (could not run on this node"
+    assert_output --partial "couldn't be deleted on every node"
+    refute_output --partial "Deleted old.gguf."
+    [[ "$output" == *"a                freed 2.0 GiB"* ]]
+}
+
+@test "split rm skips NotReady nodes, says so, and keeps their copy" {
+    split_in_use() { echo "run.gguf|run|"; }
+    split_scan_nodes() { printf '%s\n' a down; }
+    kctl() { return 0; }
+    split_on_nodes() {
+        [[ "$1" == rw && "$*" == *"/m/old.gguf"* && "$*" == *" a down" ]] || return 1
+        printf '== a\nFREED 0\n== down\nERROR node is NotReady or missing; kept its last saved disk inventory\n'
+    }
+    run ai_split_rm old.gguf --yes
+    assert_success
+    assert_output --partial "down: not reached (NotReady or offline)"
+    assert_output --partial "Deleted old.gguf where the nodes could be reached."
+}
+
+@test "switch still runs the new model when the old files can't all be deleted" {
+    switch_stubs
+    split_delete_files() { echo "delete $1" >>"$KLOG"; return 1; }
+    run ai_split_switch --model a/b:new.gguf --ctx 8192 --yes
+    assert_success
+    assert_output --partial "couldn't be deleted"
+    grep -q '^apply$' "$KLOG"
+}
+
+@test "the main model server tolerates a slow /health while it is busy answering" {
+    SPLIT_FILE="m.gguf" SPLIT_SIZE=$((4500000000)) SPLIT_URL=u SPLIT_SHA="" SPLIT_ALIAS=x SPLIT_THINK=off SPLIT_API_KEY="" SPLIT_NODEPORT=0 SPLIT_CTX=4096
+    SPLIT_MODEL_DIR=/var/lib/nodeyard/models SPLIT_LLAMA_BUILD=b1
+    cluster
+    split_plan 2>/dev/null
+    ny_simulating() { return 0; }
+    out="${BATS_TEST_TMPDIR}/m.yaml"
+    split_manifest "$out"
+    grep -A4 "readinessProbe:" "$out" | grep -q "timeoutSeconds: 5"
+    run grep -c "livenessProbe" "$out"
+    assert_output "0"
+}
+
 @test "clean reports what the disks freed, and fails when a node couldn't be cleaned" {
     NY_YES=1
     split_ai_nodes() { printf '%s\n' a b; }

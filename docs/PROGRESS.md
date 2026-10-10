@@ -21,6 +21,8 @@ claims the states that were checked.
 | Installed `yardcode` | `~/.local/bin/yardcode` → `~/.local/lib/yardcode/bin/yardcode`, installed 2026-10-08 09:59 (before the latest commits) |
 | Dashboard | answers on port 9092 (`/api/health` ok, `/api/v1/*` 401 without a key) |
 | Control node SSH | refused (public key/password); cluster deploys are blocked until the user opens a session |
+| Bats (`make test`) | 267 passed |
+| `make lint` | ok |
 
 ## Tasks
 
@@ -28,9 +30,9 @@ claims the states that were checked.
 |---|---|---|---|---|---|
 | 1 | Mac chat first-token hang ("Thinking…") | Tested | `macos/…/AppState.swift`, `ContentView.swift`, `dashboard/aiapi.py` | Swift build; dashboard suite | Live check against the real model |
 | 2 | Mac app native tool calls (web search/page read, Accessibility computer use with per-action approval) | Tested (build + server validation tests) | `macos/…/MacComputerUse.swift`, `AppState.swift`, `NodeyardClient.swift`, `controlapi.py`, `aiapi.py` | `test_ai`, `test_control` | Needs manual verification: Accessibility prompt, live tool calls |
-| 3 | Model removal bugs | Not started | | | |
-| 4 | Model reloading mid-task / memory pressure | Not started | | | |
-| 5 | Automatic model unloading setting (dashboard, Mac app, backend) | Not started | | | |
+| 3 | Model removal bugs | Tested | `lib/modules/ai_split.sh` (`split_delete_files`, `ai_split_rm`), `lib/modules/ai.sh` (`ai_model_rm_cmd`), `dashboard/aiapi.py` (`_forget_models_cache`, `_model_job_done`) | `tests/unit/split.bats`, `tests/unit/ai_model.bats`, `test_ai.ModelInventory` | Root causes found in code: split rm reported "Deleted" even when a Ready node's helper failed (file reappeared on the next scan); Ollama rm deleted loaded models (memory stayed used, no Unload button) and returned success when every node failed. Not reproduced on the live cluster (no access) |
+| 4 | Model reloading mid-task / memory pressure | Tested (code), Needs manual verification (cluster) | `dashboard/lifecycle.py`, `aiapi.py`, `web/ai.js`, `kube.py`, `analysis.py`, `ai_split.sh` | `test_lifecycle`, `test_dashboard`, `split.bats` | Causes fixed: Ollama's `/v1` endpoint ignores `keep_alive`, so chats reset "keep loaded" models to 5 min; a stale browser model pick switched the cluster back after another client changed models; 1 s readiness timeout flapped the split model NotReady mid-answer. Evidence added: OOMKilled restarts now raise an alert. GPU/RPC memory exhaustion is plausible but unconfirmed without cluster access |
+| 5 | Automatic model unloading setting (dashboard, Mac app, backend) | Tested (backend + dashboard), Mac app pending | `dashboard/lifecycle.py`, `server.py`, `web/ai.js`, `docs/ai.md` | 32 lifecycle tests; demo dashboard in the browser: toggle, presets, invalid value (400), automatic unload end to end | Mac app settings UI; live cluster check of `/slots` |
 | 6 | Shared plugin registry + audit log | Not started | | | |
 | 7 | Research Mode (sources, citations, report) | Not started | | | |
 | 8 | Browser automation plugin | Not started | | | |

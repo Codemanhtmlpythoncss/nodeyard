@@ -7,6 +7,28 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ## [Unreleased]
 
+### Added
+
+- **Automatic model unloading** (off by default): Models > Automatic model unloading, the Mac app's Settings and
+  `GET/POST /api/v1/lifecycle` share one persisted setting (on/off and an idle time from 1 minute to 7 days). The
+  split model is unloaded after that much idle time, measured from llama.cpp's `/slots` so direct clients such as
+  yardcode count as use; Ollama models get it as their keep-alive. Busy or queued models are never unloaded, no
+  model is reloaded by it, and failures are shown and retried with backoff.
+- Alerts say when a pod was killed for memory (OOMKilled) and, for model servers, that this reloads the model.
+
+### Fixed
+
+- Ollama models loaded from the dashboard no longer drop back to Ollama's 5-minute timer after a chat (its
+  OpenAI endpoint ignores `keep_alive`), which made them unload and reload mid-task.
+- A model picked in the dashboard's AI model menu is no longer remembered forever: if another client changes the
+  running model first (or 30 minutes pass), the pick is dropped instead of switching the cluster back.
+- `nodeyard ai split rm` only says "Deleted" when every Ready node confirmed it, fails when a node couldn't run
+  the delete, reports NotReady nodes as "not reached", and the dashboard keeps those nodes' copies listed.
+- `nodeyard ai model rm` unloads an Ollama model before deleting it (deleting a loaded model kept its memory in use
+  with no way to unload it), treats "not found" as already gone and fails when a node couldn't delete it.
+- The split model's readiness check allows 5 s for `/health`, so a busy CPU node no longer flaps NotReady mid-answer.
+- Toggles and menus on the dashboard show their saved result immediately instead of waiting for you to click elsewhere.
+
 ### Changed
 
 - The installer and `nodeyard update` now use the HTTPS `main` source at a recorded commit, so updates no longer depend on GitHub releases or tags. `--version` remains available for tag-based installs.

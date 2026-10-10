@@ -192,6 +192,68 @@
     })();
     return diskRequest;
   }
+  // Automatic model unloading (lifecycle.py): the setting and what it is doing now.
+  let lifeRequest = null, lifeTimer = null;
+  async function loadLifecycle(force) {
+    if (!force && A.life && Date.now() - A.lifeAt < 10000) return;
+    if (lifeRequest) return lifeRequest;
+    const seq = A.lifeSeq = (A.lifeSeq || 0) + 1;
+    lifeRequest = (async () => {
+      try {
+        const r = await getJSON("/api/ai/lifecycle");
+        if (seq !== A.lifeSeq) return;   // a save happened meanwhile: this answer is older than what is shown
+        if (r.ok) { A.life = r; A.lifeErr = ""; } else A.lifeErr = r.error || "Couldn't read the automatic unloading setting.";
+        A.lifeAt = Date.now();
+      } catch (e) { A.lifeErr = e.message || "Couldn't reach the dashboard server."; A.lifeAt = Date.now(); }
+      finally { lifeRequest = null; }
+      clearTimeout(lifeTimer);
+      if (S.view === "ai" && A.tab === "models") { lifeTimer = setTimeout(() => loadLifecycle(true), 15000); U.queueRender(); }
+    })();
+    return lifeRequest;
+  }
+  async function saveLifecycle(change) {
+    if (A.lifeSaving) return;
+    A.lifeSaving = true; A.lifeMsg = "Saving…"; A.lifeSeq = (A.lifeSeq || 0) + 1; U.queueRender();
+    try {
+      const r = await postJSON("/api/ai/lifecycle", change);
+      A.lifeSeq++;
+      if (r.ok) { A.life = r.view; A.lifeAt = Date.now(); A.lifeMsg = "Saved."; A.lifeCustom = false; }
+      else { A.lifeMsg = ""; toast(r.error || "Couldn't save the setting."); }
+    } catch (e) { A.lifeMsg = ""; toast(e.message || "Couldn't reach the dashboard server; the setting wasn't saved."); }
+    finally { A.lifeSaving = false; U.queueRender(); setTimeout(() => { if (A.lifeMsg === "Saved.") { A.lifeMsg = ""; U.queueRender(); } }, 2500); }
+  }
+  const dur = (s) => (s < 90 ? Math.round(s) + " s" : s < 5400 ? Math.round(s / 60) + " min" : Math.floor(s / 3600) + " h" + (Math.round((s % 3600) / 60) ? " " + Math.round((s % 3600) / 60) + " min" : ""));
+  function lifecycleCard() {
+    const L = A.life;
+    if (!L) return card("Automatic model unloading", A.lifeErr ? html`<div class="empty"><b>Couldn't read this setting</b><div class="muted small">${A.lifeErr}</div></div>` : html`<div class="empty"><div class="spin"></div>Reading the setting…</div>`);
+    const on = L.settings.enabled, idle = L.settings.idle_seconds, preset = L.presets.includes(idle) && !A.lifeCustom;
+    const sp = L.split, busy = A.lifeSaving;
+    const stateText = !sp ? "No split model is deployed." : {
+      none: "", loading: "The split model is loading; idle time starts once it is ready.",
+      checking: "Checking whether the split model is busy…",
+      processing: "The split model is answering a request now, so it stays loaded.",
+      idle: on ? "The split model has been idle for " + dur(sp.idle_for || 0) + "; it unloads in " + dur(sp.unload_in || 0) + " unless it is used." : "The split model has been idle for " + dur(sp.idle_for || 0) + ". Automatic unloading is off.",
+      unload_pending: "The split model is past its idle time and unloads at the next check (when no other model task is running).",
+      unloading: "Unloading the split model now…",
+      unloaded: "The split model is unloaded (not in memory).",
+      auto_unloaded: "The split model was unloaded automatically after being idle. It loads again when you choose it or send a chat.",
+      unload_failed: "The last automatic unload failed: " + (sp.error || "unknown error") + (sp.retry_at ? " Retrying " + (sp.retry_at * 1000 > Date.now() ? "in " + dur(sp.retry_at - Date.now() / 1000) : "soon") + "." : ""),
+      activity_unknown: "Nodeyard can't see whether the split model is busy" + (sp.activity_error ? " (" + sp.activity_error + ")" : "") + ", so it never unloads it automatically.",
+    }[sp.state] || "";
+    const tone = !sp ? "" : sp.state === "unload_failed" || sp.state === "activity_unknown" ? "warn" : sp.state === "processing" || sp.state === "idle" ? "good" : "";
+    const options = L.presets.map((v) => '<option value="' + v + '"' + (preset && v === idle ? " selected" : "") + ">" + esc(dur(v)) + "</option>").join("") + '<option value="custom"' + (preset ? "" : " selected") + ">Custom…</option>";
+    return card("Automatic model unloading", html`
+      <label class="check"><input type="checkbox" id="lc-enabled" ${on ? raw("checked") : ""} ${busy ? raw("disabled") : ""}> <span><b>Automatically unload idle models</b><br><span class="muted small">Automatically unload models from memory after they have not been used for a specified period.</span></span></label>
+      <div class="row wrap mt" style="gap:8px;align-items:center"><label for="lc-idle" class="muted small">Unload after</label>
+        ${raw('<select class="input" id="lc-idle" aria-label="Idle time before unloading"' + (busy ? " disabled" : "") + ">" + options + "</select>")}
+        ${preset ? "" : html`<input class="input" id="lc-custom" type="number" min="${L.min_idle / 60}" max="${L.max_idle / 60}" step="1" style="width:110px" value="${Math.round(idle / 60)}" aria-label="Custom idle time in minutes"><span class="muted small">minutes</span><button class="btn small" data-ai="lc-custom" ${busy ? raw("disabled") : ""}>Apply</button>`}
+        <span class="muted small">Now: <b>${dur(idle)}</b>${on ? "" : " (off)"}</span>${A.lifeMsg ? html`<span class="small">${A.lifeMsg}</span>` : ""}</div>
+      ${sp ? html`<div class="note small mt ${tone}"><b>${sp.alias || sp.model}</b>: ${stateText}${sp.machines && sp.machines.length ? html`<div class="faint">Runs on ${sp.machines.join(", ")}; unloading stops all of them together.</div>` : ""}</div>` : html`<p class="muted small mt">${stateText}</p>`}
+      ${L.ollama.length ? html`<div class="mt"><div class="muted small">Ollama models in memory</div>${L.ollama.map((m) => html`<div class="row small" style="gap:8px"><span class="mono">${m.model}</span><span class="faint">${m.node}</span><span class="grow"></span><span class="muted">${m.busy ? "answering now" : on ? (m.expires ? "unloads around " + new Date(m.expires).toLocaleTimeString() + " unless used" : "unloads after " + dur(idle) + " idle") : m.pinned ? "stays loaded (loaded from this page)" : (m.expires ? "Ollama's own timer: " + new Date(m.expires).toLocaleTimeString() : "Ollama's own timer")}</span></div>`)}</div>` : ""}
+      ${L.events.length ? html`<details class="mt"><summary class="muted small">Recent activity (${L.events.length})</summary>${L.events.slice(0, 10).map((e) => html`<div class="row small" style="gap:8px"><span class="faint">${new Date(e.time * 1000).toLocaleTimeString()}</span>${e.ok === false ? chip("failed", "bad") : e.ok === true ? chip("done", "good") : chip("started")}<span>${e.message}</span></div>`)}</details>` : ""}
+      <p class="muted small" style="margin:10px 0 0">Never unloads a model that is answering or has queued work, and never loads one back by itself. Activity is read from the model itself, so yardcode and other programs count as use. Ollama models get this idle time after every request through Nodeyard; requests sent straight to Ollama's own port use Ollama's default timer.</p>`,
+      on ? chip("on · " + dur(idle), "good") : chip("off"));
+  }
   const targetList = () => (A.targets && A.targets.targets) || [];
   const findTarget = (id) => targetList().find((t) => t.id === id);
 
@@ -377,7 +439,7 @@
     $$("#ai-tabs button").forEach((b) => b.classList.toggle("on", b.dataset.aiTab === t));
     A.built = null;
     refreshTab();
-    if (t === "models") { loadOllama(true); loadDisk(true); }
+    if (t === "models") { loadOllama(true); loadDisk(true); loadLifecycle(true); }
     else if (t === "search") { loadDisk(); loadOllama(); }
   }
   function refreshTab() {
@@ -450,15 +512,28 @@
       if (c && c.target !== "split") { c.target = "split"; saveChats(); }
       refreshModelPick(); refreshChat(); return;
     }
-    A.wanted = { file: m.file, size: m.size, node: m.node }; store.set("ai.wanted", JSON.stringify(A.wanted));
+    // Remember what was running when this was picked: if another client (yardcode, the Mac app, another tab)
+    // changes the model before the next message, this pick is dropped instead of switching it back.
+    A.wanted = { file: m.file, size: m.size, node: m.node, running: (sp && sp.model) || "", at: Date.now() }; store.set("ai.wanted", JSON.stringify(A.wanted));
     toast(m.file.replace(/\.gguf$/i, "") + " will load when you send your next message.");
     refreshModelPick(); refreshChat();
   }
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const aliasFor = (file) => file.replace(/\.gguf$/i, "").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[-.]+/, "").slice(0, 40) || "model";
   // does sending need to load the selected model first?
+  const WANTED_TTL = 30 * 60 * 1000;
+  function wantedStillValid(sp) {
+    const w = A.wanted;
+    if (!w) return false;
+    const stale = !w.at || Date.now() - w.at > WANTED_TTL || (sp && sp.model && sp.model !== w.file && sp.model !== (w.running || ""));
+    if (stale) {
+      if (sp && sp.model && sp.model !== w.file && w.at) toast("The cluster now runs " + sp.model.replace(/\.gguf$/i, "") + ", so your earlier pick (" + w.file.replace(/\.gguf$/i, "") + ") was dropped instead of switching models again.");
+      A.wanted = null; store.set("ai.wanted", ""); return false;
+    }
+    return true;
+  }
   const pendingLoad = (c) => { const sp = S.d && S.d.ai && S.d.ai.split, t = c && findTarget(c.target);
-    if (A.wanted && (!sp || sp.model !== A.wanted.file || sp.loaded === false)) return A.wanted;
+    if (A.wanted && wantedStillValid(sp) && (!sp || sp.model !== A.wanted.file || sp.loaded === false)) return A.wanted;
     if (c && c.target && c.target !== "split" && t) return null;
     if (sp && sp.loaded === false) return { file: sp.model, same: true }; return null; };
   async function autoLoad(c, want) {
@@ -1214,8 +1289,9 @@
   }
   function renderModels() {
     if (!$("#ai-pane")) return;
+    if (!A.life && !A.lifeErr) loadLifecycle();
     const recent = (A.targets && A.targets.recent) || [];
-    setHTML($("#ai-pane"), html`${splitCard()}<div class="mt">${diskCard()}</div><div class="mt">${ollamaCard()}</div>
+    setHTML($("#ai-pane"), html`${splitCard()}<div class="mt">${lifecycleCard()}</div><div class="mt">${diskCard()}</div><div class="mt">${ollamaCard()}</div>
       ${recent.length ? html`<div class="mt">${card("Recent tasks", html`<div class="tasks">${recent.slice(0, 6).map((j) => html`<div class="row task" data-ai="open-job" data-id="${j.id}"><b>${j.title}</b><span class="grow"></span>${j.status === "running" ? chip("running…", "warn") : j.status === "ok" ? chip("done", "good") : j.status === "cancelled" ? chip("cancelled", "warn") : chip("failed", "bad")}<span class="faint small">${ago(j.started)} ago</span></div>`)}</div>`)}</div>` : ""}`);
   }
 
@@ -1472,6 +1548,11 @@
     else if (a === "clean") startAIJob(el, "clean", {}, () => loadDisk(true));
     else if (a === "clean-models") { const v = await dialog("Free up space, including models?", html`This also deletes every downloaded model file that isn't running now. The running model stays.`, "Delete them", { danger: true }); if (v) startAIJob(el, "clean", { models: true }, () => loadDisk(true, true)); }
     else if (a === "disk-refresh") { diskRetryCount = 0; loadDisk(true, true); }
+    else if (a === "lc-custom") {
+      const minutes = +(($("#lc-custom") || {}).value || 0);
+      if (!Number.isInteger(minutes) || minutes < 1 || minutes > 10080) { toast("Enter a whole number of minutes between 1 and 10080 (7 days)."); return; }
+      saveLifecycle({ idle_seconds: minutes * 60 });
+    }
     else if (a === "s-download") startAIJob(el, "download", { repo: el.dataset.repo, file: el.dataset.file }, () => { loadDisk(true); });
     else if (a === "s-plan") startAIJob(el, "plan", { repo: el.dataset.repo, file: el.dataset.file });
     else if (a === "s-chip") { A.search.q = el.dataset.q; const i = $("#s-q"); if (i) i.value = A.search.q; A.search.results = null; runSearch(); }
@@ -1535,5 +1616,7 @@
     else if (e.target.id === "ai-model") pickModel(e.target);
     else if (e.target.id === "attach-input") { addFiles(e.target.files).then(() => { e.target.value = ""; }); }
     else if (e.target.id === "cs-files" && c) { c.files = e.target.value; saveChats(); }
+    else if (e.target.id === "lc-enabled") saveLifecycle({ enabled: e.target.checked });
+    else if (e.target.id === "lc-idle") { if (e.target.value === "custom") { A.lifeCustom = true; U.queueRender(); } else saveLifecycle({ idle_seconds: +e.target.value }); }
   });
 })();

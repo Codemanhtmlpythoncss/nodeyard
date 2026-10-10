@@ -114,9 +114,11 @@
       if (loadQueuedFresh) { loadQueuedFresh = false; void load(true); }
     }
   }
+  // Typing (or choosing from an open menu) must not be redrawn away; a focused checkbox,
+  // radio or button is not "typing", so a toggle that saves at once shows its result at once.
   function userIsInteracting() {
     const el = document.activeElement;
-    return pointerHeld || !!(el && (el.matches("input, textarea, select") || el.isContentEditable));
+    return pointerHeld || !!(el && (el.matches("textarea, select, input:not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]):not([type=range])") || el.isContentEditable));
   }
   // Real time: the server pushes a new snapshot the moment it has one (server-sent events).
   // Polling below only covers a stream that is down.

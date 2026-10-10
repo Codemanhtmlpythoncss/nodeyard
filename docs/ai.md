@@ -96,7 +96,11 @@ The dashboard's **AI model** menu (top of the AI page) lists the models
 downloaded on your nodes and switches between them the same way.
 
 In the dashboard's Ollama section, **Load** keeps a model in memory until you
-choose **Unload** or Ollama restarts. The disk inventory is saved by the
+choose **Unload** or Ollama restarts (unless automatic unloading, below, is on).
+Chats through Nodeyard keep it that way: Ollama's OpenAI-compatible endpoint
+ignores `keep_alive`, so each chat used to reset a loaded model to Ollama's
+5-minute default and it reloaded mid-task. The dashboard now sets the intended
+keep-alive again after every request it forwards. The disk inventory is saved by the
 dashboard and in the browser, so recent model locations remain visible while
 unavailable nodes recover; a complete disk scan refreshes that saved list.
 
@@ -119,6 +123,38 @@ day to day with `--reserve laptop=4`.
 
 Protect the API with a key: `--api-key-file PATH` (the key is read from a
 file and stored as a Kubernetes Secret).
+
+### Automatic model unloading
+
+Models > **Automatic model unloading** (also in the Nodeyard AI Mac app's Settings) frees memory from models
+nobody is using. It is **off** until you turn it on; the idle time defaults to 30 minutes (presets 5 min to
+2 hours, or a custom 1 minute to 7 days). The setting is stored once, in the dashboard's
+`/var/lib/nodeyard/dashboard/prefs.json`, so the page, the control API (`GET`/`POST /api/v1/lifecycle`) and
+the Mac app always show the same value, and it survives restarts.
+
+| Backend | How idle time is measured | What "unload" does |
+|---|---|---|
+| Split model (llama.cpp across nodes) | llama.cpp's own `/slots` (`id_task`, `is_processing`), checked every 15 s, plus chats the dashboard forwards. Requests that go straight to the model (yardcode, the dashboard's skills, other programs) count as use. | `nodeyard ai split unload`: every server of the model (main and RPC nodes) stops together; files and weight caches stay on disk. |
+| Ollama | Ollama's own keep-alive timer, which every request resets. | The dashboard gives each model the idle time as its keep-alive after every request through Nodeyard and when you **Load** it; Ollama unloads it from that node when the time runs out. |
+
+Safety rules, whether the setting is on or off:
+
+- A model that is answering, or has a request queued, is never unloaded; the dashboard checks `/slots` again
+  right before it acts. If it can't read `/slots` it shows **activity unknown** and never unloads that model.
+- It never runs while another model task (load, switch, removal, download) is running, and it never loads a
+  model back by itself. Sending a chat or choosing the model loads it again.
+- A failed unload is shown with its error and retried after 5, 10, 20... minutes (at most hourly); monitoring
+  carries on.
+- Turning it on starts every model's idle time from that moment, so nothing is unloaded the instant you enable
+  it. Turning it off stops all automatic unloads of the split model. Ollama models loaded from the page go back to
+  staying loaded; other Ollama models keep the timer they were last given until their next use.
+- Requests sent directly to an Ollama pod's own port (not through Nodeyard) use Ollama's default timer.
+
+Diagnosing: the card shows each model's state (checking, idle, processing, unload pending, unloading,
+unloaded automatically, unload failed, activity unknown) and the last 30 actions. The dashboard's service log
+has the same lines (`journalctl -u nodeyard-dashboard | grep lifecycle`). If a model server keeps restarting,
+Alerts now say when Kubernetes killed it for memory (**OOMKilled**): a model server that restarts reloads the
+model and interrupts answers, so use a smaller context or quant, or spread the model over more nodes.
 
 ## Terminal AI agent
 

@@ -61,6 +61,14 @@ class PodStatus(unittest.TestCase):
         init = {"name": "i", "state": {"waiting": {"reason": "ImagePullBackOff"}}}
         self.assertEqual(kube.pod_status(pod("Pending", init=init)), "Init:ImagePullBackOff")
 
+    def test_build_pod_keeps_why_a_container_last_stopped(self):
+        raw = pod("Running")
+        raw["status"]["containerStatuses"][0].update({"restartCount": 3, "lastState": {"terminated": {"reason": "OOMKilled", "finishedAt": "2026-10-10T09:00:00Z"}}})
+        p = kube.build_pod(raw, {})
+        self.assertEqual((p["restarts"], p["last_reason"]), (3, "OOMKilled"))
+        self.assertGreater(p["last_finished"], 0)
+        self.assertEqual(kube.build_pod(pod("Running"), {})["last_reason"], "")
+
     def test_build_pod_ready_and_usage(self):
         p = kube.build_pod(pod("Running"), {("ns", "p"): (0.5, 1024.0)})
         self.assertEqual(p["ready"], "1/1")
@@ -248,6 +256,16 @@ class DemoAndAnalysis(unittest.TestCase):
         for n in s["nodes"]:
             n["disk_used"] = n["disk_total"] * 0.3
         self.assertEqual(analysis.alerts(s), [])
+
+    def test_model_server_out_of_memory_is_reported_with_its_effect(self):
+        p = dict(self.state["pods"][0], namespace="ai-split", name="rpc-gpu-node-1", status="Running", restarts=2,
+                 last_reason="OOMKilled", last_finished=999000, owner="ReplicaSet/rpc-gpu-node")
+        self.state["pods"].append(p)
+        with patch.object(analysis.time, "time", return_value=1000000):
+            alert = next(a for a in analysis.alerts(self.state) if a["ref"] == "ai-split/rpc-gpu-node-1")
+        self.assertEqual(alert["level"], "warning")
+        self.assertIn("ran out of memory", alert["title"])
+        self.assertIn("reloads the model", alert["detail"])
 
     def test_not_ready_node_is_critical(self):
         self.state["nodes"][0]["ready"] = False
