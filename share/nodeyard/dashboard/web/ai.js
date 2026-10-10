@@ -710,7 +710,11 @@
   function agentReply(c, a) {
     const m = c && c.messages.slice().reverse().find((x) => x.perm); if (!m) return;
     const p = m.perm; m.perm = null; paintLast();
-    postJSON("/api/ai/agent/reply", { chat: c.id, id: p.id, decision: a === "agent-deny" ? "deny" : "allow", scope: a === "agent-always" ? "session" : "once" }).catch(() => {});
+    // If the answer doesn't reach the server the AI would wait forever: put the card back and say so.
+    const restore = (why) => { if (!m.perm && m.pending) { m.perm = p; paintLast(); } toast(why); };
+    postJSON("/api/ai/agent/reply", { chat: c.id, id: p.id, decision: a === "agent-deny" ? "deny" : "allow", scope: a === "agent-always" ? "session" : "once" })
+      .then((r) => { if (!r.ok) restore(r.error || "Your answer didn't reach the AI. Try again."); })
+      .catch(() => restore("Couldn't reach the dashboard server. Try again."));
   }
   async function sendAgent(c, mine, text, t) {
     c.messages.push(mine); A.attach = []; renderAttach();
@@ -1378,11 +1382,13 @@
     refreshSearch();
   }
   async function runSearch() {
+    const seq = A.search.seq = (A.search.seq || 0) + 1;   // only the newest search may fill the list
     A.search.loading = true; A.search.error = ""; refreshSearch();
     try {
       const r = await getJSON("/api/ai/search?q=" + encodeURIComponent(A.search.q) + "&sort=" + encodeURIComponent(A.search.sort) + "&limit=24");
+      if (seq !== A.search.seq) return;
       if (r.ok) A.search.results = r.results; else { A.search.error = r.error || "Search failed."; A.search.results = []; }
-    } catch (e) { A.search.error = "Couldn't reach the dashboard server."; }
+    } catch (e) { if (seq !== A.search.seq) return; A.search.error = "Couldn't reach the dashboard server."; }
     A.search.loading = false; refreshSearch();
   }
   function refreshSearch() {
@@ -1431,9 +1437,8 @@
     const vals = await dialog(old ? "Switch the AI model" : "Run this model across your machines", html`<p style="margin-top:0">${repo ? html`<b>${repo}</b><br>` : ""}<span class="mono small">${file}</span>${size ? " · " + fmt.bytes(size) : ""}${localNode ? " · on " + localNode : ""}</p>
       ${fit ? html`<p>${verdict(fit.split)} It needs about ${fmt.bytes(fit.need)} of your ${fmt.bytes(fit.free)} of free memory${old ? " (counting what the old model frees)" : ""}.</p>` : ""}
       <p class="muted small">${localNode ? "It's already downloaded on " + localNode + ", so it runs from there (" + localNode + " coordinates) and starts in a few minutes." : have ? "It's already downloaded, so it starts in a few minutes." : "It downloads first" + (size ? " (" + fmt.bytes(size, 1) + ")" : "") + ", then loads."}</p>
-      ${old ? html`<div class="note"><b>First, ${sp.alias || old} is cleared away:</b><ol style="margin:6px 0 8px;padding-left:20px"><li>it is unloaded: its servers stop and every machine gets its memory back;</li>
-        <li>its file and weight caches are deleted from every machine${oldBytes ? html` (frees ${fmt.bytes(oldBytes, 1)} and more)` : ""}.</li></ol>
-        <label class="check"><input type="checkbox" data-v="keep"> <span>Keep its files on disk instead (switching back is quicker, but they take the space)</span></label></div>` : ""}
+      ${old ? html`<div class="note"><b>First, ${sp.alias || old} is unloaded:</b> its servers stop and every machine gets its memory back. Its file stays on disk, so switching back is quick.
+        <label class="check" style="margin-top:8px"><input type="checkbox" data-v="purge"> <span>Also delete its file and weight caches from every machine${oldBytes ? html` (frees ${fmt.bytes(oldBytes, 1)} and more)` : ""}</span></label></div>` : ""}
       ${sp && !old ? html`<p style="color:var(--warn)">This restarts the running model with these settings.</p>` : ""}
       <label class="field-l">Name for the API<input class="input" data-v="alias" value="${alias}" spellcheck="false"></label>
       <label class="field-l">Context length (how much text it can remember: attached files count)<input class="input" data-v="ctx" type="number" min="512" max="131072" step="512" value="${(sp && sp.model === file && +sp.ctx) || chatDefaults().context_length}"></label>
@@ -1446,8 +1451,9 @@
     if (!vals) return;
     const chosen = vals.auto ? [] : nodes.filter((n) => vals["n-" + n.name]).map((n) => n.name);
     if (!vals.auto && !chosen.length) { toast("Pick at least one machine."); return; }
-    startJob(sp ? "switch" : "deploy", Object.assign(localNode || localFile ? { local: true } : { repo }, { file, ctx: +vals.ctx || 8192, alias: vals.alias, nodes: chosen, keep_old: !!vals.keep }),
-      (job) => { loadTargets(true); if (job.status === "ok" && old && !vals.keep) forgetSavedModel(old); loadDisk(true, true); });
+    // Deleting the old model's file is opt-in: a switch must never cost you a download you didn't ask to lose.
+    startJob(sp ? "switch" : "deploy", Object.assign(localNode || localFile ? { local: true } : { repo }, { file, ctx: +vals.ctx || 8192, alias: vals.alias, nodes: chosen, keep_old: !vals.purge }),
+      (job) => { loadTargets(true); if (job.status === "ok" && old && vals.purge) forgetSavedModel(old); loadDisk(true, true); });
   }
 
   // ------------------------------------------------------------------ API examples

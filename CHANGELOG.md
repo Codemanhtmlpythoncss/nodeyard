@@ -36,6 +36,11 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   saved list (except on nodes the delete couldn't reach).
 - While the model reads a long prompt, chat shows how far it has got ("Reading the prompt: 1,000 of 4,000 tokens") and
   the time so far, with a hint after 30 s, instead of only dots. A dropped connection says so in plain words.
+- Switching models with **Run model** keeps the old model's file unless you tick "Also delete its file"; it used to delete
+  it by default. The CLI's `ai split switch` is unchanged (`--keep-old` keeps it).
+- Model search results can no longer be replaced by an older, slower search. If an Allow/Deny answer to the AI's skills
+  doesn't reach the server, the card comes back instead of leaving the AI waiting.
+- The AI page's model list asks every Ollama pod at once, so one that doesn't answer no longer slows every refresh.
 
 ### Changed
 

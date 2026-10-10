@@ -840,11 +840,17 @@ class Live:
             out.append({"id": "split", "kind": "split", "name": sp.get("alias") or "split model", "model": sp.get("model", ""),
                         "detail": "split across %d machine%s" % (len(sp.get("shares", [])), "" if len(sp.get("shares", [])) == 1 else "s"),
                         "ready": bool(sp.get("ready"))})
-        for p in st["pods"]:
-            if p["namespace"] == OLLAMA_NS and p["name"].startswith("ollama") and p["status"] == "Running" and p["ip"]:
-                for m in self._ollama_models(p):
-                    out.append({"id": "ollama:%s:%s" % (p["name"], m["name"]), "kind": "ollama", "name": m["name"], "model": m["name"],
-                                "detail": "Ollama on %s" % (p["node"] or p["name"]), "ready": True, "size": m["size"]})
+        pods = [p for p in st["pods"] if p["namespace"] == OLLAMA_NS and p["name"].startswith("ollama") and p["status"] == "Running" and p["ip"]]
+        # Ask every Ollama at once: one that doesn't answer must not hold up the whole list (each waits up to 4 s).
+        asked = {p["name"]: self.ollama_pool.submit(self._ollama_models, p) for p in pods}
+        for p in pods:
+            try:
+                found = asked[p["name"]].result(timeout=8)
+            except Exception:  # noqa: BLE001 -- a slow pod just shows no models this time
+                found = []
+            for m in found:
+                out.append({"id": "ollama:%s:%s" % (p["name"], m["name"]), "kind": "ollama", "name": m["name"], "model": m["name"],
+                            "detail": "Ollama on %s" % (p["node"] or p["name"]), "ready": True, "size": m["size"]})
         busy = self.jobs.running()
         return {"targets": out, "can_run": bool(self.jobs.bin and os.access(self.jobs.bin, os.X_OK)), "busy": busy["id"] if busy else None,
                 "has_key": bool(self.api_key()), "recent": self.jobs.recent()}
