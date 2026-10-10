@@ -36,11 +36,13 @@ final class AppState: ObservableObject {
     @Published var exportFilename = "chat.md"
     @Published var renameChatID: String?
     @Published var renameDraft = ""
+    @Published var pendingToolApproval: ToolApproval?
 
     let store = ChatStore()
     private var client: NodeyardClient
     private var activeTask: Task<Void, Never>?
     private var streamStarted: Date?
+    private var toolApprovalContinuation: CheckedContinuation<Bool, Never>?
 
     init() {
         defaults = store.loadDefaults()
@@ -167,7 +169,22 @@ final class AppState: ObservableObject {
         activeTask = Task { await performSend(chatID: chatID, retry: retry) }
     }
 
-    func stop() { activeTask?.cancel(); activeTask = nil; isSending = false; info = "Generation stopped." }
+    func stop() {
+        resolveToolApproval(allow: false)
+        activeTask?.cancel(); activeTask = nil; isSending = false; info = "Generation stopped."
+    }
+
+    func requestComputerUsePermission() {
+        let granted = MacComputerUse.requestPermission()
+        info = granted ? "Computer use is allowed. Each computer action still asks you first." : "Allow Nodeyard AI under System Settings → Privacy & Security → Accessibility, then enable computer use."
+    }
+
+    func resolveToolApproval(allow: Bool) {
+        let continuation = toolApprovalContinuation
+        toolApprovalContinuation = nil
+        pendingToolApproval = nil
+        continuation?.resume(returning: allow)
+    }
 
     private func performSend(chatID: String, retry: Bool) async {
         guard let chatIndex = chats.firstIndex(where: { $0.id == chatID }) else { return }
@@ -195,17 +212,50 @@ final class AppState: ObservableObject {
             error = "Choose a ready model in the model menu first."; chats[chatIndex].messages.removeLast(); persist(chatIndex: chatIndex); return
         }
         do {
-            let messages = try openAIMessages(for: chats[chatIndex])
-            let stats = try await client.streamChat(model: target, messages: messages, temperature: chats[chatIndex].temperature,
-                                                    maxTokens: chats[chatIndex].maxTokens, onContent: { [weak self] piece in
-                self?.appendStream(piece, reasoning: false, to: response.id, chatID: chatID)
-            }, onReasoning: { [weak self] piece in
-                self?.appendStream(piece, reasoning: true, to: response.id, chatID: chatID)
-            })
-            if let i = chats[chatIndex].messages.firstIndex(where: { $0.id == response.id }) {
+            var responseID = response.id
+            var finalStats = StreamStats()
+            var toolRounds = 0
+            var actionCount = 0
+            while true {
+                try Task.checkCancellation()
+                let snapshot = chats[chatIndex]
+                let messages = try openAIMessages(for: snapshot, excludingMessageID: responseID)
+                let availableTools = toolRounds < 4 ? modelTools(for: snapshot) : []
+                let activeResponseID = responseID
+                let stats = try await client.streamChat(model: target, messages: messages, temperature: snapshot.temperature,
+                                                        maxTokens: snapshot.maxTokens, tools: availableTools, onContent: { [weak self] piece in
+                    self?.appendStream(piece, reasoning: false, to: activeResponseID, chatID: chatID)
+                }, onReasoning: { [weak self] piece in
+                    self?.appendStream(piece, reasoning: true, to: activeResponseID, chatID: chatID)
+                })
+                finalStats = stats
+                guard !stats.toolCalls.isEmpty else { break }
+                guard !availableTools.isEmpty, toolRounds < 4, actionCount + stats.toolCalls.count <= 6 else {
+                    appendStream("I stopped at the safe tool-use limit. Ask me to continue if you want another step.", reasoning: false, to: responseID, chatID: chatID)
+                    break
+                }
+                if let i = chats[chatIndex].messages.firstIndex(where: { $0.id == responseID }) {
+                    chats[chatIndex].messages[i].toolCalls = stats.toolCalls
+                    if chats[chatIndex].messages[i].content.isEmpty {
+                        chats[chatIndex].messages[i].content = "Using \(stats.toolCalls.map { $0.function.name.replacingOccurrences(of: "_", with: " ") }.joined(separator: ", "))…"
+                    }
+                }
+                for call in stats.toolCalls {
+                    try Task.checkCancellation()
+                    let result = await executeTool(call)
+                    chats[chatIndex].messages.append(ChatMessage(role: "tool", content: result, toolCallID: call.id, toolName: call.function.name))
+                }
+                actionCount += stats.toolCalls.count
+                toolRounds += 1
+                response = ChatMessage(role: "assistant", content: "")
+                responseID = response.id
+                chats[chatIndex].messages.append(response)
+                persist(chatIndex: chatIndex)
+            }
+            if let i = chats[chatIndex].messages.firstIndex(where: { $0.id == responseID }) {
                 chats[chatIndex].messages[i].duration = Date().timeIntervalSince(streamStarted ?? Date())
-                chats[chatIndex].messages[i].tokensPerSecond = stats.tokensPerSecond
-                chats[chatIndex].messages[i].tokenCount = stats.tokens
+                chats[chatIndex].messages[i].tokensPerSecond = finalStats.tokensPerSecond
+                chats[chatIndex].messages[i].tokenCount = finalStats.tokens
                 response = chats[chatIndex].messages[i]
             }
             persist(chatIndex: chatIndex)
@@ -228,10 +278,21 @@ final class AppState: ObservableObject {
         return false
     }
 
-    private func openAIMessages(for chat: ChatRecord) throws -> [OpenAIMessage] {
+    private func openAIMessages(for chat: ChatRecord, excludingMessageID: String? = nil) throws -> [OpenAIMessage] {
         var result: [OpenAIMessage] = []
         if !chat.systemPrompt.isEmpty { result.append(OpenAIMessage(role: "system", content: .text(chat.systemPrompt))) }
         for message in chat.messages {
+            // The empty assistant row is a UI placeholder while generation runs; including it
+            // in the prompt can leave chat templates continuing from a completed assistant turn.
+            if message.id == excludingMessageID { continue }
+            if let calls = message.toolCalls {
+                result.append(OpenAIMessage(role: "assistant", content: nil, tool_calls: calls))
+                continue
+            }
+            if message.role == "tool" {
+                result.append(OpenAIMessage(role: "tool", content: .text(message.content), tool_call_id: message.toolCallID, name: message.toolName))
+                continue
+            }
             if message.role != "user" || message.attachments.isEmpty {
                 result.append(OpenAIMessage(role: message.role, content: .text(message.content))); continue
             }
@@ -248,6 +309,78 @@ final class AppState: ObservableObject {
             result.append(OpenAIMessage(role: "user", content: .parts(parts)))
         }
         return result
+    }
+
+    private func modelTools(for chat: ChatRecord) -> [[String: Any]] {
+        var result: [[String: Any]] = []
+        if chat.browserUse ?? defaults.browserUse ?? true {
+            result.append(tool("browser_search", "Search the public web through Nodeyard and return sourced results.", ["query": stringParameter("Search query")], required: ["query"]))
+            result.append(tool("browser_open", "Read a public web page as text. Use a URL returned by browser_search.", ["url": stringParameter("Public HTTP or HTTPS URL")], required: ["url"]))
+        }
+        if (chat.computerUse ?? defaults.computerUse ?? false) && MacComputerUse.permissionGranted() {
+            result.append(tool("computer_read_screen", "Read visible accessibility text in the frontmost Mac app. Password values are excluded.", [:], required: []))
+            result.append(tool("computer_click", "Click one uniquely named button, link, or menu item in the frontmost Mac app. The user must approve each click.", ["label": stringParameter("Exact visible control label")], required: ["label"]))
+            result.append(tool("computer_set_text", "Replace the focused regular text field. Password fields are blocked. The user must approve the text first.", ["text": stringParameter("Text to enter")], required: ["text"]))
+            result.append(tool("computer_press_key", "Press one safe key: Return, Tab, Escape, Space, an arrow key, or Command+L. The user must approve each press.", ["key": stringParameter("Allowed key name")], required: ["key"]))
+            result.append(tool("computer_open_app", "Open an allowed Mac app: Safari, Finder, TextEdit, Notes, Calendar, Calculator, Preview, Mail, Chrome, or Firefox. The user must approve.", ["app": stringParameter("Allowed app name")], required: ["app"]))
+        }
+        return result
+    }
+
+    private func stringParameter(_ description: String) -> [String: Any] {
+        ["type": "string", "description": description]
+    }
+
+    private func tool(_ name: String, _ description: String, _ properties: [String: Any], required: [String]) -> [String: Any] {
+        ["type": "function", "function": ["name": name, "description": description,
+         "parameters": ["type": "object", "properties": properties, "required": required, "additionalProperties": false]]]
+    }
+
+    private func executeTool(_ call: ModelToolCall) async -> String {
+        guard let data = call.function.arguments.data(using: .utf8),
+              let args = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return "Tool error: arguments weren't valid JSON."
+        }
+        do {
+            switch call.function.name {
+            case "browser_search":
+                guard let query = args["query"] as? String, !query.isEmpty else { return "Tool error: give me a search query." }
+                return try await client.runWebTool("WebSearch", arguments: ["query": String(query.prefix(300))])
+            case "browser_open":
+                guard let url = args["url"] as? String, !url.isEmpty else { return "Tool error: give me a page URL." }
+                return try await client.runWebTool("WebFetch", arguments: ["url": String(url.prefix(2000)), "max_chars": 12000])
+            case "computer_read_screen":
+                return try MacComputerUse.readFrontmostScreen()
+            case "computer_click":
+                let label = String((args["label"] as? String ?? "").prefix(120))
+                guard await requestApproval(title: "Allow a Mac click?", detail: "Nodeyard AI wants to click “\(label)” in the frontmost app.") else { return "The user declined this computer action." }
+                return try MacComputerUse.click(label: label)
+            case "computer_set_text":
+                let text = String((args["text"] as? String ?? "").prefix(4000))
+                guard await requestApproval(title: "Allow text entry?", detail: "Nodeyard AI wants to replace text in the focused regular text field with:\n\n\(text.prefix(300))") else { return "The user declined this computer action." }
+                return try MacComputerUse.setFocusedText(text)
+            case "computer_press_key":
+                let key = String((args["key"] as? String ?? "").prefix(40))
+                guard await requestApproval(title: "Allow a key press?", detail: "Nodeyard AI wants to press \(key) in the frontmost app.") else { return "The user declined this computer action." }
+                return try MacComputerUse.press(key)
+            case "computer_open_app":
+                let name = String((args["app"] as? String ?? "").prefix(40))
+                guard await requestApproval(title: "Open an app?", detail: "Nodeyard AI wants to open \(name).") else { return "The user declined this computer action." }
+                return try await MacComputerUse.openApplication(named: name)
+            default:
+                return "Tool error: that tool isn't available in Nodeyard AI."
+            }
+        } catch {
+            return "Tool error: \(error.localizedDescription)"
+        }
+    }
+
+    private func requestApproval(title: String, detail: String) async -> Bool {
+        guard toolApprovalContinuation == nil else { return false }
+        return await withCheckedContinuation { continuation in
+            toolApprovalContinuation = continuation
+            pendingToolApproval = ToolApproval(id: UUID().uuidString, title: title, detail: detail)
+        }
     }
 
     private func appendStream(_ piece: String, reasoning: Bool, to messageID: String, chatID: String) {

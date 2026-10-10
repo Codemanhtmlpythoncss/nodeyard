@@ -29,6 +29,12 @@ struct ContentView: View {
         .fileExporter(isPresented: $state.showExport, document: state.exportDocument, contentType: state.exportType, defaultFilename: state.exportFilename) { result in
             switch result { case .success: state.info = "Exported chat file."; case .failure(let error): state.error = error.localizedDescription }
         }
+        .confirmationDialog(state.pendingToolApproval?.title ?? "Allow this Mac action?",
+                            isPresented: Binding(get: { state.pendingToolApproval != nil }, set: { if !$0 { state.resolveToolApproval(allow: false) } }),
+                            titleVisibility: .visible) {
+            Button("Allow once") { state.resolveToolApproval(allow: true) }
+            Button("Don't allow", role: .cancel) { state.resolveToolApproval(allow: false) }
+        } message: { Text(state.pendingToolApproval?.detail ?? "") }
         .alert("Nodeyard AI", isPresented: Binding(get: { state.error != nil }, set: { if !$0 { state.error = nil } })) {
             Button("OK", role: .cancel) { state.error = nil }
         } message: { Text(state.error ?? "") }
@@ -288,22 +294,24 @@ private struct MessageCard: View {
     let isLatest: Bool
     let sending: Bool
     @State private var showReasoning = false
+    @State private var showToolResult = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: message.role == "assistant" ? "sparkles" : "person.fill")
-                .font(.caption.weight(.semibold)).foregroundStyle(message.role == "assistant" ? Color.accentColor : Color.secondary)
+            Image(systemName: message.role == "assistant" ? "sparkles" : (message.role == "tool" ? "wrench.and.screwdriver" : "person.fill"))
+                .font(.caption.weight(.semibold)).foregroundStyle(message.role == "assistant" ? Color.accentColor : (message.role == "tool" ? Color.orange : Color.secondary))
                 .frame(width: 28, height: 28).background(.quaternary, in: Circle())
             VStack(alignment: .leading, spacing: 9) {
                 HStack {
-                    Text(message.role == "assistant" ? "Nodeyard AI" : "You").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Text(message.role == "assistant" ? "Nodeyard AI" : (message.role == "tool" ? "\(message.toolName?.replacingOccurrences(of: "_", with: " ") ?? "Tool") result" : "You"))
+                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     if let duration = message.duration { Text("\(duration, specifier: "%.1f")s").font(.caption2).foregroundStyle(.tertiary) }
                     if let speed = message.tokensPerSecond { Text("\(speed, specifier: "%.1f") tok/s").font(.caption2).foregroundStyle(.tertiary) }
                     Spacer()
                     if message.role == "assistant" {
                         Text("\(message.content.components(separatedBy: .newlines).count) lines").font(.caption2).foregroundStyle(.tertiary).help("Select this text to copy it")
                         if isLatest && !sending { Button { state.regenerate() } label: { Image(systemName: "arrow.clockwise") }.help("Regenerate answer (⇧⌘R)") }
-                    } else {
+                    } else if message.role == "user" {
                         Button { state.edit(message) } label: { Image(systemName: "pencil") }.help("Edit and resend this message")
                     }
                 }.buttonStyle(.plain)
@@ -312,9 +320,28 @@ private struct MessageCard: View {
                         Text(message.reasoning).font(.system(.callout, design: .monospaced)).textSelection(.enabled).padding(.vertical, 6)
                     } label: { Label("Model reasoning", systemImage: "brain.head.profile").font(.caption).foregroundStyle(.secondary) }
                 } else if isLatest && sending && message.content.isEmpty {
-                    HStack(spacing: 7) { ProgressView().controlSize(.small); Text("Thinking…").foregroundStyle(.secondary) }.font(.callout)
+                    TimelineView(.periodic(from: message.created, by: 1)) { timeline in
+                        let elapsed = max(0, Int(timeline.date.timeIntervalSince(message.created)))
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(spacing: 7) {
+                                ProgressView().controlSize(.small)
+                                Text(elapsed < 5 ? "Thinking…" : "Waiting for the first token · \(elapsed)s")
+                                    .foregroundStyle(.secondary)
+                            }.font(.callout)
+                            if elapsed >= 30 {
+                                Text("The model is taking a while to start. Check that it is ready in Models, or stop and try again.")
+                                    .font(.caption).foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
                 }
-                if !message.content.isEmpty { MarkdownText(markdown: message.content).textSelection(.enabled).font(.system(size: state.defaults.fontSize)).fixedSize(horizontal: false, vertical: true) }
+                if message.role != "tool" && !message.content.isEmpty { MarkdownText(markdown: message.content).textSelection(.enabled).font(.system(size: state.defaults.fontSize)).fixedSize(horizontal: false, vertical: true) }
+                if message.role == "tool" {
+                    DisclosureGroup(isExpanded: $showToolResult) {
+                        MarkdownText(markdown: message.content).textSelection(.enabled)
+                            .font(.system(.caption, design: .monospaced)).fixedSize(horizontal: false, vertical: true).padding(.vertical, 5)
+                    } label: { Text("View tool result").font(.caption).foregroundStyle(.secondary) }
+                }
                 if !message.attachments.isEmpty {
                     ForEach(message.attachments) { attachment in
                         Label(attachment.name, systemImage: attachment.mime.hasPrefix("image/") ? "photo" : "doc.text").font(.caption).foregroundStyle(.secondary)

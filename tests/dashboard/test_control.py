@@ -96,6 +96,21 @@ class Control(unittest.TestCase):
         self.assertEqual(s, 400)
         self.assertIn("Choose a model", j["error"])
 
+    def test_native_chat_accepts_only_supported_auto_tools(self):
+        call = {"id": "call_abc123", "type": "function", "function": {"name": "browser_search", "arguments": '{"query":"weather"}'}}
+        tool = {"type": "function", "function": {"name": "browser_search", "description": "Search public pages.",
+                "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}
+        body = {"model": "split", "messages": [{"role": "assistant", "content": None, "tool_calls": [call]},
+                 {"role": "tool", "tool_call_id": call["id"], "name": "browser_search", "content": "One result"},
+                 {"role": "user", "content": "Summarize"}], "tools": [tool]}
+        s, raw = self.call("POST", "/api/v1/chat/completions", body)
+        self.assertEqual(s, 200)
+        self.assertIn(b"data: ", raw)
+        tool["function"]["name"] = "run_shell"
+        s, invalid = self.call("POST", "/api/v1/chat/completions", {"model": "split", "messages": [{"role": "user", "content": "Hi"}], "tools": [tool]})
+        self.assertEqual(s, 400)
+        self.assertIn("not supported", invalid["error"])
+
     def test_loading_a_model_starts_a_task_that_can_be_followed(self):
         s, j = self.call("GET", "/api/v1/models")
         split = [m for m in j["models"] if m["kind"] == "split"]

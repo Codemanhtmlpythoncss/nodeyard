@@ -44,15 +44,48 @@ MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
 PART_RE = re.compile(r"^(.*)-(\d{5})-of-(\d{5})\.gguf$")
 QUANT_RE = re.compile(r"(?:^|[-_.])((?:UD-)?(?:IQ\d(?:_[A-Z0-9]+)*|Q\d(?:_[A-Z0-9]+)+|Q\d_\d|BF16|F16|F32|MXFP4))(?=[-_.]|$)", re.I)
 CHAT_IMAGE_RE = re.compile(r"^data:image/(jpeg|png|webp);base64,([A-Za-z0-9+/]*={0,2})$")
+CHAT_TOOL_NAMES = frozenset(("browser_search", "browser_open", "computer_read_screen", "computer_click",
+                            "computer_set_text", "computer_press_key", "computer_open_app"))
+CHAT_TOOL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 
 
 def clean_chat_messages(messages):
     """Validate text and inline image parts before forwarding chat to a model."""
     clean, text_chars, image_bytes, image_count = [], 0, 0, 0
     for message in messages:
-        if not isinstance(message, dict) or message.get("role") not in ("system", "user", "assistant"):
+        if not isinstance(message, dict) or message.get("role") not in ("system", "user", "assistant", "tool"):
             raise ValueError("Each message needs a role and text.")
         role, content = message["role"], message.get("content")
+        if role == "tool":
+            tool_id, name = message.get("tool_call_id"), message.get("name")
+            if (not isinstance(content, str) or not isinstance(tool_id, str) or not CHAT_TOOL_ID_RE.fullmatch(tool_id)
+                    or not isinstance(name, str) or name not in CHAT_TOOL_NAMES):
+                raise ValueError("That tool result isn't valid.")
+            text_chars += len(content)
+            clean.append({"role": "tool", "tool_call_id": tool_id, "name": name, "content": content})
+            continue
+        calls = message.get("tool_calls")
+        if calls is not None:
+            if role != "assistant" or not isinstance(calls, list) or not 1 <= len(calls) <= 8 or content not in (None, ""):
+                raise ValueError("That model tool request isn't valid.")
+            normalized = []
+            for call in calls:
+                if not isinstance(call, dict):
+                    raise ValueError("That model tool request isn't valid.")
+                fn = call.get("function")
+                cid, name, args = call.get("id"), fn.get("name") if isinstance(fn, dict) else None, fn.get("arguments") if isinstance(fn, dict) else None
+                if (call.get("type") != "function" or not isinstance(cid, str) or not CHAT_TOOL_ID_RE.fullmatch(cid)
+                        or not isinstance(name, str) or name not in CHAT_TOOL_NAMES or not isinstance(args, str) or len(args) > 20000):
+                    raise ValueError("That model tool request isn't valid.")
+                try:
+                    parsed = json.loads(args)
+                except ValueError:
+                    raise ValueError("That model tool request has invalid arguments.")
+                if not isinstance(parsed, dict):
+                    raise ValueError("That model tool request has invalid arguments.")
+                normalized.append({"id": cid, "type": "function", "function": {"name": name, "arguments": args}})
+            clean.append({"role": "assistant", "content": content, "tool_calls": normalized})
+            continue
         if isinstance(content, str):
             text_chars += len(content)
             clean.append({"role": role, "content": content})
@@ -791,10 +824,16 @@ class Live:
         host, port, headers, model = self._resolve(target)
         body = dict(chat_payload_for_target(target, payload), model=model, stream=True)
         headers = dict(headers, **{"Content-Type": "application/json", "Accept": "text/event-stream", "User-Agent": UA})
-        conn = http.client.HTTPConnection(host, port, timeout=900)
+        # A stale Kubernetes service or unreachable pod must fail quickly. Keep a
+        # long read timeout after connecting because prompt evaluation can take time
+        # on a large model or a slower node.
+        conn = http.client.HTTPConnection(host, port, timeout=10)
         if on_conn:
             on_conn(conn)  # so Stop can cut it, even while the model still reads the prompt
         try:
+            conn.connect()
+            if conn.sock is not None:
+                conn.sock.settimeout(900)
             conn.request("POST", "/v1/chat/completions", body=json.dumps(body), headers=headers)
             resp = conn.getresponse()
         except (OSError, http.client.HTTPException) as e:

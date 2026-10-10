@@ -56,6 +56,21 @@ struct AppSettingsView: View {
                     }
                     HStack { Text("Chat text size"); Slider(value: $state.defaults.fontSize, in: 12...22, step: 1); Text("\(Int(state.defaults.fontSize)) pt").monospacedDigit().frame(width: 52) }
                 }
+                Section("AI tools") {
+                    Toggle("Let AI search the web and read pages", isOn: Binding(get: { state.defaults.browserUse ?? true }, set: { state.defaults.browserUse = $0 }))
+                    Text("The model chooses when to search. Requests use the Nodeyard server's web connection and return page text to the model.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Toggle("Let AI use this Mac", isOn: Binding(get: { state.defaults.computerUse ?? false }, set: { state.defaults.computerUse = $0 }))
+                    Text("Shares visible text from the frontmost app with the selected model. Password values are excluded. Every click, text entry, key press and app launch asks you first.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Label(MacComputerUse.permissionGranted() ? "Accessibility access is on" : "Accessibility access is off",
+                              systemImage: MacComputerUse.permissionGranted() ? "checkmark.circle.fill" : "lock.fill")
+                            .foregroundStyle(MacComputerUse.permissionGranted() ? Color.green : Color.secondary)
+                        Spacer()
+                        Button("Request access") { state.requestComputerUsePermission() }
+                    }
+                }
                 Section("Chat saving and alerts") {
                     Toggle("Sync completed chats to the Nodeyard server", isOn: $state.defaults.syncChats)
                     Toggle("Notify when a reply is complete", isOn: $state.defaults.notifications)
@@ -92,6 +107,8 @@ struct ChatSettingsView: View {
     @State private var maxTokens = 1024
     @State private var contextLength = 8192
     @State private var noLimit = false
+    @State private var browserUse = true
+    @State private var computerUse = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -105,15 +122,30 @@ struct ChatSettingsView: View {
                     Stepper("Context length: \(contextLength.formatted()) tokens", value: $contextLength, in: 512...131072, step: 512)
                     Text("These values belong to this chat. The model context length takes effect when the model is next started.").font(.caption).foregroundStyle(.secondary)
                 }
+                Section("AI tools for this chat") {
+                    Toggle("Let AI search the web and read pages", isOn: $browserUse)
+                    Toggle("Let AI use this Mac", isOn: $computerUse)
+                    Text("Computer actions need macOS Accessibility access and your approval each time. Password fields are blocked.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if !MacComputerUse.permissionGranted() {
+                        Button("Request Accessibility access") { state.requestComputerUsePermission() }
+                    }
+                }
             }.formStyle(.grouped).padding(.horizontal, 12)
             Spacer()
             HStack { Spacer(); Button("Cancel") { dismiss() }; Button("Save chat settings") { save() }.keyboardShortcut(.defaultAction) }.padding(16)
-        }.onAppear { systemPrompt = chat.systemPrompt; temperature = chat.temperature; maxTokens = chat.maxTokens; noLimit = chat.maxTokens == 0; contextLength = chat.contextLength }
+        }.onAppear {
+            systemPrompt = chat.systemPrompt; temperature = chat.temperature; maxTokens = chat.maxTokens
+            noLimit = chat.maxTokens == 0; contextLength = chat.contextLength
+            browserUse = chat.browserUse ?? state.defaults.browserUse ?? true
+            computerUse = chat.computerUse ?? state.defaults.computerUse ?? false
+        }
     }
 
     private func save() {
         state.updateCurrentChat { chat in
-            chat.systemPrompt = systemPrompt; chat.temperature = temperature; chat.maxTokens = noLimit ? 0 : maxTokens; chat.contextLength = contextLength
+            chat.systemPrompt = systemPrompt; chat.temperature = temperature; chat.maxTokens = noLimit ? 0 : maxTokens
+            chat.contextLength = contextLength; chat.browserUse = browserUse; chat.computerUse = computerUse
         }
         dismiss()
     }

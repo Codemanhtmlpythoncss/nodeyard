@@ -268,6 +268,25 @@ def register(ctx, args):
         payload = {"messages": clean, "temperature": temp, "stream": True}
         if max_tokens:
             payload["max_tokens"] = max_tokens
+        tools = body.get("tools")
+        if tools is not None:
+            allowed = aiapi.CHAT_TOOL_NAMES
+            if not isinstance(tools, list) or not 1 <= len(tools) <= len(allowed):
+                return h._json({"ok": False, "error": "Send between 1 and 7 supported tools."}, 400)
+            clean_tools = []
+            for item in tools:
+                if not isinstance(item, dict):
+                    return h._json({"ok": False, "error": "One of the requested tools is not supported."}, 400)
+                fn = item.get("function")
+                name = fn.get("name") if isinstance(fn, dict) else None
+                description = fn.get("description", "") if isinstance(fn, dict) else None
+                parameters = fn.get("parameters") if isinstance(fn, dict) else None
+                if (item.get("type") != "function" or not isinstance(name, str) or name not in allowed or not isinstance(description, str)
+                        or len(description) > 1200 or not isinstance(parameters, dict)):
+                    return h._json({"ok": False, "error": "One of the requested tools is not supported."}, 400)
+                clean_tools.append({"type": "function", "function": {"name": name, "description": description, "parameters": parameters}})
+            payload["tools"] = clean_tools
+            payload["tool_choice"] = "auto"
         try:
             conn, resp = backend.open_chat(target, payload)
         except aiapi.AIError as e:

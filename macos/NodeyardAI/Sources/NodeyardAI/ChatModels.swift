@@ -30,6 +30,25 @@ struct ChatMessage: Codable, Identifiable, Hashable {
     var duration: Double?
     var tokensPerSecond: Double?
     var tokenCount: Int?
+    var toolCalls: [ModelToolCall]? = nil
+    var toolCallID: String? = nil
+    var toolName: String? = nil
+}
+
+struct ModelToolCall: Codable, Identifiable, Hashable {
+    struct Function: Codable, Hashable {
+        var name: String
+        var arguments: String
+    }
+    var id: String
+    var type: String = "function"
+    var function: Function
+}
+
+struct ToolApproval: Identifiable {
+    var id: String
+    var title: String
+    var detail: String
 }
 
 struct ChatRecord: Codable, Identifiable, Hashable {
@@ -41,6 +60,8 @@ struct ChatRecord: Codable, Identifiable, Hashable {
     var temperature: Double
     var maxTokens: Int
     var contextLength: Int
+    var browserUse: Bool? = nil
+    var computerUse: Bool? = nil
     var pinned: Bool = false
     var archived: Bool = false
     var created: Date = Date()
@@ -50,7 +71,8 @@ struct ChatRecord: Codable, Identifiable, Hashable {
     static func fresh(model: ModelTarget? = nil, defaults: AppDefaults) -> ChatRecord {
         ChatRecord(id: "mac-" + UUID().uuidString.lowercased(), title: "New chat", modelTarget: model?.id ?? "",
                    modelName: model?.name ?? "", systemPrompt: defaults.systemPrompt, temperature: defaults.temperature,
-                   maxTokens: defaults.maxTokens, contextLength: defaults.contextLength)
+                   maxTokens: defaults.maxTokens, contextLength: defaults.contextLength,
+                   browserUse: defaults.browserUse, computerUse: defaults.computerUse)
     }
 }
 
@@ -63,6 +85,8 @@ struct AppDefaults: Codable, Equatable {
     var fontSize: Double = 14
     var syncChats: Bool = true
     var notifications: Bool = true
+    var browserUse: Bool? = true
+    var computerUse: Bool? = false
 }
 
 struct RemoteChatSummary: Codable, Identifiable {
@@ -103,7 +127,19 @@ struct DownloadItem: Decodable, Identifiable {
 
 struct StreamDelta: Decodable {
     struct Choice: Decodable {
-        struct Delta: Decodable { var content: String?; var reasoning_content: String?; var reasoning: String? }
+        struct Delta: Decodable {
+            struct ToolCall: Decodable {
+                struct Function: Decodable { var name: String?; var arguments: String? }
+                var index: Int
+                var id: String?
+                var type: String?
+                var function: Function?
+            }
+            var content: String?
+            var reasoning_content: String?
+            var reasoning: String?
+            var tool_calls: [ToolCall]?
+        }
         var delta: Delta
     }
     var choices: [Choice]?
@@ -115,7 +151,10 @@ struct StreamDelta: Decodable {
 
 struct OpenAIMessage: Encodable {
     var role: String
-    var content: EncodableContent
+    var content: EncodableContent?
+    var tool_calls: [ModelToolCall]? = nil
+    var tool_call_id: String? = nil
+    var name: String? = nil
 }
 
 enum EncodableContent: Encodable {

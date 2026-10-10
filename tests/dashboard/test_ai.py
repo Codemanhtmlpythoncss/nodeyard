@@ -229,6 +229,22 @@ class ChatInputValidation(unittest.TestCase):
         self.assertEqual(ollama["messages"][0]["content"][1]["image_url"], "data:image/png;base64,YQ==")
         self.assertEqual(split["messages"], messages)
 
+    def test_native_tool_calls_and_results_are_kept_for_the_next_model_turn(self):
+        messages = [
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "call_abc123", "type": "function",
+             "function": {"name": "browser_search", "arguments": '{"query":"current weather"}'}}]},
+            {"role": "tool", "tool_call_id": "call_abc123", "name": "browser_search", "content": "Search result text"},
+            {"role": "user", "content": "Summarize it"},
+        ]
+        cleaned = aiapi.clean_chat_messages(messages)
+        self.assertEqual(cleaned, messages)
+        for invalid in (
+            [{"role": "tool", "tool_call_id": "x", "name": "Bash", "content": "run shell"}],
+            [{"role": "assistant", "tool_calls": [{"id": "x", "type": "function", "function": {"name": "computer_click", "arguments": "[]"}}]}],
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                aiapi.clean_chat_messages(invalid)
+
 
 class FakeStore:
     def __init__(self, state):

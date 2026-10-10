@@ -135,14 +135,18 @@ final class NodeyardClient {
         _ = try await post("/api/v1/models/load", body: ["model": name, "ctx": context], as: BasicReply.self)
     }
 
-    func streamChat(model: String, messages: [OpenAIMessage], temperature: Double, maxTokens: Int,
+    func streamChat(model: String, messages: [OpenAIMessage], temperature: Double, maxTokens: Int, tools: [[String: Any]] = [],
                     onContent: @escaping (String) -> Void, onReasoning: @escaping (String) -> Void) async throws -> StreamStats {
-        let payload = StreamRequest(model: model, messages: messages, temperature: temperature, max_tokens: maxTokens == 0 ? nil : maxTokens)
-        let encoder = JSONEncoder()
-        let data = try encoder.encode(payload)
-        var req = try request("POST", "/api/v1/chat/completions")
+        let encodedMessages = try JSONEncoder().encode(messages)
+        var payload: [String: Any] = [
+            "model": model,
+            "messages": try JSONSerialization.jsonObject(with: encodedMessages),
+            "temperature": temperature,
+        ]
+        if maxTokens > 0 { payload["max_tokens"] = maxTokens }
+        if !tools.isEmpty { payload["tools"] = tools; payload["tool_choice"] = "auto" }
+        var req = try request("POST", "/api/v1/chat/completions", body: payload)
         req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        req.httpBody = data
         let bytes: URLSession.AsyncBytes
         let response: URLResponse
         do { (bytes, response) = try await session.bytes(for: req) }
@@ -159,6 +163,7 @@ final class NodeyardClient {
             throw NodeyardError.http(http.statusCode, errorText)
         }
         var stats = StreamStats()
+        var toolCalls: [Int: ModelToolCall] = [:]
         do {
             for try await line in bytes.lines {
                 try Task.checkCancellation()
@@ -171,10 +176,26 @@ final class NodeyardClient {
                 for choice in part.choices ?? [] {
                     if let thought = choice.delta.reasoning_content ?? choice.delta.reasoning, !thought.isEmpty { onReasoning(thought) }
                     if let text = choice.delta.content, !text.isEmpty { onContent(text) }
+                    for delta in choice.delta.tool_calls ?? [] {
+                        var call = toolCalls[delta.index] ?? ModelToolCall(id: "", function: .init(name: "", arguments: ""))
+                        if let id = delta.id, !id.isEmpty { call.id = id }
+                        if let name = delta.function?.name { call.function.name += name }
+                        if let arguments = delta.function?.arguments { call.function.arguments += arguments }
+                        toolCalls[delta.index] = call
+                    }
                 }
             }
         } catch { throw explainNetworkError(error) }
+        stats.toolCalls = toolCalls.keys.sorted().compactMap { toolCalls[$0] }.filter { !$0.id.isEmpty && !$0.function.name.isEmpty }
         return stats
+    }
+
+    func runWebTool(_ name: String, arguments: [String: Any]) async throws -> String {
+        struct Reply: Decodable { var ok: Bool?; var text: String?; var error: String?; var summary: String? }
+        let reply: Reply = try await post("/api/v1/web/tool", body: ["tool": name, "args": arguments], as: Reply.self)
+        guard reply.ok != false else { throw NodeyardError.server(reply.error ?? "The web tool failed.") }
+        let result = reply.text ?? reply.summary ?? "The page returned no readable text."
+        return String(result.prefix(18000))
     }
 
     func remoteChats() async throws -> [RemoteChatSummary] {
@@ -202,12 +223,6 @@ final class NodeyardClient {
     struct RemoteChatBody: Decodable { var id: String; var title: String; var model: String; var messages: [RemoteMessage] }
     struct RemoteMessage: Decodable { var role: String; var content: String }
     private struct BasicReply: Decodable { var ok: Bool?; var error: String?; var job: String? }
-    private struct StreamRequest: Encodable {
-        var model: String
-        var messages: [OpenAIMessage]
-        var temperature: Double
-        var max_tokens: Int?
-    }
 }
 
-struct StreamStats { var tokens: Int?; var tokensPerSecond: Double? }
+struct StreamStats { var tokens: Int?; var tokensPerSecond: Double?; var toolCalls: [ModelToolCall] = [] }
