@@ -25,6 +25,7 @@
     { id: "commands", label: "Commands", icon: "commands", sub: "Every nodeyard command, runnable from here" },
     { id: "terminal", label: "Terminal", icon: "terminal", sub: "A shell on the server" },
     { id: "settings", label: "Settings", icon: "settings", sub: "Passwords, keys, the dashboard itself and how it looks" },
+    { id: "guide", label: "Setup guide", icon: "help", sub: "Setting up and using this dashboard, step by step" },
   ];
 
   const S = {
