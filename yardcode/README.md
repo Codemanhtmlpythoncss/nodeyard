@@ -85,6 +85,3 @@ Project plugins (`.yardcode/plugins`) only load after `/trust`.
 `yardcode -p "..." --output-format json|stream-json`, and `yardcode --serve-json` (JSON lines on stdin and stdout: text, tool calls,
 permission requests...). See `src/yardcode/serve.py` for the protocol.
 
-## Tests
-
-`make test-py` (Python 3.8 to 3.13, macOS and Linux).

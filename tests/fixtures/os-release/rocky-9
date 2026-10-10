@@ -1,6 +1,0 @@
-NAME="Rocky Linux"
-VERSION="9.6 (Blue Onyx)"
-ID="rocky"
-ID_LIKE="rhel centos fedora"
-VERSION_ID="9.6"
-PRETTY_NAME="Rocky Linux 9.6 (Blue Onyx)"

@@ -1,6 +1,3 @@
-# Pinned dev tools fetched by 'make deps' (tests/install-tools.sh)
-.tools/
-
 # Build output
 dist/
 .build/
@@ -11,9 +8,6 @@ dist/
 *~
 .idea/
 .vscode/
-
-# Harness logs
-tests/harness/logs/
 
 # Python
 __pycache__/

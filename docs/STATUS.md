@@ -41,8 +41,7 @@ Built ahead of the roadmap, in Python and Bash (the Go agent of phase 5 is not s
 - **yardcode** (`yardcode/`): a terminal AI agent for any OpenAI-compatible model API on macOS and Linux. Installs with nodeyard or alone.
   See [yardcode/README.md](../yardcode/README.md).
 
-Tests: 266 bats tests (`make test`) and the Python tests for the dashboard, node agent, model gate and yardcode (`make test-py`;
-macOS and Linux, Python 3.8 to 3.13).
+The repository now holds only what the apps need; the earlier test suites and CI are in the Git history.
 
 Known gaps: web search and the macOS certificate lookup are only exercised on Linux in CI; switching models through the API is
 tested against the demo and read-only against a real cluster; no screenshots of the dashboard in the docs yet.
@@ -110,5 +109,4 @@ Nothing yet. To help, run this on a spare machine or VM and report back:
 
 - Next phase: 2 (IP management and the network device view).
 - Development setup: [development.md](development.md).
-- Dev tools used in this repo are pinned in `tests/tools.lock`; runtime
-  downloads in `share/nodeyard/versions.lock`.
+- Runtime downloads are pinned in `share/nodeyard/versions.lock`.

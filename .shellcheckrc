@@ -1,8 +1,0 @@
-# shellcheck settings for the whole repo (used by 'make lint' and CI).
-shell=bash
-external-sources=true
-source-path=SCRIPTDIR
-# Extra checks beyond the defaults.
-enable=avoid-nullary-conditions
-enable=deprecate-which
-enable=require-double-brackets

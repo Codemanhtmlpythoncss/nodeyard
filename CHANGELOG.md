@@ -44,6 +44,11 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Changed
 
+- The repository now contains only what nodeyard, the dashboard, yardcode and the Nodeyard AI Mac app need: the test
+  suites, CI workflows, issue templates, lint and editor settings, contributing and conduct guides, the example config
+  and the screenshot and release-tag scripts were removed (they remain in the Git history). `make` keeps the build and
+  install targets.
+
 - The installer and `nodeyard update` now use the HTTPS `main` source at a recorded commit, so updates no longer depend on GitHub releases or tags. `--version` remains available for tag-based installs.
 - Model storage scans are bounded and include supported nodes even while they are NotReady. The dashboard keeps the last saved inventory during refreshes, retains last-known model locations for unreachable nodes, reports incomplete scans, retries after Kubernetes downloads finish, and shows Ollama downloads in Find models alongside GGUF files.
 - **License**: nodeyard and yardcode are now "All rights reserved" instead of MIT. You can read the source and run it on your own machines; copying,

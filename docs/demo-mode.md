@@ -36,5 +36,4 @@ docker run --rm -it -v "$PWD":/src debian:12 bash -c \
   'apt-get update -qq && apt-get install -yqq jq >/dev/null && /src/bin/nodeyard --demo'
 ```
 
-The [screenshots in the README](../README.md) are generated from demo mode
-by `make screenshots`.
+The [screenshots in the README](../README.md) were taken in demo mode.

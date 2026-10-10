@@ -1,6 +1,0 @@
-NAME="AlmaLinux"
-VERSION="10.0 (Purple Lion)"
-ID="almalinux"
-ID_LIKE="rhel centos fedora"
-VERSION_ID="10.0"
-PRETTY_NAME="AlmaLinux 10.0 (Purple Lion)"

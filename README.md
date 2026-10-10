@@ -160,15 +160,12 @@ Read [getting started](docs/getting-started.md) for the full walk-through.
 - [Troubleshooting](docs/troubleshooting.md) and [FAQ](docs/faq.md)
 - [Upgrading](docs/upgrading.md), including from k3s-manager
 - [Security](docs/security.md)
-- [Architecture](docs/architecture.md) and [development](docs/development.md)
+- [Architecture](docs/architecture.md) and [building from source](docs/development.md)
 - [Status and roadmap](docs/STATUS.md)
 
-## Contributing
+## Security
 
-Bug reports, testing on hardware, docs and code are all welcome: see
-[CONTRIBUTING.md](CONTRIBUTING.md). Please report security problems
-privately as described in [SECURITY.md](SECURITY.md). Everyone taking part
-is expected to follow the [code of conduct](CODE_OF_CONDUCT.md).
+Please report security problems privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 

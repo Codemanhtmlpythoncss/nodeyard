@@ -31,7 +31,7 @@ config_key() {
 
 config_show_cmd() {
     [[ $# -eq 0 ]] || ny_usage_error "Unexpected argument: $1"
-    [[ -r "$NY_CONFIG" ]] || ny_die "There is no cluster config yet (${NY_CONFIG})." "It is created when you set up this node; see examples/cluster.conf." "$NY_E_PRECONDITION"
+    [[ -r "$NY_CONFIG" ]] || ny_die "There is no cluster config yet (${NY_CONFIG})." "It is created when you set up this node (sudo nodeyard install master or worker)." "$NY_E_PRECONDITION"
     if [[ "$NY_JSON" -eq 1 ]]; then
         ny_cfg_parse "$NY_CONFIG" || true
         local k sec sub key

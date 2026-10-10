@@ -29,7 +29,6 @@ lib/modules/              one file per feature: k3s, cluster, host, firewall, ai
 share/nodeyard/           data: wizards/*.json, versions.lock, demo/ (sandbox, shim, rules)
 completions/              bash and zsh completion (they ask nodeyard for candidates)
 install.sh  uninstall.sh  installer and remover
-tests/                    bats unit tests, fixtures, multi-distro harness
 ```
 
 ## Rules every feature follows

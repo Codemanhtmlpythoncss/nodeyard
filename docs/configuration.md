@@ -4,7 +4,7 @@ One file, `/etc/nodeyard/cluster.conf`, describes the whole cluster: its
 nodes, their roles and addresses, and the network plan. Later releases add
 websites, AI and backup settings to the same file. Secrets never go in it.
 
-A commented example is in [`examples/cluster.conf`](../examples/cluster.conf).
+`nodeyard config show` prints the current file and `nodeyard config set KEY VALUE` changes it.
 
 ## Format
 

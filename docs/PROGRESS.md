@@ -10,6 +10,10 @@ macOS permission prompts).
 Pushed code, an installed Mac app, an installed yardcode and a deployed cluster are four separate states. A row only
 claims the states that were checked.
 
+On 2026-10-10 the test suites, CI and dev tooling were removed from the repository at the owner's request (the
+repository keeps only what the apps need). The checks named below ran before that and are in the Git history
+(`git show 7d8cc76:tests/...`).
+
 ## Baseline (start of this round)
 
 | Check | Result |
