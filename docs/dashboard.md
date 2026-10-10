@@ -280,6 +280,26 @@ that as a .py file", "make me a file with…", "download it as a zip". Ordinary 
 blocks that you can run. Change it per chat in Settings > Files, or with `/files ask`, `/files always` (every script, page and
 document becomes a file) or `/files never`.
 
+## Terminals
+
+The Terminal page lists this server, every cluster node and every device on your tailnet (from `tailscale status` on
+the server), and opens a shell on any of them, several at once in tabs that survive a page reload:
+
+| Button | What it opens | Runs as |
+| --- | --- | --- |
+| Shell (this server) | a login shell, started by systemd outside the dashboard's sandbox | the terminal user (whoever ran `sudo nodeyard dashboard start`) |
+| Shell (node) | a short-lived helper pod on that node (busybox, privileged, host PID and network) enters the machine's own namespaces | the terminal user, if that account exists there |
+| Root shell | the same, as root | root |
+| Checks | read-only checks for a node that drops out (boots, k3s agent errors, OOM/link/GPU/power kernel messages, pressure, disk, network, clock, temperature), then a root shell | root |
+| SSH | `ssh` from the server to the device's Tailscale (or LAN) address; its keys, or type the device's password in the terminal | the user you type (default: the terminal user) |
+
+Node shells don't need SSH keys, but they need the node's kubelet to start the helper pod (namespace
+`nodeyard-shell`, image `busybox:1.36`): for a node that isn't Ready, use SSH. The helper pod is deleted when the
+terminal closes, any left over are removed when the dashboard starts, and each expires after 12 hours regardless.
+Each node's details also have **Terminal** and **Run checks** buttons. Rules: the dashboard password is asked for
+every terminal, requests through public access are refused, only devices the server found itself can be picked (not
+an arbitrary address), idle terminals close after 30 minutes, and at most 8 are open (4 on cluster nodes).
+
 ## Device connections
 
 The Nodes page has a **Connections** card (also in the Mac app: Manage › Nodes). For every machine it shows the
@@ -320,7 +340,7 @@ web tools installed, a model ready for research, the terminal user set, devices 
 | Research Mode | yes | research routes answer 403 |
 | Reference tools (Wikipedia, arXiv, weather, calculator, tasks) | yes | those chat skills disappear |
 | Python, files and shell | yes | the Run button and those chat skills stop |
-| Terminal | yes | the Terminal page's routes answer 403 |
+| Terminal | yes | the Terminal page's routes answer 403 (every terminal: server, nodes, SSH) |
 | Device connections | yes | checks stop and its routes answer 403 |
 | Model management, Doctor, Images and OCR | no (core) | |
 | Agent Browser, Use this Mac | in the Mac app | controlled by the app's own settings |

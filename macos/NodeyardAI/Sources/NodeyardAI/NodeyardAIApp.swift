@@ -11,9 +11,13 @@ struct NodeyardAIApp: App {
                 .environmentObject(state.manage)
                 .frame(minWidth: 920, minHeight: 640)
                 .preferredColorScheme(state.defaults.appearance == "system" ? nil : (state.defaults.appearance == "light" ? .light : .dark))
-                .task { state.refresh(); await TestSnapshots.runBrowserSelfTestIfRequested(); await TestSnapshots.runIfRequested(state) }
+                .task { state.refresh(); await TestSnapshots.runBrowserSelfTestIfRequested(); await TestSnapshots.runTerminalSelfTestIfRequested(state); await TestSnapshots.runIfRequested(state) }
         }
         .windowStyle(.titleBar)
+
+        WindowGroup("Terminal", for: TerminalRequest.self) { $request in
+            TerminalWindowView(request: request).environmentObject(state.manage).frame(minWidth: 640, minHeight: 420)
+        }
 
         Window("Agent Browser", id: "agent-browser") {
             AgentBrowserView().frame(minWidth: 820, minHeight: 560)

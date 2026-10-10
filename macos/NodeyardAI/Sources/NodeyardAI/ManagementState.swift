@@ -3,7 +3,7 @@ import SwiftUI
 
 /// The sections of the website this app mirrors (the website's own sidebar order), plus the setup guide.
 enum ManageSection: String, CaseIterable, Identifiable {
-    case overview, nodes, pods, workloads, network, storage, hardware, models, research, plugins, events, alerts, doctor, tasks, guide
+    case overview, nodes, pods, workloads, network, storage, hardware, models, research, plugins, events, alerts, doctor, terminals, tasks, guide
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -20,6 +20,7 @@ enum ManageSection: String, CaseIterable, Identifiable {
         case .events: "Events"
         case .alerts: "Alerts"
         case .doctor: "Doctor"
+        case .terminals: "Terminals"
         case .tasks: "Tasks"
         case .guide: "Setup guide"
         }
@@ -39,6 +40,7 @@ enum ManageSection: String, CaseIterable, Identifiable {
         case .events: "list.bullet.rectangle"
         case .alerts: "exclamationmark.triangle"
         case .doctor: "stethoscope"
+        case .terminals: "terminal"
         case .tasks: "checklist"
         case .guide: "book"
         }
@@ -79,6 +81,8 @@ final class ManagementState: ObservableObject {
     @Published var savedPassword: Bool
     @Published var connections: [JSON] = []
     @Published var testingConnection: String?
+    @Published var termTargets: JSON?
+    @Published var termError: String?
 
     private var client: ManagementClient
     private var pollTask: Task<Void, Never>?
@@ -256,6 +260,17 @@ final class ManagementState: ObservableObject {
     func cancelResearch() async {
         guard let id = researchCurrent?["id"].string else { return }
         do { try await client.cancelResearch(id) } catch { self.error = error.localizedDescription }
+    }
+
+    func refreshTerminals() async {
+        do { termTargets = try await client.termTargets(); termError = nil } catch { termError = error.localizedDescription }
+    }
+
+    /// The website's Terminal page for one device, without its sidebar, signed in as this app's session.
+    func terminalPage(target: String, method: String) -> (URL, [HTTPCookie])? {
+        let query = [URLQueryItem(name: "embed", value: "1"), URLQueryItem(name: "term", value: target), URLQueryItem(name: "method", value: method)]
+        guard let url = try? client.pageURL(query: query, fragment: "terminal") else { return nil }
+        return (url, client.sessionCookies())
     }
 
     func refreshPlugins() async {

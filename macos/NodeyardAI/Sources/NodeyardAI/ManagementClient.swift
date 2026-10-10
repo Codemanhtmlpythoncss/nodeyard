@@ -168,6 +168,20 @@ final class ManagementClient {
     }
     func cancelResearch(_ id: String) async throws { _ = try await keyed("POST", "/api/v1/research/cancel", body: ["id": id]) }
     func plugins() async throws -> JSON { try await keyed("GET", "/api/v1/plugins") }
+    func termTargets() async throws -> JSON { try await call("GET", "/api/term/targets") }
+
+    /// A page of the website (for the terminal windows), and this session's sign-in cookie for that page's web view.
+    func pageURL(query: [URLQueryItem], fragment: String) throws -> URL {
+        guard var parts = URLComponents(url: try url("/"), resolvingAgainstBaseURL: false) else { throw NodeyardError.invalidAddress }
+        parts.queryItems = query
+        parts.fragment = fragment
+        guard let result = parts.url else { throw NodeyardError.invalidAddress }
+        return result
+    }
+    func sessionCookies() -> [HTTPCookie] {
+        guard let base = try? url("/") else { return [] }
+        return session.configuration.httpCookieStorage?.cookies(for: base) ?? []
+    }
 
     func lifecycle() async throws -> JSON { try await keyed("GET", "/api/v1/lifecycle") }
     func setLifecycle(enabled: Bool? = nil, idleSeconds: Int? = nil) async throws -> JSON {

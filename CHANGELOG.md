@@ -9,6 +9,13 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Terminals on every device** (Terminal page, node details, and Manage › Terminals in the Mac app): a shell on this
+  server, on every cluster node and on every Tailscale device, several at once in tabs. Node shells (as your user or
+  root) go through a short-lived Kubernetes helper pod, so they work without SSH keys; **Checks** runs read-only
+  diagnostics for a node that keeps dropping out (agent errors, out-of-memory, network links, clock, temperature) and
+  leaves you in a root shell. Tailscale devices and nodes open over SSH from the server, or straight from the Mac
+  (Terminal.app). The password is still asked for every terminal and public access is refused.
+
 - **Plugins** (Settings › Plugins, `/api/plugins`): every tool area with its clients, permissions and a live health
   check; switching one off makes the server refuse its routes and removes its chat skills. **Activity** shows the audit
   log of actions (no request contents or secrets).

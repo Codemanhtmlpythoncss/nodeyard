@@ -43,7 +43,11 @@ Test, manual addresses and reset. Every action uses the dashboard's own API and 
 
 Management needs the dashboard password (the website's sign-in), stored in Keychain only if you tick Remember; the
 session cookie stays in memory. Chat, model status and automatic unloading work with the server API key alone. The
-website's Terminal, Commands and Settings pages are not in the app; use the website for those.
+website's Commands and Settings pages are not in the app; use the website for those.
+
+**Terminals** (Manage › Terminals) lists this server, every cluster node and every Tailscale device. Shell, Root shell
+and Checks open the server's terminal for that device in a window (it asks for the dashboard password once more, like
+the website). SSH from this Mac opens Terminal with `ssh` to the device's Tailscale address, as the user you type.
 
 ## Build only
 

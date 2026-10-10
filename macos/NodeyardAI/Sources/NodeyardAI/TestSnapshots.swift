@@ -34,6 +34,36 @@ enum TestSnapshots {
         NSApp.terminate(nil)
     }
 
+    /// Test mode only: NODEYARD_AI_TERMINAL_SELFTEST=PASSWORD signs in to the test dashboard, opens a terminal
+    /// window's web view for node:… (NODEYARD_AI_TERMINAL_TARGET) and writes whether the page is signed in to
+    /// NODEYARD_AI_SNAPSHOT_DIR/terminal-selftest.txt, then quits.
+    static func runTerminalSelfTestIfRequested(_ app: AppState) async {
+        let env = ProcessInfo.processInfo.environment
+        guard TestMode.isOn, let password = env["NODEYARD_AI_TERMINAL_SELFTEST"], let dir = env["NODEYARD_AI_SNAPSHOT_DIR"] else { return }
+        var out: [String] = []
+        await app.manage.signIn(password: password, remember: false)
+        out.append("signed in: \(app.manage.signedIn)")
+        await app.manage.refreshTerminals()
+        out.append("targets: \(app.manage.termTargets?["targets"].array.count ?? 0) \(app.manage.termError ?? "")")
+        if let (url, cookies) = app.manage.terminalPage(target: env["NODEYARD_AI_TERMINAL_TARGET"] ?? "node:yard-2", method: "root") {
+            out.append("url: \(url.absoluteString)")
+            out.append("cookies: \(cookies.count)")
+            let view = TerminalWebView.make(url: url, cookies: cookies)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+            window.contentView = view
+            for _ in 0..<60 where view.isLoading || view.url == nil { try? await Task.sleep(nanoseconds: 250_000_000) }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            let js = "for (let i = 0; i < 40 && !document.querySelector('.tintent'); i++) await new Promise(r => setTimeout(r, 250)); const r = await fetch('/api/term/info'); return [r.status, location.pathname, !!document.querySelector('.tintent'), !!document.querySelector('#t-pw'), document.documentElement.classList.contains('embed'), location.hash, JSON.stringify((document.querySelector('#content') || document.body).innerText.slice(0, 300))].join(' ');"
+            do {
+                let result = try await view.callAsyncJavaScript(js, contentWorld: .page)
+                out.append("page: \(result.map { "\($0)" } ?? "nil")  (status path intent password-field embed)")
+            } catch { out.append("page: ERROR \(error.localizedDescription)") }
+        } else { out.append("no page URL") }
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try? out.joined(separator: "\n").write(toFile: dir + "/terminal-selftest.txt", atomically: true, encoding: .utf8)
+        NSApp.terminate(nil)
+    }
+
     static func runIfRequested(_ app: AppState) async {
         guard TestMode.isOn, let dir = ProcessInfo.processInfo.environment["NODEYARD_AI_SNAPSHOT_DIR"], !dir.isEmpty else { return }
         let folder = URL(fileURLWithPath: dir, isDirectory: true)
@@ -43,6 +73,7 @@ enum TestSnapshots {
         await app.manage.loadDoctor(fresh: false)
         await app.manage.refreshConnections()
         await app.manage.refreshPlugins()
+        await app.manage.refreshTerminals()
         await app.manage.refreshResearch()
         if let latest = app.manage.researchSessions.first?["id"].string {
             app.manage.openResearch(latest)

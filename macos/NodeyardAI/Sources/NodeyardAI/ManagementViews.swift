@@ -75,6 +75,7 @@ struct ManageDetail: View {
                 case .events: EventsView()
                 case .alerts: AlertsView()
                 case .doctor: DoctorView()
+                case .terminals: TerminalsView()
                 case .tasks: TasksView()
                 case .guide: SetupGuideView()
                 }

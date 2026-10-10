@@ -74,9 +74,13 @@ node really is, look at each layer in turn and write down the time of each drop:
    `sudo k3s kubectl get events -A --field-selector involvedObject.name=debian-1`.
 2. **Network path**: Nodes › Connections shows Wi-Fi/LAN and Tailscale separately. If one path drops at the same times,
    the flap is the network (cable, Wi-Fi, Tailscale), not the machine.
-3. **The machine**: on debian-1, `journalctl -u k3s-agent --since "-1h"` (lease renewal or API timeouts) and
-   `journalctl -k --since "-1h" | grep -i -E "oom|link|nvidia"`. Alerts also say when a pod was OOMKilled, and
-   Hardware shows OOM kills and memory pressure.
+3. **The machine**: in the dashboard, Terminal › debian-1 › **Checks** (or Run checks in the node's details) runs
+   read-only checks on the machine itself: recent boots, the k3s agent's warnings and errors, kernel messages about
+   out-of-memory, network links, disks, GPU and power, memory pressure, disk, addresses, clock sync and temperature,
+   then leaves you in a root shell there. If the node isn't Ready (its kubelet can't start the helper pod), use
+   **SSH** in the same row, over Tailscale. By hand: `journalctl -u k3s-agent --since "-1h"` (lease renewal or API
+   timeouts) and `journalctl -k --since "-1h" | grep -i -E "oom|link|nvidia"`. Alerts also say when a pod was
+   OOMKilled, and Hardware shows OOM kills and memory pressure.
 4. **Load**: a split model's RPC server on a busy or memory-starved node can delay the kubelet's heartbeats. Unload the
    model (AI › Models) for a while: if the flaps stop, give the node a smaller share (`--reserve debian-1=GiB`).
 
