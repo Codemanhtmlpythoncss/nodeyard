@@ -41,6 +41,13 @@ enum TestSnapshots {
         await app.manage.refresh()
         await app.manage.refreshModels(scan: false)
         await app.manage.loadDoctor(fresh: false)
+        await app.manage.refreshConnections()
+        await app.manage.refreshPlugins()
+        await app.manage.refreshResearch()
+        if let latest = app.manage.researchSessions.first?["id"].string {
+            app.manage.openResearch(latest)
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+        }
         rendering = true
         for section in ManageSection.allCases {
             app.manage.section = section
@@ -63,5 +70,13 @@ struct Scrolling<Content: View>: View {
     var body: some View {
         if TestSnapshots.rendering { VStack(alignment: .leading, spacing: 0) { content() }.frame(maxHeight: .infinity, alignment: .top) }
         else { ScrollView { content() } }
+    }
+}
+
+/// HSplitView, except while TestSnapshots renders (an HStack then, for the same reason as Scrolling).
+struct SplitOrStack<Content: View>: View {
+    @ViewBuilder var content: () -> Content
+    var body: some View {
+        if TestSnapshots.rendering { HStack(alignment: .top, spacing: 0) { content() } } else { HSplitView { content() } }
     }
 }

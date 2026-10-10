@@ -3,7 +3,7 @@ import SwiftUI
 
 /// The sections of the website this app mirrors (the website's own sidebar order), plus the setup guide.
 enum ManageSection: String, CaseIterable, Identifiable {
-    case overview, nodes, pods, workloads, network, storage, hardware, models, events, alerts, doctor, tasks, guide
+    case overview, nodes, pods, workloads, network, storage, hardware, models, research, plugins, events, alerts, doctor, tasks, guide
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -15,6 +15,8 @@ enum ManageSection: String, CaseIterable, Identifiable {
         case .storage: "Storage"
         case .hardware: "Hardware"
         case .models: "AI models"
+        case .research: "Research"
+        case .plugins: "Plugins"
         case .events: "Events"
         case .alerts: "Alerts"
         case .doctor: "Doctor"
@@ -32,6 +34,8 @@ enum ManageSection: String, CaseIterable, Identifiable {
         case .storage: "externaldrive"
         case .hardware: "cpu"
         case .models: "sparkles"
+        case .research: "doc.text.magnifyingglass"
+        case .plugins: "puzzlepiece.extension"
         case .events: "list.bullet.rectangle"
         case .alerts: "exclamationmark.triangle"
         case .doctor: "stethoscope"
@@ -209,6 +213,53 @@ final class ManagementState: ObservableObject {
     func updateConnection(_ id: String, _ settings: [String: Any]) async {
         do { _ = try await client.updateConnection(id, settings); info = "Connection settings saved and tested."; await refreshConnections() }
         catch { self.error = error.localizedDescription }
+    }
+
+    // MARK: research (the server's Research Mode, with the API key)
+
+    @Published var researchSessions: [JSON] = []
+    @Published var researchCurrent: JSON?
+    @Published var researchStarting = false
+    @Published var pluginList: [JSON] = []
+    private var researchPoll: Task<Void, Never>?
+
+    func refreshResearch() async {
+        do { researchSessions = try await client.researchList()["sessions"].array } catch { /* older dashboard */ }
+    }
+
+    func openResearch(_ id: String) {
+        researchPoll?.cancel()
+        researchPoll = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                do {
+                    let s = try await self.client.research(id)
+                    self.researchCurrent = s
+                    if ["done", "failed", "cancelled"].contains(s["status"].text) { await self.refreshResearch(); return }
+                } catch { self.error = error.localizedDescription; return }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
+    }
+
+    func startResearch(question: String, target: String, depth: String) async {
+        researchStarting = true
+        defer { researchStarting = false }
+        do {
+            let id = try await client.startResearch(question: question, target: target, depth: depth)
+            researchCurrent = nil
+            openResearch(id)
+            await refreshResearch()
+        } catch { self.error = error.localizedDescription }
+    }
+
+    func cancelResearch() async {
+        guard let id = researchCurrent?["id"].string else { return }
+        do { try await client.cancelResearch(id) } catch { self.error = error.localizedDescription }
+    }
+
+    func refreshPlugins() async {
+        do { pluginList = try await client.plugins()["plugins"].array } catch { self.error = error.localizedDescription }
     }
 
     func loadDoctor(fresh: Bool) async {

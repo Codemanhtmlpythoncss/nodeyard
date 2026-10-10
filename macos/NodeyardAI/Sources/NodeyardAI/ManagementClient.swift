@@ -157,6 +157,18 @@ final class ManagementClient {
         return try await call("POST", "/api/devices/connections", body: body)
     }
 
+    func researchList() async throws -> JSON { try await keyed("GET", "/api/v1/research") }
+    func research(_ id: String) async throws -> JSON {
+        let (status, reply) = try await send(try request("GET", "/api/v1/research", query: [URLQueryItem(name: "id", value: id)], bearer: true))
+        guard let reply, (200..<300).contains(status), reply["ok"].bool != false else { throw ManagementError.http(status, reply?["error"].text ?? "") }
+        return reply
+    }
+    func startResearch(question: String, target: String, depth: String) async throws -> String {
+        try await keyed("POST", "/api/v1/research", body: ["question": question, "target": target, "depth": depth])["id"].text
+    }
+    func cancelResearch(_ id: String) async throws { _ = try await keyed("POST", "/api/v1/research/cancel", body: ["id": id]) }
+    func plugins() async throws -> JSON { try await keyed("GET", "/api/v1/plugins") }
+
     func lifecycle() async throws -> JSON { try await keyed("GET", "/api/v1/lifecycle") }
     func setLifecycle(enabled: Bool? = nil, idleSeconds: Int? = nil) async throws -> JSON {
         var body: [String: Any] = [:]

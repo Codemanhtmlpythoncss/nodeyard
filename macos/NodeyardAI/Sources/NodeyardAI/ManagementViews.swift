@@ -27,7 +27,7 @@ struct ManageSidebar: View {
             Section("Cluster") {
                 ForEach([ManageSection.overview, .nodes, .pods, .workloads, .network, .storage, .hardware]) { item($0) }
             }
-            Section("AI") { item(.models) }
+            Section("AI") { ForEach([ManageSection.models, .research, .plugins]) { item($0) } }
             Section("Health") { ForEach([ManageSection.alerts, .events, .doctor, .tasks]) { item($0) } }
             Section("Help") { item(.guide) }
         }
@@ -57,6 +57,8 @@ struct ManageDetail: View {
     var body: some View {
         Group {
             if mgmt.section == .guide { SetupGuideView() }
+            else if mgmt.section == .research { ResearchView() }
+            else if mgmt.section == .plugins { PluginsView() }
             else if mgmt.authEnabled && !mgmt.signedIn && mgmt.snapshot == nil { SignInPanel() }
             else {
                 switch mgmt.section {
@@ -68,6 +70,8 @@ struct ManageDetail: View {
                 case .storage: StorageView()
                 case .hardware: HardwareView()
                 case .models: ModelsManageView()
+                case .research: ResearchView()
+                case .plugins: PluginsView()
                 case .events: EventsView()
                 case .alerts: AlertsView()
                 case .doctor: DoctorView()
@@ -683,5 +687,192 @@ struct ConnectionCard: View {
     private func pathName(_ p: String) -> String { p == "lan" ? "Wi-Fi/LAN" : p == "tailscale" ? "Tailscale" : p }
     private func statusText(_ s: String) -> String {
         ["both": "both paths", "lan": "Wi-Fi/LAN only", "tailscale": "Tailscale only", "partial": "agent not answering", "unreachable": "unreachable"][s] ?? "unknown"
+    }
+}
+
+/// Research Mode from the Mac: the server plans searches, reads pages and writes a report citing only what it read.
+struct ResearchView: View {
+    @EnvironmentObject private var mgmt: ManagementState
+    @EnvironmentObject private var app: AppState
+    @State private var question = ""
+    @State private var depth = "standard"
+    @State private var target = ""
+
+    var body: some View {
+        SplitOrStack {
+            Scrolling {
+                VStack(alignment: .leading, spacing: 14) {
+                    SectionHeader(title: "Research", subtitle: "Answers from sources that were actually read, with checked citations")
+                    Card("Ask") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            TextField("What do you want to find out?", text: $question, axis: .vertical).lineLimit(2...5).textFieldStyle(.roundedBorder)
+                            HStack {
+                                Picker("Model", selection: $target) {
+                                    if app.readyTargets.isEmpty { Text("No model is ready").tag("") }
+                                    ForEach(app.readyTargets) { t in Text(t.name).tag(t.id) }
+                                }.frame(width: 260)
+                                Picker("Depth", selection: $depth) { Text("Quick").tag("quick"); Text("Standard").tag("standard"); Text("Deep").tag("deep") }.frame(width: 180)
+                                Spacer()
+                                Button(mgmt.researchStarting ? "Starting…" : "Start research") {
+                                    let q = question
+                                    Task { await mgmt.startResearch(question: q, target: target, depth: depth); question = "" }
+                                }.buttonStyle(.borderedProminent).disabled(question.trimmingCharacters(in: .whitespaces).count < 3 || target.isEmpty || mgmt.researchStarting)
+                            }
+                            Text("It runs on your server, so it carries on if you close this window. Big models on CPU nodes take a few minutes to write the report.").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    if let s = mgmt.researchCurrent { session(s) }
+                }.padding(24)
+            }.frame(minWidth: 520)
+            List(mgmt.researchSessions.indices, id: \.self) { i in
+                let item = mgmt.researchSessions[i]
+                Button { mgmt.openResearch(item["id"].text) } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item["question"].text).lineLimit(2)
+                        Text("\(item["status"].text) · \(item["sources"].int ?? 0) sources · \(Format.ago(item["created"].double))").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }.buttonStyle(.plain)
+            }.frame(minWidth: 220, idealWidth: 260, maxWidth: 340)
+        }
+        .task {
+            await mgmt.refreshResearch()
+            if target.isEmpty { target = app.currentChat.flatMap { c in app.readyTargets.first { $0.id == c.modelTarget }?.id } ?? app.readyTargets.first?.id ?? "" }
+        }
+    }
+
+    private func session(_ s: JSON) -> some View { ResearchSessionView(s: s) }
+}
+
+private struct ResearchSessionView: View {
+    @EnvironmentObject private var mgmt: ManagementState
+    let s: JSON
+    private var running: Bool { !["done", "failed", "cancelled"].contains(s["status"].text) }
+    private var statusTone: Color { s["status"].text == "done" ? .green : s["status"].text == "failed" ? .red : .orange }
+    private var readCount: Int { s["sources"].array.filter { $0["status"].text == "read" }.count }
+
+    var body: some View {
+        Card(s["question"].text) {
+            VStack(alignment: .leading, spacing: 10) {
+                header
+                if !s["error"].text.isEmpty { Text(s["error"].text).foregroundStyle(.red).font(.callout) }
+                if !s["citations"].isNull { citationNote }
+                content
+                if !s["sources"].array.isEmpty { Divider(); sources }
+                steps
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack {
+            StatusPill(text: s["status"].text, tone: statusTone)
+            Text("\(readCount) of \(s["sources"].array.count) sources read").font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            if running { Button("Cancel") { Task { await mgmt.cancelResearch() } } }
+        }
+    }
+
+    private var problems: [String] {
+        let c = s["citations"]
+        var out: [String] = []
+        if c["uncited"].bool == true { out.append("the report cites no sources (treat it as unverified)") }
+        let invalid = c["invalid"].array.map { "[" + $0.text + "]" }
+        if !invalid.isEmpty { out.append("cites " + invalid.joined(separator: " ") + ", which match no source") }
+        let unread = c["unread"].array.map { "[" + $0.text + "]" }
+        if !unread.isEmpty { out.append("cites sources that couldn't be read: " + unread.joined(separator: " ")) }
+        return out
+    }
+
+    private var citationNote: some View {
+        let list = problems
+        let text = list.isEmpty ? "Every citation points at a source that was read." : "Citation check: " + list.joined(separator: "; ") + "."
+        return Label(text, systemImage: list.isEmpty ? "checkmark.seal" : "exclamationmark.triangle")
+            .font(.callout).foregroundStyle(list.isEmpty ? Color.green : Color.orange)
+    }
+
+    @ViewBuilder private var content: some View {
+        if !s["report"].text.isEmpty { MarkdownReport(text: s["report"].text) }
+        else if running {
+            HStack { ProgressView().controlSize(.small); Text(s["steps"].array.last?["text"].text ?? "Starting…").foregroundStyle(.secondary) }
+        }
+    }
+
+    private var sources: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Sources").font(.headline)
+            ForEach(s["sources"].array.indices, id: \.self) { i in SourceRow(src: s["sources"][i], fallback: i + 1) }
+        }
+    }
+
+    private var steps: some View {
+        DisclosureGroup("Research steps (\(s["steps"].array.count))") {
+            ForEach(s["steps"].array.indices, id: \.self) { i in
+                let step = s["steps"][i]
+                Text(step["text"].text).font(.caption).foregroundStyle(step["ok"].bool == false ? Color.orange : Color.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+}
+
+private struct SourceRow: View {
+    let src: JSON
+    let fallback: Int
+    private var read: Bool { src["status"].text == "read" }
+    private var label: String { read ? "read" : (src["error"].text.isEmpty ? "search result only" : "couldn't read") }
+    private var detail: String { read ? src["excerpt"].text : (src["error"].text.isEmpty ? src["snippet"].text : "Not read: " + src["error"].text) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("[\(src["n"].int ?? fallback)]").fontWeight(.semibold)
+                if let url = URL(string: src["url"].text) { Link(src["title"].text.ifEmpty(src["url"].text), destination: url) }
+                else { Text(src["title"].text) }
+                StatusPill(text: label, tone: read ? .green : .orange)
+            }
+            Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(4).textSelection(.enabled)
+        }
+    }
+}
+
+private struct MarkdownReport: View {
+    let text: String
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(text.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
+                if line.hasPrefix("## ") { Text(line.dropFirst(3)).font(.headline).padding(.top, 4) }
+                else if line.hasPrefix("# ") { Text(line.dropFirst(2)).font(.title3.bold()) }
+                else if !line.trimmingCharacters(in: .whitespaces).isEmpty {
+                    if let md = try? AttributedString(markdown: line, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) { Text(md).textSelection(.enabled) }
+                    else { Text(line).textSelection(.enabled) }
+                }
+            }
+        }
+    }
+}
+
+/// The server's plugin list: what each tool area does, who uses it, its permission and whether it works now.
+struct PluginsView: View {
+    @EnvironmentObject private var mgmt: ManagementState
+    var body: some View {
+        Scrolling {
+            VStack(alignment: .leading, spacing: 12) {
+                SectionHeader(title: "Plugins", subtitle: "Tool areas the AI can use, and whether they work right now", trailing: AnyView(Button("Refresh") { Task { await mgmt.refreshPlugins() } }))
+                Text("Switch plugins on or off on the website (Settings › Plugins); the server enforces it for every client. The Agent Browser and Use this Mac are set in this app's Settings › AI tools.")
+                    .font(.caption).foregroundStyle(.secondary)
+                ForEach(mgmt.pluginList.indices, id: \.self) { i in
+                    let p = mgmt.pluginList[i]
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack { Text(p["name"].text).fontWeight(.semibold); StatusPill(text: p["enabled"].bool == false ? "off" : p["status"].text, tone: p["status"].text == "ok" ? .green : p["status"].text == "client" ? .blue : p["status"].text == "warn" ? .orange : .secondary) }
+                            Text(p["description"].text).font(.callout).foregroundStyle(.secondary)
+                            Text("Used by: \(p["clients"].array.map(\.text).joined(separator: ", ").ifEmpty("–")) · Permission: \(p["permission"].text)").font(.caption).foregroundStyle(.tertiary)
+                            if !p["detail"].text.isEmpty { Text(p["detail"].text).font(.caption).foregroundStyle(p["status"].text == "warn" || p["status"].text == "unavailable" ? Color.orange : Color.secondary) }
+                        }
+                        Spacer()
+                    }.padding(10).background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+                }
+            }.padding(24)
+        }.task { await mgmt.refreshPlugins() }
     }
 }

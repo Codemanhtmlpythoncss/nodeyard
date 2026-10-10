@@ -36,8 +36,10 @@ Per chat (Chat settings › AI tools) or as defaults (Settings › AI tools):
 The toolbar switches between **Chat** (⌘1), a quick **Models** list (⌘2) and **Manage** (⌘3). Manage mirrors the website:
 Overview, Nodes (with Restart Kubernetes and Reboot every machine), Pods (with logs), Workloads, Network, Storage,
 Hardware, AI models (split model controls, automatic unloading, downloaded models with Run and Delete, Ollama load,
-unload and delete, free up space), Alerts, Events, Doctor (checks and fixes), Tasks (live output, cancel) and the
-in-app **Setup guide**. Every action uses the dashboard's own API and allow-list, and destructive ones ask first.
+unload and delete, free up space), **Research** (the server's Research Mode, with sources and the citation check),
+**Plugins** (what each tool area does and whether it works), Alerts, Events, Doctor (checks and fixes), Tasks (live
+output, cancel) and the in-app **Setup guide**. Nodes also shows each machine's Wi-Fi/LAN and Tailscale connection, with
+Test, manual addresses and reset. Every action uses the dashboard's own API and allow-list, and destructive ones ask first.
 
 Management needs the dashboard password (the website's sign-in), stored in Keychain only if you tick Remember; the
 session cookie stays in memory. Chat, model status and automatic unloading work with the server API key alone. The
