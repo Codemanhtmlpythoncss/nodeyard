@@ -85,3 +85,10 @@ Project plugins (`.yardcode/plugins`) only load after `/trust`.
 `yardcode -p "..." --output-format json|stream-json`, and `yardcode --serve-json` (JSON lines on stdin and stdout: text, tool calls,
 permission requests...). See `src/yardcode/serve.py` for the protocol.
 
+## Research
+
+`/research <topic>` (add `quick` or `deep`) runs the nodeyard server's Research Mode when yardcode is connected to a
+dashboard: it plans searches, reads pages from the server, writes a report citing only what it read, and checks every
+citation. The report and its sources are added to the chat so you can ask about them. Ctrl-C cancels it on the server.
+`/research local <topic>` (or no dashboard) asks the agent to research with its own web tools instead.
+

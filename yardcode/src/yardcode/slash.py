@@ -409,6 +409,75 @@ def c_search(app, arg):
         app.tui.w(S.muted("  Get one with /download owner/repo"))
 
 
+def server_research(app, question, depth):
+    """Research Mode on the nodeyard server (searches, reads pages, writes a report citing only what it read, checks
+    every citation). The report and its sources are added to this chat. Returns False if the server can't do it."""
+    S = app.tui.style
+    try:
+        rid = app.modelapi.research_start(question, "split", depth).get("id", "")
+    except ModelAPIError as e:
+        if e.status in (404, 501) or "turned off" in str(e):
+            app.tui.warn("The server can't run Research Mode (%s); researching here instead." % e)
+            return False
+        app.tui.error(str(e))
+        return True
+    shown, s = 0, {}
+    app.tui.spinner.begin("Researching", "ctrl-c to stop (esc stops watching)")
+    try:
+        while True:
+            try:
+                s = app.modelapi.research(rid)
+            except ModelAPIError as e:
+                app.tui.spinner.end()
+                app.tui.error(str(e))
+                return True
+            steps = s.get("steps") or []
+            for step in steps[shown:]:
+                app.tui.spinner.end()
+                mark = S.ok(S.g("check")) if step.get("ok", True) else S.warn("!")
+                app.tui.w("  %s %s" % (mark, S.muted(step.get("text", ""))))
+                app.tui.spinner.begin("Researching · " + str(s.get("status", "")), "ctrl-c to stop")
+            shown = len(steps)
+            if s.get("status") in ("done", "failed", "cancelled"):
+                break
+            time.sleep(2)
+    except KeyboardInterrupt:
+        app.tui.spinner.end()
+        try:
+            app.modelapi.research_cancel(rid)
+            app.tui.warn("Cancelled the research on the server.")
+        except ModelAPIError as e:
+            app.tui.warn("Stopped watching (%s); it may still run on the server." % e)
+        return True
+    finally:
+        app.tui.spinner.end()
+    if s.get("status") != "done":
+        app.tui.error(s.get("error") or "The research %s." % s.get("status"))
+        return True
+    sources = s.get("sources") or []
+    app.tui.w("")
+    for line in (s.get("report") or "").splitlines():
+        app.tui.w("  " + line)
+    app.tui.w("")
+    app.tui.w(S.accent("  Sources"))
+    for src in sources:
+        state = "read" if src.get("status") == "read" else ("not read: " + src.get("error", "") if src.get("error") else "search result only")
+        app.tui.w("  [%d] %s  %s" % (src.get("n", 0), src.get("title") or src.get("url"), S.muted(src.get("url", "") + " · " + state)))
+    c = s.get("citations") or {}
+    if c.get("uncited") or c.get("invalid") or c.get("unread"):
+        app.tui.warn("Citation check: " + "; ".join(x for x in (
+            "the report cites no sources" if c.get("uncited") else "",
+            ("cites " + " ".join("[%d]" % n for n in c.get("invalid", [])) + ", which match no source") if c.get("invalid") else "",
+            ("cites unread sources " + " ".join("[%d]" % n for n in c.get("unread", []))) if c.get("unread") else "") if x))
+    else:
+        app.tui.w(S.ok("  %s Every citation points at a source that was read." % S.g("check")))
+    listing = "\n".join("[%d] %s %s%s" % (x.get("n", 0), x.get("title") or "", x.get("url", ""), "" if x.get("status") == "read" else " (not read)") for x in sources)
+    app.agent.session.add({"role": "user", "_synthetic": "research",
+                           "content": "[research] Question: %s\n\n%s\n\nSources:\n%s" % (question, s.get("report", ""), listing)})
+    app.tui.w(S.muted("  The report is in this chat now: ask about it."))
+    return True
+
+
 # ---- connection and settings ----------------------------------------------------------------------------------------------
 
 def normalize_base(text):
@@ -831,11 +900,18 @@ def c_commit(app, arg):
             "(imperative subject under 72 characters, then a short body only if needed) and run `git commit`. Don't push." + ((" " + arg) if arg else ""))
 
 
-@cmd("research", "Deep research on a topic: several searches, reading sources, a cited report", group="Workflows", hint="<topic>")
+@cmd("research", "Research a topic: reads sources and writes a cited report (on the server when it can)", group="Workflows", hint="[quick|deep|local] <topic>")
 def c_research(app, arg):
-    if not arg:
-        app.tui.w(app.tui.style.muted("  Usage: /research how does speculative decoding speed up llama.cpp"))
+    words = (arg or "").split()
+    mode = words[0] if words and words[0] in ("quick", "standard", "deep", "local") else ""
+    topic = " ".join(words[1:] if mode else words)
+    if len(topic) < 3:
+        app.tui.w(app.tui.style.muted("  Usage: /research how does speculative decoding speed up llama.cpp   (add quick or deep; local = without the server)"))
         return
+    # The server's Research Mode checks every citation against pages it really read; the local workflow is the fallback.
+    if mode != "local" and app.modelapi.available and server_research(app, topic, mode or "standard"):
+        return
+    arg = topic
     return ("Do thorough research on: %s\n\nProcess: 1) Plan 3-6 distinct search queries covering different angles. 2) Run WebSearch for each. 3) Use WebFetch to read the 3-6 most "
             "relevant and authoritative pages in full (prefer primary sources, official docs and papers; Arxiv and Wikipedia can help). 4) Cross-check claims between sources and note "
             "disagreements or uncertainty. 5) Write a structured report: a short summary first, then sections with the key findings, then caveats, then a numbered list of sources "

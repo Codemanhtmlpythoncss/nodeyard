@@ -9,6 +9,9 @@ The server's API key (one key for every model; the dashboard shows it under Sett
   GET  /search?q=...              search Hugging Face for GGUF models
   GET  /files?repo=owner/name     the GGUF files of a repo, with a "fits" estimate
   GET  /jobs?id=ID&since=N        progress lines of a task
+  POST /research                  {"question", "target", "depth"} -> {"id"}: Research Mode on the server
+  GET  /research?id=ID            its steps, sources, report and citation check
+  POST /research/cancel           {"id"}
 """
 import http.client
 import json
@@ -104,6 +107,15 @@ class ModelAPI:
 
     def files(self, repo):
         return self.request("GET", "/files?" + urllib.parse.urlencode({"repo": repo}), timeout=60)
+
+    def research_start(self, question, target="split", depth="standard"):
+        return self.request("POST", "/research", {"question": question, "target": target, "depth": depth}, timeout=60)
+
+    def research(self, rid):
+        return self.request("GET", "/research?" + urllib.parse.urlencode({"id": rid}))
+
+    def research_cancel(self, rid):
+        return self.request("POST", "/research/cancel", {"id": rid})
 
     def job(self, jid, since=0):
         return self.request("GET", "/jobs?" + urllib.parse.urlencode({"id": jid, "since": since}))

@@ -22,7 +22,8 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 - **Research Mode** (AI › Research, and `/api/v1/research`): plans searches, reads pages from the server, writes a
   report that cites only what was read, checks every citation, and lists every source with when it was read. Sessions
-  run in the background, are saved, can be cancelled, exported as Markdown, or continued in chat.
+  run in the background, are saved, can be cancelled, exported as Markdown, or continued in chat. yardcode's
+  `/research` uses it when connected to a dashboard (`/research local` keeps the agent's own workflow).
 - **Nodeyard AI for macOS** can manage the cluster like the website (Manage, ⌘3) and has an in-app setup guide; see
   `macos/README.md`. `sh scripts/install-macos-ai-app.sh` builds, checks and installs it.
 
