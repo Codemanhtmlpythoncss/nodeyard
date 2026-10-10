@@ -156,6 +156,39 @@ has the same lines (`journalctl -u nodeyard-dashboard | grep lifecycle`). If a m
 Alerts now say when Kubernetes killed it for memory (**OOMKilled**): a model server that restarts reloads the
 model and interrupts answers, so use a smaller context or quant, or spread the model over more nodes.
 
+## Research Mode
+
+The dashboard's AI page has a **Research** tab (also `POST /api/v1/research` with the server API key, for the Mac app and
+scripts). Ask a question, pick the model that writes the report and a depth:
+
+| Depth | Searches | Pages read |
+|---|---|---|
+| Quick | 1 (the question itself) | 3 |
+| Standard | up to 3, planned by the model | 6 |
+| Deep | up to 4, planned by the model | 10 |
+
+It runs on the server, so it keeps going if you close the page, and every session is saved
+(`/var/lib/nodeyard/dashboard/research/`, the last 60). The steps:
+
+1. **Plan**: the model turns the question into a few searches. If it can't, the question itself is searched.
+2. **Search**: from the server's internet connection (the same engines as yardcode's web tools; private network
+   addresses are never fetched). Duplicate pages and more than two pages per site are dropped.
+3. **Read**: the pages are fetched and the paragraphs that match the question are kept, with the time each page was
+   read. Pages that can't be read stay listed as search results with the reason.
+4. **Write**: the model writes the report from those passages only, citing them as [n], in four sections: Answer, Key
+   findings, Where sources disagree, Not verified.
+5. **Check**: every [n] is checked against the sources really read. The report warns when it cites nothing, cites a
+   number that matches no source, or cites a page that couldn't be read. The source list is written by Nodeyard, not by
+   the model, so it never contains made-up links.
+
+Click a citation to open its source and the passage that was read. **Export Markdown** saves the report with its
+sources and citation check; **Discuss in chat** starts a chat that has the report and sources. On a large model on CPU
+nodes, writing the report can take several minutes; the steps list shows what it is doing, and **Cancel** stops it
+(including the model's work).
+
+Limits: research reads public web pages only. It doesn't sign in to sites, fill forms or run JavaScript-heavy pages
+(that needs browser automation). A page behind a cookie wall or paywall usually shows as "couldn't read".
+
 ## Terminal AI agent
 
 [yardcode](../yardcode/README.md) is a coding agent for your terminal that uses this model API (and any OpenAI-compatible one). It can also load models on the cluster: `yardcode models load NAME`. It installs with nodeyard.

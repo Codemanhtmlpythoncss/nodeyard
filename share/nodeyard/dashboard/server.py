@@ -548,6 +548,8 @@ def main():
     if getattr(ctx, "ai", None) is not None:
         import lifecycle
         lifecycle.register(ctx, a)
+        import research
+        research.register(ctx, a)
     import terminal
     terminal.register(ctx, a)
 

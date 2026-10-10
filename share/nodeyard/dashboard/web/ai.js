@@ -430,7 +430,7 @@
   V.ai = {
     build() {
       A.built = null;
-      NY.freshHTML($("#view"), html`<div class="toolbar"><span class="seg" id="ai-tabs" role="tablist">${[["chat", "Chat"], ["models", "Models"], ["search", "Find models"], ["api", "API"]].map(([id, l]) => raw('<button data-ai-tab="' + id + '">' + l + "</button>"))}</span>
+      NY.freshHTML($("#view"), html`<div class="toolbar"><span class="seg" id="ai-tabs" role="tablist">${[["chat", "Chat"], ["research", "Research"], ["models", "Models"], ["search", "Find models"], ["api", "API"]].map(([id, l]) => raw('<button data-ai-tab="' + id + '">' + l + "</button>"))}</span>
         <label class="model-pick"><span>AI model</span><select class="select" id="ai-model" aria-label="AI model: pick the one that runs on your cluster"><option>Loading…</option></select></label><span class="grow"></span><span id="ai-status"></span></div><div id="ai-pane"></div>`);
       loadTargets(true);
       loadDisk();
@@ -445,6 +445,7 @@
     refreshTab();
     if (t === "models") { loadOllama(true); loadDisk(true); loadLifecycle(true); }
     else if (t === "search") { loadDisk(); loadOllama(); }
+    else if (t === "research") loadResearchList();
   }
   function refreshTab() {
     if (S.view !== "ai" || !$("#ai-pane")) return;
@@ -452,6 +453,7 @@
     if (A.tab === "chat") (first ? buildChat : refreshChat)();
     else if (A.tab === "models") renderModels();
     else if (A.tab === "search") (first ? buildSearch : refreshSearch)();
+    else if (A.tab === "research") (first ? buildResearch : refreshResearch)();
     else renderApi();
     A.built = A.tab;
     refreshModelPick();
@@ -1456,6 +1458,91 @@
       (job) => { loadTargets(true); if (job.status === "ok" && old && vals.purge) forgetSavedModel(old); loadDisk(true, true); });
   }
 
+  // ------------------------------------------------------------------ research
+  // Research Mode (research.py): plan searches, read pages, write a report that cites only what was read.
+  // Runs on the server, so it carries on if this page is closed; sessions are listed and can be reopened.
+  A.research = { list: null, cur: null, curId: store.get("ai.research", ""), timer: 0, starting: false };
+  const R_DONE = ["done", "failed", "cancelled"];
+  async function loadResearchList() {
+    try { const r = await getJSON("/api/ai/research"); if (r.ok) A.research.list = r.sessions; } catch (e) { /* offline: keep the old list */ }
+    if (!A.research.cur && A.research.curId) await loadResearch(A.research.curId);
+    if (S.view === "ai" && A.tab === "research") refreshResearch();
+  }
+  async function loadResearch(id) {
+    clearTimeout(A.research.timer);
+    try {
+      const r = await getJSON("/api/ai/research?id=" + encodeURIComponent(id));
+      if (r.ok) { A.research.cur = r; A.research.curId = id; store.set("ai.research", id); }
+      else if (A.research.curId === id) { A.research.cur = null; A.research.curId = ""; store.set("ai.research", ""); }
+    } catch (e) { /* try again on the next tick */ }
+    const cur = A.research.cur;
+    if (cur && cur.id === id && !R_DONE.includes(cur.status)) A.research.timer = setTimeout(() => loadResearch(id), 2000);
+    else if (cur && R_DONE.includes(cur.status)) loadResearchList();
+    if (S.view === "ai" && A.tab === "research") refreshResearch();
+  }
+  function buildResearch() {
+    const ready = targetList().filter((t) => t.ready), c = curChat();
+    const pick = (c && ready.some((t) => t.id === c.target)) ? c.target : (ready[0] || {}).id || "";
+    NY.freshHTML($("#ai-pane"), html`<div class="research">
+      <section class="card"><h3>Research a question</h3>
+        <p class="muted small" style="margin-top:0">Nodeyard searches the web from your server, reads the best pages, and has the model write a report that cites only what it read. Every source is listed with when it was read, and every citation is checked.</p>
+        <textarea class="input" id="rs-q" rows="3" placeholder="e.g. What changed in llama.cpp's RPC backend this year, and does it support GPU offload?" spellcheck="true"></textarea>
+        <div class="row wrap mt" style="gap:8px;align-items:center">
+          <label class="muted small" for="rs-target">Model</label>
+          <select class="select" id="rs-target" aria-label="Model that writes the report"></select>
+          <label class="muted small" for="rs-depth">Depth</label>
+          <select class="select" id="rs-depth"><option value="quick">Quick (1 search, 3 pages)</option><option value="standard" selected>Standard (3 searches, 6 pages)</option><option value="deep">Deep (4 searches, 10 pages)</option></select>
+          <span class="grow"></span><button class="btn primary" data-ai="rs-start">Start research</button>
+        </div></section>
+      <div class="research-body mt"><div id="rs-session"></div><aside id="rs-list" class="card"></aside></div></div>`);
+    fillResearchTargets(pick);
+    refreshResearch();
+    if (!A.research.list) loadResearchList();
+  }
+  // The model menu fills in (and keeps your choice) as the list of ready models arrives or changes.
+  function fillResearchTargets(prefer) {
+    const sel = $("#rs-target"); if (!sel) return;
+    const ready = targetList().filter((t) => t.ready), keep = sel.value || prefer || "";
+    const htmlStr = ready.length ? ready.map((t) => '<option value="' + esc(t.id) + '"' + (t.id === keep ? " selected" : "") + ">" + esc(t.name + (t.kind === "ollama" ? " · " + t.detail.replace(/^Ollama on /, "") : " · split model")) + "</option>").join("")
+      : '<option value="">' + (A.targets ? "No model is ready" : "Loading models…") + "</option>";
+    if (sel.dataset.sig !== htmlStr) { sel.dataset.sig = htmlStr; sel.innerHTML = htmlStr; }
+  }
+  const rsStatus = { planning: ["planning", "warn"], searching: ["searching", "warn"], reading: ["reading pages", "warn"], writing: ["writing", "warn"], done: ["done", "good"], failed: ["failed", "bad"], cancelled: ["cancelled", "warn"] };
+  function refreshResearch() {
+    const list = $("#rs-list"), box = $("#rs-session"); if (!list || !box) return;
+    if (document.activeElement !== $("#rs-target")) fillResearchTargets();
+    const L = A.research.list || [];
+    setHTML(list, html`<h3>Earlier research</h3>${L.length ? L.slice(0, 25).map((x) => html`<button class="rs-item ${x.id === A.research.curId ? "on" : ""}" data-ai="rs-open" data-id="${x.id}"><span>${x.question}</span><span class="faint small">${(rsStatus[x.status] || [x.status])[0]} · ${plural(x.sources, "source")} · ${ago(x.created)} ago</span></button>`) : html`<p class="muted small">Nothing yet.</p>`}`);
+    const s = A.research.cur;
+    if (!s) { setHTML(box, html`<section class="card"><div class="empty"><b>No research open</b><div class="muted small">Ask a question above. It runs on the server, so you can leave this page and come back.</div></div></section>`); return; }
+    const running = !R_DONE.includes(s.status), st = rsStatus[s.status] || [s.status, ""];
+    const read = s.sources.filter((x) => x.status === "read").length, c = s.citations;
+    const reportHTML = s.report ? md(s.report, -1, false).replace(/\[(\d+)\]/g, (m, n) => '<a class="cite" href="#rs-src-' + n + '" data-ai="rs-cite" data-n="' + n + '">[' + n + "]</a>") : "";
+    setHTML(box, html`<section class="card"><h3>${s.question}<span class="right">${chip(st[0], st[1])}</span></h3>
+      <div class="row wrap muted small" style="gap:6px 16px">${s.queries.length ? html`<span>Searches: ${s.queries.join(" · ")}</span>` : ""}<span>${read} of ${plural(s.sources.length, "source")} read</span><span>started ${ago(s.created)} ago</span></div>
+      <div class="row wrap mt" style="gap:8px">${running ? html`<button class="btn danger small" data-ai="rs-cancel">Cancel</button>` : html`<a class="btn small" href="/api/ai/research/export?id=${s.id}" download="research.md">Export Markdown</a><button class="btn small" data-ai="rs-chat">Discuss in chat</button>`}</div>
+      ${s.error ? html`<div class="note bad mt">${s.error}</div>` : ""}
+      ${c && (c.uncited || c.invalid.length || c.unread.length) ? html`<div class="note warn mt"><b>Citation check:</b> ${[c.uncited ? "the report cites no sources, so treat it as unverified" : "", c.invalid.length ? "cites " + c.invalid.map((n) => "[" + n + "]").join(" ") + ", which match no source" : "", c.unread.length ? "cites " + c.unread.map((n) => "[" + n + "]").join(" ") + ", which could not be read (search snippet only)" : ""].filter(Boolean).join("; ")}.</div>` : c ? html`<div class="note good mt">Citation check: every citation points at a source that was read.</div>` : ""}
+      ${reportHTML ? html`<div class="md rs-report mt">${raw(reportHTML)}</div>` : running ? html`<div class="empty"><div class="spin"></div>${(s.steps[s.steps.length - 1] || {}).text || "Starting…"}</div>` : ""}
+      </section>
+      ${s.sources.length ? html`<section class="card mt"><h3>Sources<span class="right muted small">fetched by your server, with the time each was read</span></h3>${s.sources.map((x) => html`<details class="rs-src" id="rs-src-${x.n}" ${x.status === "read" ? "" : ""}><summary><b>[${x.n}]</b> <a href="${x.url}" target="_blank" rel="noopener noreferrer nofollow">${x.title || x.url}</a> ${x.status === "read" ? chip("read " + (x.retrieved_at ? new Date(x.retrieved_at * 1000).toLocaleTimeString() : ""), "good") : x.error ? chip("couldn't read", "bad") : chip("search result only")}<div class="faint small mono">${x.url}</div></summary>
+        ${x.status === "read" ? html`<div class="small rs-excerpt">${x.excerpt}</div>` : html`<div class="small muted">${x.error ? "Not read: " + x.error + ". " : ""}Search snippet: ${x.snippet || "(none)"}</div>`}<div class="faint small">Found by: “${x.query}” (${x.engine})</div></details>`)}</section>` : ""}
+      <section class="card mt"><details ${running ? raw("open") : ""}><summary><b>Research steps</b> <span class="muted small">${plural(s.steps.length, "step")}</span></summary><div class="rs-steps">${s.steps.map((x) => html`<div class="row small" style="gap:8px"><span class="faint">${new Date(x.time * 1000).toLocaleTimeString()}</span>${x.ok === false ? chip("problem", "warn") : ""}<span>${x.text}</span></div>`)}</div></details></section>`);
+  }
+  async function startResearch(btn) {
+    const q = (($("#rs-q") || {}).value || "").trim(), target = ($("#rs-target") || {}).value, depth = ($("#rs-depth") || {}).value || "standard";
+    if (q.length < 3) { toast("Type a question first."); return; }
+    if (!target) { toast("No model is ready: start one on the Models tab."); return; }
+    if (A.research.starting) return;
+    A.research.starting = true; if (btn) { btn.disabled = true; btn.textContent = "Starting…"; }
+    try {
+      const r = await postJSON("/api/ai/research", { question: q, target, depth });
+      if (!r.ok) { toast(r.error || "Couldn't start the research."); return; }
+      $("#rs-q").value = ""; A.research.cur = null; await loadResearch(r.id); loadResearchList();
+    } catch (e) { toast(netError(e, "Couldn't reach the dashboard server.")); }
+    finally { A.research.starting = false; if (btn) { btn.disabled = false; btn.textContent = "Start research"; } }
+  }
+
   // ------------------------------------------------------------------ API examples
   function renderApi() {
     const d = S.d, sp = d.ai && d.ai.split, host = location.hostname, port = sp && (sp.node_port || (sp.gate && sp.gate.port));
@@ -1582,6 +1669,17 @@
     else if (a === "clean") startAIJob(el, "clean", {}, () => loadDisk(true));
     else if (a === "clean-models") { const v = await dialog("Free up space, including models?", html`This also deletes every downloaded model file that isn't running now. The running model stays.`, "Delete them", { danger: true }); if (v) startAIJob(el, "clean", { models: true }, () => loadDisk(true, true)); }
     else if (a === "disk-refresh") { diskRetryCount = 0; loadDisk(true, true); }
+    else if (a === "rs-start") startResearch(el);
+    else if (a === "rs-open") { A.research.cur = null; loadResearch(el.dataset.id); }
+    else if (a === "rs-cancel" && A.research.cur) { try { const r = await postJSON("/api/ai/research/cancel", { id: A.research.cur.id }); if (!r.ok) toast(r.error || "Couldn't cancel."); } catch (err) { toast(netError(err, "Couldn't reach the dashboard server.")); } loadResearch(A.research.cur.id); }
+    else if (a === "rs-cite") { e.preventDefault(); const d = $("#rs-src-" + el.dataset.n); if (d) { d.open = true; d.scrollIntoView({ behavior: "smooth", block: "center" }); } }
+    else if (a === "rs-chat" && A.research.cur) {
+      const s = A.research.cur, t = targetList().find((x) => x.id === s.target && x.ready);
+      newChat(t ? s.target : undefined); const c = curChat();
+      c.messages.push({ role: "user", content: "Here is a research report with its sources. I may ask follow-up questions.\n\nQuestion: " + s.question + "\n\n" + s.report + "\n\nSources:\n" + s.sources.map((x) => "[" + x.n + "] " + (x.title || x.url) + " " + x.url + (x.status === "read" ? "" : " (not read)")).join("\n") },
+        { role: "assistant", content: "Got it. I have the report and its sources. What would you like to know?" });
+      c.title = ("Research: " + s.question).slice(0, 48); saveChats(); selectTab("chat");
+    }
     else if (a === "lc-custom") {
       const minutes = +(($("#lc-custom") || {}).value || 0);
       if (!Number.isInteger(minutes) || minutes < 1 || minutes > 10080) { toast("Enter a whole number of minutes between 1 and 10080 (7 days)."); return; }

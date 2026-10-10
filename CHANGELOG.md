@@ -9,6 +9,12 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Research Mode** (AI › Research, and `/api/v1/research`): plans searches, reads pages from the server, writes a
+  report that cites only what was read, checks every citation, and lists every source with when it was read. Sessions
+  run in the background, are saved, can be cancelled, exported as Markdown, or continued in chat.
+- **Nodeyard AI for macOS** can manage the cluster like the website (Manage, ⌘3) and has an in-app setup guide; see
+  `macos/README.md`. `sh scripts/install-macos-ai-app.sh` builds, checks and installs it.
+
 - **Automatic model unloading** (off by default): Models > Automatic model unloading, the Mac app's Settings and
   `GET/POST /api/v1/lifecycle` share one persisted setting (on/off and an idle time from 1 minute to 7 days). The
   split model is unloaded after that much idle time, measured from llama.cpp's `/slots` so direct clients such as
