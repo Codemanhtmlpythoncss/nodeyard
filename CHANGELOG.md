@@ -9,6 +9,10 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Plugins** (Settings › Plugins, `/api/plugins`): every tool area with its clients, permissions and a live health
+  check; switching one off makes the server refuse its routes and removes its chat skills. **Activity** shows the audit
+  log of actions (no request contents or secrets).
+
 - **Device connections** (Nodes › Connections, and the Mac app): every machine's Wi-Fi/LAN and Tailscale address,
   discovered by the node agents and Kubernetes, checked separately, followed across DHCP and Tailscale changes only
   once the new address answers, with failover and per-device manual addresses.

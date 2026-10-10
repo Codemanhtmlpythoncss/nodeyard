@@ -554,6 +554,8 @@ def main():
         research.register(ctx, a)
     import terminal
     terminal.register(ctx, a)
+    import plugins       # last: it wraps every route above with on/off switches and the audit log
+    plugins.register(ctx, a)
 
     servers = []
     try:

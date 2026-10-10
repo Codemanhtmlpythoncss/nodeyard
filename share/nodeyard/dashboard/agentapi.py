@@ -127,6 +127,9 @@ class Agents:
                 ok, why = False, "yardcode isn't installed next to nodeyard on this server"
             elif code:
                 ok, why = self.code_ok(h)
+            reg = getattr(self.ctx, "plugins", None)
+            if ok and reg is not None and not reg.skill_enabled(pid):
+                ok, why = False, "turned off in Settings › Plugins"
             out.append({"id": pid, "label": label, "desc": desc, "tools": tools, "code": code, "available": ok, "why": why})
         return out
 

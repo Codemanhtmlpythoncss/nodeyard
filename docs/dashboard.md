@@ -307,3 +307,28 @@ uses.
 Limits: addresses come from the node agents; without them only Kubernetes' node address is known. The node agent
 reports IPv4 addresses. Tailscale must be connected on the dashboard's own machine for its Tailscale checks to pass.
 
+## Plugins and the activity log
+
+**Settings › Plugins** lists every tool area the AI and these pages can use: what it does, which clients use it
+(dashboard, Mac app, yardcode), what it is allowed to change, and whether it works right now (a live check: yardcode's
+web tools installed, a model ready for research, the terminal user set, devices answering...). The list is also at
+`GET /api/plugins` (and `/api/v1/plugins` with the API key).
+
+| Plugin | Can be turned off | When off |
+|---|---|---|
+| Web search and page reading | yes | `/api/ai/web` and `/api/v1/web/tool` answer 403; the chat's web skill disappears |
+| Research Mode | yes | research routes answer 403 |
+| Reference tools (Wikipedia, arXiv, weather, calculator, tasks) | yes | those chat skills disappear |
+| Python, files and shell | yes | the Run button and those chat skills stop |
+| Terminal | yes | the Terminal page's routes answer 403 |
+| Device connections | yes | checks stop and its routes answer 403 |
+| Model management, Doctor, Images and OCR | no (core) | |
+| Agent Browser, Use this Mac | in the Mac app | controlled by the app's own settings |
+| Software installation | | not built: install packages on a node yourself |
+
+**Settings › Activity** shows the audit log: every change made through a plugin's routes (model actions, research,
+web tools, device settings, automatic unloading, plugin switches) with the time, the route, who did it (signed-in page,
+API key or public access), a short summary built only from known harmless fields, and the result. Request contents,
+keys, passwords and file contents are never written. The log is `/var/lib/nodeyard/dashboard/audit.jsonl`, rotated at
+5 MB.
+

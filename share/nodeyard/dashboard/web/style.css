@@ -633,3 +633,6 @@ body.term-full .tbox { flex: 1; height: auto; }
 .rs-excerpt { white-space: pre-wrap; margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--accent); background: var(--panel2); border-radius: 6px; }
 .rs-steps { display: grid; gap: 4px; margin-top: 8px; } .note.good { border-color: var(--good); } .note.bad { border-color: var(--bad); color: var(--bad); }
 .guide { display: grid; gap: 14px; max-width: 920px; } .guide p { line-height: 1.55; } .guide .cmd { margin: 6px 0; }
+.plugins { display: grid; gap: 10px; } .plugin { padding: 10px 0; border-top: 1px solid var(--line); } .plugin:first-child { border-top: 0; }
+.plug-toggle { white-space: nowrap; } .warnline { color: var(--warn); }
+.audit { display: grid; gap: 4px; max-height: 360px; overflow: auto; }

@@ -119,6 +119,7 @@ class Connections:
         self.records = self._load()
         self.stop = threading.Event()
         self.thread = None
+        self.active = None        # plugins.py: is device monitoring turned on?
 
     # -- storage ------------------------------------------------------------------------------------------------
 
@@ -336,6 +337,8 @@ class Connections:
         delay = 5
         while not self.stop.wait(delay):
             delay = TICK
+            if self.active is not None and not self.active():
+                continue          # turned off in Settings › Plugins
             try:
                 self.tick()
             except Exception:  # noqa: BLE001 -- one bad round mustn't stop monitoring
