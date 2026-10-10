@@ -274,7 +274,7 @@ def register(ctx, args):
         if tools is not None:
             allowed = aiapi.CHAT_TOOL_NAMES
             if not isinstance(tools, list) or not 1 <= len(tools) <= len(allowed):
-                return h._json({"ok": False, "error": "Send between 1 and 7 supported tools."}, 400)
+                return h._json({"ok": False, "error": "Send between 1 and %d supported tools." % len(allowed)}, 400)
             clean_tools = []
             for item in tools:
                 if not isinstance(item, dict):

@@ -9,6 +9,9 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Agent Browser** in Nodeyard AI for macOS: a private WebKit window the AI can open, read, click and type in (each
+  click and entry approved by you), with console-error capture and snapshots, for interactive sites and website testing.
+
 - **Research Mode** (AI › Research, and `/api/v1/research`): plans searches, reads pages from the server, writes a
   report that cites only what was read, checks every citation, and lists every source with when it was read. Sessions
   run in the background, are saved, can be cancelled, exported as Markdown, or continued in chat.

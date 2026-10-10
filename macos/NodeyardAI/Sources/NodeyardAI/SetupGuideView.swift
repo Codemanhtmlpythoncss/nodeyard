@@ -31,6 +31,9 @@ struct SetupGuideView: View {
         Chat settings › AI tools. Web search uses the Nodeyard server's internet connection and returns page text to the model. "Let AI use this Mac" lets the model read the frontmost app's visible text and, with your approval each time, click a named button, fill the focused text field, press a safe key or open an allowed app. It needs System Settings › Privacy & Security › Accessibility › Nodeyard AI. Password fields are never read or typed into.
         These tools need a model that supports tool calls; the split model (llama.cpp with --jinja) does.
         """),
+        Step(title: "8. The Agent Browser", body: """
+        Chat settings › AI tools › "Let AI use the Agent Browser". The AI can then open pages in a private browser window (Window › Agent Browser, ⇧⌘B), read their text and numbered links, buttons and fields, click, type, go back, read the page's JavaScript errors and take snapshots. Use it for sites that need JavaScript or interaction, and for testing your own sites. It has its own website data, forgets everything when the app quits, and never sees your Safari or Chrome sign-ins. Every click and text entry asks you first; password fields are blocked; only http and https pages open.
+        """),
         Step(title: "Troubleshooting", body: """
         • "HTTP 401: That isn't this server's API key": paste the key again (step 3). If it works with the model but not the dashboard, choose Settings › One shared API key › Use the running model's key on the website.
         • "HTTP 403 … control API is off": the server has no API key yet. Make one on the website (Settings) or with sudo nodeyard ai key --rotate.
@@ -41,7 +44,7 @@ struct SetupGuideView: View {
         • Management says "Sign in": the dashboard password changed or the session ended; sign in again.
         """),
         Step(title: "What is not in the app yet", body: """
-        The website's Terminal, Commands and Settings pages (passwords, keys, public access, background) are not built into the app. Open the dashboard in a browser for those (Manage › Overview › Open the website). Research Mode, the plugin manager and browser automation are tracked in docs/PROGRESS.md in the repository.
+        The website's Terminal, Commands and Settings pages (passwords, keys, public access, background) are not built into the app; open the dashboard in a browser for those. Research Mode runs on the website (AI › Research). The Agent Browser can't use your existing browser's signed-in sessions, by design.
         """),
     ]
 

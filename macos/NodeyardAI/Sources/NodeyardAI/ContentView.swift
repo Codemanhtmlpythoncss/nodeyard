@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var state: AppState
+    @Environment(\.openWindow) private var openWindow
     @State private var showSettings = false
     @State private var showChatSettings = false
 
@@ -62,6 +63,7 @@ struct ContentView: View {
             Button("Cancel", role: .cancel) { state.renameChatID = nil }
         } message: { Text("Choose a short name for this conversation.") }
         .animation(.easeInOut(duration: 0.2), value: state.info)
+        .onChange(of: state.browserRequested) { _ in openWindow(id: "agent-browser") }
     }
 
     private var sidebar: some View {

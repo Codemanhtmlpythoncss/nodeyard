@@ -19,6 +19,18 @@ new one. Settings › About shows the installed version, build number and source
 The app is signed ad hoc, so after an update macOS may ask once more to use the Keychain item and for Accessibility
 access (computer use). Set `NODEYARD_AI_SIGN_IDENTITY` to a certificate you own to keep those permissions across updates.
 
+## AI tools
+
+Per chat (Chat settings › AI tools) or as defaults (Settings › AI tools):
+
+- **Web search and page reading** through the Nodeyard server's internet connection.
+- **Agent Browser** (⇧⌘B): a private WebKit window the AI drives with `page_open`, `page_read` (text plus numbered
+  links, buttons and fields), `page_click`, `page_type`, `page_back`, `page_console` (JavaScript errors) and
+  `page_snapshot`. It has its own non-persistent website data, so it never sees your Safari or Chrome sign-ins, and it
+  forgets everything on quit. Every click and text entry asks you first; password fields and non-web addresses are refused.
+- **Use this Mac** (Accessibility): read the frontmost app's visible text; click, type, press safe keys and open allowed
+  apps, each with your approval.
+
 ## Manage the cluster (website parity)
 
 The toolbar switches between **Chat** (⌘1), a quick **Models** list (⌘2) and **Manage** (⌘3). Manage mirrors the website:

@@ -69,6 +69,9 @@ struct AppSettingsView: View {
                     Toggle("Let AI search the web and read pages", isOn: Binding(get: { state.defaults.browserUse ?? true }, set: { state.defaults.browserUse = $0 }))
                     Text("The model chooses when to search. Requests use the Nodeyard server's web connection and return page text to the model.")
                         .font(.caption).foregroundStyle(.secondary)
+                    Toggle("Let AI use the Agent Browser", isOn: Binding(get: { state.defaults.agentBrowser ?? false }, set: { state.defaults.agentBrowser = $0 }))
+                    Text("A private browser window (⇧⌘B) the AI can open pages in, read, click and type in. It has its own website data, forgets everything when the app quits, and never sees your browser's sign-ins. Each click and text entry asks you first; password fields are blocked.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Toggle("Let AI use this Mac", isOn: Binding(get: { state.defaults.computerUse ?? false }, set: { state.defaults.computerUse = $0 }))
                     Text("Shares visible text from the frontmost app with the selected model. Password values are excluded. Every click, text entry, key press and app launch asks you first.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -118,6 +121,7 @@ struct ChatSettingsView: View {
     @State private var noLimit = false
     @State private var browserUse = true
     @State private var computerUse = false
+    @State private var agentBrowser = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -133,6 +137,7 @@ struct ChatSettingsView: View {
                 }
                 Section("AI tools for this chat") {
                     Toggle("Let AI search the web and read pages", isOn: $browserUse)
+                    Toggle("Let AI use the Agent Browser", isOn: $agentBrowser)
                     Toggle("Let AI use this Mac", isOn: $computerUse)
                     Text("Computer actions need macOS Accessibility access and your approval each time. Password fields are blocked.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -148,13 +153,14 @@ struct ChatSettingsView: View {
             noLimit = chat.maxTokens == 0; contextLength = chat.contextLength
             browserUse = chat.browserUse ?? state.defaults.browserUse ?? true
             computerUse = chat.computerUse ?? state.defaults.computerUse ?? false
+            agentBrowser = chat.agentBrowser ?? state.defaults.agentBrowser ?? false
         }
     }
 
     private func save() {
         state.updateCurrentChat { chat in
             chat.systemPrompt = systemPrompt; chat.temperature = temperature; chat.maxTokens = noLimit ? 0 : maxTokens
-            chat.contextLength = contextLength; chat.browserUse = browserUse; chat.computerUse = computerUse
+            chat.contextLength = contextLength; chat.browserUse = browserUse; chat.computerUse = computerUse; chat.agentBrowser = agentBrowser
         }
         dismiss()
     }

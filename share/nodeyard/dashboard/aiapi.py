@@ -45,7 +45,8 @@ PART_RE = re.compile(r"^(.*)-(\d{5})-of-(\d{5})\.gguf$")
 QUANT_RE = re.compile(r"(?:^|[-_.])((?:UD-)?(?:IQ\d(?:_[A-Z0-9]+)*|Q\d(?:_[A-Z0-9]+)+|Q\d_\d|BF16|F16|F32|MXFP4))(?=[-_.]|$)", re.I)
 CHAT_IMAGE_RE = re.compile(r"^data:image/(jpeg|png|webp);base64,([A-Za-z0-9+/]*={0,2})$")
 CHAT_TOOL_NAMES = frozenset(("browser_search", "browser_open", "computer_read_screen", "computer_click",
-                            "computer_set_text", "computer_press_key", "computer_open_app"))
+                            "computer_set_text", "computer_press_key", "computer_open_app",
+                            "page_open", "page_read", "page_click", "page_type", "page_back", "page_console", "page_snapshot"))
 CHAT_TOOL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 NOT_REACHED_RE = re.compile(r"^\s+([a-z0-9][-a-z0-9.]*): not reached\b")
 

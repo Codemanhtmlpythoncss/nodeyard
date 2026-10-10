@@ -62,6 +62,7 @@ struct ChatRecord: Codable, Identifiable, Hashable {
     var contextLength: Int
     var browserUse: Bool? = nil
     var computerUse: Bool? = nil
+    var agentBrowser: Bool? = nil
     var pinned: Bool = false
     var archived: Bool = false
     var created: Date = Date()
@@ -72,7 +73,7 @@ struct ChatRecord: Codable, Identifiable, Hashable {
         ChatRecord(id: "mac-" + UUID().uuidString.lowercased(), title: "New chat", modelTarget: model?.id ?? "",
                    modelName: model?.name ?? "", systemPrompt: defaults.systemPrompt, temperature: defaults.temperature,
                    maxTokens: defaults.maxTokens, contextLength: defaults.contextLength,
-                   browserUse: defaults.browserUse, computerUse: defaults.computerUse)
+                   browserUse: defaults.browserUse, computerUse: defaults.computerUse, agentBrowser: defaults.agentBrowser)
     }
 }
 
@@ -87,6 +88,7 @@ struct AppDefaults: Codable, Equatable {
     var notifications: Bool = true
     var browserUse: Bool? = true
     var computerUse: Bool? = false
+    var agentBrowser: Bool? = false
 }
 
 struct RemoteChatSummary: Codable, Identifiable {

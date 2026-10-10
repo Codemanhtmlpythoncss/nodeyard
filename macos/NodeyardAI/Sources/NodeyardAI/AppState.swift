@@ -38,6 +38,8 @@ final class AppState: ObservableObject {
     @Published var renameDraft = ""
     @Published var pendingToolApproval: ToolApproval?
     @Published var workspace: Workspace = .chat
+    /// Bumped when the AI starts using the Agent Browser, so the window opens where the user can watch.
+    @Published var browserRequested = 0
     /// How far the model has read the prompt, per answer still waiting for its first token (llama.cpp only).
     @Published var promptProgress: [String: PromptProgress] = [:]
     struct PromptProgress: Equatable { var processed: Int; var total: Int }
@@ -339,6 +341,17 @@ final class AppState: ObservableObject {
             result.append(tool("browser_search", "Search the public web through Nodeyard and return sourced results.", ["query": stringParameter("Search query")], required: ["query"]))
             result.append(tool("browser_open", "Read a public web page as text. Use a URL returned by browser_search.", ["url": stringParameter("Public HTTP or HTTPS URL")], required: ["url"]))
         }
+        if chat.agentBrowser ?? defaults.agentBrowser ?? false {
+            let element: [String: Any] = ["type": "integer", "description": "The element's number from page_read"]
+            result.append(tool("page_open", "Open a web page in the Agent Browser on this Mac (a private window the user can watch). Use it for sites that need JavaScript or interaction; use browser_open for simply reading a public page.", ["url": stringParameter("http or https address")], required: ["url"]))
+            result.append(tool("page_read", "Read the Agent Browser's current page: its text and every link, button and field, numbered for page_click and page_type.", [:], required: []))
+            result.append(tool("page_click", "Click a numbered element from page_read. The user approves each click.", ["element": element], required: ["element"]))
+            result.append(tool("page_type", "Type text into a numbered field from page_read, optionally submitting its form. Password fields are blocked. The user approves each entry.",
+                               ["element": element, "text": stringParameter("Text to enter"), "submit": ["type": "boolean", "description": "Submit the form after typing"]], required: ["element", "text"]))
+            result.append(tool("page_back", "Go back to the previous page in the Agent Browser.", [:], required: []))
+            result.append(tool("page_console", "Read JavaScript errors and warnings the current page has logged (for debugging websites).", [:], required: []))
+            result.append(tool("page_snapshot", "Take a picture of the current page and show it to the user in the Agent Browser window.", [:], required: []))
+        }
         if (chat.computerUse ?? defaults.computerUse ?? false) && MacComputerUse.permissionGranted() {
             result.append(tool("computer_read_screen", "Read visible accessibility text in the frontmost Mac app. Password values are excluded.", [:], required: []))
             result.append(tool("computer_click", "Click one uniquely named button, link, or menu item in the frontmost Mac app. The user must approve each click.", ["label": stringParameter("Exact visible control label")], required: ["label"]))
@@ -371,6 +384,31 @@ final class AppState: ObservableObject {
             case "browser_open":
                 guard let url = args["url"] as? String, !url.isEmpty else { return "Tool error: give me a page URL." }
                 return try await client.runWebTool("WebFetch", arguments: ["url": String(url.prefix(2000)), "max_chars": 12000])
+            case "page_open":
+                guard let url = args["url"] as? String, !url.isEmpty else { return "Tool error: give me a page address." }
+                browserRequested += 1
+                return try await AgentBrowser.shared.navigate(String(url.prefix(2000)))
+            case "page_read":
+                return try await AgentBrowser.shared.read()
+            case "page_click":
+                guard let n = (args["element"] as? Int) ?? Int(args["element"] as? String ?? "") else { return "Tool error: say which element number to click." }
+                let what = try await AgentBrowser.shared.describe(n)
+                guard await requestApproval(title: "Allow a click in the Agent Browser?", detail: "Nodeyard AI wants to click [\(n)] \(what) on \(AgentBrowser.shared.url).") else { return "The user declined this click." }
+                return try await AgentBrowser.shared.click(n)
+            case "page_type":
+                guard let n = (args["element"] as? Int) ?? Int(args["element"] as? String ?? "") else { return "Tool error: say which field number to type into." }
+                let text = String((args["text"] as? String ?? "").prefix(4000)), submit = args["submit"] as? Bool ?? false
+                let what = try await AgentBrowser.shared.describe(n)
+                guard await requestApproval(title: submit ? "Allow typing and submitting?" : "Allow typing in the Agent Browser?",
+                                            detail: "Nodeyard AI wants to type into [\(n)] \(what) on \(AgentBrowser.shared.url)\(submit ? " and submit the form" : ""):\n\n\(text.prefix(300))") else { return "The user declined this text entry." }
+                return try await AgentBrowser.shared.type(n, text: text, submit: submit)
+            case "page_back":
+                return try await AgentBrowser.shared.back()
+            case "page_console":
+                return try await AgentBrowser.shared.consoleMessages()
+            case "page_snapshot":
+                browserRequested += 1
+                return try await AgentBrowser.shared.takeSnapshot()
             case "computer_read_screen":
                 return try MacComputerUse.readFrontmostScreen()
             case "computer_click":
