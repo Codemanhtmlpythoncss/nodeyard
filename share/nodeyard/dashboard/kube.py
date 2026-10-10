@@ -449,6 +449,7 @@ class KubeSource:
             "disk_limit": (meta.get("annotations") or {}).get("nodeyard/disk-limit-gib") or None,
             "roles": roles, "internal_ip": internal, "external_ip": external, "addresses": addrs,
             "os": info.get("osImage", ""), "kernel": info.get("kernelVersion", ""), "arch": info.get("architecture", ""),
+            "machine_id": info.get("machineID", ""), "system_uuid": info.get("systemUUID", ""),
             "runtime": info.get("containerRuntimeVersion", ""), "kubelet": info.get("kubeletVersion", ""),
             "cpu_cores": cpu_cores, "cpu_used": cpu_used, "mem_total": mem_total, "mem_used": mem_used, "memory": memory,
             "pods_running": sum(1 for p in mine if p["status"] == "Running"), "pods_total": len(mine),

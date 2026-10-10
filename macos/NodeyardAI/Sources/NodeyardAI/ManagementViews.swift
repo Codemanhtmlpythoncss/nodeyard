@@ -333,8 +333,14 @@ struct NodesView: View {
                 TableColumn("Disk") { r in Text(Format.percent(r.v["disk_used"].double, of: r.v["disk_total"].double)).monospacedDigit() }.width(55)
                 TableColumn("Temp") { r in Text(r.v["hw"]["temp_c"].double.map { String(format: "%.0f °C", $0) } ?? "–").monospacedDigit() }.width(60)
             }
-            if let node = list.first(where: { $0.id == selection })?.v { NodeDetail(node: node).frame(maxHeight: 260) }
+            if let node = list.first(where: { $0.id == selection })?.v {
+                HStack(alignment: .top, spacing: 12) {
+                    NodeDetail(node: node)
+                    ConnectionCard(record: mgmt.connections.first { $0["name"].text == node["name"].text })
+                }.frame(maxHeight: 280)
+            }
         }.padding(24).confirm($confirm)
+        .task { await mgmt.refreshConnections() }
     }
 }
 
@@ -618,5 +624,64 @@ struct JobSheet: View {
                 Button("Close") { dismiss() }.keyboardShortcut(.defaultAction)
             }
         }.padding(18)
+    }
+}
+
+/// One device's Wi-Fi/LAN and Tailscale paths, as the dashboard monitors them, with a test and the manual addresses.
+struct ConnectionCard: View {
+    @EnvironmentObject private var mgmt: ManagementState
+    let record: JSON?
+    @State private var lanOverride = ""
+    @State private var tailscaleOverride = ""
+    @State private var preference = "auto"
+
+    var body: some View {
+        Card("Connections") {
+            if let r = record {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        StatusPill(text: statusText(r["status"].text), tone: r["status"].text == "both" || r["status"].text == "lan" ? .green : r["status"].text == "unreachable" ? .red : .orange)
+                        Text("Using: \(r["preferred"].string.map(pathName) ?? "none")").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button(mgmt.testingConnection == r["id"].text ? "Testing…" : "Test now") { Task { await mgmt.testConnection(r["id"].text) } }.disabled(mgmt.testingConnection != nil)
+                    }
+                    ForEach(["lan", "tailscale"], id: \.self) { path in
+                        let p = r[path]
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(pathName(path)).frame(width: 80, alignment: .leading).foregroundStyle(.secondary)
+                            Text(p["address"].string.flatMap { $0.isEmpty ? nil : $0 } ?? p["candidate"].text.ifEmpty("–")).monospaced().textSelection(.enabled)
+                            StatusPill(text: p["state"].text.ifEmpty("not checked"), tone: p["state"].text == "reachable" ? .green : p["state"].text == "unreachable" ? .red : .orange)
+                            if let ms = p["ms"].double { Text(String(format: "%.0f ms", ms)).font(.caption2).foregroundStyle(.tertiary) }
+                            if !r["settings"][path + "_override"].text.isEmpty { Text("manual").font(.caption2).foregroundStyle(.blue) }
+                        }
+                        if !p["error"].text.isEmpty && p["state"].text != "reachable" { Text(p["error"].text).font(.caption2).foregroundStyle(.secondary) }
+                    }
+                    Divider()
+                    HStack {
+                        TextField("Wi-Fi/LAN address (automatic)", text: $lanOverride).textFieldStyle(.roundedBorder)
+                        TextField("Tailscale address (automatic)", text: $tailscaleOverride).textFieldStyle(.roundedBorder)
+                        Picker("", selection: $preference) { Text("Automatic").tag("auto"); Text("Prefer Wi-Fi/LAN").tag("lan"); Text("Prefer Tailscale").tag("tailscale") }.frame(width: 150)
+                    }
+                    HStack {
+                        Button("Save and test") { Task { await mgmt.updateConnection(r["id"].text, ["lan_override": lanOverride, "tailscale_override": tailscaleOverride, "preference": preference]) } }
+                        Button("Reset to automatic discovery") { Task { await mgmt.updateConnection(r["id"].text, ["reset": true]) } }
+                    }
+                }
+                .onAppear { load(r) }
+                .onChange(of: r["id"].text) { _ in load(r) }
+            } else {
+                Text("No connection record yet: the dashboard checks each machine within a minute of starting (needs a dashboard from October 2026 or later).").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func load(_ r: JSON) {
+        lanOverride = r["settings"]["lan_override"].text
+        tailscaleOverride = r["settings"]["tailscale_override"].text
+        preference = r["settings"]["preference"].string ?? "auto"
+    }
+    private func pathName(_ p: String) -> String { p == "lan" ? "Wi-Fi/LAN" : p == "tailscale" ? "Tailscale" : p }
+    private func statusText(_ s: String) -> String {
+        ["both": "both paths", "lan": "Wi-Fi/LAN only", "tailscale": "Tailscale only", "partial": "agent not answering", "unreachable": "unreachable"][s] ?? "unknown"
     }
 }

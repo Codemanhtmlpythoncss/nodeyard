@@ -133,7 +133,7 @@ class DemoSource:
             rate_tx = max(1e4, rate_rx * (1.8 if spec["name"] == "yard-3" else 0.6))
             up = t - self.boot
             nodes.append({
-                "name": spec["name"], "ready": True, "status": "Ready", "roles": spec["roles"], "internal_ip": spec["ip"], "external_ip": "",
+                "name": spec["name"], "ready": True, "status": "Ready", "roles": spec["roles"], "internal_ip": spec["ip"], "external_ip": "", "machine_id": "demo-" + spec["name"],
                 "addresses": [{"type": "InternalIP", "address": spec["ip"]}, {"type": "Hostname", "address": spec["name"]}],
                 "os": spec["os"], "kernel": spec["kernel"], "arch": spec["arch"], "runtime": "containerd://2.0.4-k3s1", "kubelet": "v1.32.3+k3s1",
                 "cpu_cores": float(spec["cpu"]), "cpu_used": cpu_used, "mem_total": float(spec["mem"]), "mem_used": mem_used,
@@ -301,7 +301,9 @@ def demo_hardware(node):
                         {"level": 2, "type": "Unified", "size": 524288, "shared": "0"}, {"level": 3, "type": "Unified", "size": 2097152, "shared": "0-3"}]},
                 "memory": {"total": int(node["mem_total"]), "swap": 0}, "board": {"model": "Raspberry Pi 5 Model B Rev 1.0" if name == "yard-1" else "Raspberry Pi 4 Model B Rev 1.4", "board": "", "bios": "", "bios_date": ""},
                 "disks": [{"name": "mmcblk0", "size": 128 * 10 ** 9, "kind": "SD card / eMMC", "model": "SD128", "vendor": "", "removable": False, "scheduler": "mq-deadline"}],
-                "nics": [{"name": "eth0", "wireless": False, "speed_mbps": 1000, "up": True, "mtu": 1500}, {"name": "wlan0", "wireless": True, "speed_mbps": None, "up": True, "mtu": 1500}],
+                "nics": [{"name": "eth0", "ipv4": node["internal_ip"], "cluster": True, "wireless": False, "speed_mbps": 1000, "up": True, "mtu": 1500},
+                         {"name": "wlan0", "ipv4": node["internal_ip"].rsplit(".", 1)[0] + "." + str(100 + int(node["internal_ip"].rsplit(".", 1)[1])), "wireless": True, "speed_mbps": None, "up": True, "mtu": 1500},
+                         {"name": "tailscale0", "ipv4": "100.64.0." + node["internal_ip"].rsplit(".", 1)[1], "wireless": False, "speed_mbps": None, "up": True, "mtu": 1280}],
                 "gpus": [{"bus": "1002000000.v3d", "vendor": "", "device": "", "driver": "v3d", "boot": True, "model": "", "driver_version": "", "vram": None, "name_full": "Broadcom VideoCore VII"}], "kernel": "6.12.47+rpt-rpi-2712"}
     return {"cpu": {"model": "Intel(R) Core(TM) i5-8259U CPU @ 2.30GHz" if name == "yard-3" else "Intel(R) Core(TM) i7-6500U CPU @ 2.50GHz", "core": "", "vendor": "GenuineIntel",
                     "arch": "x86_64", "cores": int(node["cpu_cores"]) // 2, "threads": int(node["cpu_cores"]), "max_mhz": 3800 if name == "yard-3" else 3100, "min_mhz": 400,
@@ -310,7 +312,8 @@ def demo_hardware(node):
             "memory": {"total": int(node["mem_total"]), "swap": 2 * 1024 ** 3}, "board": {"model": "Intel(R) Client Systems NUC8i5BEH", "board": "Intel Corporation NUC8BEB", "bios": "BECFL357.86A.0089", "bios_date": "03/09/2022"},
             "disks": [{"name": "nvme0n1", "size": 512 * 10 ** 9, "kind": "NVMe SSD", "model": "Samsung SSD 970 EVO Plus 500GB", "vendor": "", "removable": False, "scheduler": "none"},
                       {"name": "sda", "size": 2 * 10 ** 12, "kind": "HDD (USB)", "model": "My Passport 2626", "vendor": "WD", "removable": False, "scheduler": "mq-deadline"}],
-            "nics": [{"name": "eno1", "wireless": False, "speed_mbps": 1000, "up": True, "mtu": 1500}, {"name": "tailscale0", "wireless": False, "speed_mbps": None, "up": True, "mtu": 1280}],
+            "nics": [{"name": "eno1", "ipv4": node["internal_ip"], "cluster": True, "wireless": False, "speed_mbps": 1000, "up": True, "mtu": 1500},
+                     {"name": "tailscale0", "ipv4": "100.64.0." + node["internal_ip"].rsplit(".", 1)[1], "wireless": False, "speed_mbps": None, "up": True, "mtu": 1280}],
             "gpus": [{"bus": "0000:00:02.0", "vendor": "0x8086", "device": "0x3ea5", "driver": "i915", "boot": True, "model": "", "driver_version": "", "vram": None},
                      {"bus": "0000:01:00.0", "vendor": "0x10de", "device": "0x1c8c", "driver": "nvidia", "boot": False, "model": "NVIDIA GeForce GTX 1050 Ti", "driver_version": "550.163.01", "vram": None}], "kernel": "6.12.107+deb13-amd64"}
 

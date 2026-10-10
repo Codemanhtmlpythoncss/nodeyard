@@ -9,6 +9,10 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Device connections** (Nodes › Connections, and the Mac app): every machine's Wi-Fi/LAN and Tailscale address,
+  discovered by the node agents and Kubernetes, checked separately, followed across DHCP and Tailscale changes only
+  once the new address answers, with failover and per-device manual addresses.
+
 - **Agent Browser** in Nodeyard AI for macOS: a private WebKit window the AI can open, read, click and type in (each
   click and entry approved by you), with console-error capture and snapshots, for interactive sites and website testing.
 

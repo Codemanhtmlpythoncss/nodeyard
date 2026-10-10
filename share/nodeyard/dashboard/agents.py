@@ -95,6 +95,7 @@ class AgentPoller:
         self.payloads = {}      # node -> full payload
         self.oom_base = {}      # node -> oom_kill count when first seen
         self.installed = False
+        self.fallback = None    # node name -> other verified addresses (connections.py), tried when the pod IP doesn't answer
 
     def _token(self):
         try:
@@ -116,6 +117,20 @@ class AgentPoller:
         finally:
             conn.close()
 
+    def _fetch_any(self, node, ip, token):
+        """The agent through its pod address, else through the node's other verified addresses (e.g. Tailscale)."""
+        data = self._fetch(ip, token)
+        if data is None and self.fallback:
+            try:
+                others = [a for a in self.fallback(node) if a != ip][:2]
+            except Exception:  # noqa: BLE001
+                others = []
+            for other in others:
+                data = self._fetch(other, token)
+                if data is not None:
+                    break
+        return data
+
     def annotate(self, state):
         """Ask every agent pod and add each node's summary as node["hw"]."""
         token = self._token()
@@ -124,7 +139,7 @@ class AgentPoller:
         state["agents"] = {"installed": self.installed, "ready": 0, "pods": len(pods)}
         if not pods or not token:
             return
-        futs = {p["node"]: self.pool.submit(self._fetch, p["ip"], token) for p in pods if p["status"] == "Running" and p["ip"] and p["node"]}
+        futs = {p["node"]: self.pool.submit(self._fetch_any, p["node"], p["ip"], token) for p in pods if p["status"] == "Running" and p["ip"] and p["node"]}
         fresh = {}
         for node, fut in futs.items():
             data = fut.result()

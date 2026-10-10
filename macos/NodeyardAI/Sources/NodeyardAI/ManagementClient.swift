@@ -149,6 +149,14 @@ final class ManagementClient {
     func cancelJob(_ id: String) async throws { _ = try await call("POST", "/api/job/cancel", body: ["id": id]) }
     func ollamaLoad(pod: String, model: String, load: Bool) async throws { _ = try await call("POST", "/api/ai/ollama-load", body: ["pod": pod, "model": model, "load": load]) }
 
+    func connections() async throws -> JSON { try await call("GET", "/api/devices/connections") }
+    func testConnection(_ id: String) async throws -> JSON { try await call("POST", "/api/devices/test", body: ["id": id]) }
+    func updateConnection(_ id: String, _ settings: [String: Any]) async throws -> JSON {
+        var body = settings
+        body["id"] = id
+        return try await call("POST", "/api/devices/connections", body: body)
+    }
+
     func lifecycle() async throws -> JSON { try await keyed("GET", "/api/v1/lifecycle") }
     func setLifecycle(enabled: Bool? = nil, idleSeconds: Int? = nil) async throws -> JSON {
         var body: [String: Any] = [:]

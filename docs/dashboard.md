@@ -279,3 +279,31 @@ By default the AI only delivers a file (a card you can view, copy or download; a
 that as a .py file", "make me a file with…", "download it as a zip". Ordinary requests ("write me a script") stay in the chat as code
 blocks that you can run. Change it per chat in Settings > Files, or with `/files ask`, `/files always` (every script, page and
 document becomes a file) or `/files never`.
+
+## Device connections
+
+The Nodes page has a **Connections** card (also in the Mac app: Manage › Nodes). For every machine it shows the
+Wi-Fi/LAN address and the Tailscale address separately, whether each answers, how fast, and which one the dashboard
+uses.
+
+- **Where addresses come from**: the node agents report every network interface with its address, whether it is
+  wireless, and Tailscale's interface; Kubernetes adds its own node addresses. Devices never register themselves, so
+  nothing on the network can claim to be one of your machines.
+- **Identity**: a device is its machine ID (from Kubernetes), not its name or address. A new DHCP lease, a new
+  Tailscale address or a rename keeps its history and settings.
+- **Checks**: each path is checked on its own, every 60 seconds by default, by connecting to the node agent (port 9093)
+  and the kubelet (port 10250), never by ping. "Agent not answering" means the machine is up but its agent isn't. All
+  checks run in parallel with a 2-second timeout, so an offline machine doesn't slow the others.
+- **Address changes**: a new address is used only once it answers. Until then the last address that worked is kept,
+  shown as "last known good", and the change appears under **Recent connection changes**.
+- **Failover**: with "Automatic", Wi-Fi/LAN is used while it answers and Tailscale otherwise; you can prefer one path,
+  or turn failover off. The dashboard reads a node agent through the other verified address when its usual one fails.
+- **Settings** (per device): automatic discovery, following address changes, failover, monitoring, the check interval
+  and timeout, each path on or off, and a manual address or host name per path. A manual address is never replaced
+  automatically and only shows as working once it answers. **Reset everything to automatic discovery** returns to the
+  defaults.
+- Settings and the last known addresses are kept in `/var/lib/nodeyard/dashboard/devices.json`.
+
+Limits: addresses come from the node agents; without them only Kubernetes' node address is known. The node agent
+reports IPv4 addresses. Tailscale must be connected on the dashboard's own machine for its Tailscale checks to pass.
+

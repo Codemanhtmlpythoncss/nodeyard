@@ -73,6 +73,8 @@ final class ManagementState: ObservableObject {
     @Published var shownJobID: String?
     @Published var info: String?
     @Published var savedPassword: Bool
+    @Published var connections: [JSON] = []
+    @Published var testingConnection: String?
 
     private var client: ManagementClient
     private var pollTask: Task<Void, Never>?
@@ -191,6 +193,22 @@ final class ManagementState: ObservableObject {
             lifecycleError = error.localizedDescription
             await refreshLifecycle()          // show what the server really has, not the value that failed
         }
+    }
+
+    /// Each device's Wi-Fi/LAN and Tailscale connection (the same records as the website's Nodes page).
+    func refreshConnections() async {
+        do { connections = try await client.connections()["devices"].array } catch { /* older dashboard: no connection monitoring */ }
+    }
+
+    func testConnection(_ id: String) async {
+        testingConnection = id
+        defer { testingConnection = nil }
+        do { _ = try await client.testConnection(id); await refreshConnections() } catch { self.error = error.localizedDescription }
+    }
+
+    func updateConnection(_ id: String, _ settings: [String: Any]) async {
+        do { _ = try await client.updateConnection(id, settings); info = "Connection settings saved and tested."; await refreshConnections() }
+        catch { self.error = error.localizedDescription }
     }
 
     func loadDoctor(fresh: Bool) async {
