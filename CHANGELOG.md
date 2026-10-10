@@ -7,6 +7,18 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Answers no longer stop silently half way.** When the model's machine drops out mid-answer (debian-1 has been
+  flapping), the dashboard used to end the stream quietly, so half an answer looked finished. Now every layer notices
+  (the dashboard's chat and API relays, yardcode, the page) and says so, naming the node that dropped out, with a
+  **Continue** button that picks up where it stopped. yardcode never runs a tool call that arrived cut short, and a
+  model that goes silent for 3 minutes after it started writing counts as gone instead of hanging for 15.
+- **AI page (and others) blank or frozen until reload**: if the first data arrived before a page's script had loaded
+  (likely over Tailscale, and the AI page's script is the biggest), drawing failed and live updates never started.
+  The dashboard now starts after every script has loaded and always starts live updates.
+- Numbered lists in answers showed every item as "1." when the model put blank lines between them.
+
 ### Added
 
 - **Terminals on every device** (Terminal page, node details, and Manage › Terminals in the Mac app): a shell on this
@@ -14,7 +26,8 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   root) go through a short-lived Kubernetes helper pod, so they work without SSH keys; **Checks** runs read-only
   diagnostics for a node that keeps dropping out (agent errors, out-of-memory, network links, clock, temperature) and
   leaves you in a root shell. Tailscale devices and nodes open over SSH from the server, or straight from the Mac
-  (Terminal.app). The password is still asked for every terminal and public access is refused.
+  (Terminal.app). The Terminal page opens a shell on the server that serves it by itself; the password is asked
+  again before terminals open (then not for 10 minutes in the same sign-in), and public access is refused.
 
 - **Plugins** (Settings › Plugins, `/api/plugins`): every tool area with its clients, permissions and a live health
   check; switching one off makes the server refuse its routes and removes its chat skills. **Activity** shows the audit

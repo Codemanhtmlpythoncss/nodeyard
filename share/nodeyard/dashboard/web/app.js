@@ -156,9 +156,10 @@
   function closeStream() { if (es) { es.close(); es = null; } }
   async function start() {
     try { const h = await getJSON("/api/history?points=720"); if (h.ok) S.hist = h.points; } catch (e) { /* the chart fills in as data arrives */ }
-    await load();
-    connectStream();
-    schedule();
+    try { await load(); } finally {   // live updates start even if the first drawing failed
+      connectStream();
+      schedule();
+    }
   }
   function schedule() {
     clearTimeout(S.timer);
@@ -888,7 +889,9 @@
     }
     if (!$("#view")) { setHTML(content, html`<div id="banners"></div><div id="view"></div>`); S.built = null; }
     setHTML($("#banners"), banners());
-    const v = V[S.view], keep = $$(".tablewrap").map((el) => [el.scrollLeft, el.scrollTop]), rebuilt = S.built !== S.view;
+    const v = V[S.view];
+    if (!v) { setTimeout(queueRender, 200); return; }   // that page's script hasn't loaded yet
+    const keep = $$(".tablewrap").map((el) => [el.scrollLeft, el.scrollTop]), rebuilt = S.built !== S.view;
     if (rebuilt) { v.build(); S.built = S.view; $("#view").classList.remove("fade"); void $("#view").offsetWidth; $("#view").classList.add("fade"); syncControls(); }
     v.update();
     syncControls();
@@ -1151,5 +1154,8 @@
   if (!location.hash && VIEWS.some((v) => v.id === saved)) S.view = saved;
   applyRoute();
   setInterval(tickStatus, 1000);
-  start().then(() => { if (S.pending) { openDrawer(S.pending, true); S.pending = null; } });
+  // Start once every page's script has run (they load after this one): data that arrived first would otherwise
+  // try to draw a page that doesn't exist yet.
+  const boot = () => start().then(() => { if (S.pending) { openDrawer(S.pending, true); S.pending = null; } });
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot, { once: true }); else boot();
 })();

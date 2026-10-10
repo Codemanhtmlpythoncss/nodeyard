@@ -68,9 +68,10 @@ def pick_answer(text):
 class FakeStream:
     """Looks enough like an HTTP response for the chat relay: readline() gives server-sent-event lines."""
 
-    def __init__(self, text, delay=0.025):
+    def __init__(self, text, delay=0.025, cut_after=None):
         self.chunks = re.findall(r"\S+\s*|\s+", text)
         self.delay = delay
+        self.cut_after = cut_after   # (the demo's "model drops out half way": the stream just ends)
         self.n = 0
         self.pending = []
         self.done = False
@@ -81,6 +82,8 @@ class FakeStream:
             return b""
         if self.pending:
             return self.pending.pop(0)
+        if self.cut_after is not None and self.n >= self.cut_after:
+            return b""
         if self.n < len(self.chunks):
             time.sleep(self.delay)
             piece = self.chunks[self.n]
@@ -142,7 +145,8 @@ class DemoAI:
         last = next((m["content"] for m in reversed(payload["messages"]) if m["role"] == "user"), "")
         # (an attached file is sent as a <file> block after the question: answer the question)
         last = last.split("<file ", 1)[0] or last
-        stream = FakeStream(pick_answer(last))
+        # say "drop out" in the demo to see what happens when the model's machine drops out half way
+        stream = FakeStream(pick_answer(last), cut_after=30 if re.search(r"\bdrop(?:s|ped)? out\b", last, re.I) else None)
         conn = FakeConn(stream)
         self.task += 1
         if self.lifecycle:

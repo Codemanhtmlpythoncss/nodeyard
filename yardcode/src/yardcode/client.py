@@ -16,11 +16,14 @@ import urllib.parse
 from . import net
 
 
+STALL_SECONDS = 180   # once the model is writing, this long with nothing new means the connection is gone
+
+
 class APIError(Exception):
     def __init__(self, message, status=0, kind="error"):
         super().__init__(message)
         self.status = status
-        self.kind = kind     # error | auth | context | tools | loading | connect
+        self.kind = kind     # error | auth | context | tools | loading | connect | cut
 
 
 class Cancelled(Exception):
@@ -412,7 +415,9 @@ class Client:
             if "event-stream" not in ctype:  # a server that ignored stream:true
                 self._take_whole(json.loads(resp.read().decode("utf-8", "replace")), comp, splitter, on_text, on_thinking, on_tool)
             else:
-                self._read_stream(resp, comp, splitter, calls, on_text, on_thinking, on_tool, stop, on_progress)
+                done = self._read_stream(resp, comp, splitter, calls, on_text, on_thinking, on_tool, stop, on_progress, sock=conn.sock)
+                if not done and not comp.finish and not (stop is not None and stop.is_set()):
+                    comp.finish = "cut"   # the stream just ended: the answer (and any tool call) is incomplete
         except (OSError, http.client.HTTPException) as e:
             if stop is not None and stop.is_set():
                 raise Cancelled()
@@ -446,8 +451,10 @@ class Client:
             if on_text:
                 on_text(text)
 
-    def _read_stream(self, resp, comp, splitter, calls, on_text, on_thinking, on_tool, stop, on_progress=None):
+    def _read_stream(self, resp, comp, splitter, calls, on_text, on_thinking, on_tool, stop, on_progress=None, sock=None):
+        """Reads the event stream into comp; True if it ended properly ([DONE])."""
         t0 = time.time()
+        done = False
         while True:
             if stop is not None and stop.is_set():
                 raise Cancelled()
@@ -459,6 +466,7 @@ class Client:
                 continue
             data = line[5:].strip()
             if data == b"[DONE]":
+                done = True
                 break
             try:
                 chunk = json.loads(data)
@@ -466,6 +474,8 @@ class Client:
                 continue
             if "error" in chunk and not chunk.get("choices"):
                 e = chunk["error"]
+                if isinstance(e, dict) and e.get("type") == "incomplete":   # the nodeyard dashboard: the model went away
+                    raise APIError(str(e.get("message") or "The model stopped in the middle of its answer."), 0, "cut")
                 raise self._error(int(e.get("code", 500)) if isinstance(e, dict) and str(e.get("code", "")).isdigit() else 500,
                                   json.dumps(chunk).encode())
             if chunk.get("usage"):
@@ -482,6 +492,11 @@ class Client:
                 delta = ch.get("delta") or {}
                 if comp.first_token is None and (delta.get("content") or delta.get("reasoning_content") or delta.get("tool_calls")):
                     comp.first_token = time.time() - t0
+                    if sock is not None:   # it's writing now: long silence from here on means the connection is gone
+                        try:
+                            sock.settimeout(STALL_SECONDS)
+                        except OSError:
+                            pass
                 r = delta.get("reasoning_content") or delta.get("reasoning")
                 if r:
                     self._emit((True, r), comp, on_text, on_thinking)
@@ -505,6 +520,7 @@ class Client:
         for c in calls.values():
             if not c["id"]:
                 c["id"] = new_call_id()
+        return done
 
     def _take_whole(self, j, comp, splitter, on_text, on_thinking, on_tool):
         ch = (j.get("choices") or [{}])[0]

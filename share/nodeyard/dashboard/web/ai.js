@@ -286,14 +286,16 @@
     if (pending) src = src.replace(/<\/?(?:f|fi|fil|file|fo|fol|fold|folde|folder)?(?:\s[^>\n]*)?$/, "");  // a tag still being written
     const out = []; let inCode = false, lang = "", code = [], list = null, para = [];
     const flushPara = () => { if (para.length) { out.push("<p>" + inline(para.join(" ")) + "</p>"); para = []; } };
-    const flushList = () => { if (list) { out.push("<" + list.t + ">" + list.items.map((x) => "<li>" + inline(x) + "</li>").join("") + "</" + list.t + ">"); list = null; } };
+    // an ordered list keeps the model's own numbers ("2." after a blank line is still item 2, not a new "1.")
+    const flushList = () => { if (list) { out.push("<" + list.t + (list.start > 1 ? ' start="' + list.start + '"' : "") + ">" + list.items.map((x) => "<li>" + inline(x) + "</li>").join("") + "</" + list.t + ">"); list = null; } };
     for (const line of src.replace(/\r/g, "").split("\n")) {
       if (inCode) { if (/^\s*```/.test(line)) { out.push(codeBlock(lang, code.join("\n"), mi, bi++)); inCode = false; code = []; } else code.push(line); continue; }
       let m;
       if ((m = line.match(/^\s*```\s*([\w+#.-]*)/))) { flushPara(); flushList(); inCode = true; lang = m[1]; continue; }
       if ((m = line.match(/^(#{1,4})\s+(.*)$/))) { flushPara(); flushList(); out.push("<h" + (m[1].length + 2) + ">" + inline(m[2]) + "</h" + (m[1].length + 2) + ">"); continue; }
       if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) { flushPara(); if (!list || list.t !== "ul") { flushList(); list = { t: "ul", items: [] }; } list.items.push(m[1]); continue; }
-      if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) { flushPara(); if (!list || list.t !== "ol") { flushList(); list = { t: "ol", items: [] }; } list.items.push(m[1]); continue; }
+      if ((m = line.match(/^\s*(\d+)[.)]\s+(.*)$/))) { flushPara(); if (!list || list.t !== "ol") { flushList(); list = { t: "ol", items: [], start: Math.min(+m[1], 1e6) || 1 }; } list.items.push(m[2]); continue; }
+      if (list && list.items.length && /^\s{2,}\S/.test(line)) { list.items[list.items.length - 1] += " " + line.trim(); continue; }   // the item goes on
       if ((m = line.match(/^>\s?(.*)$/))) { flushPara(); flushList(); out.push("<blockquote>" + inline(m[1]) + "</blockquote>"); continue; }
       if (/^\s*---+\s*$/.test(line)) { flushPara(); flushList(); out.push("<hr>"); continue; }
       if (!line.trim()) { flushPara(); flushList(); continue; }
@@ -726,7 +728,7 @@
     c.messages.push(msg); renderThread(); renderChatList();
     const ctrl = new AbortController(), sid = uid() + uid();
     A.stream = { ctrl, chat: c.id, sid, agent: true }; paintSend();
-    const t0 = performance.now(); let raf = 0, usage = null;
+    const t0 = performance.now(); let raf = 0, usage = null, ended = false;
     const paint = () => { raf = 0; paintLast(); };
     try {
       const r = await fetch("/api/ai/agent", { method: "POST", cache: "no-store", signal: ctrl.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ chat: c.id, target: c.target || "split", text: apiContent(mine), plugins: c.plugins, auto_skills: c.skills_auto !== false, history, max_tokens: c.max_tokens || 0 }) });
@@ -748,12 +750,14 @@
           else if (ev.type === "permission") msg.perm = ev;
           else if (ev.type === "todos") msg.todos = ev.items;
           else if (ev.type === "usage") usage = ev;
-          else if (ev.type === "error") msg.error = ev.text;
+          else if (ev.type === "error") { msg.error = ev.text; if (/stopped in the middle/i.test(ev.text || "")) msg.cut = true; }
           else if (ev.type === "warn" && !msg.content) msg.content = "_" + ev.text + "_";
-          if (ev.type === "done" || ev.type === "exit") break;
+          if (ev.type === "done" || ev.type === "exit") { ended = true; break; }
           if (!raf) raf = requestAnimationFrame(paint);
         }
+        if (ended) break;
       }
+      if (!ended && !ctrl.signal.aborted && !msg.error && (msg.content || msg.tools.length)) { msg.cut = true; msg.error = CUT_TEXT; }
     } catch (e) {
       if (e.name !== "AbortError") msg.error = netError(e, "Something went wrong.");
     } finally {
@@ -1029,6 +1033,7 @@
   const webChips = (m) => m.web && m.web.sources && m.web.sources.length ? '<details class="srcs"><summary>Searched the web · ' + m.web.sources.length + " source" + (m.web.sources.length === 1 ? "" : "s") + "</summary>" +
     m.web.sources.map((x) => '<a href="' + esc(x.url) + '" target="_blank" rel="noopener noreferrer nofollow">' + esc(x.title || x.url) + '</a>').join("") + "</details>" : "";
   // The browser's own wording for a dropped connection ("Failed to fetch", "Load failed", "NetworkError…") means nothing to people.
+  const CUT_TEXT = "The model stopped in the middle of its answer: the connection to it ended before it finished. Press Continue to pick up where it stopped.";
   const netError = (e, fallback) => (e && e.name === "TypeError" && /fetch|network|load failed/i.test(e.message || "")
     ? "The connection to the dashboard dropped before the answer arrived (network or server restart). The model may still be busy; try again in a moment."
     : (e && e.message) || fallback);
@@ -1048,7 +1053,9 @@
   const msgHTML = (m, i, last) => {
     if (m.role === "user") return '<div class="msg user"><div class="bubble">' + esc(m.content || "").replace(/\n/g, "<br>") + webChips(m) + (m.files && m.files.length ? '<div class="att-chips">' + m.files.map((f, k) =>
       '<button class="att" data-ai="att-dl" data-mi="' + i + '" data-fi="' + k + '" title="Download"><svg class="icon"><use href="#i-file"/></svg><span>' + esc(f.name) + '</span><span class="dim">' + fmt.bytes(f.size) + "</span></button>").join("") + "</div>" : "") + "</div></div>";
-    const body = m.error ? (m.content ? md(m.content, i, false) : "") + '<div class="err">' + esc(m.error) + '</div><button class="btn small" data-ai="retry">Try again</button>' : (m.content || m.thinking ? md((m.thinking ? "<think>" + m.thinking + "</think>" : "") + m.content, i, !!m.pending) : m.pending ? waitHTML(m) : '<span class="typing"><i></i><i></i><i></i></span>');
+    const body = m.error ? (m.content ? md(m.content, i, false) : "") + '<div class="err">' + esc(m.error) + "</div>" +
+        (m.cut && m.content && last ? '<button class="btn small primary" data-ai="continue" title="Ask the model to carry on from where it stopped">Continue</button> ' : "") + '<button class="btn small" data-ai="retry">' + (m.cut && m.content ? "Start the answer again" : "Try again") + "</button>"
+      : (m.content || m.thinking ? md((m.thinking ? "<think>" + m.thinking + "</think>" : "") + m.content, i, !!m.pending) + (m.cutNote ? '<div class="faint small">(cut off here; continued below)</div>' : "") : m.pending ? waitHTML(m) : '<span class="typing"><i></i><i></i><i></i></span>');
     const meta = m.meta ? '<div class="meta">' + esc(m.meta) + "</div>" : "";
     const tools = !m.pending && !m.error && m.content ? '<div class="tools"><button data-ai="copy-msg" data-i="' + i + '">Copy</button>' + (last ? '<button data-ai="regen">Regenerate</button>' : "") + "</div>" : "";
     return '<div class="msg assistant" data-i="' + i + '"><div class="avatar">AI</div><div class="bubble">' + toolsHTML(m) + '<div class="md">' + body + (m.pending && m.content ? '<span class="caret"></span>' : "") + "</div>" + meta + tools + "</div></div>";
@@ -1151,7 +1158,7 @@
     A.stream = { ctrl, chat: c.id, sid };
     paintSend();
     const waitTimer = setInterval(() => { if (!msg.content && !msg.thinking && A.cur === c.id) tickWait(msg); }, 1000);
-    const t0 = performance.now(); let first = 0, chunks = 0, timings = null, raf = 0;
+    const t0 = performance.now(); let first = 0, chunks = 0, timings = null, raf = 0, ended = false;
     const paint = () => { raf = 0; paintLast(); };
     try {
       const r = await fetch("/api/ai/chat", { method: "POST", cache: "no-store", signal: ctrl.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ target: c.target, messages: msgs, temperature: c.temperature, max_tokens: noLimit ? 0 : c.max_tokens, stream_id: sid }) });
@@ -1165,9 +1172,10 @@
         while ((nl = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
           if (!line.startsWith("data:")) continue;
-          const payload = line.slice(5).trim(); if (payload === "[DONE]") continue;
+          const payload = line.slice(5).trim(); if (payload === "[DONE]") { ended = true; continue; }
           let j; try { j = JSON.parse(payload); } catch (e) { continue; }
-          if (j.error) throw new Error(typeof j.error === "string" ? j.error : j.error.message || "The model reported an error.");
+          if (j.error) { if (j.error.type === "incomplete") msg.cut = true; throw new Error(typeof j.error === "string" ? j.error : j.error.message || "The model reported an error."); }
+          if (j.choices && j.choices[0] && j.choices[0].finish_reason) ended = true;
           if (j.timings) timings = j.timings;
           if (j.prompt_progress && !msg.content) {   // llama.cpp: how much of the prompt it has read
             const pp = j.prompt_progress;
@@ -1184,6 +1192,8 @@
           }
         }
       }
+      // the stream just ended without the model saying it was done: don't pass half an answer off as whole
+      if (!ended && !ctrl.signal.aborted && (msg.content || msg.thinking)) { msg.cut = true; msg.error = CUT_TEXT; }
     } catch (e) {
       if (e.name !== "AbortError") msg.error = netError(e, "Something went wrong.");
     } finally {
@@ -1636,6 +1646,11 @@
       else toast("That file wasn't kept by this browser. Attach it again to open or analyze it.");
     }
     else if (a === "copy-msg" && c) copyText(c.messages[+el.dataset.i].content);
+    else if (a === "continue" && c && !A.stream) {
+      const m = c.messages[c.messages.length - 1];
+      if (m && m.cut) { m.error = ""; m.cut = false; m.cutNote = true; saveChats(); }   // keep the part it wrote, so the model sees it
+      send("Your last answer was cut off. Continue exactly where it stopped, without repeating what you already wrote.");
+    }
     else if (a === "regen" && c && !A.stream) { while (c.messages.length && c.messages[c.messages.length - 1].role !== "user") c.messages.pop(); send("", true); }
     else if (a === "retry" && c && !A.stream) { while (c.messages.length && c.messages[c.messages.length - 1].role !== "user") c.messages.pop(); send("", true); }
     else if (a === "goto-chat") { newChat(el.dataset.target); selectTab("chat"); }

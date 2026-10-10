@@ -32,6 +32,7 @@ MAX_CHAT_CHARS = 2000000  # text for a whole conversation; inline image bytes ha
 MAX_CHAT_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_CHAT_IMAGES = 8
 MAX_CHAT_BODY_BYTES = 20 * 1024 * 1024
+STALL_SECONDS = 180   # once the model has started writing, this long with nothing new means the connection is gone
 
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._()+=/-]{0,250}\.gguf$")
@@ -143,6 +144,66 @@ def chat_payload_for_target(target, payload):
         converted["messages"].append(item)
     return converted
 SORTS = {"downloads": "downloads", "likes": "likes", "trending": "trendingScore", "recent": "lastModified"}
+
+
+def _finished(data):
+    """Does this stream event end the answer ([DONE], a finish_reason, or an error the client will show)?"""
+    if data == b"[DONE]":
+        return True
+    if b"finish_reason" not in data and b"error" not in data:
+        return False
+    try:
+        j = json.loads(data)
+    except ValueError:
+        return False
+    if not isinstance(j, dict):
+        return False
+    if j.get("error"):
+        return True
+    return any(isinstance(c, dict) and c.get("finish_reason") for c in j.get("choices") or [])
+
+
+def relay_stream(h, conn, resp, why_cut):
+    """Copies the model's event stream to the client (headers already sent). If the model's side ends or goes
+    silent before the answer is finished (no [DONE], no finish_reason), the client gets an error event that says
+    so, instead of a shortened answer that looks complete. Returns "done", "cut", "stopped" or "client-gone"."""
+    finished = writing = False
+    while True:
+        try:
+            line = resp.readline()
+        except (OSError, http.client.HTTPException, ValueError):
+            line = b""
+        if not line:
+            break
+        data = line.strip()
+        if data.startswith(b"data:"):
+            data = data[5:].strip()
+            if _finished(data):
+                finished = True
+            elif not writing and b'"content"' in data:
+                writing = True
+                try:
+                    sock = getattr(conn, "sock", None)
+                    if sock is not None:
+                        sock.settimeout(STALL_SECONDS)
+                except (OSError, AttributeError):
+                    pass
+        try:
+            h.wfile.write(line)
+            h.wfile.flush()
+        except OSError:
+            return "client-gone"
+    if finished:
+        return "done"
+    if getattr(conn, "nodeyard_stopped", False):
+        return "stopped"
+    event = {"error": {"message": why_cut(), "type": "incomplete"}}
+    try:
+        h.wfile.write(b"data: " + json.dumps(event).encode() + b"\n\n")
+        h.wfile.flush()
+    except OSError:
+        return "client-gone"
+    return "cut"
 
 
 class AIError(Exception):
@@ -879,6 +940,24 @@ class Live:
                 return pod["ip"], OLLAMA_PORT, {}, m.group(2)
         raise AIError("Unknown model.", 404)
 
+    def cut_message(self, target):
+        """Why an answer stopped half way, as far as the cluster shows it."""
+        msg = "The model stopped in the middle of its answer: the connection to it ended before it finished"
+        try:
+            state = (self.store.snapshot().get("state") or {})
+            now = time.time()
+            if str(target) == "split":
+                pods = [p for p in state.get("pods") or [] if p.get("namespace") == SPLIT_NS and not str(p.get("name", "")).startswith("llama-gate")]
+            else:
+                pods = [p for p in state.get("pods") or [] if p.get("namespace") == "ai-inference"]
+            hosts = {p.get("node") for p in pods if p.get("node")}
+            shaky = [n["name"] for n in state.get("nodes") or [] if n.get("name") in hosts and (not n.get("ready") or now - (n.get("ready_since") or 0) < 180)]
+            if shaky:
+                msg += " (%s, where it runs, dropped out of the cluster just now)" % ", ".join(sorted(shaky))
+        except Exception:  # noqa: BLE001 -- the message is a hint; never fail the reply over it
+            pass
+        return msg + "."
+
     def open_chat(self, target, payload, on_conn=None):
         lc = self.lifecycle
         token = lc.begin(target) if lc else None
@@ -1225,6 +1304,7 @@ def register(ctx, args):
     streams_lock = threading.Lock()
 
     def cut(conn):
+        conn.nodeyard_stopped = True     # (the relay then doesn't report a cut-off answer)
         try:
             sock = conn.sock
             if sock is not None:
@@ -1298,11 +1378,10 @@ def register(ctx, args):
                     h.send_header(k, v)
                 h.end_headers()
                 h.close_connection = True
-                for line in iter(resp.readline, b""):
-                    h.wfile.write(line)
-                    h.wfile.flush()
+                relay_stream(h, conn, resp, lambda: backend.cut_message(target) if hasattr(backend, "cut_message") else
+                             "The model stopped in the middle of its answer: the connection to it ended before it finished.")
             except (OSError, http.client.HTTPException):
-                pass  # stopped, or the page went away
+                pass  # the page went away
             finally:
                 conn.close()
         finally:

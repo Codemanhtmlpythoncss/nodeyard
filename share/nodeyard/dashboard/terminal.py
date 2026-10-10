@@ -14,8 +14,9 @@ Where a terminal can go:
 Safety rules, all enforced here (not in the page):
   - only over Tailscale or your own network: requests that came in through Tailscale Funnel (the public internet)
     are always refused;
-  - the dashboard password is asked again to open every terminal (a stolen session cookie alone isn't enough), and
-    wrong ones count towards the sign-in lockout;
+  - the dashboard password is asked again before terminals open (a stolen session cookie alone isn't enough), and
+    wrong ones count towards the sign-in lockout; like sudo, it isn't asked again for 10 minutes in the same sign-in
+    session, so the page can open the server's own shell by itself;
   - a terminal belongs to the sign-in session that opened it; idle ones close after 30 minutes, at most 8 are open
     at once and at most 4 of them on cluster nodes.
 
@@ -44,6 +45,7 @@ import connections
 import kube
 
 MAX_SESSIONS = 8
+UNLOCK_SECONDS = 10 * 60   # after the password, more terminals open without it for this long (like sudo), same sign-in only
 MAX_NODE_SESSIONS = 4
 IDLE_SECONDS = 30 * 60
 KEEP_BYTES = 256 * 1024
@@ -343,6 +345,7 @@ class Terminals:
         self.kubeconfig = getattr(args, "kubeconfig", "") or ""
         self.lock = threading.Lock()
         self.sessions = {}
+        self.unlocked = {}   # sign-in token -> until when terminals open without the password
         self.tailnet = (0.0, None, [], "")  # (time, me, peers, error)
         self.tailnet_lock = threading.Lock()
         k3s = _which("/usr/local/bin/k3s", "k3s")
@@ -521,15 +524,19 @@ class Terminals:
         if mode == "ssh" and not USER_RE.match(login):
             raise TermError("That isn't a valid user name.")
         auth = self.ctx.auth
-        if auth is not None:
+        owner = handler._token() or "local"
+        if auth is not None and not self.is_unlocked(owner):
             ip = handler.client_address[0]
             wait = auth.retry_after(ip)
             if wait:
                 raise TermError("Too many wrong passwords. Try again in %d seconds." % wait, 429)
+            if not str(body.get("password", "")):
+                raise TermError("Type the dashboard password to open a terminal.", 401)
             if auth.login(ip, str(body.get("password", ""))[:200]) is None:
                 time.sleep(0.4)
                 raise TermError("That isn't the right password.", 401)
         with self.lock:
+            self.unlocked[owner] = time.time() + UNLOCK_SECONDS
             mine = [s for s in self.sessions.values() if s.alive]
             if len(mine) >= MAX_SESSIONS:
                 raise TermError("%d terminals are open already. Close one first." % MAX_SESSIONS, 429)
@@ -549,9 +556,16 @@ class Terminals:
             who = "root" if mode in ("root", "diagnose") else (login if mode == "ssh" else (self.user or os.environ.get("USER", "")))
             info = {"id": target["id"], "name": target["name"], "kind": target["kind"], "method": mode, "user": who,
                     "address": target.get("address", ""), "how": METHODS[mode]}
-            s = Session(sid, handler._token() or "local", argv, body.get("cols", 100), body.get("rows", 30), info, cleanup)
+            s = Session(sid, owner, argv, body.get("cols", 100), body.get("rows", 30), info, cleanup)
             self.sessions[sid] = s
         return {"id": sid, "user": who, "target": info}
+
+    def is_unlocked(self, owner):
+        with self.lock:
+            until = self.unlocked.get(owner, 0)
+            for k in [k for k, v in self.unlocked.items() if v < time.time()]:
+                self.unlocked.pop(k, None)
+        return until > time.time() and (self.ctx.auth is None or self.ctx.auth.valid(owner))
 
     # -- an open one -----------------------------------------------------------
 
@@ -624,7 +638,8 @@ class Terminals:
         with self.lock:
             mine = [s.describe() for s in self.sessions.values() if s.owner == owner]
         return {"available": ok, "why": why, "user": self.user, "public": handler._forwarded() is not None,
-                "open": sum(1 for m in mine if m["alive"]), "sessions": mine}
+                "open": sum(1 for m in mine if m["alive"]), "sessions": mine,
+                "unlocked": self.ctx.auth is None or self.is_unlocked(owner)}
 
 
 def register(ctx, args):

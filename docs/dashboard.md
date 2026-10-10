@@ -296,9 +296,10 @@ the server), and opens a shell on any of them, several at once in tabs that surv
 Node shells don't need SSH keys, but they need the node's kubelet to start the helper pod (namespace
 `nodeyard-shell`, image `busybox:1.36`): for a node that isn't Ready, use SSH. The helper pod is deleted when the
 terminal closes, any left over are removed when the dashboard starts, and each expires after 12 hours regardless.
-Each node's details also have **Terminal** and **Run checks** buttons. Rules: the dashboard password is asked for
-every terminal, requests through public access are refused, only devices the server found itself can be picked (not
-an arbitrary address), idle terminals close after 30 minutes, and at most 8 are open (4 on cluster nodes).
+Each node's details also have **Terminal** and **Run checks** buttons. The page opens a shell on the server that
+serves it by itself. Rules: the dashboard password is asked again before terminals open, then not for 10 minutes in
+the same sign-in (like sudo), requests through public access are refused, only devices the server found itself can be
+picked (not an arbitrary address), idle terminals close after 30 minutes, and at most 8 are open (4 on cluster nodes).
 
 ## Device connections
 

@@ -313,6 +313,15 @@ class Agent:
             self.session.add_usage(comp)
             self.last_prompt_tokens = comp.prompt_tokens + comp.completion_tokens if comp.prompt_tokens else 0
             content = comp.content
+            if comp.finish == "cut":
+                # the stream ended half way: keep what arrived, but never run a tool call that may be cut short
+                if content.strip():
+                    self.session.add({"role": "assistant", "content": content})
+                    final = content
+                self.fe.end_text()
+                self.fe.error("The model stopped in the middle of its answer: the connection to it ended before it finished. "
+                              "Ask it to continue once it's back.")
+                return final
             calls = list(comp.tool_calls)
             if self.text_mode or (not calls and "<tool_call>" in content):
                 visible, parsed = parse_text_tool_calls(content, set(self.tools))

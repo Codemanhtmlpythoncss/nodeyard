@@ -300,9 +300,8 @@ def register(ctx, args):
                 h.send_header(k, v)
             h.end_headers()
             h.close_connection = True
-            for line in iter(resp.readline, b""):
-                h.wfile.write(line)
-                h.wfile.flush()
+            aiapi.relay_stream(h, conn, resp, lambda: backend.cut_message(target) if hasattr(backend, "cut_message") else
+                               "The model stopped in the middle of its answer: the connection to it ended early.")
         except OSError:
             pass  # A cancelled native-app request closes the upstream connection below.
         finally:

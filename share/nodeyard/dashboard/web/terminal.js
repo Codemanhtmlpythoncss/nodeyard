@@ -219,7 +219,8 @@
     t.dirty = false;
     $("#tscreen").innerHTML = t.scr.map((r, y) => "<div>" + (rowHTML(r, y === t.y && t.cursorOn && s.alive ? t.x : -1) || " ") + "</div>").join("");
     $("#tback").style.display = t.alt ? "none" : "";
-    if (s.stick) { const box = $("#tbox"); box.scrollTop = box.scrollHeight; }
+    // nothing has scrolled off yet: stay at the top (Chrome can report a little phantom overflow here)
+    if (s.stick) { const box = $("#tbox"); box.scrollTop = t.back.length && !t.alt ? box.scrollHeight : 0; }
   }
   let raf = 0;
   const schedule = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; render(); }); setTimeout(() => { if (raf) { cancelAnimationFrame(raf); raf = 0; render(); } }, 60); };
@@ -307,8 +308,9 @@
     let r;
     try { r = await postJSON("/api/term/open", { target: targetId, method, login, password: T.pw, cols: 100, rows: 30 }); } catch (e) { r = { ok: false, error: "The dashboard didn't answer." }; }
     T.busy = "";
-    if (!r.ok) { T.error = (t ? t.name + ": " : "") + (r.error || "Couldn't open a terminal."); if (/password/i.test(r.error || "")) T.pw = ""; paintDevices(); return; }
+    if (!r.ok) { T.error = (t ? t.name + ": " : "") + (r.error || "Couldn't open a terminal."); if (/password/i.test(r.error || "")) { T.pw = ""; if (T.info) T.info.unlocked = false; } paintDevices(); return; }
     T.sess = adopt(r.id, r.user, r.target);
+    if (T.info) T.info.unlocked = true;
     if (T.intent && T.intent.id === targetId) T.intent = null;
     paintPage();
   }
@@ -375,9 +377,10 @@
     const m = t.methods.includes(it.method) ? it.method : t.methods[0];
     if (!m) return html`<p class="dev-note">${t.name}: ${t.note || "can't be opened from here."}</p>`;
     it.method = m;
-    return html`<div class="dev-note tintent"><b>${HOW[m]} on ${t.name}</b> <span class="faint">${TIPS[m] || ""}</span>
+    const unlocked = T.info && T.info.unlocked;
+    return html`<div class="dev-note tintent"><b>${HOW[m]} on ${t.name}${t.kind === "server" ? " (serving this page)" : ""}</b> <span class="faint">${TIPS[m] || ""}</span>
       <div class="row wrap" style="gap:8px;margin-top:8px">${raw('<button class="btn small primary" data-topen="' + NY.esc(t.id) + '" data-method="' + m + '"' + (T.busy ? " disabled" : "") + ">" + (T.busy ? "Opening…" : "Open") + "</button>")}
-      <span class="faint small">Type the dashboard password above, then press Return or Open.</span></div></div>`;
+      <span class="faint small">${unlocked ? "No password needed: you typed it a few minutes ago." : "Type the dashboard password above, then press Return or Open."}</span></div></div>`;
   }
   function paintDevices() {
     const host = $("#tdevices"); if (!host) return;
@@ -387,7 +390,7 @@
     const list = tg.targets || [], nodes = list.filter((t) => t.kind === "node"), net = list.filter((t) => t.kind === "tailnet"), me = list.filter((t) => t.kind === "server");
     const group = (title, items, empty) => html`<div class="tgroup"><div class="tgh">${title}</div>${items.length ? items.map(deviceRow) : html`<div class="faint small" style="padding:8px 2px">${empty}</div>`}</div>`;
     NY.freshHTML(host, card("Open a terminal", html`
-      <form id="t-open" class="row wrap" style="gap:8px;align-items:flex-end;margin-bottom:6px" onsubmit="return false"><label class="field-l grow" style="margin:0">Dashboard password, once more (asked for every terminal)
+      <form id="t-open" class="row wrap" style="gap:8px;align-items:flex-end;margin-bottom:6px" onsubmit="return false"><label class="field-l grow" style="margin:0">Dashboard password, once more (then not again for 10 minutes)
         <input class="input" type="password" id="t-pw" autocomplete="current-password" value="${T.pw}"></label>
         <button class="btn small" type="button" data-term="refresh">Refresh list</button></form>
       ${T.error ? html`<p class="small" style="color:var(--bad);margin:6px 0">${T.error}</p>` : ""}
@@ -437,7 +440,13 @@
       if (T.sess && !T.list.includes(T.sess)) T.sess = null;
       paintPage();
       await loadTargets();
+      // nothing open yet: the machine serving this page comes first, and opens by itself when the password was
+      // typed in the last few minutes (otherwise its password box is ready: type it and press Return)
+      const local = ((T.targets && T.targets.targets) || []).find((x) => x.kind === "server" && x.methods.includes("local"));
+      if (!T.list.length && !T.intent && local) T.intent = { id: local.id, method: "local", auto: true };
+      if (!T.sess && T.list.length) T.sess = T.list.find((x) => !x.done) || null;
       paintPage();
+      if (!T.list.length && T.intent && T.intent.auto && T.info && T.info.unlocked && !T.busy) openTerminal(T.intent.id, T.intent.method);
     },
     update() { if (T.sess) paintBar(); poll(); },
   };
