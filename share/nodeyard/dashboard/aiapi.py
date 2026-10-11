@@ -617,6 +617,9 @@ def build_command(action, p, nodes, key_path):
         verb = "on" if action == "public-on" else "off"
         title = ("Public access on: " if verb == "on" else "Public access off: ") + {"both": "dashboard and model API", "dashboard": "dashboard", "api": "model API"}[what]
         return title, ["public", verb, "--yes"] + flags
+    if action in ("https-on", "https-off"):
+        verb = "on" if action == "https-on" else "off"
+        return ("Secure https:// address on the tailnet: " + verb), ["dashboard", "https", verb, "--yes"]
     if action == "gate-remove":
         return "Remove the model gate", ["ai", "gate", "remove", "--yes"]
     if action == "key-rotate":

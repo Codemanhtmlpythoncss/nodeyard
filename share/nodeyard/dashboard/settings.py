@@ -11,9 +11,12 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
+
+import tsserve
 
 IMAGE_MAX = 8 * 1024 * 1024                     # the picture itself
 BODY_MAX = IMAGE_MAX * 4 // 3 + 64 * 1024       # ... sent as base64 JSON
@@ -181,6 +184,7 @@ class Settings:
             "background": p.get("bg"),
             "chat_defaults": self.chat_defaults(p),
             "public": self.public_state(),
+            "https": {"url": tsserve.https_url(getattr(self.args, "port", 9092) or 9092, max_age=10), "tailscale": bool(shutil.which("tailscale"))},
             "weak_password": self.weak_ok(),
             "nodes": [{"name": n["name"], "disk_limit": n.get("disk_limit")} for n in st.get("nodes", [])],
         }
@@ -527,7 +531,7 @@ def register(ctx, args):
         "/api/settings/background": wrap(lambda h, b: {"background": s.set_background(b)}),
         "/api/settings/background-style": wrap(lambda h, b: {"background": s.background_style(b)}),
         "/api/settings/background-remove": wrap(lambda h, b: s.remove_background()),
-        "/api/settings/public-refresh": wrap(lambda h, b: (s.forget_public(), {"public": s.public_state()})[1]),
+        "/api/settings/public-refresh": wrap(lambda h, b: (s.forget_public(), tsserve.forget(), {"public": s.public_state()})[1]),
     })
     ctx.post_limits["/api/settings/background"] = BODY_MAX
     try:

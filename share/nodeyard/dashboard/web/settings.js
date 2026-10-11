@@ -160,6 +160,7 @@
         ${field("No key needed from (one network per line)", html`<textarea class="input mono" id="st-gate" rows="6" spellcheck="false">${gateNets}</textarea>`)}
         <div class="row wrap" style="gap:8px"><button class="btn primary" data-st="gate-apply" ${s.split ? "" : raw("disabled")}>${s.gate ? "Update the gate" : "Turn the gate on"}</button>${s.gate ? html`<button class="btn danger" data-st="gate-remove">Turn it off</button>` : ""}</div>
         ${s.split ? "" : html`<p class="faint small">Run a split model first.</p>`}`)}
+      ${card("Secure address (https)", httpsCard(s.https))}
       ${card("Public access", publicCard(s.public))}
       ${card("Node agents", html`
         <p class="muted small" style="margin-top:0">${s.agents ? chip("installed", "good") : chip("not installed")} A small read-only helper on every node: processes, CPU clocks, temperatures and memory detail.</p>
@@ -171,6 +172,16 @@
         ${field("Name", html`<input class="input" id="st-name" value="${s.cluster_name}" placeholder="homelab" spellcheck="false">`, "Lowercase letters, digits and dashes. Shown in the sidebar after the dashboard restarts.")}
         <button class="btn" data-st="name-set">Save</button>`)}
       </div>`);
+  }
+  function httpsCard(h) {
+    h = h || {};
+    const here = location.protocol === "https:";
+    return html`<p class="muted small" style="margin-top:0">An <b>https://</b> address for this dashboard that only devices on your tailnet can open, with a real certificate (Tailscale Serve). Browsers only allow the microphone, so <b>voice chat</b>, on https:// pages.</p>
+      ${h.url ? html`<div class="row wrap" style="gap:8px;align-items:center">${chip("on", "good")}<a class="chip btnlike mono" href="${h.url}">${h.url}</a><span class="grow"></span>
+          ${here ? "" : html`<a class="btn small primary" href="${h.url}">Open it</a>`}<button class="btn small danger" data-st="https-off">Turn off</button></div>`
+        : h.tailscale === false ? html`<p class="small" style="color:var(--warn)">Tailscale isn't installed on this server.</p>`
+        : html`<div class="row wrap" style="gap:8px;align-items:center">${chip("off")}<span class="grow"></span><button class="btn small primary" data-st="https-on">Turn on</button></div>
+          <p class="faint small">If it fails, turn on <b>MagicDNS</b> and <b>HTTPS Certificates</b> for your tailnet at login.tailscale.com/admin/dns, then try again.</p>`}`;
   }
   function publicCard(p) {
     if (!p || !p.available) return html`<p class="muted small" style="margin-top:0">Reach the dashboard and model API from anywhere on the internet, without Tailscale on that device (Tailscale Funnel).</p>
@@ -263,6 +274,11 @@
       const what = el.dataset.what, label = what === "api" ? "the model API" : "the dashboard";
       const ok = window.confirm("Make " + label + " reachable from anywhere on the internet?\n\n" + (what === "api" ? "Every request from the internet must carry the server API key." : "Anyone who finds the address sees the sign-in page; the password protects it.") + "\n\nYou can turn it off again here.");
       if (ok) startJob("public-on", { what }, async () => { await post("/api/settings/public-refresh"); loadSettings().then(renderSettings); });
+    } else if (a === "https-on" || a === "https-off") {
+      startJob(a, {}, async () => { await post("/api/settings/public-refresh"); await loadSettings(); renderSettings();
+        const u = T.settings && T.settings.https && T.settings.https.url;
+        if (a === "https-on" && u) toast("The secure address is ready: " + u);
+      });
     } else if (a === "public-off") startJob("public-off", { what: el.dataset.what }, async () => { await post("/api/settings/public-refresh"); loadSettings().then(renderSettings); });
     else if (a === "name-set") startJob("cluster-name", { name: $("#st-name").value.trim() });
     else if (a === "bg-remove") { const r = await post("/api/settings/background-remove"); if (r.ok) { applyBackground(null); loadSettings().then(renderSettings); } }
