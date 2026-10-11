@@ -122,6 +122,9 @@ def state_response(srv, with_agents=False):
     snap = srv.store.snapshot()
     snap.update({"ok": snap["state"] is not None, "version": srv.nd_version, "mode": srv.mode, "auth": srv.auth is not None,
                  "interval": srv.store.interval, "now": time.time(), "host": socket.gethostname()})
+    su = getattr(srv, "selfupdate", None)
+    if su is not None:   # the page reloads itself when this changes, and shows a pending update
+        snap.update({"build": su.build, "update_pending": su.pending_since is not None})
     if with_agents and snap["state"] is not None:
         agents = srv.store.agents
         snap["agents_full"] = {"ok": True, "installed": bool(snap["state"].get("agents", {}).get("installed")),
@@ -554,6 +557,8 @@ def main():
         research.register(ctx, a)
     import terminal
     terminal.register(ctx, a)
+    import selfupdate    # restarts on the new program after an update (the page files are already new)
+    selfupdate.register(ctx, a)
     import plugins       # last: it wraps every route above with on/off switches and the audit log
     plugins.register(ctx, a)
 

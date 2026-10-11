@@ -39,15 +39,17 @@ func renderIcon(pixels: Int, to url: URL) throws {
     context.saveGState()
     context.setShadow(offset: CGSize(width: 0, height: -12), blur: 28, color: NSColor.black.withAlphaComponent(0.28).cgColor)
     context.addPath(tile)
-    context.setFillColor(CGColor(red: 0.3, green: 0.6, blue: 0.95, alpha: 1))
+    context.setFillColor(CGColor(red: 0.16, green: 0.47, blue: 0.82, alpha: 1))
     context.fillPath()
     context.restoreGState()
 
+    // Nodeyard AI's own blue (deeper than the website's periwinkle-to-cyan, which looks purple in the Dock)
     let colors = [
-        CGColor(red: 0.486, green: 0.549, blue: 1, alpha: 1), // website accent #7c8cff
-        CGColor(red: 0.133, green: 0.827, blue: 0.933, alpha: 1), // website accent #22d3ee
+        CGColor(red: 0.36, green: 0.43, blue: 0.96, alpha: 1), // #5C6EF5
+        CGColor(red: 0.16, green: 0.47, blue: 0.82, alpha: 1), // #2978D1
+        CGColor(red: 0.07, green: 0.70, blue: 0.78, alpha: 1), // #12B3C7
     ] as CFArray
-    let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1])!
+    let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 0.54, 1])!
     context.saveGState()
     context.addPath(tile)
     context.clip()

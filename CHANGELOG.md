@@ -9,6 +9,12 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Fixed
 
+- **An update now runs the new dashboard.** `install.sh` and `nodeyard update` replaced the files but left the old
+  program running, so the new page called things it didn't have (the Terminal page said "Couldn't list devices").
+  Updates now restart a running dashboard, and the dashboard notices when its own program changed on disk and
+  restarts on the new version as soon as nothing is in use (a banner offers **Restart now**); the page reloads itself
+  onto the new version. Until then the Terminal page still offers the server's own shell.
+- The Nodeyard AI app icon is blue again.
 - **Answers no longer stop silently half way.** When the model's machine drops out mid-answer (debian-1 has been
   flapping), the dashboard used to end the stream quietly, so half an answer looked finished. Now every layer notices
   (the dashboard's chat and API relays, yardcode, the page) and says so, naming the node that dropped out, with a

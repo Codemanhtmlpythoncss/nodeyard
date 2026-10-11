@@ -84,6 +84,8 @@
     const changed = !S.online || !S.res || S.res.updated !== res.updated || S.res.ok !== res.ok || S.res.error !== res.error || S.res.mode !== res.mode;
     S.online = true;
     S.skew = res.now - Date.now() / 1000;
+    // the server came back on a new program (after an update): load the page that goes with it
+    if (res.build) { if (!S.build) S.build = res.build; else if (res.build !== S.build && !S.reloading) { S.reloading = true; reloadWhenIdle(); } }
     S.res = res;
     if (res.ok && changed) { S.d = res.state; S.t = res.totals; derive(); pushHistory(res); }
     if (res.agents_full && res.agents_full.ok) S.agents = res.agents_full;
@@ -873,8 +875,20 @@
     if (dot.className !== want) dot.className = want;
     if (label.textContent !== text) label.textContent = text;
   }
+  function reloadWhenIdle() {
+    const busy = () => userIsInteracting() || (NY.ai && NY.ai.streaming && NY.ai.streaming());
+    if (!busy()) { location.reload(); return; }
+    toast("The dashboard was updated. The page reloads when you're done here.");
+    const t = setInterval(() => { if (!busy()) { clearInterval(t); location.reload(); } }, 3000);
+  }
+  async function restartDashboard(btn) {
+    if (btn) btn.disabled = true;
+    try { const r = await postJSON("/api/dashboard/restart", {}); toast(r.ok ? "Restarting the dashboard… the page reloads when it's back." : (r.error || "Couldn't restart it.")); }
+    catch (e) { toast("Restarting the dashboard… the page reloads when it's back."); }
+  }
   function banners() {
     const out = [];
+    if (S.res && S.res.update_pending) out.push(html`<div class="banner warn"><svg class="icon"><use href="#i-refresh"/></svg><span>The dashboard was updated and restarts on the new version as soon as nothing is running.</span><button class="btn small" data-restart-dashboard>Restart now</button></div>`);
     if (!S.online) out.push(html`<div class="banner bad"><svg class="icon"><use href="#i-warn"/></svg>Lost contact with the dashboard server. Retrying; the last data stays on screen.</div>`);
     if (S.res && S.res.error) out.push(html`<div class="banner warn"><svg class="icon"><use href="#i-warn"/></svg>The last read of the cluster failed: ${S.res.error}</div>`);
     if (S.res && S.res.mode === "demo") out.push(html`<div class="banner demo"><svg class="icon"><use href="#i-alerts"/></svg>Demo mode: this is a simulated cluster, not yours.</div>`);
@@ -1154,6 +1168,7 @@
   if (!location.hash && VIEWS.some((v) => v.id === saved)) S.view = saved;
   applyRoute();
   setInterval(tickStatus, 1000);
+  document.addEventListener("click", (e) => { const b = e.target.closest("[data-restart-dashboard]"); if (b) restartDashboard(b); });
   // Start once every page's script has run (they load after this one): data that arrived first would otherwise
   // try to draw a page that doesn't exist yet.
   const boot = () => start().then(() => { if (S.pending) { openDrawer(S.pending, true); S.pending = null; } });

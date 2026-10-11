@@ -394,6 +394,7 @@
         <input class="input" type="password" id="t-pw" autocomplete="current-password" value="${T.pw}"></label>
         <button class="btn small" type="button" data-term="refresh">Refresh list</button></form>
       ${T.error ? html`<p class="small" style="color:var(--bad);margin:6px 0">${T.error}</p>` : ""}
+      ${tg.old ? html`<p class="dev-note" style="margin:8px 0">The dashboard program on the server is older than this page (it was updated but hasn't restarted), so only the server's own shell is listed. Open it and run <span class="mono">sudo systemctl restart nodeyard-dashboard</span>, then reload: every node and Tailscale device appears here.</p>` : ""}
       ${intentBox(list)}
       ${group("This server", me, "")}
       ${group("Cluster nodes", nodes, "No nodes yet.")}
@@ -427,7 +428,17 @@
     requestAnimationFrame(() => { render(); fit(); render(); ta.focus({ preventScroll: true }); });
   }
   async function loadTargets() {
-    try { const r = await getJSON("/api/term/targets"); if (r.ok) T.targets = r; else T.error = r.error || "Couldn't list devices."; } catch (e) { T.error = "Couldn't list devices."; }
+    try {
+      const resp = await fetch("/api/term/targets", { cache: "no-store" });
+      if (resp.status === 404) {
+        // an older dashboard program than this page (updated, not restarted yet): it can still open its own shell
+        T.targets = { old: true, user: (T.info && T.info.user) || "", tailnet_error: "", targets: [{ id: "local", name: (S.res && S.res.host) || "this server",
+          kind: "server", online: true, status: "this server", address: "", methods: T.info && T.info.available === false ? [] : ["local"], note: (T.info && T.info.why) || "" }] };
+      } else {
+        const r = await resp.json();
+        if (r.ok) T.targets = r; else T.error = r.error || "Couldn't list devices.";
+      }
+    } catch (e) { T.error = "Couldn't list devices: the dashboard didn't answer."; }
     if (!T.sess) paintDevices();
   }
 

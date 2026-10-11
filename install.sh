@@ -287,6 +287,16 @@ if [[ "$NO_DEPS" -eq 0 && "$DRY_RUN" -eq 0 && "${EUID}" -eq 0 ]]; then
         say "Some required packages could not be installed; run 'sudo nodeyard deps --install' to see why."
 fi
 
+# A running dashboard keeps its old program in memory while serving the new page files, so the page would call
+# things the old program doesn't have: restart it on the new code (without waiting, so an update started from the
+# dashboard's own Terminal page finishes even though that terminal closes with it).
+if [[ "$DRY_RUN" -eq 0 && "${EUID}" -eq 0 ]] && command -v systemctl >/dev/null 2>&1 &&
+    systemctl is-active --quiet nodeyard-dashboard.service 2>/dev/null; then
+    step "Restarting the dashboard on the new version"
+    systemctl --no-block try-restart nodeyard-dashboard.service ||
+        say "Couldn't restart the dashboard; run: sudo systemctl restart nodeyard-dashboard"
+fi
+
 say ""
 if [[ "$DRY_RUN" -eq 1 ]]; then
     say "Dry run: nothing was changed."
