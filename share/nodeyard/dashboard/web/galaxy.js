@@ -195,78 +195,360 @@
   NY.anim = { kinds: Object.keys(ANIMATED), start(canvas, kind) { return ANIMATED[kind] ? ANIMATED[kind](canvas).start() : null; } };
 
   // ---------------------------------------------------------------- the AI Galaxy page
-  const G = { scene: null, poll: 0, prev: null, rate: 0, log: [], last: {}, act: null };
-  const say = (text, tone) => { G.log.unshift({ t: Date.now() / 1000, text, tone }); G.log.length = Math.min(G.log.length, 9); };
-  function nodesFor(d) {
-    const sp = (d && d.ai && d.ai.split) || {}, shares = sp.shares || [], total = shares.reduce((a, s) => a + (s.mib || 0), 0) || 1;
-    return ((d && d.nodes) || []).map((n) => {
-      const mine = shares.filter((s) => s.node.replace(/ GPU$/, "") === n.name), mib = mine.reduce((a, s) => a + (s.mib || 0), 0);
-      return { name: n.name, ready: n.ready, cpu: n.cpu_cores ? (n.cpu_used || 0) / n.cpu_cores : 0, mem: n.mem_total ? (n.mem_used || 0) / n.mem_total : 0,
-        temp: n.hw && n.hw.temp_c, model: mine.length > 0, gpu: mine.some((s) => s.gpu), share: mib / total };
+  // Every machine is a galaxy: its size from its memory, its core from its CPU, its pods as stars (gold AI, blue
+  // system, teal nodeyard, violet apps; dim when stopped, red when failing). Lines run from each machine to the control
+  // plane carrying its measured network traffic: light travels along them in proportion and they flash when it jumps.
+  // The model's own lines (its main server to each machine holding layers) glow gold while it works. Click a galaxy to
+  // fly to it, Tour visits them in turn, and the AI helper box asks the model about the cluster with a live summary.
+  const HUES = [195, 280, 160, 32, 330, 120, 250, 55];
+  const hashStr = (s) => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
+  const prng = (seed) => () => { seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const speed = (b) => (b == null ? "–" : fmt.rate(b));
+  const POD = { ai: "255,200,90", system: "110,170,255", nodeyard: "70,225,205", app: "195,145,255", bad: "255,90,90", wait: "240,210,120", off: "120,130,150" };
+  function podKind(p) {
+    if (/^ai-|^ollama/.test(p.namespace) || /llama|ollama|^rpc-/.test(p.name)) return "ai";
+    if (/^kube-/.test(p.namespace) || /coredns|traefik|metrics|local-path|svclb/.test(p.name)) return "system";
+    if (/^nodeyard/.test(p.namespace)) return "nodeyard";
+    return "app";
+  }
+  function podColor(p) {
+    if (/Error|BackOff|Failed|OOM|Err|Unknown/.test(p.status)) return POD.bad;
+    if (p.status === "Running") return POD[podKind(p)];
+    if (/Succeeded|Completed/.test(p.status)) return POD.off;
+    return POD.wait;
+  }
+  function galaxySprite(name, hue, size) {   // drawn once per machine, then turned and squashed every frame
+    const c = document.createElement("canvas"); c.width = c.height = size;
+    const x = c.getContext("2d"), rand = prng(hashStr(name)), cx = size / 2, R = size * 0.47, arms = 2 + (hashStr(name) % 2);
+    x.globalCompositeOperation = "lighter";
+    for (let i = 0; i < 240; i++) {   // clouds along the arms
+      const r = Math.pow(rand(), 0.6), a = ((i % arms) * TAU) / arms + r * 4.3 + (rand() - 0.5) * 0.7, br = R * (0.05 + 0.1 * (1 - r));
+      const px = cx + Math.cos(a) * r * R, py = cx + Math.sin(a) * r * R, g = x.createRadialGradient(px, py, 0, px, py, br);
+      g.addColorStop(0, "hsla(" + (r < 0.3 ? 40 : hue) + ",70%," + (68 - r * 20) + "%," + 0.09 * (1 - r * 0.5) + ")"); g.addColorStop(1, "hsla(" + hue + ",70%,50%,0)");
+      x.fillStyle = g; x.fillRect(px - br, py - br, br * 2, br * 2);
+    }
+    for (let i = 0; i < 3200; i++) {  // stars
+      const r = Math.pow(rand(), 0.8), spread = 0.1 + (1 - r) * 0.55, a = ((i % arms) * TAU) / arms + r * 4.3 + (rand() - 0.5) * spread * 1.6;
+      const px = cx + Math.cos(a) * r * R + (rand() - 0.5) * R * 0.04, py = cx + Math.sin(a) * r * R + (rand() - 0.5) * R * 0.04;
+      x.fillStyle = "hsla(" + (r < 0.22 ? 42 : hue) + "," + (r < 0.22 ? 85 : 65) + "%," + (90 - r * 35) + "%," + (0.35 + 0.6 * (1 - r)) + ")";
+      const s = rand() < 0.05 ? 1.7 : 0.9; x.fillRect(px, py, s, s);
+    }
+    const g = x.createRadialGradient(cx, cx, 0, cx, cx, R * 0.3);   // the bright middle
+    g.addColorStop(0, "rgba(255,250,235,0.95)"); g.addColorStop(0.18, "rgba(255,220,160,0.55)"); g.addColorStop(0.6, "hsla(" + hue + ",80%,60%,0.12)"); g.addColorStop(1, "rgba(0,0,0,0)");
+    x.fillStyle = g; x.fillRect(0, 0, size, size);
+    return c;
+  }
+
+  class Universe extends Scene {
+    constructor(canvas) {
+      super(canvas, { fps: 30 });
+      this.N = new Map(); this.links = []; this.pulses = []; this.cam = null; this.focus = ""; this.tour = false; this.tourAt = 0;
+      this.ai = { busy: false, reading: false, rate: 0, main: "", label: "" };
+      canvas.addEventListener("click", (e) => { const n = this.hit(e); this.fly(n ? n.name : ""); });
+      canvas.addEventListener("mousemove", (e) => { this.c.style.cursor = this.hit(e) ? "pointer" : "default"; });
+    }
+    reset() { this.neb = null; this.layout(); }
+    toWorld(e) { const r = this.c.getBoundingClientRect(), cam = this.cam || { x: this.w / 2, y: this.h / 2, z: 1 }; return [(e.clientX - r.left - this.w / 2) / cam.z + cam.x, (e.clientY - r.top - this.h / 2) / cam.z + cam.y]; }
+    toScreen(x, y) { const cam = this.cam; return [(x - cam.x) * cam.z + this.w / 2, (y - cam.y) * cam.z + this.h / 2]; }
+    hit(e) { const [x, y] = this.toWorld(e); let best = null; for (const n of this.N.values()) { const d = Math.hypot(x - n.x, (y - n.y) / 0.55); if (d < n.size * 1.1 && (!best || d < best.d)) best = { n, d }; } return best && best.n; }
+    fly(name) { this.focus = name || ""; if (this.onFocus) this.onFocus(this.focus); }
+    set(state) {
+      if (state.ai) Object.assign(this.ai, state.ai);
+      if (!state.nodes) { if (this.on && !this.raf) this.frame(0); return; }   // (only the model's state changed)
+      const seen = new Set();
+      state.nodes.forEach((n) => {
+        let e = this.N.get(n.name);
+        if (!e) { e = { name: n.name, hue: HUES[hashStr(n.name) % HUES.length], rot: rnd(0, TAU), spin: rnd(0.02, 0.04) * (hashStr(n.name) % 2 ? 1 : -1), flash: 0, prev: null, fx: 0, fy: 0 }; this.N.set(n.name, e); }
+        const total = (n.rx || 0) + (n.tx || 0);
+        if (e.prev != null && total > Math.max(20480, e.prev * 1.4)) e.flash = 1;   // its traffic jumped: flash its line
+        e.prev = total;
+        Object.assign(e, n, { pods: (state.pods || []).filter((p) => p.node === n.name).map((p) => Object.assign({ seed: hashStr(p.namespace + "/" + p.name) }, p)) });
+        seen.add(n.name);
+      });
+      for (const k of Array.from(this.N.keys())) if (!seen.has(k)) this.N.delete(k);
+      this.layout();
+      if (this.on && !this.raf) this.frame(0);
+    }
+    layout() {
+      const list = Array.from(this.N.values()); if (!list.length) return;
+      // fit inside the free space: clear of the cards down both sides (250 px, 196 on smaller screens, none on
+      // phones), the clock and headline at the top and the AI helper at the bottom
+      const sp = this.space ? this.space() : null;   // measured from the panels when the page provides it
+      const side = sp ? sp.side : this.w > 1180 ? 282 : this.w > 820 ? 228 : 12, top = sp ? sp.top : 112, bottom = sp ? sp.bottom : this.w > 820 ? 196 : 170;
+      const uw = Math.max(220, this.w - side * 2), uh = Math.max(160, this.h - top - bottom), cx = this.w / 2, cy = top + uh / 2;
+      const maxMem = Math.max(1, ...list.map((n) => n.memTotal || 1)), base = Math.min(uw * 0.75, uh * 1.4) * (list.length > 6 ? 0.1 : 0.13);
+      const hub = list.find((n) => n.hub) || list[0], rest = list.filter((n) => n !== hub);
+      list.forEach((n) => { n.size = base * (0.7 + 0.45 * ((n.memTotal || 1) / maxMem)) * (n === hub ? 1.12 : 1); });
+      const big = Math.max(...list.map((n) => n.size)), rx = Math.max(uw * 0.16, uw / 2 - big * 1.2), ry = Math.max(uh * 0.12, uh / 2 - big * 0.7 - 22);
+      hub.x = cx; hub.y = cy;
+      rest.forEach((n, i) => { const a = -Math.PI * 0.75 + (i * TAU) / Math.max(1, rest.length); n.x = cx + Math.cos(a) * rx; n.y = cy + Math.sin(a) * ry; });
+      const keep = new Map(this.links.map((l) => [l.key, l]));
+      this.links = rest.map((n) => Object.assign(keep.get("net:" + n.name) || { acc: 0 }, { a: hub, b: n, kind: "net", key: "net:" + n.name, bend: 1 }));
+      const main = list.find((n) => n.main);
+      if (main) list.filter((n) => n.model && n !== main).forEach((n) => this.links.push(Object.assign(keep.get("model:" + n.name) || { acc: 0 }, { a: main, b: n, kind: "model", key: "model:" + n.name, bend: -1 })));
+    }
+    curve(l) {   // a gentle arc between two galaxies
+      const ax = l.a.x, ay = l.a.y, bx = l.b.x, by = l.b.y, mx = (ax + bx) / 2, my = (ay + by) / 2, dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1;
+      return [ax, ay, mx - (dy / len) * len * 0.12 * l.bend, my + (dx / len) * len * 0.12 * l.bend, bx, by];
+    }
+    at(c, u) { const v = 1 - u; return [v * v * c[0] + 2 * v * u * c[2] + u * u * c[4], v * v * c[1] + 2 * v * u * c[3] + u * u * c[5]]; }
+    frame(dt) {
+      const ctx = this.ctx, list = Array.from(this.N.values()), ai = this.ai;
+      // the camera: the whole estate, or flown to one galaxy
+      if (this.tour && this.t - this.tourAt > 9 && list.length) { this.tourAt = this.t; const order = [""].concat(list.map((n) => n.name)); this.fly(order[(order.indexOf(this.focus) + 1) % order.length]); }
+      const f = this.focus && this.N.get(this.focus), goal = f ? { x: f.x, y: f.y, z: Math.min(2.4, (Math.min(this.w, this.h) * 0.34) / f.size) } : { x: this.w / 2, y: this.h / 2, z: 1 };
+      if (!this.cam) this.cam = Object.assign({}, goal);
+      const k = 1 - Math.exp(-dt * 2.2); this.cam.x += (goal.x - this.cam.x) * k; this.cam.y += (goal.y - this.cam.y) * k; this.cam.z += (goal.z - this.cam.z) * k;
+      this.backdrop();
+      if (!this.neb) {   // faint nebula clouds, drawn once
+        this.neb = document.createElement("canvas"); this.neb.width = Math.round(this.w); this.neb.height = Math.round(this.h);
+        const nx = this.neb.getContext("2d"), r = prng(7);
+        nx.globalCompositeOperation = "lighter";
+        for (let i = 0; i < 26; i++) { const x = r() * this.w, y = r() * this.h, rad = (0.15 + r() * 0.3) * Math.max(this.w, this.h), g = nx.createRadialGradient(x, y, 0, x, y, rad); g.addColorStop(0, "hsla(" + (r() < 0.5 ? 200 : 275) + ",70%,45%,0.05)"); g.addColorStop(1, "rgba(0,0,0,0)"); nx.fillStyle = g; nx.fillRect(0, 0, this.w, this.h); }
+      }
+      ctx.globalCompositeOperation = "lighter"; ctx.globalAlpha = 1;
+      ctx.drawImage(this.neb, (this.w / 2 - this.cam.x) * 0.15, (this.h / 2 - this.cam.y) * 0.15);
+      ctx.save(); ctx.translate(this.w / 2, this.h / 2); ctx.scale(this.cam.z, this.cam.z); ctx.translate(-this.cam.x, -this.cam.y);
+      // lines and the traffic on them
+      for (const l of this.links) {
+        const c = this.curve(l), model = l.kind === "model", busy = model && ai.busy, bytes = (l.b.rx || 0) + (l.b.tx || 0);
+        let perSec = model ? (busy ? 3 + (ai.rate || 2) * 1.4 : 0) : Math.max(0, Math.min(8, (Math.log10(bytes + 1) - 2.6) * 1.7));
+        if (!l.b.ready || !l.a.ready) perSec = 0;
+        l.acc += dt * perSec;
+        while (l.acc >= 1 && this.pulses.length < 400) { l.acc -= 1; const down = model ? Math.random() < 0.5 : Math.random() < ((l.b.rx || 0) / (bytes || 1)); this.pulses.push({ l, u: down ? 0 : 1, dir: down ? 1 : -1, v: rnd(0.35, 0.6), col: model ? "255,205,110" : down ? "120,220,255" : "190,150,255" }); }
+        l.glow = Math.max((l.b.flash || 0) * (model ? 0 : 1), busy ? 0.75 + 0.25 * Math.sin(this.t * 6) : 0);
+        const bad = !l.b.ready || !l.a.ready, base = bad ? "255,100,100" : model ? "255,200,110" : "120,180,255";
+        ctx.lineCap = "round";
+        if (l.glow > 0.02) { ctx.globalAlpha = 0.35 * l.glow; ctx.strokeStyle = "rgb(" + base + ")"; ctx.lineWidth = 6 / this.cam.z; ctx.beginPath(); ctx.moveTo(c[0], c[1]); ctx.quadraticCurveTo(c[2], c[3], c[4], c[5]); ctx.stroke(); }
+        ctx.globalAlpha = bad ? 0.25 : (model ? 0.3 : 0.16) + 0.6 * l.glow; ctx.strokeStyle = "rgb(" + base + ")"; ctx.lineWidth = (model ? 1.6 : 1.1) / this.cam.z;
+        ctx.setLineDash(bad ? [6, 6] : []); ctx.beginPath(); ctx.moveTo(c[0], c[1]); ctx.quadraticCurveTo(c[2], c[3], c[4], c[5]); ctx.stroke(); ctx.setLineDash([]);
+      }
+      for (const p of this.pulses) {
+        p.u += p.dir * p.v * dt;
+        const c = this.curve(p.l), [x, y] = this.at(c, Math.max(0, Math.min(1, p.u))), [x2, y2] = this.at(c, Math.max(0, Math.min(1, p.u - p.dir * 0.05)));
+        ctx.globalAlpha = 0.95; ctx.strokeStyle = "rgb(" + p.col + ")"; ctx.lineWidth = 2.2 / this.cam.z; ctx.beginPath(); ctx.moveTo(x2, y2); ctx.lineTo(x, y); ctx.stroke();
+        const g = ctx.createRadialGradient(x, y, 0, x, y, 6 / this.cam.z); g.addColorStop(0, "rgba(" + p.col + ",0.9)"); g.addColorStop(1, "rgba(" + p.col + ",0)");
+        ctx.fillStyle = g; ctx.fillRect(x - 6 / this.cam.z, y - 6 / this.cam.z, 12 / this.cam.z, 12 / this.cam.z);
+      }
+      this.pulses = this.pulses.filter((p) => p.u >= 0 && p.u <= 1 && this.links.includes(p.l));
+      // the galaxies, their pods, their cores
+      for (const n of list) {
+        n.rot += dt * n.spin * (1 + (n.cpu || 0) * 2);
+        n.flash = Math.max(0, (n.flash || 0) - dt * 0.8);
+        if (!n.sprite) n.sprite = galaxySprite(n.name, n.hue, 384);
+        const s = n.size * 2.3;
+        ctx.save(); ctx.translate(n.x, n.y); ctx.scale(1, 0.55); ctx.rotate(n.rot);
+        ctx.globalAlpha = n.ready ? 0.95 : 0.3; ctx.drawImage(n.sprite, -s / 2, -s / 2, s, s);
+        for (const p of n.pods || []) {
+          if (/Succeeded|Completed/.test(p.status)) continue;
+          const r = 0.2 + 0.7 * ((p.seed % 997) / 997), a = ((p.seed >>> 10) % 6283) / 1000, px = Math.cos(a) * r * s * 0.45, py = Math.sin(a) * r * s * 0.45;
+          const col = podColor(p), big = 1.8 + Math.min(3, (p.mem || 0) / 5e8), hot = col === POD.bad;
+          const g = ctx.createRadialGradient(px, py, 0, px, py, big * (hot ? 5 + 2 * Math.sin(this.t * 5) : 3.2));
+          g.addColorStop(0, "rgba(" + col + ",0.95)"); g.addColorStop(0.35, "rgba(" + col + ",0.35)"); g.addColorStop(1, "rgba(" + col + ",0)");
+          ctx.globalAlpha = p.status === "Running" || hot ? 1 : 0.55; ctx.fillStyle = g; const rr = big * 6; ctx.fillRect(px - rr, py - rr, rr * 2, rr * 2);
+        }
+        ctx.restore();
+        const cpu = Math.max(0, Math.min(1, n.cpu || 0)), cr = n.size * (0.35 + 0.35 * cpu);
+        const cg = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, cr);
+        cg.addColorStop(0, n.ready ? "rgba(255,245,225," + (0.35 + 0.5 * cpu) + ")" : "rgba(255,90,90,0.6)"); cg.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.globalAlpha = n.ready ? 1 : 0.6 + 0.4 * Math.sin(this.t * 3); ctx.fillStyle = cg; ctx.fillRect(n.x - cr, n.y - cr, cr * 2, cr * 2);
+        if (n.main) {   // the model lives here: a golden halo, brighter while it works
+          const hr = n.size * (1.05 + (ai.busy ? 0.08 * Math.sin(this.t * 5) : 0));
+          ctx.save(); ctx.translate(n.x, n.y); ctx.scale(1, 0.55);
+          ctx.globalAlpha = ai.busy ? 0.8 : 0.35; ctx.strokeStyle = "rgb(255,205,110)"; ctx.lineWidth = (ai.busy ? 2.2 : 1.2) / this.cam.z;
+          ctx.beginPath(); ctx.arc(0, 0, hr, 0, TAU); ctx.stroke();
+          if (ai.busy) { ctx.globalAlpha = 0.25; ctx.lineWidth = 8 / this.cam.z; ctx.beginPath(); ctx.arc(0, 0, hr, this.t * 2, this.t * 2 + 1.2); ctx.stroke(); }
+          ctx.restore();
+        }
+      }
+      ctx.restore();
+      // words, at screen size
+      ctx.globalCompositeOperation = "source-over"; ctx.textAlign = "center";
+      for (const l of this.links) {   // each line's measured traffic, nearer its machine (the middle is busy)
+        if (l.kind === "model" && !ai.busy) continue;
+        const c = this.curve(l), [mx, my] = this.at(c, l.kind === "model" ? 0.62 : 0.68), [sx, sy] = this.toScreen(mx, my);
+        const txt = l.kind === "model" ? "model · " + (ai.rate ? ai.rate.toFixed(1) + " tok/s" : ai.reading ? "reading" : "working")
+          : l.b.ready ? "↓ " + speed(l.b.rx) + "  ↑ " + speed(l.b.tx) : "no contact";
+        ctx.globalAlpha = 0.85; ctx.font = "10.5px ui-monospace, SFMono-Regular, Menlo, monospace"; ctx.fillStyle = l.kind === "model" ? "#ffd58a" : l.b.ready ? "#9fc4ff" : "#ff9b9b";
+        ctx.fillText(txt, sx, sy - 4);
+      }
+      for (const n of list) {
+        const [sx, sy] = this.toScreen(n.x, n.y - n.size * 0.62), hue = n.ready ? "hsl(" + n.hue + ",85%,72%)" : "#ff8080";
+        ctx.globalAlpha = 1; ctx.font = "600 13px ui-monospace, SFMono-Regular, Menlo, monospace"; ctx.fillStyle = hue;
+        ctx.fillText(n.name.toUpperCase().split("").join(String.fromCharCode(8202)), sx, sy - 16);
+        ctx.font = "10.5px ui-monospace, SFMono-Regular, Menlo, monospace"; ctx.fillStyle = "rgba(200,215,240,.8)";
+        ctx.fillText(n.ready ? Math.round((n.cpu || 0) * 100) + "% cpu · " + (n.pods || []).filter((p) => p.status === "Running").length + " pods" + (n.temp != null ? " · " + Math.round(n.temp) + "°" : "") : "NOT READY", sx, sy - 2);
+        if (n.main && ai.label) { ctx.fillStyle = "#ffd58a"; ctx.fillText("◆ " + ai.label, sx, sy + n.size * 1.4 * this.cam.z + 18); }
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // ---- the page: the scene, the panels around it, the AI helper
+  const G = { scene: null, poll: 0, prev: null, rate: 0, log: [], last: {}, act: null, target: "", ask: { busy: false, text: "", q: "", history: [] } };
+  const say = (text, tone) => { G.log.unshift({ t: Date.now() / 1000, text, tone }); G.log.length = Math.min(G.log.length, 6); };
+  const pct = (x) => (x == null || isNaN(x) ? "–" : Math.round(x * 100) + "%");
+  function snapshotNodes(d) {
+    const sp = (d.ai && d.ai.split) || {}, shares = sp.shares || [], pods = d.pods || [];
+    const mainNode = ((sp.pods || []).find((p) => /^llama-main/.test(p.name)) || {}).node || "";
+    return (d.nodes || []).map((n) => {
+      const mine = shares.filter((s) => s.node.replace(/ GPU$/, "") === n.name), hw = n.hw || {};
+      return { name: n.name, ready: n.ready, cores: n.cpu_cores, cpu: n.cpu_cores ? (n.cpu_used || 0) / n.cpu_cores : 0, memUsed: n.mem_used, memTotal: n.mem_total, mem: n.mem_total ? (n.mem_used || 0) / n.mem_total : 0,
+        disk: n.disk_total ? (n.disk_used || 0) / n.disk_total : null, temp: hw.temp_c, rx: n.net_rx_rate, tx: n.net_tx_rate, gpus: hw.gpu_live || [], roles: n.roles || [],
+        hub: (n.roles || []).some((r) => /control-plane|master/.test(r)), model: mine.length > 0, main: n.name === mainNode, pods: pods.filter((p) => p.node === n.name).length, reason: n.ready_reason };
     });
   }
-  function track(d) {   // what changed since last time, for the activity log
-    const sp = (d && d.ai && d.ai.split) || null;
-    ((d && d.nodes) || []).forEach((n) => { const was = G.last["n:" + n.name]; if (was !== undefined && was !== n.ready) say(n.name + (n.ready ? " is back" : " dropped out"), n.ready ? "good" : "bad"); G.last["n:" + n.name] = n.ready; });
+  function track(d) {
+    const sp = (d.ai && d.ai.split) || null;
+    (d.nodes || []).forEach((n) => { const was = G.last["n:" + n.name]; if (was !== undefined && was !== n.ready) say(n.name + (n.ready ? " is back" : " dropped out"), n.ready ? "good" : "bad"); G.last["n:" + n.name] = n.ready; });
     const phase = sp ? (sp.loaded === false ? "unloaded" : sp.ready ? "ready" : "loading") : "none";
-    if (G.last.phase !== undefined && G.last.phase !== phase) say("Model " + (phase === "ready" ? "ready" : phase === "loading" ? "loading" : phase === "unloaded" ? "unloaded" : "gone"), phase === "ready" ? "good" : "");
+    if (G.last.phase !== undefined && G.last.phase !== phase) say("Model " + phase, phase === "ready" ? "good" : "");
     G.last.phase = phase;
   }
   async function pollActivity() {
     let a; try { a = await getJSON("/api/ai/activity"); } catch (e) { return; }
     if (!a || !a.ok) return;
     const now = a.time || Date.now() / 1000, p = G.prev;
-    if (a.processing && p && p.processing && p.task === a.task && a.decoded >= p.decoded && now > p.time) {
-      const r = (a.decoded - p.decoded) / (now - p.time); G.rate = G.rate ? G.rate * 0.6 + r * 0.4 : r;
-    }
-    if (a.processing && !(p && p.processing)) { G.started = now; G.rate = 0; say("Answering started", ""); }
-    if (!a.processing && p && p.processing) say("Answer finished: " + (p.decoded || 0) + " tokens in " + Math.max(1, Math.round(now - (G.started || now))) + " s", "good");
+    if (a.processing && p && p.processing && p.task === a.task && a.decoded >= p.decoded && now > p.time) { const r = (a.decoded - p.decoded) / (now - p.time); G.rate = G.rate ? G.rate * 0.6 + r * 0.4 : r; }
+    if (a.processing && !(p && p.processing)) { G.started = now; G.rate = 0; say("The model started answering", ""); }
+    if (!a.processing && p && p.processing) say("Answer done: " + (p.decoded || 0) + " tokens in " + Math.max(1, Math.round(now - (G.started || now))) + " s", "good");
     G.prev = a; G.act = a;
-    if (G.scene) G.scene.set({ busy: !!a.processing, reading: a.processing && !a.decoded, rate: G.rate });
-    paintHud();
+    paint();
   }
-  function paintHud() {
+  function card(n) {
+    const bar = (v, warn) => '<span class="ux-bar"><i style="width:' + Math.round(Math.max(0, Math.min(1, v || 0)) * 100) + "%" + (warn && v > warn ? ";background:#f87171" : "") + '"></i></span>';
+    const row = (k, v, b) => '<div class="ux-row"><span>' + k + "</span>" + (b || "") + "<b>" + NY.esc(v) + "</b></div>";
+    const g = n.gpus[0];
+    return '<div class="ux-card' + (G.scene && G.scene.focus === n.name ? " on" : "") + (n.ready ? "" : " down") + '" data-gx-node="' + NY.esc(n.name) + '" style="--h:' + HUES[hashStr(n.name) % HUES.length] + '">' +
+      '<div class="ux-card-h"><b>' + NY.esc(n.name) + "</b><span>" + (n.ready ? NY.esc((n.hub ? "control plane" : "worker") + (n.main ? " · model" : n.model ? " · model layers" : "")) : "NOT READY") + "</span></div>" +
+      (n.ready ? row("CPU", pct(n.cpu) + (n.cores ? " of " + n.cores : ""), bar(n.cpu, 0.85)) + row("MEM", n.memTotal ? fmt.bytes(n.memUsed, 1) + " / " + fmt.bytes(n.memTotal, 0) : "–", bar(n.mem, 0.9)) +
+        (n.disk != null ? row("DISK", pct(n.disk), bar(n.disk, 0.9)) : "") + (n.temp != null ? row("TEMP", Math.round(n.temp) + " °C", bar(n.temp / 95, 0.8)) : "") +
+        row("NET", "↓ " + speed(n.rx) + "  ↑ " + speed(n.tx)) + (g ? row("GPU", pct(g.use) + " · vram " + pct(g.mem_use), bar(g.use)) : "") + row("PODS", String(n.pods))
+        : '<div class="ux-row"><span>' + NY.esc(n.reason || "Kubelet stopped posting status") + "</span></div>") + "</div>";
+  }
+  function paint() {
     const d = S.d; if (!d || !$("#gx")) return;
-    const sp = (d.ai && d.ai.split) || null, a = G.act || {}, nodes = nodesFor(d), ready = nodes.filter((n) => n.ready).length;
-    const state = !sp ? "No model running" : sp.loaded === false ? "Unloaded" : !sp.ready ? "Loading" + (sp.load && sp.load.pct != null ? " " + Math.round(sp.load.pct) + "%" : "") : a.processing ? (a.decoded ? "Answering" : "Reading the prompt") : "Ready";
-    const tone = state === "Answering" || state === "Reading the prompt" ? "live" : state === "Ready" ? "good" : "warn";
-    NY.freshHTML($("#gx-model"), html`<div class="gx-k">Model</div><div class="gx-big">${sp ? sp.alias || sp.model : "none"}</div>
-      <div class="gx-row gx-state"><span class="gx-dot ${tone}"></span>${state}</div>
-      <div class="gx-row"><span>speed</span><b>${a.processing && G.rate ? G.rate.toFixed(1) + " tok/s" : "–"}</b></div>
-      <div class="gx-row"><span>this answer</span><b>${a.processing ? (a.decoded || 0) + " tokens" : "–"}</b></div>
-      <div class="gx-row"><span>context</span><b>${a.n_ctx || (sp && sp.ctx) || "–"}</b></div>
-      <div class="gx-row"><span>runs on</span><b>${sp && sp.shares ? Array.from(new Set(sp.shares.map((s) => s.node.replace(/ GPU$/, "")))).join(", ") : "–"}</b></div>`);
-    const cpu = nodes.length ? nodes.reduce((x, n) => x + n.cpu, 0) / nodes.length : 0, t = S.t || {};
-    NY.freshHTML($("#gx-cluster"), html`<div class="gx-k">Cluster</div><div class="gx-big">${(d.cluster && d.cluster.name) || "cluster"}</div>
-      <div class="gx-row"><span>nodes ready</span><b>${ready} / ${nodes.length}</b></div>
-      <div class="gx-row"><span>cpu</span><b>${Math.round(cpu * 100)}%</b></div>
-      <div class="gx-row"><span>memory</span><b>${t.mem_total ? fmt.bytes(t.mem_used, 0) + " / " + fmt.bytes(t.mem_total, 0) : "–"}</b></div>
-      <div class="gx-row"><span>pods running</span><b>${t.pods_running != null ? t.pods_running : ((d.pods || []).filter((p) => p.status === "Running").length)}</b></div>`);
-    NY.freshHTML($("#gx-nodes"), html`<div class="gx-k">Machines</div>${nodes.map((n) => html`<div class="gx-node"><span class="gx-dot ${n.ready ? (n.model ? "live" : "good") : "bad"}"></span><b>${n.name}</b>
-      <span class="gx-bar"><i style="width:${Math.round(n.cpu * 100)}%"></i></span><span class="gx-num">${n.ready ? Math.round(n.cpu * 100) + "%" : "down"}</span></div>`)}`);
-    NY.freshHTML($("#gx-log"), html`<div class="gx-k">Activity</div>${G.log.length ? G.log.map((e) => html`<div class="gx-ev ${e.tone || ""}"><span>${new Date(e.t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>${e.text}</div>`) : html`<div class="gx-ev faint">Waiting for something to happen…</div>`}`);
-    if (G.scene) G.scene.set({ nodes, loaded: !sp || (sp.loaded !== false && sp.ready) });
+    const sp = (d.ai && d.ai.split) || null, a = G.act || {}, nodes = snapshotNodes(d), up = nodes.filter((n) => n.ready).length, down = nodes.length - up;
+    const busy = !!a.processing, state = !sp ? "no model" : sp.loaded === false ? "unloaded" : !sp.ready ? "loading" : busy ? (a.decoded ? "answering" : "reading the prompt") : "ready";
+    const label = sp ? (sp.alias || sp.model || "model").replace(/\.gguf$/i, "").slice(0, 38) + " · " + state + (busy && G.rate ? " · " + G.rate.toFixed(1) + " tok/s" : "") : "";
+    if (G.scene) G.scene.set({ nodes, pods: d.pods || [], ai: { busy, reading: busy && !a.decoded, rate: G.rate, label } });
+    const head = $("#ux-head"); if (head) { head.textContent = down ? down + (down === 1 ? " NODE DOWN" : " NODES DOWN") : "ALL NODES UP"; head.className = "ux-head " + (down ? "bad" : "good"); }
+    const running = (d.pods || []).filter((p) => p.status === "Running").length, failing = (d.pods || []).filter((p) => /Error|BackOff|Failed|OOM/.test(p.status)).length;
+    const hs = $("#ux-headsub"); if (hs) hs.textContent = up + " / " + nodes.length + " nodes · " + running + " pods running" + (failing ? " · " + failing + " failing" : "") + " · " + ((S.res && S.res.alerts) || []).length + " alerts";
+    const tk = $("#ux-ticker"); if (tk) NY.freshHTML(tk, raw(G.log.slice(0, 3).map((e) => '<div class="' + (e.tone || "") + '"><span>' + new Date(e.t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) + "</span> " + NY.esc(e.text) + "</div>").join("")));
+    const cl = $("#ux-cluster"); if (cl) cl.textContent = ((d.cluster && d.cluster.name) || "cluster").toUpperCase() + " · " + (sp ? label : "no model running");
+    const half = Math.ceil(nodes.length / 2);
+    const L = $("#ux-left"), R = $("#ux-right");
+    if (L) L.innerHTML = nodes.slice(0, half).map(card).join("");
+    if (R) R.innerHTML = nodes.slice(half).map(card).join("");
+    if (G.scene && !G.laid) { G.laid = true; requestAnimationFrame(() => { G.scene.layout(); if (!G.scene.raf) G.scene.frame(0); }); }
+    const f = G.scene && G.scene.focus && nodes.find((n) => n.name === G.scene.focus);
+    const t = $("#ux-title"), o = $("#ux-overview");
+    if (t) t.textContent = f ? f.name.toUpperCase() : "OVERVIEW";
+    if (o) o.textContent = f ? (f.ready ? pct(f.cpu) + " cpu · " + pct(f.mem) + " memory · " + f.pods + " pods · ↓ " + speed(f.rx) + " ↑ " + speed(f.tx) : "not ready: " + (f.reason || "no contact")) : up + " / " + nodes.length + " nodes up · " + running + " pods · model " + state;
+  }
+  function tick() {
+    const c = $("#ux-clock"), dd = $("#ux-date"); if (!c) return;
+    const now = new Date(); c.textContent = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    if (dd) dd.textContent = now.toLocaleDateString([], { weekday: "long", day: "numeric", month: "short", year: "numeric" }).toUpperCase();
+  }
+
+  // the AI helper: a question about the cluster, answered by the model with a short live summary
+  function brief() {
+    const d = S.d || {}, nodes = snapshotNodes(d), sp = (d.ai && d.ai.split) || null;
+    const lines = nodes.map((n) => "- " + n.name + ": " + (n.ready ? "Ready" : "NOT READY (" + (n.reason || "no contact") + ")") + (n.hub ? ", control plane" : "") + (n.main ? ", runs the model" : n.model ? ", holds model layers" : "") +
+      (n.ready ? ", CPU " + pct(n.cpu) + (n.cores ? " of " + n.cores + " cores" : "") + ", memory " + (n.memTotal ? fmt.bytes(n.memUsed, 1) + "/" + fmt.bytes(n.memTotal, 1) : "?") + (n.temp != null ? ", " + Math.round(n.temp) + " °C" : "") +
+        ", network down " + speed(n.rx) + " up " + speed(n.tx) + (n.gpus[0] ? ", GPU " + (n.gpus[0].name || "") + " " + pct(n.gpus[0].use) : "") + ", " + n.pods + " pods" : ""));
+    const bad = (d.pods || []).filter((p) => p.status !== "Running" && !/Succeeded|Completed/.test(p.status)).slice(0, 8).map((p) => p.namespace + "/" + p.name + " " + p.status + " on " + (p.node || "no node"));
+    const alerts = ((S.res && S.res.alerts) || []).slice(0, 6).map((x) => x.level + ": " + x.title);
+    return "You are the AI helper on the AI galaxy display of the user's home Kubernetes (k3s) cluster, run with nodeyard. Answer in 1 to 4 short, plain sentences. Use the live state below; if the answer isn't in it, say so.\n" +
+      "Now: " + new Date().toLocaleString() + ". Cluster " + ((d.cluster && d.cluster.name) || "") + ".\nNodes:\n" + lines.join("\n") +
+      "\nModel: " + (sp ? (sp.alias || sp.model) + (sp.loaded === false ? " (unloaded)" : sp.ready ? " (ready)" : " (loading)") + " split over " + Array.from(new Set((sp.shares || []).map((s) => s.node))).join(", ") : "none") +
+      (bad.length ? "\nPods not running: " + bad.join("; ") : "") + (alerts.length ? "\nAlerts: " + alerts.join("; ") : "");
+  }
+  async function pickTarget() {
+    if (G.target) return G.target;
+    try { const r = await getJSON("/api/ai/targets"); const ts = (r.targets || []).filter((t) => t.ready); const t = ts.find((x) => x.id === "split") || ts[0]; G.target = t ? t.id : ""; } catch (e) { G.target = ""; }
+    return G.target;
+  }
+  function paintAnswer() {
+    const el = $("#ux-answer"), A = G.ask; if (!el) return;
+    el.classList.toggle("hide", !A.q);
+    el.innerHTML = A.q ? '<div class="ux-q">' + NY.esc(A.q) + '</div><div class="ux-a">' + (A.text ? NY.esc(A.text).replace(/\n/g, "<br>") : '<span class="faint">' + NY.esc(A.wait || "Thinking…") + "</span>") + (A.busy && A.text ? '<span class="caret"></span>' : "") + "</div>" : "";
+    el.scrollTop = el.scrollHeight;
+    const b = $("#ux-send"); if (b) { b.textContent = A.busy ? "Stop" : "Ask"; b.classList.toggle("danger", A.busy); }
+  }
+  async function ask(q) {
+    const A = G.ask;
+    if (A.busy) { if (A.ctrl) A.ctrl.abort(); return; }
+    q = (q || "").trim(); if (!q) return;
+    const target = await pickTarget();
+    A.q = q; A.text = ""; A.wait = "Thinking…"; A.busy = true; A.ctrl = new AbortController(); paintAnswer();
+    if (!target) { A.busy = false; A.text = "No model is ready to answer. Start one in AI › Models."; paintAnswer(); return; }
+    const messages = [{ role: "system", content: brief() }].concat(A.history.slice(-4), [{ role: "user", content: q }]);
+    try {
+      const r = await fetch("/api/ai/chat", { method: "POST", signal: A.ctrl.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ target, messages, temperature: 0.3, max_tokens: 400 }) });
+      if (!r.ok) { let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ } throw new Error(j.error || "The model didn't answer (HTTP " + r.status + ")."); }
+      const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "";
+      for (;;) {
+        const { value, done } = await rd.read(); if (done) break;
+        buf += dec.decode(value, { stream: true }); let i;
+        while ((i = buf.indexOf("\n")) >= 0) {
+          const l = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+          if (!l.startsWith("data:") || l.includes("[DONE]")) continue;
+          let j; try { j = JSON.parse(l.slice(5)); } catch (e) { continue; }
+          if (j.error) throw new Error(j.error.message || j.error);
+          if (j.prompt_progress && !A.text) { const pp = j.prompt_progress; A.wait = "Reading the cluster summary… " + Math.round((100 * (pp.processed || 0)) / Math.max(1, pp.total || 1)) + "%"; paintAnswer(); }
+          const dl = j.choices && j.choices[0] && j.choices[0].delta;
+          if (dl && dl.content) { A.text += dl.content.replace(/<\/?think>/g, ""); paintAnswer(); }
+        }
+      }
+      A.history.push({ role: "user", content: q }, { role: "assistant", content: A.text }); A.history = A.history.slice(-6);
+    } catch (e) {
+      if (e.name !== "AbortError") A.text = (A.text ? A.text + "\n\n" : "") + "⚠ " + (e.message || "Something went wrong.");
+    } finally { A.busy = false; paintAnswer(); }
   }
 
   V.galaxy = {
     build() {
-      NY.freshHTML($("#view"), raw('<div class="gx" id="gx"><canvas id="gx-c" aria-label="Your cluster and its AI, drawn as a galaxy"></canvas>' +
-        '<div class="gx-hud tl" id="gx-model"></div><div class="gx-hud tr" id="gx-cluster"></div><div class="gx-hud bl" id="gx-nodes"></div><div class="gx-hud br" id="gx-log"></div>' +
-        '<button class="btn small gx-full" data-gx="full" title="Full screen (for a spare screen, like a rack display)">Full screen</button></div>'));
+      NY.freshHTML($("#view"), raw('<div class="ux" id="gx"><canvas id="gx-c" aria-label="Your cluster drawn as galaxies: one per machine, with their traffic and the AI"></canvas>' +
+        '<div class="ux-tl"><div class="ux-clock" id="ux-clock"></div><div class="ux-date" id="ux-date"></div><div class="ux-sub" id="ux-cluster"></div></div>' +
+        '<div class="ux-tr"><div class="ux-head" id="ux-head"></div><div class="ux-sub" id="ux-headsub"></div><div class="ux-ticker" id="ux-ticker"></div></div>' +
+        '<div class="ux-side left" id="ux-left"></div><div class="ux-side right" id="ux-right"></div>' +
+        '<div class="ux-bottom"><div class="ux-title" id="ux-title">OVERVIEW</div><div class="ux-sub" id="ux-overview"></div>' +
+        '<div class="ux-answer hide" id="ux-answer" aria-live="polite"></div>' +
+        '<form class="ux-ask" id="ux-ask"><input id="ux-q" placeholder="Ask your cluster\'s AI…  (e.g. why is debian-worker down?)" autocomplete="off" aria-label="Ask the AI helper"><button class="btn small primary" id="ux-send" type="submit">Ask</button></form>' +
+        '<div class="ux-legend"><span style="--c:255,200,90">AI</span><span style="--c:110,170,255">system</span><span style="--c:70,225,205">nodeyard</span><span style="--c:195,145,255">apps</span><span style="--c:255,90,90">failing</span><span style="--c:120,180,255">traffic</span><span style="--c:255,205,110">model link</span></div></div>' +
+        '<div class="ux-tools"><button class="btn small" data-gx="tour" title="Fly from galaxy to galaxy by itself">Tour</button><button class="btn small" data-gx="full" title="Full screen, for a spare display">Full screen</button></div></div>'));
       if (G.scene) G.scene.destroy();
-      G.scene = new Galaxy($("#gx-c"), { hud: true, particles: 2600 }).start();
+      G.laid = false;
+      G.scene = new Universe($("#gx-c"));
+      G.scene.onFocus = () => paint();
+      G.scene.space = () => {   // the free middle: inside the side cards, below the clock, above the AI helper
+        const box = $("#gx"), r = box.getBoundingClientRect(), L = $("#ux-left"), R = $("#ux-right"), T = $(".ux-tl"), B = $(".ux-bottom");
+        const vis = (el) => el && el.offsetParent !== null && getComputedStyle(el).display !== "none";
+        const left = vis(L) ? L.getBoundingClientRect().right - r.left : 0, right = vis(R) ? r.right - R.getBoundingClientRect().left : 0;
+        return { side: Math.max(left, right, 0) + 14, top: (T ? T.getBoundingClientRect().bottom - r.top : 90) + 18, bottom: (B ? r.bottom - B.getBoundingClientRect().top : 170) + 8 };
+      };
+      G.scene.start();
       if (S.d) track(S.d);
-      paintHud();
+      paint(); paintAnswer(); tick();
       clearInterval(G.poll); pollActivity();
-      G.poll = setInterval(() => { if (!$("#gx")) { clearInterval(G.poll); G.poll = 0; return; } if (!document.hidden) pollActivity(); }, 1000);
+      G.poll = setInterval(() => { if (!$("#gx")) { clearInterval(G.poll); G.poll = 0; return; } tick(); if (!document.hidden) pollActivity(); }, 1000);
     },
-    update() { if (S.d) track(S.d); paintHud(); },
+    update() { if (S.d) track(S.d); paint(); },
   };
+  document.addEventListener("submit", (e) => { if (e.target.id === "ux-ask") { e.preventDefault(); const q = $("#ux-q"); ask(q.value); if (!G.ask.busy) q.value = ""; else q.value = ""; } });
   document.addEventListener("click", (e) => {
-    const b = e.target.closest('[data-gx="full"]'); if (!b) return;
+    const nodeCard = e.target.closest("[data-gx-node]");
+    if (nodeCard && G.scene) { G.scene.tour = false; G.scene.fly(G.scene.focus === nodeCard.dataset.gxNode ? "" : nodeCard.dataset.gxNode); return; }
+    const b = e.target.closest("[data-gx]"); if (!b) return;
+    if (b.dataset.gx === "tour" && G.scene) { G.scene.tour = !G.scene.tour; G.scene.tourAt = G.scene.t - 99; b.classList.toggle("primary", G.scene.tour); if (!G.scene.tour) G.scene.fly(""); return; }
+    if (b.dataset.gx !== "full") return;
     const el = $("#gx"); if (!el) return;
-    if (document.fullscreenElement) document.exitFullscreen(); else if (el.requestFullscreen) el.requestFullscreen().then(() => { if (G.scene) { G.scene.fit(); G.scene.reset(); } }).catch(() => {});
+    if (document.fullscreenElement) document.exitFullscreen(); else if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
   });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && G.scene && G.scene.focus && $("#gx") && !document.fullscreenElement) G.scene.fly(""); });
   document.addEventListener("fullscreenchange", () => { if (G.scene && $("#gx")) setTimeout(() => { G.scene.fit(); G.scene.reset(); }, 60); });
   NY.Galaxy = Galaxy;
   NY.galaxyScene = () => G.scene;   // (for tests)

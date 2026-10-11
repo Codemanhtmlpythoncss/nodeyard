@@ -27,6 +27,13 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **The galaxy screens, for k3s** (sidebar › AI galaxy, `/g3/`): a copy of
+  [homelab-galaxy-dashboard](https://github.com/NetworkBound/homelab-galaxy-dashboard) (MIT) fed from your cluster
+  instead of Proxmox. The **wall** (`/g3/`) shows the network graph in 3D with each node's measured traffic on its link
+  and its physical addresses (wired, Wi-Fi; Tailscale on hover), panels and the AI box; **Nexus** (`/g3/nexus`, for a TV)
+  shows every node as a galaxy with its pods as stars by category, the problems and a status headline. The two
+  screens follow each other's tour. The Mac app shows the wall under Manage and in its own window (Shift-Command-G).
+
 - **AI galaxy** (sidebar, and Manage in the Mac app): your cluster drawn live as a spiral galaxy. The core is the model:
   it brightens while it works, draws light in while it reads the prompt and streams it out along the arms at its real
   writing speed. The machines are stars orbiting it (brighter with CPU use, red when they drop out), linked to the core

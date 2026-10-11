@@ -274,6 +274,12 @@ final class ManagementState: ObservableObject {
         return (url, client.sessionCookies())
     }
 
+    /// Another page of the dashboard (e.g. "/g3/", the 3D galaxy wall), signed in as this app's session.
+    func websitePath(_ path: String) -> (URL, [HTTPCookie])? {
+        guard let url = try? client.pagePath(path) else { return nil }
+        return (url, client.sessionCookies())
+    }
+
     /// The website's Terminal page for one device, without its sidebar, signed in as this app's session.
     func terminalPage(target: String, method: String) -> (URL, [HTTPCookie])? {
         let query = [URLQueryItem(name: "embed", value: "1"), URLQueryItem(name: "term", value: target), URLQueryItem(name: "method", value: method)]

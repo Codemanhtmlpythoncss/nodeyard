@@ -1,0 +1,1 @@
+window.NP_NO_AUTOPOLL=true;

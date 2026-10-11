@@ -178,6 +178,7 @@ final class ManagementClient {
         guard let result = parts.url else { throw NodeyardError.invalidAddress }
         return result
     }
+    func pagePath(_ path: String) throws -> URL { try url(path) }
     func sessionCookies() -> [HTTPCookie] {
         guard let base = try? url("/") else { return [] }
         return session.configuration.httpCookieStorage?.cookies(for: base) ?? []

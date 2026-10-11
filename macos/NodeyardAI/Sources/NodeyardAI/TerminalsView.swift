@@ -194,18 +194,26 @@ struct TerminalWebView: NSViewRepresentable {
     func updateNSView(_ nsView: WKWebView, context: Context) {}
 }
 
-/// Manage › AI galaxy: the website's live picture of the cluster and its model.
+/// Manage › AI galaxy, and its own window (Window › AI Galaxy, Shift-Command-G, full screen with the green button):
+/// the website's live picture of the cluster, its traffic and its model, with the AI helper box.
 struct GalaxyView: View {
     @EnvironmentObject private var mgmt: ManagementState
+    @Environment(\.openWindow) private var openWindow
     @State private var page: (URL, [HTTPCookie])?
     var body: some View {
         Group {
             if let page { TerminalWebView(url: page.0, cookies: page.1) }
+            else if mgmt.authEnabled && !mgmt.signedIn && mgmt.termError != nil {
+                VStack(spacing: 10) {
+                    Text("Sign in to the dashboard to see the galaxy.").foregroundStyle(.secondary)
+                    Text("Settings › Management: the dashboard password.").font(.caption).foregroundStyle(.tertiary)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
             else { ProgressView("Signing in to the dashboard…").frame(maxWidth: .infinity, maxHeight: .infinity) }
         }
         .task {
             await mgmt.refreshTerminals()     // (signs in again with the saved password if the session expired)
-            page = mgmt.websitePage("galaxy")
+            page = mgmt.websitePath("/g3/")      // the 3D galaxy wall
         }
     }
 }

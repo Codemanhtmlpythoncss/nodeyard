@@ -311,6 +311,9 @@ class Handler(BaseHTTPRequestHandler):
             for route, fn in srv.get_routes.items():
                 if path == route:
                     return fn(self, q)
+            for prefix, fn in srv.prefix_routes.items():
+                if path.startswith(prefix):
+                    return fn(self, path, q)
             go = self._https_redirect(path, q)
             if go:
                 return self._redirect(go)
@@ -452,6 +455,7 @@ class Context:
 
     def __init__(self, **kw):
         self.get_routes, self.post_routes, self.post_limits = {}, {}, {}
+        self.prefix_routes = {}   # path prefix -> fn(handler, path, query), for folders of files
         self.lock = threading.Lock()
         self.streams = 0
         self.__dict__.update(kw)
@@ -580,6 +584,8 @@ def main():
         research.register(ctx, a)
     import terminal
     terminal.register(ctx, a)
+    import galaxy3d      # the 3D galaxy screens (/g3/), fed from k3s
+    galaxy3d.register(ctx, a)
     import selfupdate    # restarts on the new program after an update (the page files are already new)
     selfupdate.register(ctx, a)
     import plugins       # last: it wraps every route above with on/off switches and the audit log

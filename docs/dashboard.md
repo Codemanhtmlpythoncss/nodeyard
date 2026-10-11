@@ -298,6 +298,23 @@ for the tailnet (login.tailscale.com/admin/dns) and the dashboard listening on i
 (`dashboard start --listen auto`). Speech recognition is the browser's: Chrome sends the audio to Google; Safari can
 do it on the computer. The Nodeyard AI Mac app has voice chat too and needs neither.
 
+## AI galaxy (the 3D screens)
+
+Sidebar › **AI galaxy** opens `/g3/`, a copy of
+[homelab-galaxy-dashboard](https://github.com/NetworkBound/homelab-galaxy-dashboard) (MIT) fed from k3s:
+
+| Page | For | What it shows |
+| --- | --- | --- |
+| `/g3/` (the wall) | a desk monitor | the network in 3D: internet, router, cluster network, every node with its physical addresses and measured traffic, pods; panels; "Ask the homelab LLM" |
+| `/g3/nexus` | a TV across the room | every node as a galaxy, its pods as stars coloured by category (AI, media, network, monitoring, web, infrastructure; red when stopped), the clock, a status headline, node cards |
+| `/g3/desk` | a spare panel | the older flat HUD |
+
+Data comes from nodeyard itself: nodes and pods from Kubernetes, CPU, memory, disk and GPUs from the node agents, each
+node's network rate from its kubelet, addresses from the node agents (wired, Wi-Fi) and Tailscale, problems from the
+dashboard's alerts (a node down counts as "host down", a failing pod as a warning), the split model's RPC traffic as a
+flow while it answers. The AI box asks the running model with a short summary of the cluster. A light, 2D version that
+also works on phones stays at `/#galaxy`.
+
 ## Terminals
 
 The Terminal page lists this server, every cluster node and every device on your tailnet (from `tailscale status` on

@@ -19,7 +19,7 @@
     { id: "storage", label: "Storage", icon: "storage", sub: "Disks and volumes" },
     { id: "hardware", label: "Hardware", icon: "hardware", sub: "What every machine is made of, and how fast it really is" },
     { id: "ai", label: "AI", icon: "ai", sub: "Models running on your cluster" },
-    { id: "galaxy", label: "AI galaxy", icon: "galaxy", sub: "Your cluster and its AI, live" },
+    { id: "galaxy", label: "AI galaxy", icon: "galaxy", sub: "Your cluster and its AI, live", href: "/g3/" },   // the 3D screens (#galaxy is the light one)
     { id: "events", label: "Events", icon: "events", sub: "What Kubernetes has been doing" },
     { id: "alerts", label: "Alerts", icon: "alerts", sub: "Things that need your attention" },
     { id: "doctor", label: "Doctor", icon: "doctor", sub: "Checks for common problems, with one-click fixes" },
@@ -804,7 +804,7 @@
   const MOBILE_PRIMARY = new Set(["overview", "nodes", "pods", "ai"]);
   let mobileMenuReturnFocus = null;
   function buildNav() {
-    const link = (v, mobile) => '<a href="#' + v.id + '" data-view="' + v.id + '"' + (mobile ? ' class="mobile-section-link"' : "") + '><svg class="icon"><use href="#i-' + v.icon + '"/></svg><span class="nav-label">' + esc(v.label) + '</span><span class="n" id="' + (mobile ? "mobile-n-" : "nav-n-") + v.id + '"></span></a>';
+    const link = (v, mobile) => (v.href ? '<a href="' + v.href + '"' : '<a href="#' + v.id + '" data-view="' + v.id + '"') + (mobile ? ' class="mobile-section-link"' : "") + '><svg class="icon"><use href="#i-' + v.icon + '"/></svg><span class="nav-label">' + esc(v.label) + '</span><span class="n" id="' + (mobile ? "mobile-n-" : "nav-n-") + v.id + '"></span></a>';
     setHTML($("#nav"), VIEWS.map((v) => raw(link(v, false))));
     setHTML($("#mobile-tabs"), [...MOBILE_PRIMARY].map((id) => VIEWS.find((v) => v.id === id)).map((v) => raw('<a href="#' + v.id + '" data-view="' + v.id + '"><svg class="icon"><use href="#i-' + v.icon + '"/></svg><span class="mobile-tab-label">' + esc(v.label) + '</span></a>')).concat([raw('<button type="button" class="mobile-tab-more" aria-haspopup="dialog" aria-controls="mobile-menu" aria-expanded="false"><svg class="icon"><use href="#i-settings"/></svg><span class="mobile-tab-label">More</span></button>')]));
     setHTML($("#mobile-more-list"), VIEWS.filter((v) => !MOBILE_PRIMARY.has(v.id)).map((v) => raw(link(v, true))));
