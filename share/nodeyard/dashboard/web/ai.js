@@ -743,7 +743,7 @@
           const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
           if (!line.startsWith("data:")) continue;
           let ev; try { ev = JSON.parse(line.slice(5)); } catch (e) { continue; }
-          if (ev.type === "text") msg.content += ev.delta;
+          if (ev.type === "text") { msg.content += ev.delta; liveRead(msg); }
           else if (ev.type === "thinking") msg.thinking += ev.delta;
           else if (ev.type === "tool_use") msg.tools.push({ id: ev.id, name: ev.name, summary: ev.summary, status: "running" });
           else if (ev.type === "tool_result") { const x = msg.tools.find((k) => k.id === ev.id); if (x) { x.status = ev.ok ? "ok" : "bad"; x.result = ev.summary; x.text = (ev.text || "").slice(0, 2500); x.diff = ev.diff ? ev.diff.lines.slice(0, 40) : null; } }
@@ -761,6 +761,7 @@
     } catch (e) {
       if (e.name !== "AbortError") msg.error = netError(e, "Something went wrong.");
     } finally {
+      if (ctrl.signal.aborted) { if (TTS.msg === msg) stopReading(); } else liveRead(msg, true);
       msg.pending = false; msg.perm = null;
       if (!msg.error && !msg.content && !msg.tools.length) msg.error = ctrl.signal.aborted ? "Stopped." : "The AI sent an empty answer.";
       if (msg.error === "Stopped." && (msg.content || msg.tools.length)) msg.error = "";
@@ -819,7 +820,7 @@
     ["model", "[name]", "Pick the model for this chat"], ["models", "", "Open the Models tab (load, download, delete)"], ["unload", "", "Unload the model to free memory"], ["max", "[tokens|none]", "Set the longest reply (none = no limit)"],
     ["web", "[on|off]", "Always search the web first"], ["skills", "[on|off]", "Let the AI choose its available skills automatically"], ["plugins", "[on|off NAME]", "Show or switch skills manually (search, Wikipedia, Python...)"], ["system", "[text]", "Set the system prompt"],
     ["temp", "[0-2]", "Set creativity"], ["run", "", "Run the last code block the AI wrote"], ["fix", "", "Ask the AI to fix the last code that failed"], ["autofix", "[on|off]", "Run code automatically and let the AI fix errors"],
-    ["files", "[ask|always|never]", "When the AI delivers files (default: only when you ask)"], ["retry", "", "Answer the last message again"], ["stop", "", "Stop the answer"], ["copy", "", "Copy the last answer"], ["export", "", "Download this chat as a file"], ["context", "", "How full the model's memory is"],
+    ["files", "[ask|always|never]", "When the AI delivers files (default: only when you ask)"], ["retry", "", "Answer the last message again"], ["stop", "", "Stop the answer"], ["copy", "", "Copy the last answer"], ["read", "[on|off]", "Read the last answer aloud; on/off reads every answer as it arrives"], ["export", "", "Download this chat as a file"], ["context", "", "How full the model's memory is"],
   ];
   const lastBlock = (c) => { for (let i = c.messages.length - 1; i >= 0; i--) { const m = c.messages[i]; if (m.role !== "assistant" || !m.content || m.error) continue; md(m.content, i, false); const bl = (A.blocks[i] || []).map((b, k) => [b, k]).filter(([b]) => b && b.lang); if (bl.length) return { i, b: bl[bl.length - 1][0], k: bl[bl.length - 1][1] }; } return null; };
   async function slash(line) {
@@ -862,6 +863,13 @@
       case "files": { const v = (arg || "").toLowerCase(); if (["ask", "always", "never"].includes(v)) { c.files = v; saveChats(); toast(v === "ask" ? "Files only when you ask for one." : v === "always" ? "Scripts, pages and documents come as files." : "No files: everything stays in the chat."); } else toast("Files: " + (c.files === "always" ? "always" : c.files === false || c.files === "never" ? "never" : "only when you ask") + ". Use /files ask, always or never."); break; }
       case "retry": send("", true); break;
       case "stop": stopStream(); break;
+      case "read": case "speak": case "voice": {
+        if (/^(on|off|yes|no|true|false|1|0)$/i.test(arg)) { setAutoRead(on(arg)); break; }
+        if (TTS.msg) { stopReading(); break; }
+        const m = c.messages.slice().reverse().find((x) => x.role === "assistant" && x.content);
+        if (m) readMessage(m); else toast("Nothing to read yet.");
+        break;
+      }
       case "copy": { const m = c.messages.slice().reverse().find((x) => x.role === "assistant" && x.content); if (m) copyText(m.content); else toast("Nothing to copy."); break; }
       case "export": { const md = c.messages.filter((m) => m.content).map((m) => (m.role === "user" ? "## You\n\n" : "## AI\n\n") + m.content).join("\n\n"); const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([md], { type: "text/markdown" })); a.download = (c.title || "chat").replace(/[^\w.-]+/g, "-").slice(0, 40) + ".md"; a.click(); break; }
       case "context": { const t = findTarget(c.target), cx = chatCtx(t), used = estTokens(chatMessages(c, null)); toast(cx ? "About " + used.toLocaleString() + " of " + cx.toLocaleString() + " tokens used (" + Math.round((100 * used) / cx) + "%)." : "About " + used.toLocaleString() + " tokens so far."); break; }
@@ -899,6 +907,7 @@
     setHTML($("#ai-pane"), html`<div class="chat">
       <aside class="chat-side card"><button class="btn primary wide" data-ai="new-chat">+ New chat</button><div id="chat-list" class="chat-list"></div></aside>
       <section class="chat-main card"><header class="chat-head"><select class="select grow" id="chat-target" aria-label="Model"></select>
+        ${canSpeak() ? raw('<button class="btn small" data-ai="voice-toggle" aria-pressed="' + (VOICE.auto ? "true" : "false") + '" title="Read every answer aloud as it arrives (your computer\'s voice)">' + (VOICE.auto ? "🔊 Reading on" : "🔈 Read aloud") + "</button>") : ""}
         <button class="btn small" data-ai="chat-settings" aria-label="Chat settings">Settings</button><button class="btn small" data-ai="clear-chat">Clear</button></header>
         <div class="chat-settings hide" id="chat-settings"></div>
         <div class="thread" id="thread" aria-live="polite"></div>
@@ -1033,6 +1042,94 @@
   const webChips = (m) => m.web && m.web.sources && m.web.sources.length ? '<details class="srcs"><summary>Searched the web · ' + m.web.sources.length + " source" + (m.web.sources.length === 1 ? "" : "s") + "</summary>" +
     m.web.sources.map((x) => '<a href="' + esc(x.url) + '" target="_blank" rel="noopener noreferrer nofollow">' + esc(x.title || x.url) + '</a>').join("") + "</details>" : "";
   // The browser's own wording for a dropped connection ("Failed to fetch", "Load failed", "NetworkError…") means nothing to people.
+  // ------------------------------------------------------------------ reading answers aloud
+  // The browser's own speech (Web Speech API): the computer's voices, nothing is sent anywhere. Each answer has a
+  // Read aloud button; with "read answers aloud" on (per browser), every answer is read sentence by sentence as the
+  // model writes it.
+  const VOICE = (() => { const d = { auto: false, voice: "", rate: 1 }; try { return Object.assign(d, JSON.parse(store.get("ai.voice", "{}")) || {}); } catch (e) { return d; } })();
+  const saveVoice = () => store.set("ai.voice", JSON.stringify(VOICE));
+  const canSpeak = () => typeof window.speechSynthesis !== "undefined" && typeof window.SpeechSynthesisUtterance !== "undefined";
+  const TTS = { msg: null, queue: 0, live: false };
+  const spoken = new WeakMap();   // answer -> how much of its speakable text is already queued
+  function speechText(src) {
+    return String(src || "")
+      .replace(/<think>[\s\S]*?(<\/think>|$)/g, " ")
+      .replace(/```[\s\S]*?(```|$)/g, " (code) ")
+      .replace(/<file\b[\s\S]*?(<\/file>|$)/g, " (a file) ")
+      .replace(/!\[[^\]]*\]\([^)]*\)?/g, " ")
+      .replace(/\[([^\]]+)\]\([^)\s]*\)?/g, "$1")
+      .replace(/`([^`]*)`/g, "$1")
+      .replace(/https?:\/\/\S+/g, " a link ")
+      .replace(/^\s*\|.*$/gm, " ")                 // tables
+      .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+      .replace(/^\s*[-*+]\s+/gm, "")
+      .replace(/^\s*>\s?/gm, "")
+      .replace(/[*_~#|`[\]]+/g, "")
+      .replace(/\n{2,}/g, ".\n")                     // a new paragraph is a pause
+      .replace(/([.!?:])\.\n/g, "$1\n")
+      .replace(/[ \t]+/g, " ");
+  }
+  function chunks(text) {   // Chrome stops long utterances part way: say at most ~220 characters at a time
+    const out = []; let t = text.replace(/\s+/g, " ").trim();
+    while (t.length > 220) {
+      let k = Math.max(t.lastIndexOf(". ", 220), t.lastIndexOf("! ", 220), t.lastIndexOf("? ", 220));
+      if (k < 80) k = t.lastIndexOf(", ", 220);
+      if (k < 80) k = t.lastIndexOf(" ", 220);
+      if (k < 1) k = 220;
+      out.push(t.slice(0, k + 1)); t = t.slice(k + 1).trim();
+    }
+    if (t) out.push(t);
+    return out;
+  }
+  const voiceList = () => (canSpeak() ? speechSynthesis.getVoices() : []);
+  const pickVoice = () => { const vs = voiceList(); return vs.find((v) => v.name === VOICE.voice) || vs.find((v) => v.default && /^en/i.test(v.lang)) || vs.find((v) => /^en/i.test(v.lang)) || vs[0] || null; };
+  function say(text) {
+    const voice = pickVoice();
+    for (const piece of chunks(text)) {
+      const u = new SpeechSynthesisUtterance(piece);
+      if (voice) { u.voice = voice; u.lang = voice.lang; }
+      u.rate = Math.min(2, Math.max(0.5, +VOICE.rate || 1));
+      u.onend = u.onerror = () => { TTS.queue = Math.max(0, TTS.queue - 1); if (!TTS.queue && !TTS.live) { TTS.msg = null; paintSpeak(); } };
+      TTS.queue++;
+      speechSynthesis.speak(u);
+    }
+  }
+  function stopReading() {
+    TTS.msg = null; TTS.queue = 0; TTS.live = false;
+    if (canSpeak()) speechSynthesis.cancel();
+    paintSpeak();
+  }
+  function readMessage(m) {
+    if (!canSpeak()) { toast("This browser can't read aloud."); return; }
+    stopReading();
+    const text = speechText(m.content).trim(); if (!text) return;
+    TTS.msg = m; say(text); paintSpeak();
+  }
+  // while an answer streams in: each finished sentence is read as soon as it's there
+  function liveRead(m, final) {
+    if (!VOICE.auto || !canSpeak() || !m) return;
+    if (TTS.msg !== m) { stopReading(); TTS.msg = m; TTS.live = true; spoken.set(m, 0); paintSpeak(); }
+    const t = speechText(m.content), from = Math.min(spoken.get(m) || 0, t.length);
+    let end = t.length;
+    if (!final) { end = -1; const re = /[.!?]["')\]]?(?=\s)|\n/g; let x; while ((x = re.exec(t))) end = x.index + x[0].length; }
+    if (end > from) { spoken.set(m, end); const piece = t.slice(from, end); if (piece.trim()) say(piece); }
+    if (final) { TTS.live = false; if (!TTS.queue) TTS.msg = null; paintSpeak(); }
+  }
+  function paintSpeak() {
+    const c = curChat();
+    $$('[data-ai="read-msg"]').forEach((b) => { const m = c && c.messages[+b.dataset.i]; b.textContent = m && TTS.msg === m ? "■ Stop reading" : "🔊 Read aloud"; });
+    const t = $('[data-ai="voice-toggle"]'); if (t) { t.textContent = VOICE.auto ? "🔊 Reading on" : "🔈 Read aloud"; t.setAttribute("aria-pressed", VOICE.auto ? "true" : "false"); t.classList.toggle("on", !!VOICE.auto); }
+  }
+  function setAutoRead(on) {
+    if (on && !canSpeak()) { toast("This browser can't read aloud."); return; }
+    VOICE.auto = !!on; saveVoice();
+    if (!on && TTS.live) stopReading();
+    paintSpeak();
+    toast(on ? "Answers are read aloud as they arrive." : "Reading aloud is off.");
+  }
+  const voiceOptions = () => voiceList().map((v) => '<option value="' + esc(v.name) + '"' + (v.name === (pickVoice() || {}).name ? " selected" : "") + ">" + esc(v.name + " (" + v.lang + ")") + "</option>").join("");
+  if (canSpeak()) speechSynthesis.addEventListener("voiceschanged", () => { const el = $("#cs-voice"); if (el) el.innerHTML = voiceOptions(); });
+
   const CUT_TEXT = "The model stopped in the middle of its answer: the connection to it ended before it finished. Press Continue to pick up where it stopped.";
   const netError = (e, fallback) => (e && e.name === "TypeError" && /fetch|network|load failed/i.test(e.message || "")
     ? "The connection to the dashboard dropped before the answer arrived (network or server restart). The model may still be busy; try again in a moment."
@@ -1057,7 +1154,8 @@
         (m.cut && m.content && last ? '<button class="btn small primary" data-ai="continue" title="Ask the model to carry on from where it stopped">Continue</button> ' : "") + '<button class="btn small" data-ai="retry">' + (m.cut && m.content ? "Start the answer again" : "Try again") + "</button>"
       : (m.content || m.thinking ? md((m.thinking ? "<think>" + m.thinking + "</think>" : "") + m.content, i, !!m.pending) + (m.cutNote ? '<div class="faint small">(cut off here; continued below)</div>' : "") : m.pending ? waitHTML(m) : '<span class="typing"><i></i><i></i><i></i></span>');
     const meta = m.meta ? '<div class="meta">' + esc(m.meta) + "</div>" : "";
-    const tools = !m.pending && !m.error && m.content ? '<div class="tools"><button data-ai="copy-msg" data-i="' + i + '">Copy</button>' + (last ? '<button data-ai="regen">Regenerate</button>' : "") + "</div>" : "";
+    const tools = !m.pending && !m.error && m.content ? '<div class="tools"><button data-ai="copy-msg" data-i="' + i + '">Copy</button>' +
+      (canSpeak() ? '<button data-ai="read-msg" data-i="' + i + '">' + (TTS.msg === m ? "■ Stop reading" : "🔊 Read aloud") + "</button>" : "") + (last ? '<button data-ai="regen">Regenerate</button>' : "") + "</div>" : "";
     return '<div class="msg assistant" data-i="' + i + '"><div class="avatar">AI</div><div class="bubble">' + toolsHTML(m) + '<div class="md">' + body + (m.pending && m.content ? '<span class="caret"></span>' : "") + "</div>" + meta + tools + "</div></div>";
   };
   function renderThread() {
@@ -1096,6 +1194,10 @@
           <span class="muted small">Automatic mode sends the available skill list with each message and can add a little delay. Turn it off to select individual skills.</span>
           <div id="plugin-list">${pluginList(c)}</div></div>
         <label class="check"><input type="checkbox" id="cs-autofix" ${c.autofix ? raw("checked") : ""}> <span><b>Run and fix code automatically</b>: runs the code the AI writes on the server (as your user) and sends errors back so it fixes them, up to 3 tries. Off by default; code only runs when you press ▶ Run.</span></label>
+        ${canSpeak() ? html`<div class="plugins"><b>Read aloud</b> <label class="check"><input type="checkbox" id="cs-voice-auto" ${VOICE.auto ? raw("checked") : ""}> <span><b>Read answers aloud</b> as they're written, sentence by sentence (this browser, every chat). Uses your computer's own voices; nothing is sent anywhere.</span></label>
+          <div class="row" style="gap:12px;flex-wrap:wrap;align-items:flex-end"><label>Voice<select class="select" id="cs-voice">${raw(voiceOptions())}</select></label>
+          <label>Speed<select class="select" id="cs-rate">${raw([0.8, 1, 1.15, 1.3, 1.5, 1.75, 2].map((r) => '<option value="' + r + '"' + (+VOICE.rate === r ? " selected" : "") + ">" + r + "×</option>").join(""))}</select></label>
+          <button class="btn small" type="button" data-ai="voice-test">Test</button></div></div>` : ""}
         <label>Files<select class="select" id="cs-files"><option value="ask" ${!c.files || c.files === true || c.files === "ask" ? raw("selected") : ""}>Only when I ask for a file</option><option value="always" ${c.files === "always" ? raw("selected") : ""}>Always: scripts, pages and documents as files</option><option value="never" ${c.files === false || c.files === "never" ? raw("selected") : ""}>Never</option></select></label>`);
     }
   }
@@ -1186,7 +1288,7 @@
           if (d && (d.content || d.reasoning_content)) {
             if (!first) first = performance.now();
             chunks++;
-            if (d.content) msg.content += d.content;
+            if (d.content) { msg.content += d.content; liveRead(msg); }
             if (d.reasoning_content) msg.thinking += d.reasoning_content;
             if (!raf) raf = requestAnimationFrame(paint);
           }
@@ -1198,6 +1300,7 @@
       if (e.name !== "AbortError") msg.error = netError(e, "Something went wrong.");
     } finally {
       clearInterval(waitTimer);
+      if (ctrl.signal.aborted) { if (TTS.msg === msg) stopReading(); } else liveRead(msg, true);
       msg.pending = false; delete msg.progress;
       if (!msg.error && !msg.content && !msg.thinking) msg.error = ctrl.signal.aborted ? "Stopped." : "The model sent an empty answer.";
       const secs = (performance.now() - (first || t0)) / 1000, tps = timings && timings.predicted_per_second ? timings.predicted_per_second : (chunks > 1 && secs > 0 ? (chunks - 1) / secs : 0);
@@ -1616,7 +1719,7 @@
     if (a === "new-chat") { newChat(); buildChat(); }
     else if (a === "open-chat") { A.cur = el.dataset.id; saveChats(); buildChat(); }
     else if (a === "del-chat") { e.stopPropagation(); const gone = A.chats.find((x) => x.id === el.dataset.id); if (gone && gone.remote) postJSON("/api/v1/chats/delete", { id: gone.remote.id }).catch(() => {}); A.chats = A.chats.filter((x) => x.id !== el.dataset.id); if (A.cur === el.dataset.id) A.cur = (A.chats[0] || {}).id || ""; saveChats(); buildChat(); }
-    else if (a === "clear-chat" && c) { if (A.stream) A.stream.ctrl.abort(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); c.messages = []; c.summary = ""; c.summaryUpTo = 0; c.title = "New chat"; saveChats(); renderThread(); renderChatList(); refreshChat(); }
+    else if (a === "clear-chat" && c) { stopReading(); if (A.stream) A.stream.ctrl.abort(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); c.messages = []; c.summary = ""; c.summaryUpTo = 0; c.title = "New chat"; saveChats(); renderThread(); renderChatList(); refreshChat(); }
     else if (a === "compress-now" && c) { compressChat(c, { manual: true }); }
     else if (a === "agent-allow" || a === "agent-always" || a === "agent-deny") { agentReply(c, a); }
     else if (a === "stop-load") { if (A.loadingModel) A.loadingModel.cancelled = true; }
@@ -1646,6 +1749,9 @@
       else toast("That file wasn't kept by this browser. Attach it again to open or analyze it.");
     }
     else if (a === "copy-msg" && c) copyText(c.messages[+el.dataset.i].content);
+    else if (a === "read-msg" && c) { const m = c.messages[+el.dataset.i]; if (m && TTS.msg === m) stopReading(); else if (m) readMessage(m); }
+    else if (a === "voice-toggle") setAutoRead(!VOICE.auto);
+    else if (a === "voice-test") { if (canSpeak()) { stopReading(); say("Hello! This is how answers will sound."); } }
     else if (a === "continue" && c && !A.stream) {
       const m = c.messages[c.messages.length - 1];
       if (m && m.cut) { m.error = ""; m.cut = false; m.cutNote = true; saveChats(); }   // keep the part it wrote, so the model sees it
@@ -1763,6 +1869,9 @@
     else if (e.target.id === "ai-model") pickModel(e.target);
     else if (e.target.id === "attach-input") { addFiles(e.target.files).then(() => { e.target.value = ""; }); }
     else if (e.target.id === "cs-files" && c) { c.files = e.target.value; saveChats(); }
+    else if (e.target.id === "cs-voice-auto") setAutoRead(e.target.checked);
+    else if (e.target.id === "cs-voice") { VOICE.voice = e.target.value; saveVoice(); }
+    else if (e.target.id === "cs-rate") { VOICE.rate = +e.target.value || 1; saveVoice(); }
     else if (e.target.id === "lc-enabled") saveLifecycle({ enabled: e.target.checked });
     else if (e.target.id === "lc-idle") { if (e.target.value === "custom") { A.lifeCustom = true; U.queueRender(); } else saveLifecycle({ idle_seconds: +e.target.value }); }
   });

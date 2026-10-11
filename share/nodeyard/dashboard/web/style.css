@@ -656,3 +656,4 @@ html.embed .tbox { height: calc(100vh - 150px); }
 .plug-toggle { white-space: nowrap; } .warnline { color: var(--warn); }
 .audit { display: grid; gap: 4px; max-height: 360px; overflow: auto; }
 .tintent { border-style: solid; border-color: var(--accent); margin: 8px 0 4px; }
+.chat-head .btn.on { border-color: var(--accent); color: var(--accent); }

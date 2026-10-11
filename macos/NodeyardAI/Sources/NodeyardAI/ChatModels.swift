@@ -89,6 +89,9 @@ struct AppDefaults: Codable, Equatable {
     var browserUse: Bool? = true
     var computerUse: Bool? = false
     var agentBrowser: Bool? = false
+    var readAloud: Bool? = false
+    var voiceID: String? = ""
+    var speechRate: Double? = 1.0
 }
 
 struct RemoteChatSummary: Codable, Identifiable {

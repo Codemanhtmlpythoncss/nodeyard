@@ -296,6 +296,7 @@ private struct ChatDetailView: View {
 
 private struct MessageCard: View {
     @EnvironmentObject private var state: AppState
+    @ObservedObject private var reader = SpeechReader.shared
     let message: ChatMessage
     let isLatest: Bool
     let sending: Bool
@@ -316,6 +317,10 @@ private struct MessageCard: View {
                     Spacer()
                     if message.role == "assistant" {
                         Text("\(message.content.components(separatedBy: .newlines).count) lines").font(.caption2).foregroundStyle(.tertiary).help("Select this text to copy it")
+                        if !message.content.isEmpty {
+                            Button { state.speech().toggle(message) } label: { Image(systemName: reader.speakingID == message.id ? "stop.circle" : "speaker.wave.2") }
+                                .help(reader.speakingID == message.id ? "Stop reading" : "Read aloud (⌥⌘R)")
+                        }
                         if isLatest && !sending { Button { state.regenerate() } label: { Image(systemName: "arrow.clockwise") }.help("Regenerate answer (⇧⌘R)") }
                     } else if message.role == "user" {
                         Button { state.edit(message) } label: { Image(systemName: "pencil") }.help("Edit and resend this message")

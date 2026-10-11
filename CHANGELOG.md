@@ -14,7 +14,7 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   Updates now restart a running dashboard, and the dashboard notices when its own program changed on disk and
   restarts on the new version as soon as nothing is in use (a banner offers **Restart now**); the page reloads itself
   onto the new version. Until then the Terminal page still offers the server's own shell.
-- The Nodeyard AI app icon is blue again.
+- The Nodeyard AI app icon is the original blue design again.
 - **Answers no longer stop silently half way.** When the model's machine drops out mid-answer (debian-1 has been
   flapping), the dashboard used to end the stream quietly, so half an answer looked finished. Now every layer notices
   (the dashboard's chat and API relays, yardcode, the page) and says so, naming the node that dropped out, with a
@@ -26,6 +26,10 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 - Numbered lists in answers showed every item as "1." when the model put blank lines between them.
 
 ### Added
+
+- **Read aloud** (dashboard chat and Nodeyard AI for macOS): every answer has a 🔊 button, and with reading on
+  (🔈 in the chat header, `/read on`, or Settings › Read aloud on the Mac) answers are read sentence by sentence while
+  the model writes them. Uses the computer's own voices (pick one and a speed); code, links and formatting are skipped.
 
 - **Terminals on every device** (Terminal page, node details, and Manage › Terminals in the Mac app): a shell on this
   server, on every cluster node and on every Tailscale device, several at once in tabs. Node shells (as your user or

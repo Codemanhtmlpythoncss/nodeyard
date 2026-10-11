@@ -31,6 +31,8 @@ struct NodeyardAIApp: App {
                 Button("Send Message") { state.beginSend() }.keyboardShortcut(.return, modifiers: [.command])
                 Button("Stop Generation") { state.stop() }.keyboardShortcut(".", modifiers: .command).disabled(!state.isSending)
                 Button("Regenerate Answer") { state.regenerate() }.keyboardShortcut("r", modifiers: [.command, .shift])
+                Button("Read Last Answer Aloud / Stop") { state.readLastAnswer() }.keyboardShortcut("r", modifiers: [.command, .option])
+                Toggle("Read Answers Aloud as They Arrive", isOn: Binding(get: { state.defaults.readAloud ?? false }, set: { state.defaults.readAloud = $0; if !$0 { SpeechReader.shared.stop() } }))
                 Divider()
                 Button("Refresh Models") { state.refresh() }.keyboardShortcut("r", modifiers: .command)
                 Button("Sync Saved Chats") { state.syncNow() }.keyboardShortcut("s", modifiers: [.command, .option])

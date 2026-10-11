@@ -83,6 +83,22 @@ struct AppSettingsView: View {
                         Button("Request access") { state.requestComputerUsePermission() }
                     }
                 }
+                Section("Read aloud") {
+                    Toggle("Read answers aloud as they arrive", isOn: Binding(get: { state.defaults.readAloud ?? false },
+                                                                         set: { state.defaults.readAloud = $0; if !$0 { SpeechReader.shared.stop() } }))
+                    Picker("Voice", selection: Binding(get: { state.defaults.voiceID ?? "" }, set: { state.defaults.voiceID = $0 })) {
+                        Text("System voice").tag("")
+                        ForEach(SpeechReader.voices, id: \.identifier) { v in Text("\(v.name) (\(v.language))").tag(v.identifier) }
+                    }
+                    Picker("Speed", selection: Binding(get: { state.defaults.speechRate ?? 1 }, set: { state.defaults.speechRate = $0 })) {
+                        ForEach([0.8, 1.0, 1.15, 1.3, 1.5, 1.75, 2.0], id: \.self) { r in Text(String(format: "%g×", r)).tag(r) }
+                    }
+                    HStack {
+                        Text("Uses this Mac's own voices; nothing is sent anywhere. Every answer also has a speaker button.").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Test") { state.speech().read("Hello! This is how answers will sound.", id: "voice-test") }
+                    }
+                }
                 Section("Chat saving and alerts") {
                     Toggle("Sync completed chats to the Nodeyard server", isOn: $state.defaults.syncChats)
                     Toggle("Notify when a reply is complete", isOn: $state.defaults.notifications)

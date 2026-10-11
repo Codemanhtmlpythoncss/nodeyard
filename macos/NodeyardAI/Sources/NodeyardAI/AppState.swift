@@ -180,7 +180,21 @@ final class AppState: ObservableObject {
         activeTask = Task { await performSend(chatID: chatID, retry: retry) }
     }
 
+    /// The speech reader with this app's voice settings.
+    func speech() -> SpeechReader {
+        let reader = SpeechReader.shared
+        reader.voiceIdentifier = defaults.voiceID ?? ""
+        reader.rate = defaults.speechRate ?? 1
+        return reader
+    }
+
+    func readLastAnswer() {
+        guard let m = currentChat?.messages.last(where: { $0.role == "assistant" && !$0.content.isEmpty }) else { return }
+        speech().toggle(m)
+    }
+
     func stop() {
+        SpeechReader.shared.stop()
         resolveToolApproval(allow: false)
         activeTask?.cancel(); activeTask = nil; isSending = false; info = "Generation stopped."
     }
@@ -279,6 +293,7 @@ final class AppState: ObservableObject {
                 response = chats[try ci()].messages[i]
             }
             persist(chatIndex: try ci())
+            if defaults.readAloud == true { speech().feed(id: response.id, text: response.content, final: true) }
             if defaults.syncChats { await sync(chatID: chatID) }
             if defaults.notifications { notify(title: "Nodeyard AI replied", body: chats[try ci()].title) }
         } catch is CancellationError {
@@ -446,7 +461,10 @@ final class AppState: ObservableObject {
     private func appendStream(_ piece: String, reasoning: Bool, to messageID: String, chatID: String) {
         if promptProgress[messageID] != nil { promptProgress[messageID] = nil }
         guard let ci = chats.firstIndex(where: { $0.id == chatID }), let mi = chats[ci].messages.firstIndex(where: { $0.id == messageID }) else { return }
-        if reasoning { chats[ci].messages[mi].reasoning += piece } else { chats[ci].messages[mi].content += piece }
+        if reasoning { chats[ci].messages[mi].reasoning += piece } else {
+            chats[ci].messages[mi].content += piece
+            if defaults.readAloud == true { speech().feed(id: messageID, text: chats[ci].messages[mi].content, final: false) }
+        }
         if chats[ci].messages[mi].content.count % 160 == 0 { try? store.save(chats[ci]) }
     }
 

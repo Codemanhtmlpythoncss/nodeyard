@@ -28,48 +28,41 @@ func renderIcon(pixels: Int, to url: URL) throws {
     context.setShouldAntialias(true)
     context.interpolationQuality = .high
 
-    // The dashboard's favicon (share/nodeyard/dashboard/web/index.html), drawn on the macOS icon grid:
-    // an 824 px rounded tile centred on the 1024 px canvas, with a soft shadow. SVG units (32 x 32,
-    // y down) map onto the tile; CoreGraphics' y axis points up.
-    let tileRect = CGRect(x: 100, y: 100, width: 824, height: 824)
-    let unit = tileRect.width / 32
-    func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: tileRect.minX + x * unit, y: 1024 - (tileRect.minY + y * unit)) }
-    let tile = CGPath(roundedRect: tileRect, cornerWidth: 185, cornerHeight: 185, transform: nil)
-
-    context.saveGState()
-    context.setShadow(offset: CGSize(width: 0, height: -12), blur: 28, color: NSColor.black.withAlphaComponent(0.28).cgColor)
-    context.addPath(tile)
-    context.setFillColor(CGColor(red: 0.16, green: 0.47, blue: 0.82, alpha: 1))
-    context.fillPath()
-    context.restoreGState()
-
-    // Nodeyard AI's own blue (deeper than the website's periwinkle-to-cyan, which looks purple in the Dock)
     let colors = [
-        CGColor(red: 0.36, green: 0.43, blue: 0.96, alpha: 1), // #5C6EF5
-        CGColor(red: 0.16, green: 0.47, blue: 0.82, alpha: 1), // #2978D1
-        CGColor(red: 0.07, green: 0.70, blue: 0.78, alpha: 1), // #12B3C7
+        CGColor(red: 0.36, green: 0.43, blue: 0.96, alpha: 1),
+        CGColor(red: 0.16, green: 0.47, blue: 0.82, alpha: 1),
+        CGColor(red: 0.07, green: 0.70, blue: 0.78, alpha: 1),
     ] as CFArray
     let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 0.54, 1])!
+    context.drawLinearGradient(gradient, start: CGPoint(x: 70, y: 970), end: CGPoint(x: 940, y: 55), options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+
     context.saveGState()
-    context.addPath(tile)
-    context.clip()
-    context.drawLinearGradient(gradient, start: point(0, 0), end: point(32, 32), options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+    context.setFillColor(CGColor(red: 0.85, green: 0.96, blue: 1, alpha: 0.11))
+    context.fillEllipse(in: CGRect(x: 245, y: 255, width: 690, height: 690))
+    context.setFillColor(CGColor(red: 0.12, green: 0.22, blue: 0.62, alpha: 0.10))
+    context.fillEllipse(in: CGRect(x: -255, y: -245, width: 980, height: 980))
     context.restoreGState()
 
-    // <g stroke="white" stroke-width="2" stroke-linecap="round" fill="none">
-    context.setStrokeColor(NSColor.white.cgColor)
-    context.setLineWidth(2 * unit)
+    let nodes = [CGPoint(x: 286, y: 315), CGPoint(x: 740, y: 397), CGPoint(x: 416, y: 741)]
+    context.setStrokeColor(NSColor.white.withAlphaComponent(0.88).cgColor)
+    context.setLineWidth(38)
     context.setLineCap(.round)
     context.setLineJoin(.round)
-    for (cx, cy) in [(9.0, 10.0), (23.0, 12.0), (13.0, 23.0)] {   // <circle r="2.4">
-        let c = point(cx, cy), r = 2.4 * unit
-        context.strokeEllipse(in: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r))
-    }
-    // <path d="M11 10.5l10 1.2M10 12.4l2 8.2M21.8 14l-7 7.2"/>
-    context.addLines(between: [point(11, 10.5), point(21, 11.7)])
-    context.addLines(between: [point(10, 12.4), point(12, 20.6)])
-    context.addLines(between: [point(21.8, 14), point(14.8, 21.2)])
+    context.addLines(between: [nodes[0], nodes[1]])
+    context.addLines(between: [nodes[0], nodes[2]])
+    context.addLines(between: [nodes[1], nodes[2]])
     context.strokePath()
+
+    for point in nodes {
+        let radius: CGFloat = 72
+        context.setShadow(offset: CGSize(width: 0, height: -9), blur: 22, color: NSColor.black.withAlphaComponent(0.22).cgColor)
+        context.setFillColor(NSColor.white.cgColor)
+        context.fillEllipse(in: CGRect(x: point.x - radius, y: point.y - radius, width: radius * 2, height: radius * 2))
+        context.setShadow(offset: .zero, blur: 0, color: nil)
+        context.setFillColor(CGColor(red: 0.27, green: 0.40, blue: 0.88, alpha: 1))
+        let core = radius * 0.32
+        context.fillEllipse(in: CGRect(x: point.x - core, y: point.y - core, width: core * 2, height: core * 2))
+    }
 
     graphics.flushGraphics()
     NSGraphicsContext.restoreGraphicsState()
