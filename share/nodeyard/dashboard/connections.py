@@ -258,7 +258,11 @@ class Connections:
         if pref in ("lan", "tailscale") and not rec["settings"]["failover"] and chosen != pref:
             chosen = pref if rec[pref]["state"] == "reachable" else None
         if rec.get("preferred") and chosen and rec["preferred"] != chosen:
-            self._event(rec, "Switched to %s (%s is %s)" % (path_name(chosen), path_name(rec["preferred"]), rec[rec["preferred"]]["state"]))
+            old = rec["preferred"]
+            if rec[old]["state"] == "reachable":   # the preferred path came back
+                self._event(rec, "Switched back to %s (it answers again)" % path_name(chosen))
+            else:
+                self._event(rec, "Switched to %s (%s is %s)" % (path_name(chosen), path_name(old), rec[old]["state"]))
         rec["preferred"] = chosen
         rec["status"] = status
 

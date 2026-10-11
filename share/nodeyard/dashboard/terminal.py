@@ -277,7 +277,9 @@ def parse_tailnet(data):
                 "online": bool(p.get("Online")), "last_seen": seen if seen > 0 else 0.0}
     me = one(data.get("Self") or {})
     me["online"] = True
-    peers = [one(p) for p in (data.get("Peer") or {}).values()]
+    # Tailscale's own Funnel relays show up as peers ("funnel-ingress-node", IPv6 only, no OS): not your devices
+    peers = [one(p) for p in (data.get("Peer") or {}).values()
+             if p.get("HostName") != "funnel-ingress-node" and not (not p.get("OS") and not any("." in str(i) for i in p.get("TailscaleIPs") or []))]
     return me, [p for p in peers if p["ips"]]
 
 
