@@ -166,12 +166,13 @@ final class NodeyardClient {
         }
         var stats = StreamStats()
         var toolCalls: [Int: ModelToolCall] = [:]
+        var endedCleanly = false        // saw [DONE] or a finish reason — the model stopped on purpose, not a drop-out
         do {
             for try await line in bytes.lines {
                 try Task.checkCancellation()
                 guard line.hasPrefix("data: ") else { continue }
                 let chunk = String(line.dropFirst(6))
-                if chunk == "[DONE]" { break }
+                if chunk == "[DONE]" { endedCleanly = true; break }
                 guard let json = chunk.data(using: .utf8) else { continue }
                 if let any = JSON.parse(json) {
                     // An error in the middle of the stream (the model server restarted, ran out of memory...) is a failure,
@@ -185,6 +186,7 @@ final class NodeyardClient {
                 if let usage = part.usage?.completion_tokens { stats.tokens = usage }
                 if let speed = part.timings?.predicted_per_second { stats.tokensPerSecond = speed }
                 for choice in part.choices ?? [] {
+                    if let reason = choice.finish_reason, !reason.isEmpty { stats.finishReason = reason; endedCleanly = true }
                     if let thought = choice.delta.reasoning_content ?? choice.delta.reasoning, !thought.isEmpty { onReasoning(thought) }
                     if let text = choice.delta.content, !text.isEmpty { onContent(text) }
                     for delta in choice.delta.tool_calls ?? [] {
@@ -198,6 +200,8 @@ final class NodeyardClient {
             }
         } catch { throw explainNetworkError(error) }
         stats.toolCalls = toolCalls.keys.sorted().compactMap { toolCalls[$0] }.filter { !$0.id.isEmpty && !$0.function.name.isEmpty }
+        // The loop ending on its own, with no [DONE] and no finish reason, means the stream was cut off mid-answer.
+        stats.truncated = !endedCleanly && stats.toolCalls.isEmpty
         return stats
     }
 
@@ -236,4 +240,11 @@ final class NodeyardClient {
     private struct BasicReply: Decodable { var ok: Bool?; var error: String?; var job: String? }
 }
 
-struct StreamStats { var tokens: Int?; var tokensPerSecond: Double?; var toolCalls: [ModelToolCall] = [] }
+struct StreamStats {
+    var tokens: Int?; var tokensPerSecond: Double?; var toolCalls: [ModelToolCall] = []
+    /// The model's own "why I stopped" ("stop" = done, "length" = hit the reply cap, "tool_calls" = calling a tool).
+    var finishReason: String?
+    /// The stream ended with neither a finish reason nor [DONE] — i.e. it was cut off (the model machine dropped out,
+    /// or the connection closed mid-answer) rather than finishing. The partial text is kept; the answer is incomplete.
+    var truncated = false
+}

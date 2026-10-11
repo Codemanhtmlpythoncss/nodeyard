@@ -33,6 +33,10 @@ struct ChatMessage: Codable, Identifiable, Hashable {
     var toolCalls: [ModelToolCall]? = nil
     var toolCallID: String? = nil
     var toolName: String? = nil
+    /// Set when the answer did not finish normally: "length" = it hit the reply-length cap, "cutoff" = the stream ended
+    /// mid-answer (the model machine dropped out, or the connection closed). nil = finished normally. Drives the
+    /// "answer was cut off · Continue" notice so a half answer never looks complete.
+    var incomplete: String? = nil
 }
 
 struct ModelToolCall: Codable, Identifiable, Hashable {
@@ -146,6 +150,7 @@ struct StreamDelta: Decodable {
             var tool_calls: [ToolCall]?
         }
         var delta: Delta
+        var finish_reason: String?
     }
     var choices: [Choice]?
     var usage: Usage?

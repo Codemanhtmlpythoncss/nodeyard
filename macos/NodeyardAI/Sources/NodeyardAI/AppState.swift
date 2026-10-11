@@ -287,13 +287,22 @@ final class AppState: ObservableObject {
                 chats[try ci()].messages.append(response)
                 persist(chatIndex: try ci())
             }
-            if let i = chats[try ci()].messages.firstIndex(where: { $0.id == responseID }) {
-                chats[try ci()].messages[i].duration = Date().timeIntervalSince(streamStarted ?? Date())
-                chats[try ci()].messages[i].tokensPerSecond = finalStats.tokensPerSecond
-                chats[try ci()].messages[i].tokenCount = finalStats.tokens
-                response = chats[try ci()].messages[i]
+            let ciIndex = try ci()
+            if let i = chats[ciIndex].messages.firstIndex(where: { $0.id == responseID }) {
+                chats[ciIndex].messages[i].duration = Date().timeIntervalSince(streamStarted ?? Date())
+                chats[ciIndex].messages[i].tokensPerSecond = finalStats.tokensPerSecond
+                chats[ciIndex].messages[i].tokenCount = finalStats.tokens
+                // A half answer must never look finished: mark it so the UI shows "cut off · Continue".
+                if finalStats.truncated && !chats[ciIndex].messages[i].content.isEmpty {
+                    chats[ciIndex].messages[i].incomplete = "cutoff"
+                    info = "The answer was cut off — the model stream ended early. Use Continue to carry on."
+                } else if finalStats.finishReason == "length" {
+                    chats[ciIndex].messages[i].incomplete = "length"
+                    info = "The answer reached the reply-length limit. Use Continue, or raise it in Settings."
+                }
+                response = chats[ciIndex].messages[i]
             }
-            persist(chatIndex: try ci())
+            persist(chatIndex: ciIndex)
             if defaults.readAloud == true || VoiceChat.shared.isOn { speech().feed(id: response.id, text: response.content, final: true) }
             if defaults.syncChats { await sync(chatID: chatID) }
             if defaults.notifications { notify(title: "Nodeyard AI replied", body: chats[try ci()].title) }
@@ -474,6 +483,15 @@ final class AppState: ObservableObject {
     func regenerate() {
         guard let chat = currentChat, chat.messages.last?.role == "assistant" else { return }
         beginSend(retry: true)
+    }
+
+    /// Carry on from a cut-off answer: keep the partial text and ask the model to continue it in a new turn.
+    func continueAnswer() {
+        guard !isSending, let chat = currentChat, chat.messages.last?.role == "assistant",
+              chat.messages.last?.content.isEmpty == false else { return }
+        composer = "Continue your previous answer from exactly where it stopped. Do not repeat anything you already wrote; if it was inside a code block, keep going inside the same code block."
+        stagedAttachments = []
+        beginSend(retry: false)
     }
 
     func stageFiles(_ urls: [URL]) {

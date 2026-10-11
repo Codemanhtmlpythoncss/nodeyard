@@ -366,6 +366,17 @@ private struct MessageCard: View {
                     }
                 }
                 if message.role != "tool" && !message.content.isEmpty { MarkdownText(markdown: message.content).textSelection(.enabled).font(.system(size: state.defaults.fontSize)).fixedSize(horizontal: false, vertical: true) }
+                if message.role == "assistant", let reason = message.incomplete, !sending {
+                    HStack(spacing: 9) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        Text(reason == "length" ? "This answer hit the reply-length limit." : "This answer was cut off before it finished.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        if isLatest { Button("Continue") { state.continueAnswer() }.buttonStyle(.borderedProminent).controlSize(.small) }
+                    }
+                    .padding(.vertical, 6).padding(.horizontal, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                }
                 if message.role == "tool" {
                     DisclosureGroup(isExpanded: $showToolResult) {
                         MarkdownText(markdown: message.content).textSelection(.enabled)

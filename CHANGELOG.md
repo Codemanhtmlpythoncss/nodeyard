@@ -29,6 +29,11 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   up while it tours unless you hide them (H, or Tab › Panels), and the tour can be set to stay on the overview.
 - The galaxy screens say "k3s nodes" and "nodes" where the original said Proxmox's "PVE".
 - The Mac app's galaxy shows the 2D Universe page (and says why) when the cluster's dashboard is too old for the 3D one.
+- **The Mac app no longer shows a cut-off answer as if it finished.** When the model stream ended early with no
+  end marker (the model machine dropped out, or the connection closed mid-answer), the app kept the half answer and
+  marked it done. It now notices an answer that stopped without finishing and shows a **cut off — Continue** notice
+  under it (and flags one that hit the reply-length limit), with a Continue button that carries on from where it
+  stopped. (The dashboard already caught cut-offs its relay could see; this covers the case where the stream just ends.)
 - **Code in the Mac app's answers is in a copy box now.** The app drew a whole answer as one block of text, so code
   wasn't set apart, and paragraphs and list items ran together ("script:import random"). Answers are now laid out
   properly (paragraphs, headings, bullet and numbered lists, quotes) and each code block is a box with its language,
