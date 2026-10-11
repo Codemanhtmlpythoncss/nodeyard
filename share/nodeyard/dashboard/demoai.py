@@ -147,6 +147,7 @@ class DemoAI:
         last = last.split("<file ", 1)[0] or last
         # say "drop out" in the demo to see what happens when the model's machine drops out half way
         stream = FakeStream(pick_answer(last), cut_after=30 if re.search(r"\bdrop(?:s|ped)? out\b", last, re.I) else None)
+        self.streams = [st for st in getattr(self, "streams", []) if not st.done][-8:] + [stream]
         conn = FakeConn(stream)
         self.task += 1
         if self.lifecycle:
@@ -167,7 +168,8 @@ class DemoAI:
             return any(j["status"] == "running" and j.get("exclusive", True) for j in self.jobs.values())
 
     def split_slots(self):
-        return {"processing": False, "task": self.task}
+        live = [st for st in list(getattr(self, "streams", [])) if not st.done and not st.stopped and not (st.cut_after is not None and st.n >= st.cut_after)]
+        return {"processing": bool(live), "task": self.task, "decoded": sum(st.n for st in live), "n_ctx": 8192}
 
     def ollama_keep_alive(self, pod, model, keep_alive):
         if (pod, model) not in {(e["pod"], m["name"]) for e in self.ollama_overview() for m in e["models"]}:

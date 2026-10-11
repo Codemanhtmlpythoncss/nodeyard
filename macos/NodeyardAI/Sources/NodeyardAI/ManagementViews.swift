@@ -63,6 +63,7 @@ struct ManageDetail: View {
             else {
                 switch mgmt.section {
                 case .overview: OverviewView()
+                case .galaxy: GalaxyView()
                 case .nodes: NodesView()
                 case .pods: PodsView()
                 case .workloads: WorkloadsView()

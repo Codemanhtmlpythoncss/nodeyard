@@ -30,7 +30,7 @@ LIB_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 LIB_MAX_ITEMS = 30                              # uploaded pictures and videos kept to pick again
 LIB_MAX_BYTES = 1024 * 1024 * 1024
 # Built-in backgrounds (drawn by the page with CSS, see style.css .bgp-*). A new dashboard starts on the first.
-PRESETS = ("aurora", "sunset", "ocean", "nebula", "forest", "graphite")
+PRESETS = ("aurora", "sunset", "ocean", "nebula", "forest", "graphite", "galaxy", "warp", "constellation")   # (the last three move)
 DEFAULT_BG = {"kind": "preset", "preset": PRESETS[0], "v": 0, "blur": 0, "dim": 0, "default": True}
 LISTEN_RE = re.compile(r"^[a-z0-9.:]+(,[a-z0-9.:]+)*$")  # each item is then checked on its own
 ENV = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/tmp", "LANG": "C.UTF-8", "NODEYARD_COLOR": "never"}

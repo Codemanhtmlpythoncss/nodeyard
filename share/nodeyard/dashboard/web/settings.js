@@ -26,7 +26,9 @@
   const T = { settings: null, doctor: null, doctorBusy: false, newPassword: "" };
 
   // ------------------------------------------------------------------ background picture
-  const PRESET_NAMES = { aurora: "Aurora", sunset: "Sunset", ocean: "Ocean", nebula: "Nebula", forest: "Forest", graphite: "Graphite" };
+  const PRESET_NAMES = { aurora: "Aurora", sunset: "Sunset", ocean: "Ocean", nebula: "Nebula", forest: "Forest", graphite: "Graphite", galaxy: "Galaxy", warp: "Warp", constellation: "Constellation" };
+  const ANIMATED = { galaxy: 1, warp: 1, constellation: 1 };   // drawn live by galaxy.js
+  let anim = null;
   const isVideo = (bg) => !!bg && (bg.kind === "mp4" || bg.kind === "webm");
   function applyBackground(bg) {
     let el = $("#ny-bg");
@@ -38,10 +40,17 @@
       el.innerHTML = '<div class="img"></div><video class="vid" muted loop playsinline preload="auto"></video><div class="dim"></div>';
       document.body.prepend(el);
     }
+    // animated ones: a canvas drawn live (galaxy.js)
+    const moving = bg.kind === "preset" && ANIMATED[bg.preset] && NY.anim;
+    let cv = el.querySelector("canvas.anim");
+    if (moving) {
+      if (!cv) { cv = document.createElement("canvas"); cv.className = "anim"; el.insertBefore(cv, el.querySelector(".dim")); }
+      if (!anim || anim.kind !== bg.preset || !anim.scene.c.isConnected) { if (anim) anim.scene.destroy(); anim = { kind: bg.preset, scene: NY.anim.start(cv, bg.preset) }; }
+    } else if (cv) { if (anim) anim.scene.destroy(); anim = null; cv.remove(); }
     const img = el.querySelector(".img"), vid = el.querySelector(".vid"), video = isVideo(bg);
     img.className = "img" + (bg.kind === "preset" && PRESET_NAMES[bg.preset] ? " bgp-" + bg.preset : "");
     img.style.backgroundImage = bg.kind === "preset" || video ? "" : 'url("/api/background?v=' + encodeURIComponent(bg.v) + '")';
-    img.style.display = video ? "none" : "";
+    img.style.display = video || moving ? "none" : "";
     if (video) {
       const src = "/api/background?v=" + encodeURIComponent(bg.v);
       const still = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -52,7 +61,7 @@
     } else if (vid.dataset.src) { vid.pause(); vid.removeAttribute("src"); vid.dataset.src = ""; vid.load(); vid.style.display = "none"; }
     else vid.style.display = "none";
     const blur = bg.blur ? "blur(" + bg.blur + "px)" : "";
-    img.style.filter = blur; vid.style.filter = blur;
+    img.style.filter = blur; vid.style.filter = blur; if (cv && moving) cv.style.filter = blur;
     el.querySelector(".dim").style.opacity = String((bg.dim == null ? 45 : bg.dim) / 100);
     document.body.classList.add("has-bg");
   }
@@ -143,7 +152,7 @@
         : empty("No sign-in", "This dashboard only answers on its own machine, so it has no password."))}
       ${card("Background", html`
         <div class="field-l">Built in</div>
-        <div class="bg-grid">${(s.background_presets || Object.keys(PRESET_NAMES)).map((n) => raw('<button type="button" class="bg-swatch' + (bg && bg.kind === "preset" && bg.preset === n ? " on" : "") + '" data-st="bg-preset" data-name="' + n + '"><span class="bgp-' + n + '"></span>' + (PRESET_NAMES[n] || n) + "</button>"))}
+        <div class="bg-grid">${(s.background_presets || Object.keys(PRESET_NAMES)).map((n) => raw('<button type="button" class="bg-swatch' + (bg && bg.kind === "preset" && bg.preset === n ? " on" : "") + '" data-st="bg-preset" data-name="' + n + '"><span class="bgp-' + n + '">' + (ANIMATED[n] ? '<i class="bg-play">▶ moves</i>' : "") + "</span>" + (PRESET_NAMES[n] || n) + "</button>"))}
           ${raw('<button type="button" class="bg-swatch none' + (!bg || bg.kind === "none" ? " on" : "") + '" data-st="bg-remove"><span></span>None</button>')}</div>
         <div class="field-l">Your pictures and videos</div>
         <div class="bg-grid">${(s.background_library || []).map((e) => raw('<div class="bg-item"><button type="button" class="bg-swatch' + (bg && bg.id === e.id ? " on" : "") + '" data-st="bg-pick" data-id="' + esc(e.id) + '" title="Use this' + (e.name ? ": " + esc(e.name) : "") + '"><span>' +

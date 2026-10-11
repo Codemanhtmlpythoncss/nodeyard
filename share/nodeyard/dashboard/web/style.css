@@ -692,3 +692,31 @@ html.embed .tbox { height: calc(100vh - 150px); }
 @media (hover: none) { .bg-del { opacity: 1; } }
 .bg-del:hover { color: var(--bad); border-color: var(--bad); }
 .bg-add span { display: grid !important; place-items: center; font-size: 22px; color: var(--muted); border: 1px dashed var(--line2); }
+#ny-bg canvas.anim { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+/* still previews of the animated backgrounds (Settings swatches) */
+.bg-swatch .bgp-galaxy { background: radial-gradient(circle at 50% 50%, rgba(255, 240, 210, .95) 0 4%, rgba(255, 200, 120, .5) 10%, transparent 26%), conic-gradient(from 20deg at 50% 50%, transparent, rgba(110, 200, 255, .5), transparent 30%, rgba(150, 130, 255, .45), transparent 62%, rgba(110, 200, 255, .4), transparent 90%), #050817; }
+.bg-swatch .bgp-warp { background: repeating-conic-gradient(from 0deg at 50% 50%, rgba(255, 255, 255, .5) 0 .4deg, transparent .4deg 9deg), radial-gradient(circle at 50% 50%, #03040b 0 12%, rgba(60, 80, 200, .25) 40%, #03040b 75%); }
+.bg-swatch .bgp-constellation { background: radial-gradient(1.6px 1.6px at 20% 30%, #7fd3ff, transparent), radial-gradient(1.6px 1.6px at 60% 20%, #b48cff, transparent), radial-gradient(1.6px 1.6px at 80% 65%, #7fd3ff, transparent), radial-gradient(1.6px 1.6px at 35% 75%, #b48cff, transparent), linear-gradient(28deg, transparent 49.6%, rgba(127, 211, 255, .35) 50%, transparent 50.4%), linear-gradient(-35deg, transparent 49.6%, rgba(180, 140, 255, .3) 50%, transparent 50.4%), #070a1a; }
+/* the AI galaxy page */
+.gx { position: relative; height: calc(100vh - 150px); min-height: 460px; border-radius: 16px; overflow: hidden; background: #03040b; border: 1px solid rgba(120, 170, 255, .14); }
+.gx:fullscreen { height: 100vh; border-radius: 0; border: 0; }
+.gx canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.gx-hud { position: absolute; min-width: 190px; max-width: 270px; padding: 10px 12px; border-radius: 12px; background: rgba(6, 10, 26, .55); border: 1px solid rgba(120, 170, 255, .18); color: #d4e4ff; font-size: 12px; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.gx-hud.tl { top: 14px; left: 14px; } .gx-hud.tr { top: 14px; right: 14px; } .gx-hud.bl { bottom: 14px; left: 14px; } .gx-hud.br { bottom: 14px; right: 14px; max-height: 40%; overflow: hidden; }
+.gx-k { font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: #7fa6e8; margin-bottom: 4px; }
+.gx-big { font-weight: 700; font-size: 14px; color: #fff; margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gx-row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; } .gx-row span { color: #94acd6; } .gx-row b { font-family: var(--mono); font-weight: 600; }
+.gx-row.gx-state { justify-content: flex-start; gap: 7px; color: #fff; }
+.gx-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; background: #8aa0c8; }
+.gx-dot.good { background: #4ade80; } .gx-dot.bad { background: #f87171; } .gx-dot.warn { background: #fbbf24; }
+.gx-dot.live { background: #fcd34d; box-shadow: 0 0 0 0 rgba(252, 211, 77, .6); animation: gx-ping 1.4s infinite; }
+@keyframes gx-ping { 70% { box-shadow: 0 0 0 7px rgba(252, 211, 77, 0); } 100% { box-shadow: 0 0 0 0 rgba(252, 211, 77, 0); } }
+.gx-node { display: grid; grid-template-columns: 10px minmax(70px, 1fr) 70px 38px; gap: 7px; align-items: center; padding: 2px 0; }
+.gx-node b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gx-bar { height: 5px; border-radius: 3px; background: rgba(255, 255, 255, .1); overflow: hidden; } .gx-bar i { display: block; height: 100%; background: linear-gradient(90deg, #22d3ee, #7c8cff); }
+.gx-num { text-align: right; font-family: var(--mono); color: #b9cbec; }
+.gx-ev { display: flex; gap: 8px; padding: 2px 0; color: #c9d8f5; } .gx-ev span { color: #7f95bf; font-family: var(--mono); } .gx-ev.good { color: #9ff0bd; } .gx-ev.bad { color: #ffaaaa; }
+.gx-full { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); opacity: .75; }
+.gx-full:hover { opacity: 1; }
+@media (max-width: 760px) { .gx { height: calc(100vh - 190px); } .gx-hud.bl, .gx-hud.br { display: none; } .gx-hud { min-width: 0; max-width: 46%; font-size: 11px; } .gx-full { top: auto; bottom: 12px; } }
+@media (prefers-reduced-motion: reduce) { .gx-dot.live { animation: none; } }

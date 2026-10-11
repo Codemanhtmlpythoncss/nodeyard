@@ -27,6 +27,14 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **AI galaxy** (sidebar, and Manage in the Mac app): your cluster drawn live as a spiral galaxy. The core is the model:
+  it brightens while it works, draws light in while it reads the prompt and streams it out along the arms at its real
+  writing speed. The machines are stars orbiting it (brighter with CPU use, red when they drop out), linked to the core
+  with flowing light while they run part of the model. Panels show the model, speed, context, the machines and an
+  activity log; Full screen turns a spare screen into a rack display (`/?embed=1#galaxy` for a kiosk).
+- **Animated backgrounds**: Galaxy, Warp and Constellation, drawn live (sharp at any size, nothing to download, paused
+  while the tab is hidden, still for reduced motion), next to the built-in pictures in Settings › Background.
+
 - **Backgrounds**: six built-in ones drawn by the page (Aurora, the default for a new dashboard, Sunset, Ocean, Nebula,
   Forest, Graphite), **video backgrounds** (MP4 or WebM up to 80 MB, uploaded in pieces, streamed in ranges, silent on a
   loop, still for reduced motion) and None, in Settings › Background with blur and darken. Pictures and videos you

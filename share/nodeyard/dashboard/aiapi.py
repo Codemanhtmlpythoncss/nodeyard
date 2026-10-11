@@ -692,7 +692,10 @@ class Live:
         if not isinstance(slots, list):
             raise AIError("The model's activity endpoint sent something unexpected.", 502)
         tasks = [s.get("id_task") for s in slots if isinstance(s, dict) and isinstance(s.get("id_task"), int)]
-        return {"processing": any(isinstance(s, dict) and s.get("is_processing") for s in slots), "task": max(tasks) if tasks else None}
+        busy = [s for s in slots if isinstance(s, dict) and s.get("is_processing")]
+        decoded = sum(int(((s.get("next_token") or {}) if isinstance(s.get("next_token"), dict) else {}).get("n_decoded") or 0) for s in busy)
+        n_ctx = max([int(s.get("n_ctx") or 0) for s in slots if isinstance(s, dict)] or [0])
+        return {"processing": bool(busy), "task": max(tasks) if tasks else None, "decoded": decoded, "n_ctx": n_ctx}
 
     def ollama_keep_alive(self, pod_name, model, keep_alive):
         """Set how long Ollama keeps a model loaded after its last use (-1 = until unloaded, 0 = unload now)."""
@@ -1403,6 +1406,26 @@ def register(ctx, args):
     ctx.post_routes["/api/ai/web"] = web
     ctx.get_routes.update({"/api/ai/targets": targets, "/api/ai/search": search, "/api/ai/files": files, "/api/job": job, "/api/ai/ollama": ollama,
                            "/api/ai/models": disk_models})
+    act = {"at": 0.0, "data": None, "lock": threading.Lock()}
+
+    def activity(h, q):
+        """What the split model is doing right now (the AI Galaxy page): read at most about once a second."""
+        with act["lock"]:
+            now = time.time()
+            if act["data"] is None or now - act["at"] > 0.8:
+                data = {"processing": False, "decoded": 0, "n_ctx": 0, "task": None, "error": ""}
+                try:
+                    data.update(backend.split_slots())
+                except AIError as e:
+                    data["error"] = str(e)
+                except Exception as e:  # noqa: BLE001 -- a picture, never an error page
+                    data["error"] = str(e)[:200]
+                lc = getattr(ctx, "lifecycle", None)
+                data["inflight"] = sum(lc.inflight.values()) if lc is not None else 0
+                act.update(at=now, data=data)
+            h._json(dict(act["data"], ok=True, time=now))
+
+    ctx.get_routes["/api/ai/activity"] = activity
     ctx.post_routes.update({"/api/ai/chat": chat, "/api/ai/stop": stop, "/api/run": run, "/api/job/cancel": cancel_job,
                             "/api/ai/ollama-load": ollama_load, "/api/ai/reveal-key": reveal})
     ctx.post_limits["/api/ai/chat"] = MAX_CHAT_BODY_BYTES

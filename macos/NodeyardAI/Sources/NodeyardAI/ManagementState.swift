@@ -3,11 +3,12 @@ import SwiftUI
 
 /// The sections of the website this app mirrors (the website's own sidebar order), plus the setup guide.
 enum ManageSection: String, CaseIterable, Identifiable {
-    case overview, nodes, pods, workloads, network, storage, hardware, models, research, plugins, events, alerts, doctor, terminals, tasks, guide
+    case overview, galaxy, nodes, pods, workloads, network, storage, hardware, models, research, plugins, events, alerts, doctor, terminals, tasks, guide
     var id: String { rawValue }
     var title: String {
         switch self {
         case .overview: "Overview"
+        case .galaxy: "AI galaxy"
         case .nodes: "Nodes"
         case .pods: "Pods"
         case .workloads: "Workloads"
@@ -28,6 +29,7 @@ enum ManageSection: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .overview: "square.grid.2x2"
+        case .galaxy: "atom"
         case .nodes: "server.rack"
         case .pods: "shippingbox"
         case .workloads: "square.stack.3d.up"
@@ -264,6 +266,12 @@ final class ManagementState: ObservableObject {
 
     func refreshTerminals() async {
         do { termTargets = try await client.termTargets(); termError = nil } catch { termError = error.localizedDescription }
+    }
+
+    /// A page of the website without its sidebar (e.g. "galaxy"), signed in as this app's session.
+    func websitePage(_ fragment: String) -> (URL, [HTTPCookie])? {
+        guard let url = try? client.pageURL(query: [URLQueryItem(name: "embed", value: "1")], fragment: fragment) else { return nil }
+        return (url, client.sessionCookies())
     }
 
     /// The website's Terminal page for one device, without its sidebar, signed in as this app's session.

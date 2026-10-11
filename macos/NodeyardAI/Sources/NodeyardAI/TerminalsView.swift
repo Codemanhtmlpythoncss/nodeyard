@@ -193,3 +193,19 @@ struct TerminalWebView: NSViewRepresentable {
 
     func updateNSView(_ nsView: WKWebView, context: Context) {}
 }
+
+/// Manage › AI galaxy: the website's live picture of the cluster and its model.
+struct GalaxyView: View {
+    @EnvironmentObject private var mgmt: ManagementState
+    @State private var page: (URL, [HTTPCookie])?
+    var body: some View {
+        Group {
+            if let page { TerminalWebView(url: page.0, cookies: page.1) }
+            else { ProgressView("Signing in to the dashboard…").frame(maxWidth: .infinity, maxHeight: .infinity) }
+        }
+        .task {
+            await mgmt.refreshTerminals()     // (signs in again with the saved password if the session expired)
+            page = mgmt.websitePage("galaxy")
+        }
+    }
+}
