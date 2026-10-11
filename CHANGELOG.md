@@ -29,6 +29,10 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   up while it tours unless you hide them (H, or Tab › Panels), and the tour can be set to stay on the overview.
 - The galaxy screens say "k3s nodes" and "nodes" where the original said Proxmox's "PVE".
 - The Mac app's galaxy shows the 2D Universe page (and says why) when the cluster's dashboard is too old for the 3D one.
+- **Web search works in the Mac app again.** Every successful search failed with "Tool error: The data couldn't be
+  read because it isn't in the correct format": the server marks a successful result with an `error` boolean flag, but
+  the app decoded that field as a text message, so decoding threw on every good result. The app now reads that field
+  leniently (a message when the server sends one, otherwise ignored), so search and page reads return their results.
 - **The Mac app no longer shows a cut-off answer as if it finished.** When the model stream ended early with no
   end marker (the model machine dropped out, or the connection closed mid-answer), the app kept the half answer and
   marked it done. It now notices an answer that stopped without finishing and shows a **cut off — Continue** notice

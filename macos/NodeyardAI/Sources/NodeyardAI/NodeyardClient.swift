@@ -206,9 +206,22 @@ final class NodeyardClient {
     }
 
     func runWebTool(_ name: String, arguments: [String: Any]) async throws -> String {
-        struct Reply: Decodable { var ok: Bool?; var text: String?; var error: String?; var summary: String? }
+        // `error` is a human message on the failure path but a bool "did this result carry an error" flag on the
+        // success path, so it is decoded leniently (a string when it is one, otherwise ignored) — decoding it as a
+        // plain String? made every successful search fail with "the data couldn't be read".
+        struct Reply: Decodable {
+            var ok: Bool?; var text: String?; var summary: String?; var errorMessage: String?
+            enum CodingKeys: String, CodingKey { case ok, text, summary, error }
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                ok = try c.decodeIfPresent(Bool.self, forKey: .ok)
+                text = try c.decodeIfPresent(String.self, forKey: .text)
+                summary = try c.decodeIfPresent(String.self, forKey: .summary)
+                errorMessage = try? c.decodeIfPresent(String.self, forKey: .error)
+            }
+        }
         let reply: Reply = try await post("/api/v1/web/tool", body: ["tool": name, "args": arguments], as: Reply.self)
-        guard reply.ok != false else { throw NodeyardError.server(reply.error ?? "The web tool failed.") }
+        guard reply.ok != false else { throw NodeyardError.server(reply.errorMessage ?? "The web tool failed.") }
         let result = reply.text ?? reply.summary ?? "The page returned no readable text."
         return String(result.prefix(18000))
     }
