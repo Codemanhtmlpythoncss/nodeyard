@@ -304,6 +304,14 @@ private struct MessageCard: View {
     let sending: Bool
     @State private var showReasoning = false
     @State private var showToolResult = false
+    @State private var copiedAnswer = false
+
+    private func copyAnswer() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(message.content, forType: .string)
+        copiedAnswer = true
+        Task { try? await Task.sleep(for: .seconds(1.6)); copiedAnswer = false }
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -318,7 +326,11 @@ private struct MessageCard: View {
                     if let speed = message.tokensPerSecond { Text("\(speed, specifier: "%.1f") tok/s").font(.caption2).foregroundStyle(.tertiary) }
                     Spacer()
                     if message.role == "assistant" {
-                        Text("\(message.content.components(separatedBy: .newlines).count) lines").font(.caption2).foregroundStyle(.tertiary).help("Select this text to copy it")
+                        Text("\(message.content.components(separatedBy: .newlines).count) lines").font(.caption2).foregroundStyle(.tertiary)
+                        if !message.content.isEmpty {
+                            Button { copyAnswer() } label: { Image(systemName: copiedAnswer ? "checkmark" : "doc.on.doc") }
+                                .help(copiedAnswer ? "Copied" : "Copy the whole answer (each code box has its own Copy)")
+                        }
                         if !message.content.isEmpty {
                             Button { state.speech().toggle(message) } label: { Image(systemName: reader.speakingID == message.id ? "stop.circle" : "speaker.wave.2") }
                                 .help(reader.speakingID == message.id ? "Stop reading" : "Read aloud (⌥⌘R)")
@@ -370,14 +382,6 @@ private struct MessageCard: View {
                                                                                 in: RoundedRectangle(cornerRadius: 12))
         }
         .accessibilityElement(children: .contain)
-    }
-}
-
-private struct MarkdownText: View {
-    let markdown: String
-    var body: some View {
-        if let value = try? AttributedString(markdown: markdown, options: .init(interpretedSyntax: .full)) { Text(value) }
-        else { Text(markdown) }
     }
 }
 
