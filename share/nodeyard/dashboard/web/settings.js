@@ -26,21 +26,39 @@
   const T = { settings: null, doctor: null, doctorBusy: false, newPassword: "" };
 
   // ------------------------------------------------------------------ background picture
+  const PRESET_NAMES = { aurora: "Aurora", sunset: "Sunset", ocean: "Ocean", nebula: "Nebula", forest: "Forest", graphite: "Graphite" };
+  const isVideo = (bg) => !!bg && (bg.kind === "mp4" || bg.kind === "webm");
   function applyBackground(bg) {
     let el = $("#ny-bg");
-    if (!bg) { if (el) el.remove(); document.body.classList.remove("has-bg"); return; }
+    if (!bg || bg.kind === "none") { if (el) el.remove(); document.body.classList.remove("has-bg"); return; }
     if (!el) {
       el = document.createElement("div");
       el.id = "ny-bg";
       el.setAttribute("aria-hidden", "true");
-      el.innerHTML = '<div class="img"></div><div class="dim"></div>';
+      el.innerHTML = '<div class="img"></div><video class="vid" muted loop playsinline preload="auto"></video><div class="dim"></div>';
       document.body.prepend(el);
     }
-    el.querySelector(".img").style.backgroundImage = 'url("/api/background?v=' + encodeURIComponent(bg.v) + '")';
-    el.querySelector(".img").style.filter = bg.blur ? "blur(" + bg.blur + "px)" : "";
+    const img = el.querySelector(".img"), vid = el.querySelector(".vid"), video = isVideo(bg);
+    img.className = "img" + (bg.kind === "preset" && PRESET_NAMES[bg.preset] ? " bgp-" + bg.preset : "");
+    img.style.backgroundImage = bg.kind === "preset" || video ? "" : 'url("/api/background?v=' + encodeURIComponent(bg.v) + '")';
+    img.style.display = video ? "none" : "";
+    if (video) {
+      const src = "/api/background?v=" + encodeURIComponent(bg.v);
+      const still = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+      vid.autoplay = !still; vid.muted = true; vid.defaultMuted = true;
+      if (vid.dataset.src !== src) { vid.dataset.src = src; vid.src = src; vid.addEventListener("canplay", () => { if (!still) vid.play().catch(() => {}); }, { once: true }); }
+      vid.style.display = "";
+      if (still) vid.pause(); else vid.play().catch(() => { /* starts when it can, or on the next click */ });
+    } else if (vid.dataset.src) { vid.pause(); vid.removeAttribute("src"); vid.dataset.src = ""; vid.load(); vid.style.display = "none"; }
+    else vid.style.display = "none";
+    const blur = bg.blur ? "blur(" + bg.blur + "px)" : "";
+    img.style.filter = blur; vid.style.filter = blur;
     el.querySelector(".dim").style.opacity = String((bg.dim == null ? 45 : bg.dim) / 100);
     document.body.classList.add("has-bg");
   }
+  document.addEventListener("visibilitychange", () => { const v = $("#ny-bg .vid"); if (!document.hidden && v && v.dataset.src && v.paused && v.autoplay) v.play().catch(() => {}); });
+  // a muted video may only start after the first click on some browsers
+  document.addEventListener("click", () => { const v = $("#ny-bg .vid"); if (v && v.dataset.src && v.paused && !(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches)) v.play().catch(() => {}); }, { once: true });
   async function loadSettings() {
     try { const r = await getJSON("/api/settings"); if (r.ok) { T.settings = r; store.set("ai.chatDefaults", JSON.stringify(r.chat_defaults || {})); NY.publicAccess = r.public || null; applyBackground(r.background); } } catch (e) { /* signed out */ }
     return T.settings;
@@ -124,12 +142,16 @@
         <div class="row wrap mt" style="gap:8px;align-items:center"><button class="btn danger" data-st="signout-all">Sign out everywhere</button><span class="muted small">${s.sessions} signed-in browser${s.sessions === 1 ? "" : "s"}</span></div>`
         : empty("No sign-in", "This dashboard only answers on its own machine, so it has no password."))}
       ${card("Background", html`
-        <div class="field-l">Background picture
-          <div class="row wrap" style="gap:8px;margin-top:6px"><label class="btn" for="st-bg-file">${bg ? "Change picture…" : "Upload a picture…"}</label><input type="file" id="st-bg-file" accept="image/png,image/jpeg,image/webp" hidden>
-          ${bg ? html`<button class="btn danger" data-st="bg-remove">Remove</button>` : ""}</div>
-          <span class="faint small" style="display:block;margin-top:4px">PNG, JPEG or WebP, up to 8 MB. Stored on the server and only shown to signed-in browsers.</span></div>
-        ${bg ? html`${field(html`Blur <span class="faint" id="st-blur-v">${bg.blur}px</span>`, html`<input type="range" id="st-blur" min="0" max="40" value="${bg.blur}" class="range">`)}
-          ${field(html`Darken <span class="faint" id="st-dim-v">${bg.dim}%</span>`, html`<input type="range" id="st-dim" min="0" max="95" value="${bg.dim}" class="range">`, "Darker keeps text easy to read.")}` : ""}`)}
+        <div class="field-l">Built in</div>
+        <div class="bg-grid">${(s.background_presets || Object.keys(PRESET_NAMES)).map((n) => raw('<button type="button" class="bg-swatch' + (bg && bg.kind === "preset" && bg.preset === n ? " on" : "") + '" data-st="bg-preset" data-name="' + n + '"><span class="bgp-' + n + '"></span>' + (PRESET_NAMES[n] || n) + "</button>"))}
+          ${raw('<button type="button" class="bg-swatch none' + (!bg || bg.kind === "none" ? " on" : "") + '" data-st="bg-remove"><span></span>None</button>')}</div>
+        <div class="field-l">Your own picture or video
+          <div class="row wrap" style="gap:8px;margin-top:6px"><label class="btn" for="st-bg-file">${bg && (bg.kind in { png: 1, jpg: 1, webp: 1, mp4: 1, webm: 1 }) ? "Change…" : "Upload a picture or video…"}</label><input type="file" id="st-bg-file" accept="image/png,image/jpeg,image/webp,video/mp4,video/webm" hidden>
+          ${bg && (bg.kind in { png: 1, jpg: 1, webp: 1, mp4: 1, webm: 1 }) ? html`${chip(isVideo(bg) ? "video" : "picture", "good")}<button class="btn danger" data-st="bg-remove">Remove</button>` : ""}</div>
+          <span class="faint small" style="display:block;margin-top:4px">PNG, JPEG or WebP up to 8 MB, or an MP4 or WebM video up to 80 MB (plays silently on a loop). Stored on the server and only shown to signed-in browsers.</span>
+          <span class="faint small" id="st-bg-progress"></span></div>
+        ${bg && bg.kind !== "none" ? html`${field(html`Blur <span class="faint" id="st-blur-v">${bg.blur || 0}px</span>`, html`<input type="range" id="st-blur" min="0" max="40" value="${bg.blur || 0}" class="range">`)}
+          ${field(html`Darken <span class="faint" id="st-dim-v">${bg.dim || 0}%</span>`, html`<input type="range" id="st-dim" min="0" max="95" value="${bg.dim || 0}" class="range">`, "Darker keeps text easy to read.")}` : ""}`)}
       ${card("One shared API key", html`
         <p class="muted small" style="margin-top:0">Use one key for Nodeyard AI, yardcode, the dashboard control API and every split model. The dashboard keeps the running model and this server key in sync. Ollama has no native API-key setting; requests to it go through this key-protected dashboard API. The dashboard sign-in password is separate.${s.gate ? " From your own networks (see Model gate) no API key is needed." : ""}</p>
         <div class="row wrap" style="gap:8px"><button class="btn" data-st="key-reveal">Reveal shared key</button><button class="btn" data-st="key-rotate">Generate a new shared key</button></div>
@@ -282,18 +304,31 @@
     } else if (a === "public-off") startJob("public-off", { what: el.dataset.what }, async () => { await post("/api/settings/public-refresh"); loadSettings().then(renderSettings); });
     else if (a === "name-set") startJob("cluster-name", { name: $("#st-name").value.trim() });
     else if (a === "bg-remove") { const r = await post("/api/settings/background-remove"); if (r.ok) { applyBackground(null); loadSettings().then(renderSettings); } }
+    else if (a === "bg-preset") { const r = await post("/api/settings/background-preset", { name: el.dataset.name }); if (r.ok) { applyBackground(r.background); loadSettings().then(renderSettings); } }
     void s;
   });
   document.addEventListener("change", async (e) => {
     if (e.target.id === "st-chat-nolimit") { $("#st-chat-max").disabled = e.target.checked; return; }
     if (e.target.id !== "st-bg-file") return;
     const f = e.target.files && e.target.files[0]; if (!f) return;
-    if (f.size > IMAGE_MAX) { toast("That picture is over 8 MB."); return; }
-    if (!/^image\/(png|jpeg|webp)$/.test(f.type)) { toast("Use a PNG, JPEG or WebP picture."); return; }
-    toast("Uploading…");
-    let data; try { data = await readFile(f); } catch (err) { toast("Couldn't read that file."); return; }
-    const r = await post("/api/settings/background", { image: data });
-    if (r.ok) { applyBackground(r.background); loadSettings().then(renderSettings); toast("Background set."); }
+    const video = /^video\/(mp4|webm)$/.test(f.type);
+    if (!video && !/^image\/(png|jpeg|webp)$/.test(f.type)) { toast("Use a PNG, JPEG or WebP picture, or an MP4 or WebM video."); return; }
+    if (f.size > (video ? 80 : 8) * 1024 * 1024) { toast(video ? "That video is over 80 MB." : "That picture is over 8 MB."); return; }
+    // in pieces of 2 MB (a video is too big for one request)
+    const id = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join(""), CH = 2 * 1024 * 1024;
+    const prog = $("#st-bg-progress");
+    let r = null;
+    for (let off = 0; off < f.size || off === 0; off += CH) {
+      const piece = new Uint8Array(await f.slice(off, off + CH).arrayBuffer());
+      let bin = ""; for (let i = 0; i < piece.length; i += 0x8000) bin += String.fromCharCode.apply(null, piece.subarray(i, i + 0x8000));
+      const done = off + CH >= f.size;
+      r = await post("/api/settings/background-upload", { id, offset: off, data: btoa(bin), done });
+      if (!r.ok) { if (prog) prog.textContent = ""; return; }
+      if (prog) prog.textContent = "Uploading… " + Math.min(100, Math.round(((off + piece.length) / f.size) * 100)) + "%";
+      if (done) break;
+    }
+    if (prog) prog.textContent = "";
+    if (r && r.ok && r.background) { applyBackground(r.background); loadSettings().then(renderSettings); toast(video ? "Video background set." : "Background set."); }
   });
   let styleTimer = null;
   document.addEventListener("input", (e) => {

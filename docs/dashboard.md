@@ -291,6 +291,8 @@ Browsers only allow the microphone on **https://** pages. Give the dashboard a s
 
     sudo nodeyard dashboard https on
 
+Then a browser that opens the plain address (http://TAILSCALE-IP:9092) is sent to the https:// one; the API, the Mac app,
+SSH tunnels (localhost) and `?http=1` stay on http://. (A certificate can't be made for the bare IP, so the name is used.)
 It uses Tailscale Serve (your tailnet only, a real certificate) and needs MagicDNS and HTTPS Certificates turned on
 for the tailnet (login.tailscale.com/admin/dns) and the dashboard listening on its Tailscale address
 (`dashboard start --listen auto`). Speech recognition is the browser's: Chrome sends the audio to Google; Safari can

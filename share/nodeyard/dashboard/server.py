@@ -47,7 +47,7 @@ MIME = {
 }
 # Needed to show the sign-in page; everything else waits for a session.
 PUBLIC_FILES = ("/login", "/login.html", "/login.js", "/style.css", "/theme.js")
-CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; "
        "connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 
 
@@ -168,6 +168,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self, obj, code=200, extra=None):
         self._send(code, json.dumps(obj, separators=(",", ":")), "application/json; charset=utf-8", extra)
+
+    def _https_redirect(self, path, q):
+        """Browsers opening a page on the plain http:// address (like http://TAILSCALE-IP:9092) go to the tailnet's
+        https:// one when it's on (voice chat needs it): never the API, the Mac app's embedded pages, this machine
+        itself (SSH tunnels), Tailscale Serve's own requests, or with ?http=1."""
+        if self.command != "GET" or path not in ("/", "/index.html", "/login", "/login.html") or q.get("embed") or q.get("http"):
+            return ""
+        if self.ctx.mode == "demo" or not getattr(self.ctx, "port", None):
+            return ""
+        peer = self.client_address[0]
+        host = self.headers.get("Host", "").rsplit(":", 1)[0].strip("[]").lower()
+        if peer in ("127.0.0.1", "::1") or host.endswith(".ts.net") or self.headers.get("X-Forwarded-Proto", "").lower() == "https":
+            return ""
+        url = tsserve.https_url(self.ctx.port)
+        if not url or peer == tsserve.proxy_source():
+            return ""
+        return url.rstrip("/") + ("/login" if path.startswith("/login") else "/")
 
     def _redirect(self, where):
         self._send(302, "", "text/plain; charset=utf-8", {"Location": where})
@@ -294,6 +311,9 @@ class Handler(BaseHTTPRequestHandler):
             for route, fn in srv.get_routes.items():
                 if path == route:
                     return fn(self, q)
+            go = self._https_redirect(path, q)
+            if go:
+                return self._redirect(go)
             if path == "/login":
                 path = "/login.html"
             if srv.auth is not None and self._authed() and path == "/login.html":

@@ -888,6 +888,8 @@
   }
   function banners() {
     const out = [];
+    if (S.res && S.res.https_url && location.protocol === "http:" && store.get("https-hint", "") !== S.res.https_url)
+      out.push(html`<div class="banner info"><svg class="icon"><use href="#i-check"/></svg><span>This dashboard has a secure address on your tailnet (needed for voice chat): <a href="${S.res.https_url.replace(/\/$/, "") + "/" + location.hash}">${S.res.https_url}</a></span><button class="btn small" data-https-hint>Not now</button></div>`);
     if (S.res && S.res.update_pending) out.push(html`<div class="banner warn"><svg class="icon"><use href="#i-refresh"/></svg><span>The dashboard was updated and restarts on the new version as soon as nothing is running.</span><button class="btn small" data-restart-dashboard>Restart now</button></div>`);
     if (!S.online) out.push(html`<div class="banner bad"><svg class="icon"><use href="#i-warn"/></svg>Lost contact with the dashboard server. Retrying; the last data stays on screen.</div>`);
     if (S.res && S.res.error) out.push(html`<div class="banner warn"><svg class="icon"><use href="#i-warn"/></svg>The last read of the cluster failed: ${S.res.error}</div>`);
@@ -1168,7 +1170,10 @@
   if (!location.hash && VIEWS.some((v) => v.id === saved)) S.view = saved;
   applyRoute();
   setInterval(tickStatus, 1000);
-  document.addEventListener("click", (e) => { const b = e.target.closest("[data-restart-dashboard]"); if (b) restartDashboard(b); });
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-restart-dashboard]"); if (b) restartDashboard(b);
+    if (e.target.closest("[data-https-hint]") && S.res) { store.set("https-hint", S.res.https_url); queueRender(); }
+  });
   // Start once every page's script has run (they load after this one): data that arrived first would otherwise
   // try to draw a page that doesn't exist yet.
   const boot = () => start().then(() => { if (S.pending) { openDrawer(S.pending, true); S.pending = null; } });

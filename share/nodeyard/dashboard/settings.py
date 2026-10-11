@@ -20,7 +20,14 @@ import tsserve
 
 IMAGE_MAX = 8 * 1024 * 1024                     # the picture itself
 BODY_MAX = IMAGE_MAX * 4 // 3 + 64 * 1024       # ... sent as base64 JSON
-KINDS = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}
+KINDS = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp", "mp4": "video/mp4", "webm": "video/webm"}
+VIDEO_KINDS = ("mp4", "webm")
+VIDEO_MAX = 80 * 1024 * 1024                    # a background video, uploaded in pieces
+CHUNK_MAX = 3 * 1024 * 1024                     # one piece of an upload
+UPLOAD_RE = re.compile(r"^[0-9a-f]{16,32}$")
+# Built-in backgrounds (drawn by the page with CSS, see style.css .bgp-*). A new dashboard starts on the first.
+PRESETS = ("aurora", "sunset", "ocean", "nebula", "forest", "graphite")
+DEFAULT_BG = {"kind": "preset", "preset": PRESETS[0], "v": 0, "blur": 0, "dim": 0, "default": True}
 LISTEN_RE = re.compile(r"^[a-z0-9.:]+(,[a-z0-9.:]+)*$")  # each item is then checked on its own
 ENV = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/tmp", "LANG": "C.UTF-8", "NODEYARD_COLOR": "never"}
 CHAT_DEFAULTS = {"system": "", "temperature": 0.7, "max_tokens": 1024, "compress": "auto", "web": False,
@@ -44,6 +51,18 @@ def image_kind(data):
         return "jpg"
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "webp"
+    return None
+
+
+def media_kind(data):
+    """A background's type from its first bytes: a picture, or an MP4 / WebM video (not QuickTime .mov)."""
+    kind = image_kind(data)
+    if kind:
+        return kind
+    if data[4:8] == b"ftyp" and data[8:10] != b"qt":
+        return "mp4"
+    if data[:4] == b"\x1a\x45\xdf\xa3":
+        return "webm"
     return None
 
 
@@ -181,7 +200,8 @@ class Settings:
             "hf_token": self._secret_exists("hf-token"), "model_key": self._secret_exists("ai-split-api-key"),
             "agents": bool((st.get("agents") or {}).get("installed")),
             "gate": split.get("gate"), "split": bool(split),
-            "background": p.get("bg"),
+            "background": p.get("bg") or DEFAULT_BG,
+            "background_presets": list(PRESETS),
             "chat_defaults": self.chat_defaults(p),
             "public": self.public_state(),
             "https": {"url": tsserve.https_url(getattr(self.args, "port", 9092) or 9092, max_age=10), "tailscale": bool(shutil.which("tailscale"))},
@@ -464,7 +484,9 @@ class Settings:
         with self.lock:
             p = self.prefs()
             if not p.get("bg"):
-                raise SettingsError("Upload a picture first.")
+                p["bg"] = {k: v for k, v in DEFAULT_BG.items() if k != "default"}
+            if p["bg"].get("kind") == "none":
+                raise SettingsError("Pick a background first.")
             p["bg"].update({"blur": blur, "dim": dim})
             self._save_prefs(p)
             return p["bg"]
@@ -477,20 +499,95 @@ class Settings:
                 except OSError:
                     pass
             p = self.prefs()
-            p.pop("bg", None)
+            p["bg"] = {"kind": "none", "v": int(time.time())}
             self._save_prefs(p)
-        return {}
+        return {"background": p["bg"]}
+
+    def _drop_files(self):
+        for k in KINDS:
+            try:
+                os.remove(self._bg_path(k))
+            except OSError:
+                pass
+
+    def set_preset(self, body):
+        name = str(body.get("name", ""))
+        if name not in PRESETS:
+            raise SettingsError("There's no built-in background called that.")
+        with self.lock:
+            self._drop_files()
+            p = self.prefs()
+            p["bg"] = {"kind": "preset", "preset": name, "v": int(time.time()), "blur": 0, "dim": 0}
+            self._save_prefs(p)
+            return p["bg"]
+
+    def upload_background(self, body):
+        """One piece of a picture or video, in order; the last one ("done") checks the file and makes it the background."""
+        uid = str(body.get("id", ""))
+        if not UPLOAD_RE.match(uid):
+            raise SettingsError("Bad upload.")
+        try:
+            data = base64.b64decode(str(body.get("data", "")), validate=True)
+            offset = int(body.get("offset", 0))
+        except (ValueError, TypeError):
+            raise SettingsError("Bad upload data.")
+        if len(data) > CHUNK_MAX:
+            raise SettingsError("Upload pieces are 3 MB at most.", 413)
+        tmp = os.path.join(self.dir, "background.upload-" + uid)
+        with self.lock:
+            os.makedirs(self.dir, mode=0o700, exist_ok=True)
+            if offset == 0:   # forget uploads nobody finished
+                for n in os.listdir(self.dir):
+                    f = os.path.join(self.dir, n)
+                    if n.startswith("background.upload-") and time.time() - os.path.getmtime(f) > 3600:
+                        os.remove(f)
+            size = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+            if offset != size:
+                raise SettingsError("The upload got out of step. Try again.", 409)
+            if size + len(data) > VIDEO_MAX:
+                os.remove(tmp)
+                raise SettingsError("That file is too big (80 MB at most).", 413)
+            with open(tmp, "ab") as f:
+                f.write(data)
+            os.chmod(tmp, 0o600)
+            size += len(data)
+            if not body.get("done"):
+                return {"received": size}
+            with open(tmp, "rb") as f:
+                kind = media_kind(f.read(64))
+            if kind is None or (kind not in VIDEO_KINDS and size > IMAGE_MAX):
+                os.remove(tmp)
+                raise SettingsError("Use a PNG, JPEG or WebP picture (8 MB at most) or an MP4 or WebM video (80 MB at most)." if kind is None
+                                    else "The picture is too big (8 MB at most).", 400 if kind is None else 413)
+            self._drop_files()
+            os.replace(tmp, self._bg_path(kind))
+            p = self.prefs()
+            old = p.get("bg") or {}
+            dim = old.get("dim", 55) if old.get("kind") not in ("preset", "none") else 45
+            p["bg"] = {"kind": kind, "v": int(time.time()), "blur": old.get("blur", 0) if old.get("kind") in KINDS else 0, "dim": dim,
+                       "video": kind in VIDEO_KINDS}
+            self._save_prefs(p)
+            return p["bg"]
 
     def background_file(self):
+        """(bytes, content type) of the uploaded background, or (None, None)."""
+        path, ctype, _ = self.background_media()
+        if path is None:
+            return None, None
+        with open(path, "rb") as f:
+            return f.read(), ctype
+
+    def background_media(self):
+        """(path, content type, size) of the uploaded background, or (None, None, 0)."""
         bg = self.prefs().get("bg") or {}
         kind = bg.get("kind")
         if kind not in KINDS:
-            return None, None
+            return None, None, 0
+        path = self._bg_path(kind)
         try:
-            with open(self._bg_path(kind), "rb") as f:
-                return f.read(), KINDS[kind]
+            return path, KINDS[kind], os.path.getsize(path)
         except OSError:
-            return None, None
+            return None, None, 0
 
 
 def register(ctx, args):
@@ -508,10 +605,35 @@ def register(ctx, args):
         return route
 
     def background(h, q):
-        data, ctype = s.background_file()
-        if data is None:
+        path, ctype, size = s.background_media()
+        if path is None:
             return h._send(404, "No background", "text/plain; charset=utf-8")
-        h._send(200, data, ctype, {"Cache-Control": "private, max-age=86400"})
+        cache = {"Cache-Control": "private, max-age=86400", "Accept-Ranges": "bytes"}
+        m = re.match(r"^bytes=(\d*)-(\d*)$", h.headers.get("Range", "").strip())
+        if m and size:   # videos are read in ranges (Safari won't play one otherwise)
+            if m.group(1):
+                start, end = int(m.group(1)), int(m.group(2)) if m.group(2) else size - 1
+            else:
+                start, end = max(0, size - int(m.group(2) or 0)), size - 1
+            end = min(end, size - 1, start + 4 * 1024 * 1024 - 1)
+            if start >= size or start > end:
+                return h._send(416, "", "text/plain; charset=utf-8", {"Content-Range": "bytes */%d" % size})
+            with open(path, "rb") as f:
+                f.seek(start)
+                data = f.read(end - start + 1)
+            return h._send(206, data, ctype, dict(cache, **{"Content-Range": "bytes %d-%d/%d" % (start, end, size)}))
+        h.send_response(200)
+        for k, v in dict(cache, **{"Content-Type": ctype, "Content-Length": str(size), "X-Content-Type-Options": "nosniff"}).items():
+            h.send_header(k, v)
+        h.end_headers()
+        if h.command == "HEAD":
+            return None
+        with open(path, "rb") as f:
+            while True:
+                piece = f.read(1024 * 1024)
+                if not piece:
+                    break
+                h.wfile.write(piece)
 
     ctx.get_routes.update({
         "/api/settings": wrap(lambda h, q: s.view(h._token())),
@@ -531,9 +653,12 @@ def register(ctx, args):
         "/api/settings/background": wrap(lambda h, b: {"background": s.set_background(b)}),
         "/api/settings/background-style": wrap(lambda h, b: {"background": s.background_style(b)}),
         "/api/settings/background-remove": wrap(lambda h, b: s.remove_background()),
+        "/api/settings/background-preset": wrap(lambda h, b: {"background": s.set_preset(b)}),
+        "/api/settings/background-upload": wrap(lambda h, b: (lambda r: {"background": r} if "kind" in r else r)(s.upload_background(b))),
         "/api/settings/public-refresh": wrap(lambda h, b: (s.forget_public(), tsserve.forget(), {"public": s.public_state()})[1]),
     })
     ctx.post_limits["/api/settings/background"] = BODY_MAX
+    ctx.post_limits["/api/settings/background-upload"] = CHUNK_MAX * 4 // 3 + 64 * 1024
     try:
         import aiapi
         aiapi.COMMAND_PATHS = s.command_paths

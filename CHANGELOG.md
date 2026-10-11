@@ -27,6 +27,13 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Backgrounds**: six built-in ones drawn by the page (Aurora, the default for a new dashboard, Sunset, Ocean, Nebula,
+  Forest, Graphite), **video backgrounds** (MP4 or WebM up to 80 MB, uploaded in pieces, streamed in ranges, silent on a
+  loop, still for reduced motion) and None, in Settings › Background with blur and darken.
+- **Secure address everywhere on the tailnet**: with `dashboard https on`, browsers opening the plain address (like
+  http://TAILSCALE-IP:9092) go to the https:// one automatically; the API, the Mac app, SSH tunnels and `?http=1` stay
+  on http://. A banner on http:// pages links there too.
+
 - **Voice chat** (dashboard chat 🎙 or `/talk`, Nodeyard AI for macOS mic button or Shift-Command-T): talk to the model
   like a call. It listens, sends what you said when you pause, reads the answer aloud as it's written, then listens
   again; tap to interrupt, send or end. The Mac uses Apple's speech recognition (on the Mac when it can).

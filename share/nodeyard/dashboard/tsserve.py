@@ -5,14 +5,14 @@ import shutil
 import subprocess
 import time
 
-_cache = {"at": 0.0, "url": "", "port": None}
+_cache = {"at": 0.0, "url": "", "port": None, "via": ""}
 
 
 def https_url(port, max_age=60):
     """https://NAME.TAILNET.ts.net/ when Tailscale Serve sends an https port to this dashboard, else ""."""
     if _cache["port"] == port and time.time() - _cache["at"] < max_age:
         return _cache["url"]
-    url = ""
+    url, via = "", ""
     try:
         ts = shutil.which("tailscale") or ("/usr/bin/tailscale" if os.path.exists("/usr/bin/tailscale") else "")
         if ts:
@@ -24,10 +24,16 @@ def https_url(port, max_age=60):
                     if proxy.rstrip("/").endswith(":%d" % port):
                         host, _, p = hostport.rpartition(":")
                         url = "https://%s/" % (host if p == "443" else hostport)
+                        via = proxy.split("://", 1)[-1].rsplit(":", 1)[0].strip("[]")   # Serve's own requests come from here
     except (OSError, ValueError, subprocess.SubprocessError):
         url = ""
-    _cache.update(at=time.time(), url=url, port=port)
+    _cache.update(at=time.time(), url=url, port=port, via=via)
     return url
+
+
+def proxy_source():
+    """The address Tailscale Serve connects to this dashboard from (its own requests must never be redirected)."""
+    return _cache["via"]
 
 
 def forget():
