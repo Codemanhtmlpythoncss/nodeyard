@@ -820,7 +820,7 @@
     ["model", "[name]", "Pick the model for this chat"], ["models", "", "Open the Models tab (load, download, delete)"], ["unload", "", "Unload the model to free memory"], ["max", "[tokens|none]", "Set the longest reply (none = no limit)"],
     ["web", "[on|off]", "Always search the web first"], ["skills", "[on|off]", "Let the AI choose its available skills automatically"], ["plugins", "[on|off NAME]", "Show or switch skills manually (search, Wikipedia, Python...)"], ["system", "[text]", "Set the system prompt"],
     ["temp", "[0-2]", "Set creativity"], ["run", "", "Run the last code block the AI wrote"], ["fix", "", "Ask the AI to fix the last code that failed"], ["autofix", "[on|off]", "Run code automatically and let the AI fix errors"],
-    ["files", "[ask|always|never]", "When the AI delivers files (default: only when you ask)"], ["retry", "", "Answer the last message again"], ["stop", "", "Stop the answer"], ["copy", "", "Copy the last answer"], ["read", "[on|off]", "Read the last answer aloud; on/off reads every answer as it arrives"], ["export", "", "Download this chat as a file"], ["context", "", "How full the model's memory is"],
+    ["files", "[ask|always|never]", "When the AI delivers files (default: only when you ask)"], ["retry", "", "Answer the last message again"], ["stop", "", "Stop the answer"], ["copy", "", "Copy the last answer"], ["read", "[on|off]", "Read the last answer aloud; on/off reads every answer as it arrives"], ["talk", "", "Voice chat: talk to it and it answers out loud (Esc ends it)"], ["export", "", "Download this chat as a file"], ["context", "", "How full the model's memory is"],
   ];
   const lastBlock = (c) => { for (let i = c.messages.length - 1; i >= 0; i--) { const m = c.messages[i]; if (m.role !== "assistant" || !m.content || m.error) continue; md(m.content, i, false); const bl = (A.blocks[i] || []).map((b, k) => [b, k]).filter(([b]) => b && b.lang); if (bl.length) return { i, b: bl[bl.length - 1][0], k: bl[bl.length - 1][1] }; } return null; };
   async function slash(line) {
@@ -863,6 +863,7 @@
       case "files": { const v = (arg || "").toLowerCase(); if (["ask", "always", "never"].includes(v)) { c.files = v; saveChats(); toast(v === "ask" ? "Files only when you ask for one." : v === "always" ? "Scripts, pages and documents come as files." : "No files: everything stays in the chat."); } else toast("Files: " + (c.files === "always" ? "always" : c.files === false || c.files === "never" ? "never" : "only when you ask") + ". Use /files ask, always or never."); break; }
       case "retry": send("", true); break;
       case "stop": stopStream(); break;
+      case "talk": case "call": talkStart(); break;
       case "read": case "speak": case "voice": {
         if (/^(on|off|yes|no|true|false|1|0)$/i.test(arg)) { setAutoRead(on(arg)); break; }
         if (TTS.msg) { stopReading(); break; }
@@ -915,7 +916,8 @@
         <form class="composer" id="composer"><button type="button" class="btn icon-btn" data-ai="attach" title="Attach several text, code, or image files. Images are sent to vision-capable models for OCR. You can also drop or paste files." aria-label="Attach files"><svg class="icon"><use href="#i-clip"/></svg></button>
           <input type="file" id="attach-input" accept="text/*,application/json,image/png,image/jpeg,image/webp,image/gif,image/bmp,.yaml,.yml,.toml,.py,.js,.ts,.sh,.log,.csv,.md" multiple hidden>
           <textarea id="prompt" rows="1" placeholder="Message the model…  (Enter to send, Shift+Enter for a new line)" aria-label="Message"></textarea>
-          <button class="btn primary" type="submit" id="send">Send</button></form><div class="faint small" id="chat-note"></div><div class="dropzone" id="dropzone">Drop files to attach them</div></section></div>`);
+          <button type="button" class="btn icon-btn talk-btn" data-ai="talk" title="Voice chat: talk to it, it answers out loud" aria-label="Voice chat">🎙</button>
+          <button class="btn primary" type="submit" id="send">Send</button></form><div class="talk-state hide" id="talk-state" aria-live="polite"></div><div class="faint small" id="chat-note"></div><div class="dropzone" id="dropzone">Drop files to attach them</div></section></div>`);
     renderAttach();
     refreshChat(true);
     const ta = $("#prompt"); if (ta) ta.focus();
@@ -1082,13 +1084,27 @@
     return out;
   }
   const voiceList = () => (canSpeak() ? speechSynthesis.getVoices() : []);
-  const pickVoice = () => { const vs = voiceList(); return vs.find((v) => v.name === VOICE.voice) || vs.find((v) => v.default && /^en/i.test(v.lang)) || vs.find((v) => /^en/i.test(v.lang)) || vs[0] || null; };
+  // Automatic choice: the most natural-sounding voice in your language (Premium / Enhanced / Neural / "Natural"
+  // voices, then Chrome's Google voices), never the novelty or robotic ones.
+  const ROBOTIC = /\b(albert|bad news|bahh|bells|boing|bubbles|cellos|eddy|flo|fred|good news|grandma|grandpa|jester|junior|kathy|organ|ralph|reed|rocko|sandy|shelley|superstar|trinoids|whisper|wobble|zarvox|compact|eloquence)\b/i;
+  function voiceScore(v) {
+    const want = (navigator.language || "en").slice(0, 2).toLowerCase();
+    let sc = (v.lang || "").toLowerCase().startsWith(want) ? 100 : 0;
+    if (/premium|neural|natural/i.test(v.name)) sc += 60; else if (/enhanced|siri/i.test(v.name)) sc += 45; else if (/^google/i.test(v.name)) sc += 35;
+    if (ROBOTIC.test(v.name)) sc -= 90;
+    if (v.default) sc += 4;
+    if (v.localService) sc += 2;
+    return sc;
+  }
+  const naturalVoice = (v) => voiceScore(v) >= 135;
+  const bestVoice = () => voiceList().slice().sort((a, b) => voiceScore(b) - voiceScore(a))[0] || null;
+  const pickVoice = () => voiceList().find((v) => v.name === VOICE.voice) || bestVoice();
   function say(text) {
     const voice = pickVoice();
     for (const piece of chunks(text)) {
       const u = new SpeechSynthesisUtterance(piece);
       if (voice) { u.voice = voice; u.lang = voice.lang; }
-      u.rate = Math.min(2, Math.max(0.5, +VOICE.rate || 1));
+      u.rate = Math.min(2, Math.max(0.5, +VOICE.rate || 1)); u.pitch = 1;
       u.onend = u.onerror = () => { TTS.queue = Math.max(0, TTS.queue - 1); if (!TTS.queue && !TTS.live) { TTS.msg = null; paintSpeak(); } };
       TTS.queue++;
       speechSynthesis.speak(u);
@@ -1107,7 +1123,7 @@
   }
   // while an answer streams in: each finished sentence is read as soon as it's there
   function liveRead(m, final) {
-    if (!VOICE.auto || !canSpeak() || !m) return;
+    if (!(VOICE.auto || TALK.on) || !canSpeak() || !m) return;
     if (TTS.msg !== m) { stopReading(); TTS.msg = m; TTS.live = true; spoken.set(m, 0); paintSpeak(); }
     const t = speechText(m.content), from = Math.min(spoken.get(m) || 0, t.length);
     let end = t.length;
@@ -1127,8 +1143,89 @@
     paintSpeak();
     toast(on ? "Answers are read aloud as they arrive." : "Reading aloud is off.");
   }
-  const voiceOptions = () => voiceList().map((v) => '<option value="' + esc(v.name) + '"' + (v.name === (pickVoice() || {}).name ? " selected" : "") + ">" + esc(v.name + " (" + v.lang + ")") + "</option>").join("");
+  const voiceOptions = () => { const best = bestVoice();
+    return '<option value=""' + (VOICE.voice ? "" : " selected") + ">Automatic" + (best ? ": " + esc(best.name) : "") + "</option>" +
+      voiceList().slice().sort((a, b) => voiceScore(b) - voiceScore(a)).map((v) => '<option value="' + esc(v.name) + '"' + (v.name === VOICE.voice ? " selected" : "") + ">" +
+        esc(v.name + " (" + v.lang + ")" + (naturalVoice(v) ? " · natural" : "") + (v.localService ? "" : " · online")) + "</option>").join(""); };
   if (canSpeak()) speechSynthesis.addEventListener("voiceschanged", () => { const el = $("#cs-voice"); if (el) el.innerHTML = voiceOptions(); });
+
+  // ------------------------------------------------------------------ voice chat
+  // Talk to it like a phone call: it listens, sends what you said when you pause, reads the answer aloud as it's
+  // written, then listens again. Speech recognition is the browser's own (Chrome sends the audio to Google, Safari
+  // can do it on the computer); browsers only allow the microphone on https:// pages (nodeyard dashboard https on).
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const TALK = { on: false, rec: null, listening: false, heard: "", silence: 0, watch: 0, waiting: false };
+  const speaking = () => TTS.queue > 0 || (canSpeak() && speechSynthesis.speaking);
+  function talkStart() {
+    if (!SR || !canSpeak()) { toast("This browser can't do voice chat. Use Chrome, Edge or Safari, or the Mac app."); return; }
+    if (!window.isSecureContext) { secureDialog(); return; }
+    const c = curChat(); if (!c) return;
+    TALK.on = true; stopReading();
+    clearInterval(TALK.watch); TALK.watch = setInterval(talkTick, 400);
+    talkListen(); paintTalk();
+  }
+  function talkEnd() { TALK.on = false; clearInterval(TALK.watch); talkStopListening(); stopReading(); const box = $("#prompt"); if (box && TALK.heard) box.value = ""; TALK.heard = ""; paintTalk(); }
+  function talkTick() {   // listen again once the answer has been written and read out
+    if (!TALK.on) return;
+    if (!TALK.listening && !TALK.waiting && !A.stream && !speaking()) talkListen();
+    paintTalk();
+  }
+  function talkListen() {
+    if (!TALK.on || TALK.listening) return;
+    let rec;
+    try { rec = new SR(); } catch (e) { toast("Speech recognition didn't start."); talkEnd(); return; }
+    rec.lang = navigator.language || "en-US"; rec.continuous = true; rec.interimResults = true;
+    try { if ("processLocally" in rec) rec.processLocally = true; } catch (e) { /* older browsers: their default */ }
+    TALK.rec = rec; TALK.heard = ""; TALK.listening = true;
+    rec.onresult = (ev) => {
+      let text = ""; for (let i = 0; i < ev.results.length; i++) text += ev.results[i][0].transcript;
+      TALK.heard = text.trim();
+      const box = $("#prompt"); if (box) box.value = TALK.heard;
+      clearTimeout(TALK.silence); TALK.silence = setTimeout(talkSendHeard, 1400);   // a pause: you've finished
+      paintTalk();
+    };
+    rec.onerror = (e) => {
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") { toast("The browser wasn't allowed to use the microphone."); talkEnd(); }
+      else if (e.error === "network") { toast("Speech recognition couldn't reach its service."); talkEnd(); }
+      else if (e.error === "language-not-supported") { toast("Speech recognition doesn't support " + rec.lang + " here."); talkEnd(); }
+    };
+    rec.onend = () => { if (TALK.rec === rec) { TALK.rec = null; TALK.listening = false; } paintTalk(); };   // (Chrome stops after silence: talkTick restarts it)
+    try { rec.start(); } catch (e) { TALK.listening = false; TALK.rec = null; }
+    paintTalk();
+  }
+  function talkStopListening() { clearTimeout(TALK.silence); const r = TALK.rec; TALK.rec = null; TALK.listening = false; if (r) { try { r.abort(); } catch (e) { /* gone */ } } }
+  function talkSendHeard() {
+    const text = TALK.heard.trim(); if (!text || !TALK.on || A.stream) return;
+    talkStopListening(); TALK.heard = "";
+    const box = $("#prompt"); if (box) box.value = "";
+    TALK.waiting = true; paintTalk();
+    Promise.resolve(send(text)).catch(() => {}).finally(() => { TALK.waiting = false; paintTalk(); });
+  }
+  function talkButton() {
+    if (!TALK.on) return talkStart();
+    if (speaking()) { stopReading(); talkListen(); return; }   // talk over it: it stops and listens
+    if (TALK.listening && TALK.heard) { clearTimeout(TALK.silence); talkSendHeard(); return; }   // send now
+    talkEnd();
+  }
+  function paintTalk() {
+    const b = $('[data-ai="talk"]'), st = $("#talk-state"); if (!b) return;
+    const state = !TALK.on ? "" : TALK.listening ? (TALK.heard ? "Listening… pause (or tap) to send" : "Listening… say something")
+      : (A.stream || TALK.waiting) ? (speaking() ? "Answering…" : "Thinking…") : speaking() ? "Speaking · tap to interrupt" : "…";
+    b.classList.toggle("talking", TALK.on); b.classList.toggle("hearing", TALK.on && TALK.listening);
+    b.innerHTML = TALK.on ? "■" : "🎙"; b.title = TALK.on ? "Voice chat: tap to interrupt, send or end (Esc ends it)" : "Voice chat: talk to it, it answers out loud";
+    if (st) { st.textContent = state; st.classList.toggle("hide", !TALK.on); }
+  }
+  async function secureDialog() {
+    const url = S.res && S.res.https_url;
+    if (url) {
+      const go = await dialog("Voice chat needs the secure address", html`<p style="margin-top:0">Browsers only let pages use the microphone over <b>https://</b>. This dashboard has one on your tailnet:</p><p class="mono">${url}</p>`, "Open it");
+      if (go) location.href = url.replace(/\/$/, "") + "/#ai";
+    } else {
+      await dialog("Voice chat needs a secure address", html`<p style="margin-top:0">Browsers only let pages use the microphone over <b>https://</b>, and this page is <span class="mono">http://</span>. Give the dashboard a secure address on your tailnet: on the server run</p>
+        <p><span class="mono">sudo nodeyard dashboard https on</span></p><p class="muted small">It uses Tailscale Serve (your tailnet only, a real certificate). If it asks, turn on MagicDNS and HTTPS Certificates at login.tailscale.com/admin/dns first. Or use voice chat in the Nodeyard AI Mac app, which doesn't need this.</p>`, "OK");
+    }
+  }
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && TALK.on) talkEnd(); });
 
   const CUT_TEXT = "The model stopped in the middle of its answer: the connection to it ended before it finished. Press Continue to pick up where it stopped.";
   const netError = (e, fallback) => (e && e.name === "TypeError" && /fetch|network|load failed/i.test(e.message || "")
@@ -1719,7 +1816,7 @@
     if (a === "new-chat") { newChat(); buildChat(); }
     else if (a === "open-chat") { A.cur = el.dataset.id; saveChats(); buildChat(); }
     else if (a === "del-chat") { e.stopPropagation(); const gone = A.chats.find((x) => x.id === el.dataset.id); if (gone && gone.remote) postJSON("/api/v1/chats/delete", { id: gone.remote.id }).catch(() => {}); A.chats = A.chats.filter((x) => x.id !== el.dataset.id); if (A.cur === el.dataset.id) A.cur = (A.chats[0] || {}).id || ""; saveChats(); buildChat(); }
-    else if (a === "clear-chat" && c) { stopReading(); if (A.stream) A.stream.ctrl.abort(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); c.messages = []; c.summary = ""; c.summaryUpTo = 0; c.title = "New chat"; saveChats(); renderThread(); renderChatList(); refreshChat(); }
+    else if (a === "clear-chat" && c) { if (TALK.on) talkEnd(); stopReading(); if (A.stream) A.stream.ctrl.abort(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); c.messages = []; c.summary = ""; c.summaryUpTo = 0; c.title = "New chat"; saveChats(); renderThread(); renderChatList(); refreshChat(); }
     else if (a === "compress-now" && c) { compressChat(c, { manual: true }); }
     else if (a === "agent-allow" || a === "agent-always" || a === "agent-deny") { agentReply(c, a); }
     else if (a === "stop-load") { if (A.loadingModel) A.loadingModel.cancelled = true; }
@@ -1751,6 +1848,7 @@
     else if (a === "copy-msg" && c) copyText(c.messages[+el.dataset.i].content);
     else if (a === "read-msg" && c) { const m = c.messages[+el.dataset.i]; if (m && TTS.msg === m) stopReading(); else if (m) readMessage(m); }
     else if (a === "voice-toggle") setAutoRead(!VOICE.auto);
+    else if (a === "talk") talkButton();
     else if (a === "voice-test") { if (canSpeak()) { stopReading(); say("Hello! This is how answers will sound."); } }
     else if (a === "continue" && c && !A.stream) {
       const m = c.messages[c.messages.length - 1];

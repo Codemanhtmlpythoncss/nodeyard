@@ -195,6 +195,7 @@ final class AppState: ObservableObject {
 
     func stop() {
         SpeechReader.shared.stop()
+        if VoiceChat.shared.isOn { VoiceChat.shared.stop() }
         resolveToolApproval(allow: false)
         activeTask?.cancel(); activeTask = nil; isSending = false; info = "Generation stopped."
     }
@@ -293,7 +294,7 @@ final class AppState: ObservableObject {
                 response = chats[try ci()].messages[i]
             }
             persist(chatIndex: try ci())
-            if defaults.readAloud == true { speech().feed(id: response.id, text: response.content, final: true) }
+            if defaults.readAloud == true || VoiceChat.shared.isOn { speech().feed(id: response.id, text: response.content, final: true) }
             if defaults.syncChats { await sync(chatID: chatID) }
             if defaults.notifications { notify(title: "Nodeyard AI replied", body: chats[try ci()].title) }
         } catch is CancellationError {
@@ -463,7 +464,7 @@ final class AppState: ObservableObject {
         guard let ci = chats.firstIndex(where: { $0.id == chatID }), let mi = chats[ci].messages.firstIndex(where: { $0.id == messageID }) else { return }
         if reasoning { chats[ci].messages[mi].reasoning += piece } else {
             chats[ci].messages[mi].content += piece
-            if defaults.readAloud == true { speech().feed(id: messageID, text: chats[ci].messages[mi].content, final: false) }
+            if defaults.readAloud == true || VoiceChat.shared.isOn { speech().feed(id: messageID, text: chats[ci].messages[mi].content, final: false) }
         }
         if chats[ci].messages[mi].content.count % 160 == 0 { try? store.save(chats[ci]) }
     }

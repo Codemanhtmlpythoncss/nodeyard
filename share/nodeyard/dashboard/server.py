@@ -17,6 +17,8 @@ import importlib.util
 import ipaddress
 import json
 import os
+import shutil
+import subprocess
 import re
 import signal
 import socket
@@ -118,10 +120,37 @@ class Store:
 
 # --------------------------------------------------------------------------- http
 
+_https = {"at": 0.0, "url": ""}
+
+
+def https_url(port):
+    """The dashboard's https:// address on the tailnet (Tailscale Serve, see `nodeyard dashboard https`), or ""."""
+    if time.time() - _https["at"] < 60:
+        return _https["url"]
+    url = ""
+    try:
+        ts = shutil.which("tailscale") or ("/usr/bin/tailscale" if os.path.exists("/usr/bin/tailscale") else "")
+        if ts:
+            out = subprocess.run([ts, "serve", "status", "--json"], capture_output=True, text=True, timeout=4, check=False)
+            web = (json.loads(out.stdout or "{}") or {}).get("Web") or {}
+            for hostport, conf in web.items():
+                for handler in ((conf or {}).get("Handlers") or {}).values():
+                    proxy = str((handler or {}).get("Proxy") or "")
+                    if proxy.rstrip("/").endswith(":%d" % port):
+                        host, _, p = hostport.rpartition(":")
+                        url = "https://%s/" % (host if p == "443" else hostport)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        url = ""
+    _https.update(at=time.time(), url=url)
+    return url
+
+
 def state_response(srv, with_agents=False):
     snap = srv.store.snapshot()
     snap.update({"ok": snap["state"] is not None, "version": srv.nd_version, "mode": srv.mode, "auth": srv.auth is not None,
                  "interval": srv.store.interval, "now": time.time(), "host": socket.gethostname()})
+    if srv.mode != "demo" and getattr(srv, "port", None):
+        snap["https_url"] = https_url(srv.port)
     su = getattr(srv, "selfupdate", None)
     if su is not None:   # the page reloads itself when this changes, and shows a pending update
         snap.update({"build": su.build, "update_pending": su.pending_since is not None})
@@ -526,7 +555,7 @@ def main():
         import agents as agentsmod
         agents = agentsmod.AgentPoller(a.agent_token_file)
     store = Store(source, a.interval, agents)
-    ctx = Context(store=store, source=source, mode="demo" if a.demo else "live", nd_version=a.nodeyard_version, auth=auth)
+    ctx = Context(store=store, source=source, mode="demo" if a.demo else "live", nd_version=a.nodeyard_version, auth=auth, port=a.port)
 
     def agents_route(h, q):
         snap = store.snapshot()

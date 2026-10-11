@@ -272,6 +272,7 @@ private struct ChatDetailView: View {
                     Divider()
                     Button { showSettings = true } label: { Label("Chat settings…", systemImage: "slider.horizontal.3") }
                 } label: { Image(systemName: "plus.circle").font(.title3) }.menuStyle(.borderlessButton).help("Attach a file or change chat settings")
+                VoiceChatButton()
                 if state.isSending {
                     Button { state.stop() } label: { Image(systemName: "stop.fill").frame(width: 28, height: 28) }
                         .buttonStyle(.borderedProminent).tint(.red).help("Stop generation (⌘.)")
@@ -281,6 +282,7 @@ private struct ChatDetailView: View {
                         .help("Send message (⌘ Return)")
                 }
             }
+            VoiceChatStatus()
             HStack {
                 Text("\(chat.modelName.isEmpty ? "Choose a model" : chat.modelName) · \(chat.contextLength.formatted()) context")
                     .font(.caption2).foregroundStyle(.secondary)
@@ -432,5 +434,42 @@ private struct EmptyState: View {
             Text(title).font(.title3.weight(.semibold))
             Text(message).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 430)
         }.frame(maxWidth: .infinity, maxHeight: .infinity).padding(32)
+    }
+}
+
+/// The composer's microphone: starts voice chat; while on, interrupts the reading, sends what you said, or ends it.
+private struct VoiceChatButton: View {
+    @EnvironmentObject private var state: AppState
+    @ObservedObject private var voice = VoiceChat.shared
+    var body: some View {
+        Button { voice.toggle(state) } label: {
+            Image(systemName: voice.isOn ? (voice.phase == .listening ? "waveform.circle.fill" : "stop.circle.fill") : "mic.circle")
+                .font(.title3).foregroundStyle(voice.isOn ? Color.red : Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut("t", modifiers: [.command, .shift])
+        .help(voice.isOn ? "Voice chat: tap to interrupt, send now, or end it (⇧⌘T)" : "Voice chat: talk to it and it answers out loud (⇧⌘T)")
+    }
+}
+
+private struct VoiceChatStatus: View {
+    @ObservedObject private var voice = VoiceChat.shared
+    var body: some View {
+        if voice.isOn {
+            HStack(spacing: 6) {
+                Image(systemName: "waveform").foregroundStyle(.red)
+                Text(text).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("End voice chat") { voice.stop() }.buttonStyle(.link).font(.caption)
+            }
+        }
+    }
+    private var text: String {
+        switch voice.phase {
+        case .listening: voice.heard.isEmpty ? "Listening… say something" : "Listening… pause (or tap the mic) to send"
+        case .thinking: "Thinking…"
+        case .speaking: "Speaking · tap the mic to interrupt"
+        case .off: ""
+        }
     }
 }

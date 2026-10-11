@@ -27,6 +27,15 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Voice chat** (dashboard chat 🎙 or `/talk`, Nodeyard AI for macOS mic button or Shift-Command-T): talk to the model
+  like a call. It listens, sends what you said when you pause, reads the answer aloud as it's written, then listens
+  again; tap to interrupt, send or end. The Mac uses Apple's speech recognition (on the Mac when it can).
+  Read-aloud now picks the most natural voice by itself (Premium, Enhanced, Neural or Google voices; never the robotic
+  ones).
+- **`nodeyard dashboard https on`**: a secure https:// address for the dashboard on your tailnet (Tailscale Serve,
+  your tailnet only), which browsers require before a page may use the microphone. The page offers it when you start
+  voice chat on the http:// address.
+
 - **Read aloud** (dashboard chat and Nodeyard AI for macOS): every answer has a 🔊 button, and with reading on
   (🔈 in the chat header, `/read on`, or Settings › Read aloud on the Mac) answers are read sentence by sentence while
   the model writes them. Uses the computer's own voices (pick one and a speed); code, links and formatting are skipped.

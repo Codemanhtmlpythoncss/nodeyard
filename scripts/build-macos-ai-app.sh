@@ -84,6 +84,8 @@ cat >"$app/Contents/Info.plist" <<PLIST
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Voice chat: Nodeyard AI listens while you talk to it.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Voice chat: what you say is turned into text (on this Mac when it can) and sent to your model.</string>
   <key>NSAppTransportSecurity</key>
   <dict><key>NSAllowsArbitraryLoads</key><true/></dict>
 </dict>

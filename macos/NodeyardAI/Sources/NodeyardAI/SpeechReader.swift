@@ -25,8 +25,34 @@ final class SpeechReader: NSObject, ObservableObject {
     }
 
     static var voices: [AVSpeechSynthesisVoice] {
-        AVSpeechSynthesisVoice.speechVoices().sorted { ($0.language, $0.name) < ($1.language, $1.name) }
+        AVSpeechSynthesisVoice.speechVoices().sorted { (score($1), $0.name) < (score($0), $1.name) }
     }
+
+    /// Is it reading (or about to)?
+    var busy: Bool { synth.isSpeaking || !current.isEmpty || live != nil }
+
+    private static let robotic = try? NSRegularExpression(pattern: #"\b(albert|bad news|bahh|bells|boing|bubbles|cellos|eddy|flo|fred|good news|grandma|grandpa|jester|junior|kathy|organ|ralph|reed|rocko|sandy|shelley|superstar|trinoids|whisper|wobble|zarvox)\b"#, options: .caseInsensitive)
+
+    /// How natural a voice sounds, for the automatic choice: your language first, then Premium, Enhanced, the rest;
+    /// never the novelty or robotic voices. (Download better ones in System Settings › Accessibility › Spoken
+    /// Content › System voice › Manage Voices: the "Premium" ones sound the most human.)
+    static func score(_ v: AVSpeechSynthesisVoice) -> Int {
+        let lang = Locale.preferredLanguages.first ?? "en-US"
+        var s = v.language.hasPrefix(String(lang.prefix(2))) ? 100 : 0
+        if v.language == lang { s += 3 }
+        switch v.quality {
+        case .premium: s += 60
+        case .enhanced: s += 45
+        default: break
+        }
+        let name = v.name as NSString
+        if robotic?.firstMatch(in: v.name, range: NSRange(location: 0, length: name.length)) != nil { s -= 90 }
+        if #available(macOS 14.0, *), v.voiceTraits.contains(.isNoveltyVoice) { s -= 90 }
+        return s
+    }
+
+    static var bestVoice: AVSpeechSynthesisVoice? { voices.first }
+    static func isNatural(_ v: AVSpeechSynthesisVoice) -> Bool { v.quality == .premium || v.quality == .enhanced }
 
     /// Markdown as it should sound: no code, links, tables or formatting marks; paragraphs become pauses.
     static func speakable(_ markdown: String) -> String {
@@ -107,7 +133,7 @@ final class SpeechReader: NSObject, ObservableObject {
     }
 
     private func say(_ text: String) {
-        let voice = AVSpeechSynthesisVoice(identifier: voiceIdentifier) ?? AVSpeechSynthesisVoice(language: Locale.preferredLanguages.first)
+        let voice = AVSpeechSynthesisVoice(identifier: voiceIdentifier) ?? Self.bestVoice ?? AVSpeechSynthesisVoice(language: Locale.preferredLanguages.first)
         for piece in Self.pieces(text) {
             let u = AVSpeechUtterance(string: piece)
             u.voice = voice

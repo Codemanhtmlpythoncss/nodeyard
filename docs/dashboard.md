@@ -280,6 +280,22 @@ that as a .py file", "make me a file with…", "download it as a zip". Ordinary 
 blocks that you can run. Change it per chat in Settings > Files, or with `/files ask`, `/files always` (every script, page and
 document becomes a file) or `/files never`.
 
+## Voice: read aloud and voice chat
+
+Every answer has a 🔊 **Read aloud** button; **🔈 Read aloud** in the chat header (or `/read on`) reads every answer
+sentence by sentence while it's written. **🎙** next to Send (or `/talk`) starts **voice chat**: it listens, sends what
+you said when you pause, reads the answer aloud, then listens again; tap it to interrupt, send now or end (Esc ends).
+Voices are the computer's own (chat Settings: voice and speed; automatic picks the most natural one).
+
+Browsers only allow the microphone on **https://** pages. Give the dashboard a secure address on your tailnet:
+
+    sudo nodeyard dashboard https on
+
+It uses Tailscale Serve (your tailnet only, a real certificate) and needs MagicDNS and HTTPS Certificates turned on
+for the tailnet (login.tailscale.com/admin/dns) and the dashboard listening on its Tailscale address
+(`dashboard start --listen auto`). Speech recognition is the browser's: Chrome sends the audio to Google; Safari can
+do it on the computer. The Nodeyard AI Mac app has voice chat too and needs neither.
+
 ## Terminals
 
 The Terminal page lists this server, every cluster node and every device on your tailnet (from `tailscale status` on

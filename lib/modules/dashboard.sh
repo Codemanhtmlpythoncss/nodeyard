@@ -12,6 +12,7 @@ ny_cmd "dashboard start" dashboard_start_cmd "Dashboard" "Start the web dashboar
 ny_cmd "dashboard stop" dashboard_stop_cmd "Dashboard" "Stop the dashboard and remove its service" dashboard
 ny_cmd "dashboard password" dashboard_password_cmd "Dashboard" "Set, show or randomise the dashboard's sign-in password" dashboard
 ny_cmd "dashboard run" dashboard_run_cmd "Dashboard" "Run the dashboard in this terminal (Ctrl-C stops it)" dashboard
+ny_cmd "dashboard https" dashboard_https_cmd "Dashboard" "A secure https:// address for the dashboard on your tailnet (voice chat needs it)" dashboard
 ny_cmd "dashboard agent install" dashboard_agent_install_cmd "Dashboard" "Run the read-only node agent on every node (processes, CPU clocks, temperatures)" dashboard
 ny_cmd "dashboard agent remove" dashboard_agent_remove_cmd "Dashboard" "Remove the node agents" dashboard
 ny_cmd "dashboard agent status" dashboard_agent_status_cmd "Dashboard" "Show the node agents" dashboard
@@ -94,6 +95,20 @@ HELP
 dashboard_stop_cmd_help() { dashboard_start_cmd_help; }
 dashboard_run_cmd_help() { dashboard_start_cmd_help; }
 dashboard_status_cmd_help() { dashboard_start_cmd_help; }
+dashboard_https_cmd_help() {
+    cat <<'HELP'
+Usage: nodeyard dashboard https [on|off|status]
+
+  on      Serve the dashboard at https://THIS-MACHINE.YOUR-TAILNET.ts.net/ with a real certificate, through
+          Tailscale Serve. Only devices on your tailnet can open it; the internet can't (that is 'nodeyard public').
+          Browsers allow the microphone (voice chat) only on https:// pages.
+  off     Remove that address (the http:// one keeps working).
+  status  Show the address (the default).
+
+Needs MagicDNS and HTTPS certificates turned on for your tailnet (https://login.tailscale.com/admin/dns), and the
+dashboard listening on its Tailscale address (nodeyard dashboard start --listen auto).
+HELP
+}
 dashboard_password_cmd_help() { dashboard_start_cmd_help; }
 dashboard_agent_install_cmd_help() { dashboard_start_cmd_help; }
 dashboard_agent_remove_cmd_help() { dashboard_start_cmd_help; }
@@ -846,5 +861,65 @@ dashboard_status_cmd() {
         ny_info "The dashboard isn't running. Start it with: sudo nodeyard dashboard start"
         ny_hint "Want to look first? nodeyard --demo dashboard run shows a simulated cluster."
     fi
+    return 0
+}
+
+# --- https on the tailnet (Tailscale Serve) -------------------------------------------------------------------
+
+DASH_HTTPS_PORT=443   # (public access, Tailscale Funnel, uses 8443 and 10000)
+
+dashboard_https_cmd() {
+    local action="${1:-status}" st name ts port target serve
+    case "$action" in
+        on | off | status) ;;
+        -h | --help)
+            dashboard_https_cmd_help
+            return 0
+            ;;
+        *) ny_usage_error "Say on, off or status: nodeyard dashboard https on" ;;
+    esac
+    st="$(public_ts_json)"
+    name="$(public_name "$st")"
+    [[ -n "$name" ]] || ny_die "This machine has no Tailscale name." "Turn on MagicDNS for your tailnet: https://login.tailscale.com/admin/dns" "$NY_E_PRECONDITION"
+    serve="$(tailscale serve status --json 2>/dev/null || true)"
+    if [[ "$action" == status ]]; then
+        if jq -e --arg k "${name}:${DASH_HTTPS_PORT}" '.Web[$k]' >/dev/null 2>&1 <<<"$serve"; then
+            ny_ok "The dashboard's secure address (your tailnet only): https://${name}/"
+        else
+            ny_info "The dashboard has no https:// address. Turn it on: sudo nodeyard dashboard https on"
+        fi
+        return 0
+    fi
+    ny_need_root
+    if [[ "$action" == off ]]; then
+        if [[ "$NY_DRY_RUN" -eq 1 ]]; then
+            ny_plan_add run "tailscale serve --https=${DASH_HTTPS_PORT} off"
+            return 0
+        fi
+        ny_run tailscale serve --https="$DASH_HTTPS_PORT" off >/dev/null 2>&1 || true
+        ny_ok "The https:// address is off; http:// keeps working."
+        return 0
+    fi
+    dashboard_is_active || ny_die "The dashboard isn't running." "Start it: sudo nodeyard dashboard start" "$NY_E_PRECONDITION"
+    port="$(dashboard_unit_value port)"
+    port="${port:-$DASH_PORT}"
+    ts="$(jq -r '.Self.TailscaleIPs[]? | select(test("^[0-9.]+$"))' <<<"$st" | head -n1)"
+    [[ -n "$ts" ]] || ny_die "This machine has no Tailscale IPv4 address." "Check: tailscale status" "$NY_E_PRECONDITION"
+    # Through the Tailscale address (not 127.0.0.1): the dashboard then treats these visits as your tailnet, not as
+    # public access, so the Terminal page and everything else work as usual.
+    ny_tcp_check "$ts" "$port" 3 ||
+        ny_die "The dashboard doesn't listen on its Tailscale address (${ts}:${port})." "Start it that way: sudo nodeyard dashboard start --listen auto" "$NY_E_PRECONDITION"
+    target="http://${ts}:${port}"
+    if [[ "$NY_DRY_RUN" -eq 1 ]]; then
+        ny_plan_add run "tailscale serve --bg --https=${DASH_HTTPS_PORT} ${target}"
+        return 0
+    fi
+    # (an older tailscale waits for you to allow Serve in the admin console: don't hang here)
+    if ! timeout 60 tailscale serve --bg --https="$DASH_HTTPS_PORT" "$target" >/dev/null 2>&1; then
+        ny_die "Tailscale didn't set up the https:// address." \
+            "Turn on MagicDNS and HTTPS Certificates for your tailnet (https://login.tailscale.com/admin/dns), then run this again. Details: tailscale serve --https=${DASH_HTTPS_PORT} ${target}" "$NY_E_PRECONDITION"
+    fi
+    ny_ok "The dashboard is at https://${name}/ (your tailnet only)."
+    ny_hint "The first visit can take a few seconds while Tailscale gets the certificate. Voice chat works there."
     return 0
 }
