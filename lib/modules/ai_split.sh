@@ -557,6 +557,19 @@ split_threads() {
     return 0
 }
 
+# split_cram -- MiB for llama.cpp's prompt cache (-cram) on the main node. Conversations other than the current one
+# keep the prompt the model already read there, so switching chats or programs (dashboard, yardcode, the Mac app)
+# doesn't make it re-read a whole conversation (at ~20 tokens/s, minutes). It gets what the main node has left after
+# its share, keeping 1.5 GiB for the system: 512 MiB (already in SPLIT_RES_MAIN) up to 4 GiB.
+split_cram() {
+    local left
+    left=$(( ${PLAN_FREE[0]:-0} - ${PLAN_SHARE[0]:-0} - SPLIT_WORK - SPLIT_RES_MAIN - 1536 ))
+    if ((left < 0)); then left=0; fi
+    if ((left > 3584)); then left=3584; fi
+    printf '%s\n' $((512 + left))
+    return 0
+}
+
 split_print_plan() {
     local size_gib i threads left extra
     size_gib=$(awk -v b="$SPLIT_SIZE" 'BEGIN{printf "%.1f", b/1073741824}')
@@ -571,7 +584,7 @@ split_print_plan() {
         threads="$(split_threads "$i")"
         extra=$SPLIT_WORK
         if [[ "${PLAN_SHARE[i]}" -eq 0 ]]; then extra=0; fi
-        if [[ $i -eq 0 ]]; then extra=$((extra + SPLIT_RES_MAIN)); fi
+        if [[ $i -eq 0 ]]; then extra=$((extra + SPLIT_RES_MAIN + $(split_cram) - 512)); fi
         left=$((PLAN_FREE[i] - PLAN_SHARE[i] - extra))
         printf '  %-18s %-13s %8.1fG %7.1fG %2d%% %9.1fG %8s\n' "${PLAN_NAMES[i]}" \
             "$(if [[ $i -eq 0 && "${PLAN_SHARE[i]}" -eq 0 ]]; then echo 'main only'; elif [[ $i -eq 0 ]]; then echo 'main + share'; else echo 'share'; fi)" \
@@ -946,7 +959,7 @@ ${main_fetch}
         - -t
         - "2"
         - -cram
-        - "512"
+        - "$(split_cram)"
         # lets the model call tools (OpenAI-style tool calls: yardcode and other agents need it)
         - --jinja${think_args}${key_args}
         - --host
