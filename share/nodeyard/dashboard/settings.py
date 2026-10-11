@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import threading
@@ -25,6 +26,9 @@ VIDEO_KINDS = ("mp4", "webm")
 VIDEO_MAX = 80 * 1024 * 1024                    # a background video, uploaded in pieces
 CHUNK_MAX = 3 * 1024 * 1024                     # one piece of an upload
 UPLOAD_RE = re.compile(r"^[0-9a-f]{16,32}$")
+LIB_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+LIB_MAX_ITEMS = 30                              # uploaded pictures and videos kept to pick again
+LIB_MAX_BYTES = 1024 * 1024 * 1024
 # Built-in backgrounds (drawn by the page with CSS, see style.css .bgp-*). A new dashboard starts on the first.
 PRESETS = ("aurora", "sunset", "ocean", "nebula", "forest", "graphite")
 DEFAULT_BG = {"kind": "preset", "preset": PRESETS[0], "v": 0, "blur": 0, "dim": 0, "default": True}
@@ -200,7 +204,8 @@ class Settings:
             "hf_token": self._secret_exists("hf-token"), "model_key": self._secret_exists("ai-split-api-key"),
             "agents": bool((st.get("agents") or {}).get("installed")),
             "gate": split.get("gate"), "split": bool(split),
-            "background": p.get("bg") or DEFAULT_BG,
+            "background": self._adopt_legacy() or DEFAULT_BG,
+            "background_library": [dict(e, video=e.get("kind") in VIDEO_KINDS) for e in self.prefs().get("bg_library") or []],
             "background_presets": list(PRESETS),
             "chat_defaults": self.chat_defaults(p),
             "public": self.public_state(),
@@ -492,12 +497,9 @@ class Settings:
             return p["bg"]
 
     def remove_background(self):
+        """No background (your uploaded ones stay in the library)."""
+        self._adopt_legacy()
         with self.lock:
-            for k in KINDS:
-                try:
-                    os.remove(self._bg_path(k))
-                except OSError:
-                    pass
             p = self.prefs()
             p["bg"] = {"kind": "none", "v": int(time.time())}
             self._save_prefs(p)
@@ -510,12 +512,73 @@ class Settings:
             except OSError:
                 pass
 
+    # Uploaded pictures and videos stay in a library (state dir/backgrounds/ID.KIND) to pick again later.
+    def _lib_path(self, eid, kind):
+        return os.path.join(self.dir, "backgrounds", "%s.%s" % (eid, kind))
+
+    def _adopt_legacy(self):
+        """The current background from before the library (background.KIND) moves into it. Returns the current one."""
+        with self.lock:
+            p = self.prefs()
+            bg = p.get("bg")
+            if not bg or bg.get("kind") not in KINDS or bg.get("id"):
+                return bg
+            old = self._bg_path(bg["kind"])
+            if not os.path.exists(old):
+                return bg
+            eid = secrets.token_hex(6)
+            os.makedirs(os.path.dirname(self._lib_path(eid, bg["kind"])), mode=0o700, exist_ok=True)
+            os.replace(old, self._lib_path(eid, bg["kind"]))
+            lib = p.get("bg_library") or []
+            lib.insert(0, {"id": eid, "kind": bg["kind"], "size": os.path.getsize(self._lib_path(eid, bg["kind"])), "added": int(time.time())})
+            p["bg_library"] = lib
+            bg["id"] = eid
+            p["bg"] = bg
+            self._save_prefs(p)
+            return bg
+
+    def pick_background(self, body):
+        eid = str(body.get("id", ""))
+        self._adopt_legacy()
+        with self.lock:
+            p = self.prefs()
+            entry = next((e for e in p.get("bg_library") or [] if e.get("id") == eid), None)
+            if entry is None or not os.path.exists(self._lib_path(eid, entry["kind"])):
+                raise SettingsError("That picture or video isn't in the library any more.", 404)
+            old = p.get("bg") or {}
+            custom = old.get("kind") in KINDS
+            p["bg"] = {"kind": entry["kind"], "id": eid, "v": int(time.time()), "blur": old.get("blur", 0) if custom else 0,
+                       "dim": old.get("dim", 45) if custom else 45, "video": entry["kind"] in VIDEO_KINDS}
+            self._save_prefs(p)
+            return p["bg"]
+
+    def delete_background(self, body):
+        eid = str(body.get("id", ""))
+        if not LIB_ID_RE.match(eid):
+            raise SettingsError("Unknown picture or video.")
+        self._adopt_legacy()
+        with self.lock:
+            p = self.prefs()
+            lib = p.get("bg_library") or []
+            entry = next((e for e in lib if e.get("id") == eid), None)
+            if entry is None:
+                raise SettingsError("That picture or video isn't in the library.", 404)
+            try:
+                os.remove(self._lib_path(eid, entry["kind"]))
+            except OSError:
+                pass
+            p["bg_library"] = [e for e in lib if e.get("id") != eid]
+            if (p.get("bg") or {}).get("id") == eid:   # it was the background: back to the default
+                p["bg"] = {k: v for k, v in DEFAULT_BG.items() if k != "default"}
+            self._save_prefs(p)
+            return {"background": p.get("bg") or DEFAULT_BG}
+
     def set_preset(self, body):
         name = str(body.get("name", ""))
         if name not in PRESETS:
             raise SettingsError("There's no built-in background called that.")
+        self._adopt_legacy()   # (your own pictures stay in the library)
         with self.lock:
-            self._drop_files()
             p = self.prefs()
             p["bg"] = {"kind": "preset", "preset": name, "v": int(time.time()), "blur": 0, "dim": 0}
             self._save_prefs(p)
@@ -559,13 +622,22 @@ class Settings:
                 os.remove(tmp)
                 raise SettingsError("Use a PNG, JPEG or WebP picture (8 MB at most) or an MP4 or WebM video (80 MB at most)." if kind is None
                                     else "The picture is too big (8 MB at most).", 400 if kind is None else 413)
-            self._drop_files()
-            os.replace(tmp, self._bg_path(kind))
+            lib = self.prefs().get("bg_library") or []
+            if len(lib) >= LIB_MAX_ITEMS or sum(int(e.get("size") or 0) for e in lib) + size > LIB_MAX_BYTES:
+                os.remove(tmp)
+                raise SettingsError("Your pictures and videos are full (%d, or 1 GB): delete some first." % LIB_MAX_ITEMS, 413)
+        self._adopt_legacy()
+        with self.lock:
+            eid = secrets.token_hex(6)
+            os.makedirs(os.path.dirname(self._lib_path(eid, kind)), mode=0o700, exist_ok=True)
+            os.replace(tmp, self._lib_path(eid, kind))
+            os.chmod(self._lib_path(eid, kind), 0o600)
             p = self.prefs()
+            p["bg_library"] = [{"id": eid, "kind": kind, "size": size, "added": int(time.time()), "name": str(body.get("name", ""))[:80]}] + (p.get("bg_library") or [])
             old = p.get("bg") or {}
-            dim = old.get("dim", 55) if old.get("kind") not in ("preset", "none") else 45
-            p["bg"] = {"kind": kind, "v": int(time.time()), "blur": old.get("blur", 0) if old.get("kind") in KINDS else 0, "dim": dim,
-                       "video": kind in VIDEO_KINDS}
+            custom = old.get("kind") in KINDS
+            p["bg"] = {"kind": kind, "id": eid, "v": int(time.time()), "blur": old.get("blur", 0) if custom else 0,
+                       "dim": old.get("dim", 45) if custom else 45, "video": kind in VIDEO_KINDS}
             self._save_prefs(p)
             return p["bg"]
 
@@ -577,13 +649,20 @@ class Settings:
         with open(path, "rb") as f:
             return f.read(), ctype
 
-    def background_media(self):
-        """(path, content type, size) of the uploaded background, or (None, None, 0)."""
-        bg = self.prefs().get("bg") or {}
-        kind = bg.get("kind")
-        if kind not in KINDS:
-            return None, None, 0
-        path = self._bg_path(kind)
+    def background_media(self, eid=""):
+        """(path, content type, size) of the current uploaded background, or of library item eid; else (None, None, 0)."""
+        p = self.prefs()
+        if eid:
+            entry = next((e for e in p.get("bg_library") or [] if e.get("id") == eid and LIB_ID_RE.match(eid)), None)
+            if entry is None:
+                return None, None, 0
+            kind, path = entry["kind"], self._lib_path(eid, entry["kind"])
+        else:
+            bg = p.get("bg") or {}
+            kind = bg.get("kind")
+            if kind not in KINDS:
+                return None, None, 0
+            path = self._lib_path(bg["id"], kind) if bg.get("id") else self._bg_path(kind)
         try:
             return path, KINDS[kind], os.path.getsize(path)
         except OSError:
@@ -605,7 +684,7 @@ def register(ctx, args):
         return route
 
     def background(h, q):
-        path, ctype, size = s.background_media()
+        path, ctype, size = s.background_media(str((q.get("id") or [""])[0])[:12])
         if path is None:
             return h._send(404, "No background", "text/plain; charset=utf-8")
         cache = {"Cache-Control": "private, max-age=86400", "Accept-Ranges": "bytes"}
@@ -654,6 +733,8 @@ def register(ctx, args):
         "/api/settings/background-style": wrap(lambda h, b: {"background": s.background_style(b)}),
         "/api/settings/background-remove": wrap(lambda h, b: s.remove_background()),
         "/api/settings/background-preset": wrap(lambda h, b: {"background": s.set_preset(b)}),
+        "/api/settings/background-pick": wrap(lambda h, b: {"background": s.pick_background(b)}),
+        "/api/settings/background-delete": wrap(lambda h, b: s.delete_background(b)),
         "/api/settings/background-upload": wrap(lambda h, b: (lambda r: {"background": r} if "kind" in r else r)(s.upload_background(b))),
         "/api/settings/public-refresh": wrap(lambda h, b: (s.forget_public(), tsserve.forget(), {"public": s.public_state()})[1]),
     })

@@ -145,11 +145,14 @@
         <div class="field-l">Built in</div>
         <div class="bg-grid">${(s.background_presets || Object.keys(PRESET_NAMES)).map((n) => raw('<button type="button" class="bg-swatch' + (bg && bg.kind === "preset" && bg.preset === n ? " on" : "") + '" data-st="bg-preset" data-name="' + n + '"><span class="bgp-' + n + '"></span>' + (PRESET_NAMES[n] || n) + "</button>"))}
           ${raw('<button type="button" class="bg-swatch none' + (!bg || bg.kind === "none" ? " on" : "") + '" data-st="bg-remove"><span></span>None</button>')}</div>
-        <div class="field-l">Your own picture or video
-          <div class="row wrap" style="gap:8px;margin-top:6px"><label class="btn" for="st-bg-file">${bg && (bg.kind in { png: 1, jpg: 1, webp: 1, mp4: 1, webm: 1 }) ? "Change…" : "Upload a picture or video…"}</label><input type="file" id="st-bg-file" accept="image/png,image/jpeg,image/webp,video/mp4,video/webm" hidden>
-          ${bg && (bg.kind in { png: 1, jpg: 1, webp: 1, mp4: 1, webm: 1 }) ? html`${chip(isVideo(bg) ? "video" : "picture", "good")}<button class="btn danger" data-st="bg-remove">Remove</button>` : ""}</div>
-          <span class="faint small" style="display:block;margin-top:4px">PNG, JPEG or WebP up to 8 MB, or an MP4 or WebM video up to 80 MB (plays silently on a loop). Stored on the server and only shown to signed-in browsers.</span>
-          <span class="faint small" id="st-bg-progress"></span></div>
+        <div class="field-l">Your pictures and videos</div>
+        <div class="bg-grid">${(s.background_library || []).map((e) => raw('<div class="bg-item"><button type="button" class="bg-swatch' + (bg && bg.id === e.id ? " on" : "") + '" data-st="bg-pick" data-id="' + esc(e.id) + '" title="Use this' + (e.name ? ": " + esc(e.name) : "") + '"><span>' +
+            (e.video ? '<video src="/api/background?id=' + esc(e.id) + '#t=0.5" muted playsinline preload="metadata"></video><i class="bg-play">▶</i>' : '<img src="/api/background?id=' + esc(e.id) + '" alt="" loading="lazy">') +
+            "</span>" + esc(e.video ? "Video" : "Picture") + ' · ' + esc(fmt.bytes(e.size || 0, 0)) + '</button><button type="button" class="bg-del" data-st="bg-del" data-id="' + esc(e.id) + '" title="Delete it from the server" aria-label="Delete">×</button></div>'))}
+          <label class="bg-swatch bg-add" for="st-bg-file" title="Upload a picture or video"><span>＋</span>Upload…</label></div>
+        <input type="file" id="st-bg-file" accept="image/png,image/jpeg,image/webp,video/mp4,video/webm" hidden>
+        <span class="faint small" style="display:block;margin:-2px 0 8px">PNG, JPEG or WebP up to 8 MB, or MP4 or WebM video up to 80 MB (plays silently on a loop). They stay here to pick again (up to 30, 1 GB in all), are stored on the server and only shown to signed-in browsers.</span>
+        <span class="faint small" id="st-bg-progress"></span>
         ${bg && bg.kind !== "none" ? html`${field(html`Blur <span class="faint" id="st-blur-v">${bg.blur || 0}px</span>`, html`<input type="range" id="st-blur" min="0" max="40" value="${bg.blur || 0}" class="range">`)}
           ${field(html`Darken <span class="faint" id="st-dim-v">${bg.dim || 0}%</span>`, html`<input type="range" id="st-dim" min="0" max="95" value="${bg.dim || 0}" class="range">`, "Darker keeps text easy to read.")}` : ""}`)}
       ${card("One shared API key", html`
@@ -304,6 +307,11 @@
     } else if (a === "public-off") startJob("public-off", { what: el.dataset.what }, async () => { await post("/api/settings/public-refresh"); loadSettings().then(renderSettings); });
     else if (a === "name-set") startJob("cluster-name", { name: $("#st-name").value.trim() });
     else if (a === "bg-remove") { const r = await post("/api/settings/background-remove"); if (r.ok) { applyBackground(null); loadSettings().then(renderSettings); } }
+    else if (a === "bg-pick") { const r = await post("/api/settings/background-pick", { id: el.dataset.id }); if (r.ok) { applyBackground(r.background); loadSettings().then(renderSettings); } }
+    else if (a === "bg-del") {
+      if (!confirm("Delete this from the server? It can't be picked again afterwards.")) return;
+      const r = await post("/api/settings/background-delete", { id: el.dataset.id }); if (r.ok) { applyBackground(r.background); loadSettings().then(renderSettings); }
+    }
     else if (a === "bg-preset") { const r = await post("/api/settings/background-preset", { name: el.dataset.name }); if (r.ok) { applyBackground(r.background); loadSettings().then(renderSettings); } }
     void s;
   });
@@ -322,12 +330,13 @@
       const piece = new Uint8Array(await f.slice(off, off + CH).arrayBuffer());
       let bin = ""; for (let i = 0; i < piece.length; i += 0x8000) bin += String.fromCharCode.apply(null, piece.subarray(i, i + 0x8000));
       const done = off + CH >= f.size;
-      r = await post("/api/settings/background-upload", { id, offset: off, data: btoa(bin), done });
+      r = await post("/api/settings/background-upload", { id, offset: off, data: btoa(bin), done, name: done ? f.name : undefined });
       if (!r.ok) { if (prog) prog.textContent = ""; return; }
       if (prog) prog.textContent = "Uploading… " + Math.min(100, Math.round(((off + piece.length) / f.size) * 100)) + "%";
       if (done) break;
     }
     if (prog) prog.textContent = "";
+    e.target.value = "";
     if (r && r.ok && r.background) { applyBackground(r.background); loadSettings().then(renderSettings); toast(video ? "Video background set." : "Background set."); }
   });
   let styleTimer = null;

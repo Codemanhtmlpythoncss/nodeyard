@@ -29,7 +29,8 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 - **Backgrounds**: six built-in ones drawn by the page (Aurora, the default for a new dashboard, Sunset, Ocean, Nebula,
   Forest, Graphite), **video backgrounds** (MP4 or WebM up to 80 MB, uploaded in pieces, streamed in ranges, silent on a
-  loop, still for reduced motion) and None, in Settings › Background with blur and darken.
+  loop, still for reduced motion) and None, in Settings › Background with blur and darken. Pictures and videos you
+  upload stay in a library to pick again (up to 30, 1 GB); delete them with ×. A background from before is kept there.
 - **Secure address everywhere on the tailnet**: with `dashboard https on`, browsers opening the plain address (like
   http://TAILSCALE-IP:9092) go to the https:// one automatically; the API, the Mac app, SSH tunnels and `?http=1` stay
   on http://. A banner on http:// pages links there too.
