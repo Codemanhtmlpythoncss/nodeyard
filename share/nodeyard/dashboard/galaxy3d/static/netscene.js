@@ -241,6 +241,16 @@
       applyViewOffset();
       if (NS.nodes && NS.nodes.length) buildTour();
     };
+    /* nodeyard: the camera mode (Tab › Mode). 'auto' tours every stop, 'overview' holds the whole graph and
+       'manual' leaves the camera to you; the choice is remembered. */
+    NS.tourMode = 'auto';
+    try { var tmSaved = localStorage.getItem('galaxy.tour'); if (tmSaved === 'overview' || tmSaved === 'manual') NS.tourMode = tmSaved; } catch (e) {}
+    NS.setTour = function (m) {
+      NS.tourMode = (m === 'overview' || m === 'manual') ? m : 'auto';
+      try { localStorage.setItem('galaxy.tour', NS.tourMode); } catch (e) {}
+      NS.manualAt = -1e9;                       // leave a held camera now: overview/auto fly home at once
+      if (NS.tour) NS.tour.manual = true;
+    };
     window.NETSCENE = NS;
     /* for overlays (netscene_flows.js): 1 = node fully shown, 0 = hidden by
        the tour's focus. NS.focusAll === false while a close-up is framed. */
@@ -1887,7 +1897,7 @@
       if (total && total <= 9) {
         var lst = [h];
         blocks.forEach(function (B) { lst = lst.concat(B.list); });
-        stops.push(key(mkStop('PVE ' + hn + ' · ' + total + ' GUESTS', lst, 1.15, 0.58, false, 0.52), 'host:' + h.id));
+        stops.push(key(mkStop('NODE ' + hn + ' · ' + total + ' GUESTS', lst, 1.15, 0.58, false, 0.52), 'host:' + h.id));
       } else {
         blocks.forEach(function (B) {
           stops.push(key(mkStop(hn + ' · ' + B.cat.toUpperCase() + ' (' + B.list.length + ')', B.list, 1.05, 0.66, true, 0.70),
@@ -1962,6 +1972,11 @@
     var TR = NS.tour;
     if (!TR || !TR.stops.length) return;
     if (!TP.pos) { TP.pos = new THREE.Vector3(); TP.tgt = new THREE.Vector3(); }
+    if (NS.tourMode === 'manual') {                 // nodeyard: camera mode 'manual' - the camera is yours
+      if (!TR.manual) setFocus(null);
+      TR.manual = true; setTourText('◆ MANUAL · drag to look around · Tab for controls');
+      return;
+    }
     if (t - NS.manualAt <= MANUAL_HOLD) {          // user holds the camera
       if (!TR.manual) { TR.manual = true; setFocus(null); setTourText('◆ MANUAL · tour resumes after idle'); }
       return;
@@ -1981,13 +1996,14 @@
       TR.switched = true;                        // focus is already full
       tourPose(TR.stops[0], 0, TP.pos, TP.tgt);
       TR.arcH = Math.min(110, 26 + TP.pos.distanceTo(TR.P0) * 0.14);
-      setTourText('◆ AUTO-TOUR · → OVERVIEW');
+      setTourText(NS.tourMode === 'overview' ? '◆ OVERVIEW · → WHOLE CLUSTER' : '◆ AUTO-TOUR · → OVERVIEW');
     }
     var st = TR.stops[TR.idx], e = t - TR.t0;
     if (TR.phase === 'hold') {
       tourPose(st, t - TR.tHold, TP.pos, TP.tgt);
       glide(dt, 1.6);
-      if (e > (st.list ? T_HOLD : T_HOLD_OVER)) {
+      if (NS.tourMode === 'overview' && TR.idx === 0) setTourText('◆ OVERVIEW · tour off · Tab for controls');
+      if (NS.tourMode !== 'overview' && e > (st.list ? T_HOLD : T_HOLD_OVER)) {
         /* depart IMMEDIATELY with the union of both stops materialised: the
            outgoing subject recedes while the incoming one grows, so no frame
            of the flight is empty (the old 1 s parked fade-out read as the

@@ -174,7 +174,7 @@
     var bkBad = (bk.stale7 || 0) + (bk.missing || 0) > 0;
     var certBad = (d.certs && d.certs.warn) > 0;
     host().innerHTML =
-      sec("PVE Nodes", rNodes2(d.nodes2)) +
+      sec("k3s nodes", rNodes2(d.nodes2)) +
       sec("ZFS Pools", rZfs(d.zfs), zfsBad) +
       sec("Backups", rBackups(d.backups), bkBad) +
       sec("Frigate", rFrigate(d.frigate), d.frigate && d.frigate.up === false) +

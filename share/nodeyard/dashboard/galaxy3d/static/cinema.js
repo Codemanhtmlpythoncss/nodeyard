@@ -91,8 +91,10 @@
   var SS_TARGET = 2.0;
   var SS_PIXCAP = 9.0e6;      // internal framebuffer ceiling, ~4K worth
 
+  /* nodeyard: the panels stay up unless you hid them (H, or Tab › Panels), and that choice is remembered */
+  function hudSaved() { try { return localStorage.getItem('galaxy.hud') !== '0'; } catch (e) { return true; } }
   var C = {
-    on: Q !== 'off', cinema: false, hud: true, force: Q === 'force',
+    on: Q !== 'off', cinema: false, hud: hudSaved(), force: Q === 'force',
     ss: 0, ssIdx: SS_LADDER.length - 1, slowSS: 0, fastSS: 0,
     pass: null, u: null, t: 0,
     roll: 0, prevPos: null, prevTgt: new THREE.Vector3(), speed: 0,
@@ -318,7 +320,7 @@
     '#cinbars b.t{top:0} #cinbars b.b{bottom:0}',
     /* clean-plate mode */
     'body.cin-nohud #railL,body.cin-nohud #railR,body.cin-nohud #stat,',
-    'body.cin-nohud #data,body.cin-nohud #chat{opacity:0;transition:opacity .4s ease;',
+    'body.cin-nohud #data,body.cin-nohud #chat,body.cin-nohud #st-ai,body.cin-nohud #st-emby,body.cin-nohud #st-det,body.cin-nohud #st-alist{opacity:0!important;transition:opacity .4s ease;',
     '  pointer-events:none}',
     '@media (max-width:1599px){ #cin .cname{font-size:13px} }'
   ].join('\n');
@@ -794,6 +796,7 @@
   /* ======================= modes & keys ======================= */
 
   function applyMode() {
+    document.body.classList.toggle('cin-nohud', !C.hud);    // nodeyard: before the grade pass exists too, so hidden panels stay hidden on load
     if (!C.u) return;
     var G = C.cinema ? CINEMA : GRADE;
     C.u.uCA.value    = C.on ? G.ca    : 0;
@@ -813,7 +816,7 @@
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     var k = (e.key || '').toLowerCase();
     if (k === 'c') { C.cinema = !C.cinema; applyMode(); }
-    else if (k === 'h') { C.hud = !C.hud; applyMode(); }
+    else if (k === 'h') { C.hud = !C.hud; applyMode(); try { localStorage.setItem('galaxy.hud', C.hud ? '1' : '0'); } catch (er) {} }
     else if (k === 'g') { C.on = !C.on; C.degraded = false; applyMode(); }
     else if (k === 'm') { if (cinematicsOn()) playNext(); }
     else return;

@@ -200,9 +200,18 @@ struct GalaxyView: View {
     @EnvironmentObject private var mgmt: ManagementState
     @Environment(\.openWindow) private var openWindow
     @State private var page: (URL, [HTTPCookie])?
+    @State private var olderServer = false
     var body: some View {
         Group {
-            if let page { TerminalWebView(url: page.0, cookies: page.1) }
+            if let page {
+                VStack(spacing: 0) {
+                    if olderServer {
+                        Text("The cluster's dashboard is older than the 3D galaxy, so this is its 2D Universe. Update nodeyard on the server to get the 3D one.")
+                            .font(.caption).foregroundStyle(.secondary).padding(6).frame(maxWidth: .infinity).background(.bar)
+                    }
+                    TerminalWebView(url: page.0, cookies: page.1)
+                }
+            }
             else if mgmt.authEnabled && !mgmt.signedIn && mgmt.termError != nil {
                 VStack(spacing: 10) {
                     Text("Sign in to the dashboard to see the galaxy.").foregroundStyle(.secondary)
@@ -213,7 +222,8 @@ struct GalaxyView: View {
         }
         .task {
             await mgmt.refreshTerminals()     // (signs in again with the saved password if the session expired)
-            page = mgmt.websitePath("/g3/")      // the 3D galaxy wall
+            if await mgmt.hasGalaxyWall() { page = mgmt.websitePath("/g3/") }      // the 3D galaxy wall (Tab opens its controls)
+            else { olderServer = true; page = mgmt.websitePage("galaxy") }
         }
     }
 }

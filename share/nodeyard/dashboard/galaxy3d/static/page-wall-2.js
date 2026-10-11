@@ -52,7 +52,7 @@ function startHudFallback(){
     const gpuMem=gpu.reduce((a,g)=>a+Number(g.mem_total||0),0),gpuUsed=gpu.reduce((a,g)=>a+Number(g.mem_used||0),0);
     const ops=document.getElementById('opsgrid');
     if(ops)ops.innerHTML=
-      `<div class="op"><span>Compute</span><b>${nodes.length} PVE · ${gpu.length} GPU</b><small>${(memUsed/1.07e9).toFixed(0)}/${(memTotal/1.07e9).toFixed(0)}G RAM</small><div class="meter"><i style="width:${pct(memUsed,memTotal)}%"></i></div></div>`+
+      `<div class="op"><span>Compute</span><b>${nodes.length} nodes · ${gpu.length} GPU</b><small>${(memUsed/1.07e9).toFixed(0)}/${(memTotal/1.07e9).toFixed(0)}G RAM</small><div class="meter"><i style="width:${pct(memUsed,memTotal)}%"></i></div></div>`+
       `<div class="op"><span>AI Fabric</span><b>${ai.filter(s=>s.up).length}/${ai.length||1} online</b><small>${(gpuUsed/1024).toFixed(1)}/${(gpuMem/1024).toFixed(0)}GB VRAM</small><div class="meter"><i style="width:${pct(gpuUsed,gpuMem)}%"></i></div></div>`+
       `<div class="op"><span>Network</span><b>${text(u.clients)} clients</b><small>${text(u.rx)} / ${text(u.tx)} Mbps WAN</small><div class="meter"><i style="width:${Math.min(100,Number(u.rx||0)*2)}%"></i></div></div>`+
       `<div class="op"><span>Health</span><b style="color:${z.problems?'#ff5a6a':'#37f5a0'}">${z.problems||0} alerts</b><small>${upHealth}/${health.length||0} checks up</small><div class="meter"><i style="width:${pct(upHealth,health.length)}%"></i></div></div>`;
@@ -62,7 +62,7 @@ function startHudFallback(){
       `<div class="kv"><span>UniFi clients / devices</span><b>${text(u.clients)} / ${text(u.devices)} (${text(u.wifi,'?')} wifi)</b></div>`+
       `<div class="kv"><span>WAN down / up</span><b>${text(u.rx)} / ${text(u.tx)} Mbps</b></div>`+
       `<div class="kv"><span>Zabbix hosts / alerts</span><b style="color:${z.problems?'#ff5a6a':'#37f5a0'}">${text(z.hosts)} / ${z.problems||0}</b></div>`+
-      `<div class="kv"><span>PVE hosts</span><b>${nodes.length} · ${(memUsed/1.07e9).toFixed(0)}/${(memTotal/1.07e9).toFixed(0)}G RAM</b></div>`+
+      `<div class="kv"><span>k3s nodes</span><b>${nodes.length} · ${(memUsed/1.07e9).toFixed(0)}/${(memTotal/1.07e9).toFixed(0)}G RAM</b></div>`+
       `<div class="kv"><span>AI GPU server</span><b style="color:${ai.length?'#37f5a0':'#ff5a6a'}">${aiLine}</b></div>`+
       `<div class="kv"><span>ZFS pools</span><b>${pools.length} pools</b></div>`+
       `<div class="kv"><span>Storage</span><b>${storage.length} stores · ${(storUsed/1e12).toFixed(1)}/${(storTotal/1e12).toFixed(1)}TB</b></div>`;
@@ -156,7 +156,7 @@ async function pollAll(){try{const d=await (await fetch('/g3/api/all')).json();i
   const aiUp=(d.ai_servers||[]).filter(s=>s.up).length;
   const ops=document.getElementById('opsgrid');
   if(ops)ops.innerHTML=
-    `<div class="op"><span>Compute</span><b>${_nodes.length} PVE · ${GPU.length} GPU</b><small>${(memUsed/1.07e9).toFixed(0)}/${(memTotal/1.07e9).toFixed(0)}G RAM</small><div class="meter"><i style="width:${Math.min(100,memUsed/Math.max(memTotal,1)*100)}%"></i></div></div>`+
+    `<div class="op"><span>Compute</span><b>${_nodes.length} nodes · ${GPU.length} GPU</b><small>${(memUsed/1.07e9).toFixed(0)}/${(memTotal/1.07e9).toFixed(0)}G RAM</small><div class="meter"><i style="width:${Math.min(100,memUsed/Math.max(memTotal,1)*100)}%"></i></div></div>`+
     `<div class="op"><span>AI Fabric</span><b>${aiUp}/${(d.ai_servers||[]).length||1} online</b><small>${(gpuUsed/1024).toFixed(1)}/${(gpuMem/1024).toFixed(0)}GB VRAM</small><div class="meter"><i style="width:${Math.min(100,gpuUsed/Math.max(gpuMem,1)*100)}%"></i></div></div>`+
     `<div class="op"><span>Network</span><b>${u.clients??'–'} clients</b><small>${u.rx??'–'} / ${u.tx??'–'} Mbps WAN</small><div class="meter"><i style="width:${Math.min(100,Number(u.rx||0)*2)}%"></i></div></div>`+
     `<div class="op"><span>Health</span><b style="color:${z.problems?'#ff5a6a':'#37f5a0'}">${z.problems??0} alerts</b><small>${upHealth}/${hl.length||0} checks up</small><div class="meter"><i style="width:${hl.length?upHealth/hl.length*100:0}%"></i></div></div>`+
@@ -172,7 +172,7 @@ async function pollAll(){try{const d=await (await fetch('/g3/api/all')).json();i
     `<div class="kv"><span>WAN down / up</span><b>${u.rx??'–'} / ${u.tx??'–'} Mbps</b></div>`+
     `<div class="kv"><span>WAN link</span><b style="color:${u.wan_up==='ok'?'#37f5a0':'#ff5a6a'}">${(u.wan_up||'?').toUpperCase()} · ${nbEsc(u.isp||cfg().wan_label||'–')} · ${u.latency??'–'}ms</b></div>`+
     `<div class="kv"><span>Zabbix hosts / alerts</span><b style="color:${z.problems?'#ff5a6a':'#37f5a0'}">${z.hosts??'–'} / ${z.problems??0}</b></div>`+
-    `<div class="kv"><span>PVE hosts</span><b>${_nodes.length} · avg ${pveCpu.toFixed(1)}% CPU · ${(memUsed/1.07e9).toFixed(0)}/${(memTotal/1.07e9).toFixed(0)}G</b></div>`+
+    `<div class="kv"><span>k3s nodes</span><b>${_nodes.length} · avg ${pveCpu.toFixed(1)}% CPU · ${(memUsed/1.07e9).toFixed(0)}/${(memTotal/1.07e9).toFixed(0)}G</b></div>`+
     `<div class="kv"><span>AI GPU server</span><b style="color:${aiUp?'#37f5a0':'#ff5a6a'}">${aiLine}</b></div>`+
     `<div class="kv"><span>ZFS pools</span><b style="color:${zfsBad.length?'#ff5a6a':'#dcefff'}">${_pools.length} pools · ${zfsBad.length?zfsBad.length+' degraded':'ONLINE'} · ${zfsPct}% avg</b></div>`+
     `<div class="kv"><span>Storage</span><b>${storage.length} stores · ${(storUsed/1e12).toFixed(1)}/${(storTotal/1e12).toFixed(1)}TB</b></div>`+

@@ -274,6 +274,15 @@ final class ManagementState: ObservableObject {
         return (url, client.sessionCookies())
     }
 
+    /// Does the cluster's dashboard serve the 3D galaxy screens yet? Only a "not found" answer (a server older than
+    /// them sends a plain-text 404) says no; a sign-in or network problem still tries the 3D page.
+    func hasGalaxyWall() async -> Bool {
+        do { _ = try await client.call("GET", "/g3/api/config"); return true }
+        catch ManagementError.badReply { return false }
+        catch ManagementError.http(let status, _) where status == 404 { return false }
+        catch { return true }
+    }
+
     /// Another page of the dashboard (e.g. "/g3/", the 3D galaxy wall), signed in as this app's session.
     func websitePath(_ path: String) -> (URL, [HTTPCookie])? {
         guard let url = try? client.pagePath(path) else { return nil }

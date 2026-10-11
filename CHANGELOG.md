@@ -24,6 +24,11 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   (likely over Tailscale, and the AI page's script is the biggest), drawing failed and live updates never started.
   The dashboard now starts after every script has loaded and always starts live updates.
 - Numbered lists in answers showed every item as "1." when the model put blank lines between them.
+- **The galaxy wall kept its panels only for a moment**: a few seconds after opening, it switched itself to the
+  scene-only layout and its tour flew off the overview, so the panels vanished while it toured. The panels now stay
+  up while it tours unless you hide them (H, or Tab › Panels), and the tour can be set to stay on the overview.
+- The galaxy screens say "k3s nodes" and "nodes" where the original said Proxmox's "PVE".
+- The Mac app's galaxy shows the 2D Universe page (and says why) when the cluster's dashboard is too old for the 3D one.
 
 ### Added
 
@@ -33,6 +38,10 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   and its physical addresses (wired, Wi-Fi; Tailscale on hover), panels and the AI box; **Nexus** (`/g3/nexus`, for a TV)
   shows every node as a galaxy with its pods as stars by category, the problems and a status headline. The two
   screens follow each other's tour. The Mac app shows the wall under Manage and in its own window (Shift-Command-G).
+- **Galaxy controls on Tab**: press Tab on any galaxy screen (Esc or a click outside closes it) to switch modes: the
+  camera (**Auto tour**, **Overview** to stay on the whole cluster, **Manual** to drive it yourself), the layout (all
+  panels, or scene first), the panels on or off, the display mode (Wall, Showcase, Ops, Night, Alert); also which screen,
+  full screen, cinema bars, colour grading, privacy and the way back to nodeyard. The choices are remembered.
 
 - **AI galaxy** (sidebar, and Manage in the Mac app): your cluster drawn live as a spiral galaxy. The core is the model:
   it brightens while it works, draws light in while it reads the prompt and streams it out along the arms at its real

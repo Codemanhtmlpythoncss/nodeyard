@@ -315,6 +315,22 @@ dashboard's alerts (a node down counts as "host down", a failing pod as a warnin
 flow while it answers. The AI box asks the running model with a short summary of the cluster. A light, 2D version that
 also works on phones stays at `/#galaxy`.
 
+Press **Tab** on any of them for the controls (Esc or a click outside closes them):
+
+| Control | Choices |
+| --- | --- |
+| Camera (wall) | **Auto tour** (every stop in turn), **Overview** (stays on the whole cluster), **Manual** (drag to orbit, scroll to zoom) |
+| Camera (Nexus) | follow the wall's tour, or its own |
+| Layout (wall) | all panels, or scene first (two slim bars) |
+| Panels | shown or hidden (they stay up while the camera tours unless you hide them) |
+| Display | Wall, Showcase, Ops, Night, Alert (all open screens switch together) |
+| Screen | Wall, Nexus, Desk, full screen, back to nodeyard |
+| Look | cinema bars, colour grading, privacy (hides names), extra camera moves |
+
+The camera, layout and panel choices are remembered by that browser. Their keys still work: 1-5 display mode, H panels,
+F layout, C cinema bars, G grading, P privacy, M an extra camera move; on Nexus, Space free roam and P showcase.
+Dragging or scrolling the wall takes the camera for 25 seconds, then the chosen camera mode carries on.
+
 ## Terminals
 
 The Terminal page lists this server, every cluster node and every device on your tailnet (from `tailscale status` on

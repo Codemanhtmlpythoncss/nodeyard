@@ -69,7 +69,7 @@
     hero: { x0: 0.025, x1: 0.975, y0: 0.095, y1: 0.865 }
   };
 
-  var H = { mode: 'hero', privacy: false, top: null, bot: null, last: null };
+  var H = { mode: 'full', privacy: false, top: null, bot: null, last: null };
 
   /* ---------------- privacy / record-safe redaction ----------------
      What is exposed on this wall is NOT your own addressing - every internal
@@ -581,8 +581,9 @@
   /* ---------------- boot ---------------- */
 
   mount();
-  var saved = 'hero';
-  try { saved = localStorage.getItem(KEY) || 'hero'; } catch (e) {}
+  /* nodeyard: the full layout (every panel) is the default; F or Tab › Layout picks the scene-only hero bars */
+  var saved = 'full';
+  try { saved = localStorage.getItem(KEY) || 'full'; } catch (e) {}
   apply(saved, false);
   document.addEventListener('keydown', keys);
   setInterval(mirror, MIRROR_MS);
