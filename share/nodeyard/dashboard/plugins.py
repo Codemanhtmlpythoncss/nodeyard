@@ -38,6 +38,8 @@ PLUGINS = [
      ["dashboard", "Mac app (API)"], "read-only (uses a model)", True, ["/api/ai/research", "/api/v1/research"], []),
     ("knowledge", "Reference tools", "Wikipedia, arXiv, weather, a calculator and a visible task list for the chat's AI skills.",
      ["dashboard chat"], "read-only", True, [], ["wikipedia", "arxiv", "weather", "calculator", "tasks"]),
+    ("music", "Music", "Lets the dashboard AI read your liked songs, listening history and local library, and create playlists from those tracks.",
+     ["dashboard", "dashboard chat"], "reads music; asks before saving an AI playlist", True, ["/api/music/"], ["music"]),
     ("files-code", "Python, files and shell", "Runs Python and edits files and runs commands in a work folder, as the terminal user (never root).",
      ["dashboard chat"], "asks before every change", True, ["/api/ai/run-code"], ["python", "files"]),
     ("terminal", "Terminals", "Interactive shells on this server (as the terminal user), on every cluster node through Kubernetes "
@@ -112,6 +114,8 @@ class Registry:
                 return "ok", "Demo: nothing is fetched from the internet."
             ok, detail = _yardcode_tools()
             return ("ok" if ok else "unavailable"), detail
+        if pid == "music":
+            return ("ok", "Your dashboard music library is available to its AI chats.") if getattr(self.ctx, "music", None) else ("unavailable", "The Music page is not available.")
         if pid == "research":
             ok, detail = (True, "") if demo else _yardcode_tools()
             if not ok or not self.enabled("web"):
@@ -242,6 +246,8 @@ def register(ctx, args):
                 return h._json({"ok": False, "error": "%s is turned off in Settings › Plugins." % BY_ID[pid][1], "plugin": pid}, 403)
             if not post:
                 return fn(h, arg)
+            if path in ("/api/music/history", "/api/music/playback"):
+                return fn(h, arg)  # high-frequency player state and history updates aren't useful audit entries
             seen = {}
             real = h._json
 
@@ -250,7 +256,7 @@ def register(ctx, args):
                 seen.setdefault("ok", obj.get("ok") if isinstance(obj, dict) else None)
                 return real(obj, code, *a, **k)
             h._json = spy
-            actor = "api key" if getattr(h, "v1_bearer", False) else ("public access" if h._forwarded() else "signed-in page")
+            actor = "api key" if getattr(h, "v1_bearer", False) else ("dashboard AI" if h.headers.get("X-Nodeyard-AI") == "1" else ("public access" if h._forwarded() else "signed-in page"))
             try:
                 return fn(h, arg)
             finally:

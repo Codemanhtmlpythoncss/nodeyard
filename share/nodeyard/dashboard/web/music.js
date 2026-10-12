@@ -10,8 +10,10 @@
 
   const M = {
     data: null, tab: "search",
-    queue: [], idx: -1, live: false, seekable: true, shuffle: false, repeat: false,
+    queue: [], idx: -1, live: false, seekable: true, shuffle: false, repeat: "off",
     scResults: [], scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
+    historyId: "", historyElapsed: 0, historySince: 0, lastHistorySave: 0, lastPlaybackSave: 0, restored: false, stopping: false,
+    hideDrm: (() => { try { return localStorage.getItem("ny-hidedrm") === "1"; } catch (e) { return false; } })(),
   };
   let audio = null, bar = null;
   let actx = null, analyser = null, vizData = null, vizSource = null, vizRAF = 0;
@@ -31,7 +33,10 @@
       "#ny-player canvas{width:120px;height:30px;flex:none;opacity:.95}" +
       "#ny-player button{background:none;border:0;color:inherit;cursor:pointer;font-size:16px;padding:4px;border-radius:6px}" +
       "#ny-player button:hover{background:rgba(125,160,200,.14)}" +
+      "#ny-player button:disabled{opacity:.4;cursor:default}" +
       "#ny-player button.act{color:var(--sc,#ff5500)}" +
+      "#ny-player button.act::after{content:'';position:absolute;left:50%;bottom:1px;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--sc,#ff5500)}" +
+      "#ny-player #ny-shuffle,#ny-player #ny-repeat{position:relative}" +
       "#ny-player .seek{flex:1;display:flex;align-items:center;gap:8px;min-width:110px}" +
       "#ny-player input[type=range]{flex:1;accent-color:var(--sc,#ff5500)}" +
       "#ny-player .t{font-variant-numeric:tabular-nums;color:var(--ink3,#8fa3c0);font-size:11px;min-width:38px}" +
@@ -63,27 +68,38 @@
       '<span class="live-pill" id="ny-live-pill" hidden>● LIVE</span>' +
       '<button id="ny-shuffle" title="Shuffle">🔀</button>' +
       '<button id="ny-repeat" title="Repeat">🔁</button>' +
+      '<button id="ny-copy" title="Copy SoundCloud link" aria-label="Copy SoundCloud link">⧉</button>' +
       '<button id="ny-vol-i" title="Volume">🔊</button><input type="range" id="ny-vol" min="0" max="1" value="1" step="0.05" style="width:70px" aria-label="Volume">' +
       '<button id="ny-close" title="Close player">✕</button>';
     document.body.appendChild(bar);
     audio = new Audio();
     audio.preload = "metadata";
     audio.crossOrigin = "anonymous";
-    audio.addEventListener("timeupdate", tick);
+    audio.defaultPlaybackRate = 1;
+    audio.playbackRate = 1;
+    audio.addEventListener("ratechange", () => {
+      // There is no speed control in this player; keep unexpected browser rate changes from altering playback.
+      if (audio.playbackRate !== 1) audio.playbackRate = 1;
+    });
+    audio.addEventListener("timeupdate", () => { tick(); historyProgress(false); savePlayback(false, false); });
     audio.addEventListener("durationchange", tick);
     audio.addEventListener("ended", onEnded);
-    audio.addEventListener("play", () => { startViz(); paintBtn(); });
-    audio.addEventListener("playing", () => { const t = M.queue[M.idx]; if (t && !M.live) $("#ny-np-sub").textContent = subOf(t); });
-    audio.addEventListener("pause", paintBtn);
+    audio.addEventListener("play", () => { startViz(); paintBtn(); savePlayback(false, false); });
+    audio.addEventListener("playing", () => {
+      const t = M.queue[M.idx];
+      if (t && !M.live) { $("#ny-np-sub").textContent = subOf(t); beginHistory(t); }
+    });
+    audio.addEventListener("pause", () => { historyProgress(true); paintBtn(); if (!M.stopping) savePlayback(false, true); });
     audio.addEventListener("error", onAudioError);
     $("#ny-play").onclick = () => { if (audio.paused) audio.play(); else audio.pause(); };
     $("#ny-prev").onclick = () => { if (!M.live) play(M.idx - 1); };
     $("#ny-next").onclick = () => { if (!M.live) next(); };
     $("#ny-close").onclick = stop;
-    $("#ny-shuffle").onclick = () => { M.shuffle = !M.shuffle; paintBtn(); };
-    $("#ny-repeat").onclick = () => { M.repeat = !M.repeat; paintBtn(); };
+    $("#ny-shuffle").onclick = () => { M.shuffle = !M.shuffle; paintBtn(); savePlayback(false, true); };
+    $("#ny-repeat").onclick = () => { M.repeat = M.repeat === "off" ? "all" : M.repeat === "all" ? "one" : "off"; paintBtn(); savePlayback(false, true); };
+    $("#ny-copy").onclick = copyCurrentLink;
     $("#ny-seek").oninput = (e) => { if (audio.duration && M.seekable && !M.live) audio.currentTime = (e.target.value / 100) * audio.duration; };
-    $("#ny-vol").oninput = (e) => { audio.volume = +e.target.value; };
+    $("#ny-vol").oninput = (e) => { audio.volume = +e.target.value; savePlayback(false, false); };
   }
 
   // ---- CAVA-style visualizer ----------------------------------------------
@@ -151,7 +167,15 @@
     if (!bar) return;
     $("#ny-play").textContent = audio.paused ? "▶" : "⏸";
     $("#ny-shuffle").classList.toggle("act", M.shuffle);
-    $("#ny-repeat").classList.toggle("act", M.repeat);
+    $("#ny-shuffle").title = M.shuffle ? "Shuffle on" : "Shuffle off";
+    const rep = $("#ny-repeat");
+    rep.classList.toggle("act", M.repeat !== "off");
+    rep.textContent = M.repeat === "one" ? "🔂" : "🔁";
+    rep.title = M.repeat === "one" ? "Repeat one" : M.repeat === "all" ? "Repeat all" : "Repeat off";
+    const current = M.queue[M.idx];
+    const copy = $("#ny-copy");
+    copy.disabled = !(current && current.url);
+    copy.title = copy.disabled ? "No SoundCloud link for this track" : "Copy SoundCloud link";
     if (S.view === "music") renderTab();
   }
 
@@ -163,19 +187,100 @@
   const titleOf = (t) => (t.kind === "sc" || t.url ? t.title : t.name) || "Untitled";
   const subOf = (t) => (t.kind === "sc" || t.url ? (t.artist || "SoundCloud") : (t.folder || "music"));
 
+  function trackForApi(t) {
+    if (!t) return null;
+    return t.url ? { ...t, kind: "sc" } : { ...t, kind: "local" };
+  }
+  function historyBody(action) {
+    const t = M.queue[M.idx]; if (!M.historyId || !t || M.live) return null;
+    let seconds = M.historyElapsed;
+    if (M.historySince && !audio.paused) seconds += (performance.now() - M.historySince) / 1000;
+    return { action, id: M.historyId, seconds: Math.floor(seconds), track: trackForApi(t) };
+  }
+  function beginHistory(track) {
+    if (!M.historyId) {
+      M.historyId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2);
+      M.historyElapsed = 0;
+      postJSON("/api/music/history", { action: "start", id: M.historyId, seconds: 0, track: trackForApi(track) }).catch(() => {});
+    }
+    if (!M.historySince) M.historySince = performance.now();
+  }
+  function historyProgress(flush, keepalive) {
+    const t = M.queue[M.idx];
+    if (!M.historyId || !t || M.live) return;
+    if (M.historySince) {
+      M.historyElapsed += Math.max(0, (performance.now() - M.historySince) / 1000);
+      M.historySince = audio.paused ? 0 : performance.now();
+    }
+    if (!flush && Date.now() - M.lastHistorySave < 15000) return;
+    const body = historyBody("progress");
+    if (body) {
+      M.lastHistorySave = Date.now();
+      if (keepalive) fetch("/api/music/history", { method: "POST", keepalive: true, credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify(body) }).catch(() => {});
+      else postJSON("/api/music/history", body).catch(() => {});
+    }
+  }
+  function savePlayback(handoff, keepalive) {
+    if (M.idx < 0 || !M.queue.length || M.live || !audio) return;
+    const history = historyBody("progress");
+    const body = { queue: M.queue.map(trackForApi), index: M.idx, position: audio.currentTime || 0,
+      volume: audio.volume, playing: !audio.paused, shuffle: M.shuffle, repeat: M.repeat,
+      history_id: M.historyId, history_seconds: history ? history.seconds : M.historyElapsed, handoff: !!handoff };
+    if (!keepalive && Date.now() - M.lastPlaybackSave < 15000) return;
+    M.lastPlaybackSave = Date.now();
+    if (keepalive) {
+      fetch("/api/music/playback", { method: "POST", keepalive: true, credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify(body) }).catch(() => {});
+    } else postJSON("/api/music/playback", body).catch(() => {});
+  }
+  async function restorePlayback() {
+    if (M.restored) return;
+    M.restored = true;
+    try {
+      const r = await getJSON("/api/music/playback");
+      const state = r.playback || {};
+      if (!r.ok || !state.handoff || !Array.isArray(state.queue) || !state.queue.length || Date.now() / 1000 - (+state.updated || 0) > 180) return;
+      ensureBar();
+      M.queue = state.queue; M.idx = Math.max(0, Math.min(+state.index || 0, M.queue.length - 1));
+      M.shuffle = !!state.shuffle; M.repeat = ["off", "all", "one"].includes(state.repeat) ? state.repeat : "off";
+      M.historyId = state.history_id || ""; M.historyElapsed = Math.max(0, +state.history_seconds || 0); M.historySince = 0;
+      const track = M.queue[M.idx]; if (!track) return;
+      audio.volume = Math.max(0, Math.min(1, +state.volume || 0));
+      audio.src = srcFor(track);
+      const resumeAt = Math.max(0, +state.position || 0);
+      audio.addEventListener("loadedmetadata", () => { if (resumeAt < audio.duration) audio.currentTime = resumeAt; }, { once: true });
+      $("#ny-np-title").textContent = titleOf(track); $("#ny-np-sub").textContent = subOf(track) + " · resuming…";
+      $("#ny-vol").value = audio.volume; bar.classList.add("on"); paintBtn();
+      if (state.playing) audio.play().catch(() => { $("#ny-np-sub").textContent = subOf(track) + " · press play to resume"; });
+      savePlayback(false, true);
+    } catch (e) { /* music state is optional */ }
+  }
+  window.addEventListener("pagehide", () => {
+    historyProgress(true, true);
+    savePlayback(true, true);
+  });
+
   function playQueue(tracks, i) {
+    historyProgress(true);
+    M.historyId = ""; M.historyElapsed = 0; M.historySince = 0;
     M.queue = (tracks || []).slice();
     play(i || 0);
   }
   function play(i) {
     ensureBar();
     if (i < 0 || i >= M.queue.length) return;
+    M.stopping = false;
+    historyProgress(true);
+    M.historyId = ""; M.historyElapsed = 0; M.historySince = 0; M.lastHistorySave = 0;
     M.idx = i; M.live = false;
     const t = M.queue[i];
+    audio.defaultPlaybackRate = 1;
+    audio.playbackRate = 1;
     const sc = (t.kind === "sc" || t.url);
     M.seekable = true;     // the server buffers both local files and SoundCloud, so seeking & resume work
     audio.src = srcFor(t);
-    audio.play().catch(() => {});
+    audio.play().then(() => savePlayback(false, true)).catch(() => {});
     $("#ny-np-title").textContent = titleOf(t);
     $("#ny-np-sub").textContent = sc ? subOf(t) + " · loading…" : subOf(t);
     $("#ny-live-pill").hidden = true;
@@ -195,24 +300,38 @@
   }
   function onEnded() {
     if (M.live) return;
-    if (M.repeat) { play(M.idx); return; }
+    historyProgress(true);
+    const body = historyBody("complete"); if (body) postJSON("/api/music/history", body).catch(() => {});
+    if (M.repeat === "one") { play(M.idx); return; }
     next();
   }
   function next() {
-    if (M.shuffle && M.queue.length > 1) { play(Math.floor(Math.random() * M.queue.length)); return; }
-    if (M.idx + 1 < M.queue.length) play(M.idx + 1); else audio.pause();
+    if (M.shuffle && M.queue.length > 1) {
+      let i = Math.floor(Math.random() * (M.queue.length - 1));
+      if (i >= M.idx) i++;
+      play(i);
+      return;
+    }
+    if (M.idx + 1 < M.queue.length) play(M.idx + 1);
+    else if (M.repeat === "all" && M.queue.length) play(0);
+    else audio.pause();
   }
   function stop() {
+    historyProgress(true);
+    M.stopping = true;
     if (audio) { audio.pause(); audio.removeAttribute("src"); audio.load(); }
     if (bar) bar.classList.remove("on");
-    M.live = false; M.idx = -1;
+    M.live = false; M.idx = -1; M.historyId = "";
+    postJSON("/api/music/playback", { clear: true }).catch(() => {});
     if (S.view === "music") renderTab();
   }
   function playLive() {
     ensureBar();
+    historyProgress(true); M.stopping = true;
     M.live = true; M.idx = -1; M.seekable = false;
     audio.src = "/api/audio/live?t=" + Date.now();
     audio.play().catch(() => toast("Couldn't start the live audio."));
+    postJSON("/api/music/playback", { clear: true }).catch(() => {});
     $("#ny-np-title").textContent = "Server audio";
     $("#ny-np-sub").textContent = "live from the host";
     $("#ny-live-pill").hidden = false;
@@ -273,14 +392,22 @@
       : "";
     const results = M.scResults.length
       ? html`<div class="section-title">Results</div>${M.scResults.map((t) => trackRow(t, "res:" + trackKey(t), likeBtn(t)))}`
-      : (M._searched ? html`<div class="empty">No results.</div>` : "");
+      : (M._searched ? html`<div class="empty">No ${M.hideDrm ? "playable " : ""}results${M.hideDrm ? " — all matches were DRM-protected" : ""}.</div>` : "");
     setHTML(el, html`
       <div class="card">
         <div class="row" style="gap:8px"><input class="input" data-music="sc-query" placeholder="Search SoundCloud for a song, artist…" spellcheck="false" style="flex:1">
           <button class="btn primary" data-music="sc-search" ${sc.search_ready ? "" : "disabled"}>Search</button></div>
+        <label class="check mt" style="font-size:13px"><input type="checkbox" data-music="nodrm" ${M.hideDrm ? raw("checked") : ""}> <span>Only show playable tracks — hide DRM-protected (Go+) ones <span class="faint">(slower; checks each result)</span></span></label>
         ${!sc.search_ready ? html`<p class="small mt">SoundCloud search needs <span class="mono">yt-dlp</span> on the server. Use <b>Settings → Update everything</b> (installs it), then search.</p>` : ""}
         ${sc.search_ready && !sc.stream_ready ? html`<p class="small faint mt">In-browser playback also needs ffmpeg — run <b>Settings → Update everything</b>. Until then use ＋ to save tracks and ↗ to open on SoundCloud.</p>` : ""}
         <div id="sc-results" class="mt">${results}</div>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">Play a song link</h3>
+        <p class="muted small" style="margin-top:0">Paste a link to one SoundCloud song to open it here.</p>
+        <div class="row" style="gap:8px"><input class="input" data-music="track-url" value="${M._trackUrl || ""}" placeholder="https://soundcloud.com/artist/song" spellcheck="false" style="flex:1">
+          <button class="btn primary" data-music="play-url">Play link</button></div>
+        <div id="sc-track-link-status" class="mt"></div>
       </div>
       <div class="card">
         <h3 style="margin-top:0">Open a SoundCloud playlist / set</h3>
@@ -432,9 +559,9 @@
     const input = $('[data-music="sc-query"]');
     const query = (input && input.value || "").trim();
     if (query.length < 2) { toast("Enter at least two characters to search."); return; }
-    const el = $("#sc-results"); if (el) setHTML(el, html`<div class="empty"><div class="spin"></div>Searching…</div>`);
+    const el = $("#sc-results"); if (el) setHTML(el, html`<div class="empty"><div class="spin"></div>${M.hideDrm ? "Searching and checking which tracks are playable…" : "Searching…"}</div>`);
     try {
-      const r = await getJSON("/api/music/search?q=" + encodeURIComponent(query));
+      const r = await getJSON("/api/music/search?q=" + encodeURIComponent(query) + (M.hideDrm ? "&nodrm=1" : ""));
       M._searched = true;
       if (!r.ok) { if (el) setHTML(el, html`<div class="empty">${r.error || "Search failed."}</div>`); return; }
       M.scResults = Array.isArray(r.tracks) ? r.tracks : [];
@@ -451,6 +578,48 @@
     M.scSet = { title: r.title || "Playlist", tracks: r.tracks || [] };
     renderTab();
   }
+  async function playTrackLink() {
+    const input = $('[data-music="track-url"]');
+    const url = (input && input.value || "").trim();
+    if (!url) { toast("Paste a SoundCloud song link first."); return; }
+    M._trackUrl = url;
+    const out = $("#sc-track-link-status");
+    if (out) setHTML(out, html`<div class="empty"><div class="spin"></div>Opening song link…</div>`);
+    try {
+      const r = await getJSON("/api/music/sc-playlist?url=" + encodeURIComponent(url));
+      if (!r.ok) {
+        if (out) setHTML(out, html`<div class="err small">${r.error || "Couldn't open that link."}</div>`);
+        return;
+      }
+      const tracks = Array.isArray(r.tracks) ? r.tracks : [];
+      if (tracks.length !== 1) {
+        if (out) setHTML(out, html`<div class="err small">That link has multiple tracks. Load it in the playlist section below.</div>`);
+        return;
+      }
+      playQueue([{ ...tracks[0], kind: "sc" }], 0);
+      toast("Opened song link.");
+    } catch (e) {
+      if (out) setHTML(out, html`<div class="err small">${e.message || "Couldn't open that link."}</div>`);
+    }
+  }
+  async function copyCurrentLink() {
+    const track = M.queue[M.idx];
+    if (!track || !track.url) { toast("This track has no SoundCloud link."); return; }
+    try {
+      await navigator.clipboard.writeText(track.url);
+    } catch (e) {
+      const input = document.createElement("textarea");
+      input.value = track.url;
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.appendChild(input);
+      input.select();
+      const copied = document.execCommand("copy");
+      input.remove();
+      if (!copied) { toast("Couldn't copy the link."); return; }
+    }
+    toast("SoundCloud link copied.");
+  }
 
   // ---- events -------------------------------------------------------------
   document.addEventListener("click", async (e) => {
@@ -466,6 +635,7 @@
     else if (act === "b-cancel") closeBrowse();
     else if (act === "b-use") { closeBrowse(); await saveDir(t.dataset.path); }
     else if (act === "sc-search") await searchSc();
+    else if (act === "play-url") await playTrackLink();
     else if (act === "load-set") await loadSet();
     else if (act === "play-set") { if (M.scSet) playQueue(M.scSet.tracks, 0); }
     else if (act === "likes-play") playQueue(M.scLikes, 0);
@@ -547,16 +717,18 @@
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
     if (e.target.matches('[data-music="sc-query"]')) { e.preventDefault(); searchSc(); }
+    else if (e.target.matches('[data-music="track-url"]')) { e.preventDefault(); playTrackLink(); }
     else if (e.target.matches('[data-music="set-url"]')) { e.preventDefault(); loadSet(); }
   });
   document.addEventListener("change", async (e) => {
     const t = e.target.closest && e.target.closest("[data-music]"); if (!t) return;
     if (t.dataset.music === "fw-toggle") { const r = await postJSON("/api/music/config", { forward_enabled: t.checked }); if (r.ok) { await load(); renderTab(); } }
     else if (t.dataset.music === "fw-source") { await postJSON("/api/music/config", { forward_source: t.value }); await load(); renderTab(); }
+    else if (t.dataset.music === "nodrm") { M.hideDrm = t.checked; try { localStorage.setItem("ny-hidedrm", t.checked ? "1" : "0"); } catch (e) { /* ignore */ } }
   });
 
   V.music = {
-    build() { ensureBar(); NY.freshHTML($("#view"), html`<div class="card"><div class="empty"><div class="spin"></div>Loading…</div></div>`); load().then(renderPage); },
+    build() { ensureBar(); NY.freshHTML($("#view"), html`<div class="card"><div class="empty"><div class="spin"></div>Loading…</div></div>`); load().then(renderPage); restorePlayback(); },
     update() { },
   };
 })();
