@@ -12,6 +12,7 @@ Config at <state_dir>/music.json: {"dir": "...", "forward_enabled": bool, "forwa
 The folder is the only place tracks are served from — every streamed path is resolved and checked to be inside it, so
 the folder picker can't be turned into a way to read the rest of the disk.
 """
+import glob
 import json
 import os
 import pwd
@@ -283,14 +284,23 @@ class Music:
     def _valid_sc_url(url):
         return bool(re.match(r"^https?://(www\.|m\.)?soundcloud\.com/[^\s]+$", str(url or "").strip(), re.I))
 
+    def _tool(self, name):
+        """Find a helper sc-pick installed, wherever it was run from. The dashboard runs as a different user (often
+        root) than the person who ran sc-pick, so look in every home's sc-pick bin and /usr/local/bin, not just ours."""
+        homes = [self.home, "/root"] + sorted(glob.glob("/home/*"))
+        seen = set()
+        for h in homes:
+            if not h or h in seen:
+                continue
+            seen.add(h)
+            c = os.path.join(h, ".local", "share", "sc-pick", "bin", name)
+            if os.path.isfile(c) and os.access(c, os.X_OK):
+                return c
+        return shutil.which(name) or ""
+
     def soundcloud_cli(self):
-        """Find the public-search CLI installed by sc-pick for the dashboard's terminal user."""
-        candidates = [os.path.join(self.home, ".local", "share", "sc-pick", "bin", "soundcloud"),
-                      shutil.which("soundcloud")]
-        for candidate in candidates:
-            if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                return candidate
-        return ""
+        """The public-search CLI installed by sc-pick (or system-wide by 'Update everything')."""
+        return self._tool("soundcloud")
 
     def sc_search(self, query):
         query = str(query or "").strip()[:200]
@@ -363,11 +373,8 @@ class Music:
     # -- SoundCloud streaming & playlists (so tracks play in the browser) -----
 
     def yt_dlp(self):
-        """yt-dlp, used to resolve a SoundCloud track's audio URL and list a set's tracks. Prefer sc-pick's copy."""
-        for c in [os.path.join(self.home, ".local", "share", "sc-pick", "bin", "yt-dlp"), shutil.which("yt-dlp")]:
-            if c and os.path.isfile(c) and os.access(c, os.X_OK):
-                return c
-        return ""
+        """yt-dlp, used to resolve a SoundCloud track's audio URL and list a set's tracks. Wherever sc-pick put it."""
+        return self._tool("yt-dlp")
 
     def stream_ready(self):
         return self.demo or bool(self.yt_dlp() and self.ffmpeg())
