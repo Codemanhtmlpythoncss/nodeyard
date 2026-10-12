@@ -27,6 +27,7 @@
     queue: [], idx: -1, live: false, seekable: true, shuffle: false, shuffleOrder: null, shufflePos: 0, repeat: "off", rate: 1, eq: "flat",
     scResults: [], playlistResults: [], searchQuery: "", searchError: "", scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
     discoverTracks: [], discoverIndex: 0, discoverSeeded: false, discoverPointerY: null, discoverWheelAt: 0,
+    disc: { tracks: [], updated: 0, building: false, error: "", seeds: [], loaded: false, polls: 0, timer: 0 },   // new songs found for you
     dj: readDJState(),
     sleep: null,   // the sleep timer: null, "end" (after this song) or a time in ms
     historyId: "", historyElapsed: 0, historySince: 0, lastHistorySave: 0, lastPlaybackSave: 0, restored: false, stopping: false,
@@ -537,7 +538,7 @@
     return html`<div class="sc-row">
       <button class="sc-pbtn ${playing ? "" : "ghost"}" data-play="${onplay}" title="Play">${playing ? "⏸" : "▶"}</button>
       <div class="sc-cover" aria-hidden="true">♪${cover ? html`<img src="${cover}" alt="" loading="lazy">` : ""}</div>
-      <div class="meta"><div><b>${titleOf(t)}</b></div><div class="faint small">${subOf(t)}${dur ? " · " + dur : ""}</div></div>
+      <div class="meta"><div><b>${titleOf(t)}</b></div><div class="faint small">${subOf(t)}${dur ? " · " + dur : ""}</div>${t.why ? html`<div class="sc-why">${t.why}</div>` : ""}</div>
       ${extra || ""}
       <button class="btn small" data-music="add" data-key="${trackKey(t)}" title="Add to a playlist">＋</button>
     </div>`;
@@ -691,11 +692,15 @@
       const key = item.track.url || item.track.path;
       if (key && !seen.has(key) && selected.length < 150) { seen.add(key); selected.push(item); }
     });
+    // new songs found for this listener (not heard yet): up to 20 of the 150 places, so the prompt stays the same size
+    if (!M.disc.loaded) await loadDiscover(false);
+    const fresh = discovered().filter((t) => !map.has(t.url)).slice(0, 20).map((t) => ({ track: t, sources: new Set(["new"]), plays: 0, lastPlayed: 0 }));
+    append(fresh, 20);
     const unliked = all.filter((item) => !item.sources.has("liked"));
     const liked = all.filter((item) => item.sources.has("liked"));
     const library = unliked.filter((item) => item.sources.has("library"));
     const historyOnly = unliked.filter((item) => !item.sources.has("library") && item.sources.has("history"));
-    append(library, 100);
+    append(library, 100 - fresh.length);
     append(historyOnly, 25);
     append(liked, 25);
     if (selected.length < 150) append(unliked.filter((item) => !seen.has(item.track.url || item.track.path)), 150 - selected.length);
@@ -705,7 +710,8 @@
       return { id: "t" + String(i + 1).padStart(3, "0"), track: { ...t, kind: local ? "local" : "sc" },
         info: { id: "t" + String(i + 1).padStart(3, "0"), title: local ? t.name : t.title, artist: local ? (t.folder || "your library") : (t.artist || "SoundCloud"),
           sources: Array.from(item.sources), liked: item.sources.has("liked"), from_library: item.sources.has("library"),
-          in_listening_history: item.sources.has("history"), plays: item.plays, last_played: item.lastPlayed || undefined } };
+          in_listening_history: item.sources.has("history"), plays: item.plays, last_played: item.lastPlayed || undefined,
+          new_to_you: item.sources.has("new") || undefined, why: item.sources.has("new") ? t.why : undefined } };
     });
   }
   async function readDJStream(response) {
@@ -768,7 +774,7 @@
       const catalog = await djCatalog();
       if (!catalog.length) throw new Error("There are no songs for the DJ yet. Set a Music folder, like some SoundCloud songs, or listen to a few tracks first.");
       const catalogText = catalog.map((x) => x.info);
-      const system = "You are Nodeyard DJ, a warm, confident, conversational music host. Sound like a natural radio presenter: short, personal, lightly playful, never overdo catchphrases. Use listening history and likes to personalize, but never claim you listened to audio or know lyrics unless given. Recommend only catalogue tracks. The user request may be a vibe, activity, artist/style preference, or follow-up. If you need one key detail, ask one concise question and return no tracks. Otherwise create a useful mix. IMPORTANT: for ordinary vibe/activity requests, use unliked tracks from the user's library and listening history first; likes are taste context, not the default source. Never make a mix only from liked tracks when unliked catalogue tracks are available. Include at least half unliked tracks where possible. Only focus on liked tracks when the user explicitly asks for their likes/favourites. Catalogue fields `liked`, `from_library`, and `in_listening_history` tell you which tracks are liked or unliked. Reply with exactly one JSON object and no markdown: {\"speech\":\"spoken response, 1-3 short sentences\",\"playlist_name\":\"short name or empty string\",\"track_ids\":[\"t001\"]}. For a playlist, include 5-20 catalogue IDs in a deliberate order. If there are fewer suitable songs, use fewer. If this is only a greeting or clarifying question, playlist_name must be empty and track_ids must be []. Never invent IDs.\nCATALOGUE:\n" + JSON.stringify(catalogText);
+      const system = "You are Nodeyard DJ, a warm, confident, conversational music host. Sound like a natural radio presenter: short, personal, lightly playful, never overdo catchphrases. Use listening history and likes to personalize, but never claim you listened to audio or know lyrics unless given. Recommend only catalogue tracks. The user request may be a vibe, activity, artist/style preference, or follow-up. If you need one key detail, ask one concise question and return no tracks. Otherwise create a useful mix. IMPORTANT: for ordinary vibe/activity requests, use unliked tracks from the user's library and listening history first; likes are taste context, not the default source. Never make a mix only from liked tracks when unliked catalogue tracks are available. Include at least half unliked tracks where possible. Only focus on liked tracks when the user explicitly asks for their likes/favourites. Catalogue fields `liked`, `from_library`, and `in_listening_history` tell you which tracks are liked or unliked. Tracks with `new_to_you: true` are songs the user has never heard, picked for their taste (`why` says why): put about a quarter of them into ordinary mixes so the user discovers music, and lead with them (at least half) when the user asks for something new, fresh, different or to discover; skip them only when the user asks for songs they know. Reply with exactly one JSON object and no markdown: {\"speech\":\"spoken response, 1-3 short sentences\",\"playlist_name\":\"short name or empty string\",\"track_ids\":[\"t001\"]}. For a playlist, include 5-20 catalogue IDs in a deliberate order. If there are fewer suitable songs, use fewer. If this is only a greeting or clarifying question, playlist_name must be empty and track_ids must be []. Never invent IDs.\nCATALOGUE:\n" + JSON.stringify(catalogText);
       const history = (M.dj.messages || []).slice(-8).filter((m) => !m.hidden);
       if (!hidden && history.length && history[history.length - 1].role === "user" && history[history.length - 1].content === userText) history.pop();
       const messages = [{ role: "system", content: system }].concat(history.map((m) => ({ role: m.role, content: m.content })), [{ role: "user", content: userText }]);
@@ -796,9 +802,27 @@
           }
         }
       }
+      // and some discovery: a quarter new finds in an ordinary mix, half when asked for something new (never for "my likes" or "songs I know")
+      const wantsNew = /\b(?:new|fresh|discover|different|haven(?:'|’)?t heard|never heard|explore|surprise)\b/i.test(userText);
+      const wantsKnown = asksForLikes || /\b(?:songs? i know|familiar|old favou?rites?|my songs|my library)\b/i.test(userText);
+      const newRows = catalog.filter((row) => row.info.new_to_you && !selectedKeys.has(trackKey(row.track)));
+      if (!wantsKnown && newRows.length && selectedRows.length > 2) {
+        const targetNew = Math.ceil(selectedRows.length * (wantsNew ? 0.5 : 0.25));
+        let newCount = selectedRows.filter((row) => row.info.new_to_you).length;
+        for (let i = selectedRows.length - 1; i >= 1 && newCount < targetNew && newRows.length; i -= 2) {   // every other place from the end: they mix in
+          if (!selectedRows[i].info.new_to_you) {
+            const replacement = newRows.shift();
+            selectedKeys.delete(trackKey(selectedRows[i].track));
+            selectedRows[i] = replacement;
+            selectedKeys.add(trackKey(replacement.track));
+            newCount++;
+          }
+        }
+      }
       const selected = selectedRows.map((row) => row.track);
       const name = String(parsed.playlist_name || "").trim().slice(0, 120);
-      const assistantText = selected.length ? speech + "\n\nI’ve queued “" + (name || "Your mix") + "” with " + selected.length + " tracks and am starting playback now." : speech;
+      const newIn = selectedRows.filter((row) => row.info.new_to_you).length;
+      const assistantText = selected.length ? speech + "\n\nI’ve queued “" + (name || "Your mix") + "” with " + selected.length + " tracks" + (newIn ? " (" + newIn + " new to you)" : "") + " and am starting playback now." : speech;
       M.dj.messages.push({ role: "assistant", content: assistantText });
       if (selected.length) {
         M.dj.draft = { name: name || "Your mix", tracks: selected, saved: false };
@@ -900,27 +924,36 @@
 
   function discoverRecommendations() {
     const rows = [], seen = new Set();
-    const candidates = (M.homeHistoryReady ? homeUnheardRecommendations() : []).concat(homeRecommendations());
+    const candidates = discovered().concat(M.homeHistoryReady ? homeUnheardRecommendations() : [], homeRecommendations());
     candidates.forEach((track) => { const key = trackKey(track); if (key && !seen.has(key)) { seen.add(key); rows.push(track); } });
     return rows;
   }
 
   function renderHome(el) {
     M.homeRecs = homeRecommendations();
-    M.homeUnheard = homeUnheardRecommendations();
+    const found = discovered().filter((t) => !M.homeSessionHeard.has(trackKey(t)));
+    const local = homeUnheardRecommendations();
+    // new finds first, with a few unplayed songs you already own mixed in every fourth place
+    const mixed = [], fq = found.slice(0, 24), lq = local.slice(0, 8);
+    while (fq.length || lq.length) { for (let i = 0; i < 3 && fq.length; i++) mixed.push(fq.shift()); if (lq.length) mixed.push(lq.shift()); }
+    M.homeUnheard = mixed;
     const tracks = M.homeRecs;
     const unheard = M.homeUnheard;
     const likes = M.scLikes.slice(0, 12);
     const playlists = M.playlists.slice(0, 10);
-    const unseenContent = !M.homeHistoryReady
+    const discStatus = M.disc.building ? html`<span class="sc-disc-status"><span class="spin small"></span> Finding new songs for you…</span>`
+      : M.disc.updated ? html`<span class="sc-disc-status">Updated ${U.ago(M.disc.updated)} ago${M.disc.seeds.length ? html` · <span title="${"Started from: " + M.disc.seeds.join(", ")}">from ${M.disc.seeds.length} of your favourites and styles</span>` : ""}</span>` : "";
+    const unseenContent = !M.homeHistoryReady && !unheard.length
       ? html`<div class="empty">${M.homeHistoryError ? "Couldn't check your listening history." : "Checking your listening history…"} ${M.homeHistoryError ? raw('<button class="btn small mt" data-music="home-history-retry">Try again</button>') : ""}</div>`
       : unheard.length
-        ? unheard.map((t) => trackRow(t, "new:" + trackKey(t), t.url ? likeBtn(t) : ""))
-        : html`<div class="empty">You’ve heard every song we can see in your library and likes. Add more songs to find new ones.</div>`;
+        ? unheard.map((t) => trackRow(t, "new:" + trackKey(t), t.url ? html`${likeBtn(t)}${t.why ? html`<button class="btn small" data-music="disc-no" data-key="${t.url}" title="Not for me: show fewer like this">✕</button>` : ""}` : ""))
+        : M.disc.building || !M.disc.loaded ? html`<div class="empty"><div class="spin"></div>Looking on SoundCloud for songs that match your taste…</div>`
+        : html`<div class="empty">${M.disc.error || "No new picks yet."} Like or play a few songs and press Find more.</div>`;
     setHTML(el, html`<div class="card">
       <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h2 style="margin:0">New to you</h2>
-        <div class="muted small mt">Songs from your library and likes that aren’t in your saved listening history.</div></div>
-        ${unheard.length ? raw('<button class="btn primary" data-music="home-unheard-play">▶ Play new songs</button>') : ""}</div>
+        <div class="muted small mt">New songs found on SoundCloud from what you like and play (plus a few unplayed ones you own). It learns from likes, skips and ✕.</div>
+        <div class="mt">${discStatus}</div></div>
+        <div class="row" style="gap:8px">${unheard.length ? raw('<button class="btn primary" data-music="home-unheard-play">▶ Play new songs</button>') : ""}<button class="btn" data-music="disc-refresh" ${M.disc.building ? "disabled" : ""}>↻ Find more</button></div></div>
       <div class="mt">${unseenContent}</div>
     </div>
     <div class="card mt">
@@ -969,7 +1002,7 @@
     const art = artworkSource(track);
     const background = art ? "background-image:url('" + art + "')" : "";
     const liked = M.scLikes.some((item) => item.url === track.url);
-    setHTML(el, html`<div class="sc-discover-feed"><header class="sc-discover-feed-head"><div><h2>Discover</h2><span>For you · from your music</span></div><b>${M.discoverIndex + 1} / ${tracks.length}</b></header>
+    setHTML(el, html`<div class="sc-discover-feed"><header class="sc-discover-feed-head"><div><h2>Discover</h2><span>For you · new finds first, then your music</span></div><b>${M.discoverIndex + 1} / ${tracks.length}</b></header>
       <article class="sc-discover-card" data-discover-stage style="${background}" tabindex="0" aria-label="Discover song: ${titleOf(track)}. Swipe up or down to browse.">
         <div class="sc-discover-shade"></div>
         <div class="sc-discover-cover">${art ? html`<img src="${art}" alt="${titleOf(track)} artwork" loading="lazy">` : html`<span aria-hidden="true">♫</span>`}</div>
@@ -978,8 +1011,8 @@
           <button type="button" data-music="discover-play" aria-label="Play song">▶</button><small>Play</small>
           <button type="button" data-music="discover-add" aria-label="Add song to playlist">＋</button><small>Save</small>
         </aside>
-        <div class="sc-discover-meta"><span class="chip">${track.url ? "SoundCloud" : "Your library"}</span><h2>${titleOf(track)}</h2>
-          <div>${subOf(track)}${track.duration_ms ? " · " + fmtTime(track.duration_ms / 1000) : ""}</div></div>
+        <div class="sc-discover-meta"><span class="chip">${track.why ? "New for you" : track.url ? "SoundCloud" : "Your library"}</span><h2>${titleOf(track)}</h2>
+          <div>${subOf(track)}${track.duration_ms ? " · " + fmtTime(track.duration_ms / 1000) : ""}</div>${track.why ? html`<div class="sc-why">${track.why}</div>` : ""}</div>
         <div class="sc-discover-nav"><button type="button" data-music="discover-prev" ${M.discoverIndex <= 0 ? "disabled" : ""} aria-label="Previous song">⌃</button><button type="button" data-music="discover-next" ${M.discoverIndex >= tracks.length - 1 ? "disabled" : ""} aria-label="Next song">⌄</button></div>
         <div class="sc-discover-hint">Swipe or scroll · ↑ / ↓</div>
       </article></div>`);
@@ -1120,7 +1153,7 @@
 
   // ---- add-to-playlist picker --------------------------------------------
   function findTrack(key) {
-    return [M.queue, M.scResults, M.discoverTracks, M.scLikes, (M.scSet && M.scSet.tracks) || [], (M.openPl && M.openPl.tracks) || [],
+    return [M.queue, M.scResults, M.discoverTracks, M.disc.tracks, M.scLikes, (M.scSet && M.scSet.tracks) || [], (M.openPl && M.openPl.tracks) || [],
       (M.dj.draft && M.dj.draft.tracks) || [], (M.data || {}).tracks || []]
       .flat().find((t) => t && trackKey(t) === key) || null;
   }
@@ -1192,8 +1225,25 @@
 
   async function load() {
     try { const r = await getJSON("/api/music"); if (r.ok) M.data = r; } catch (e) { /* signed out */ }
+    loadDiscover(false);
     await refreshHomeHistory();
   }
+
+  // ---- new songs for you: the server finds them (from your likes and listening) and keeps them fresh ------------
+  async function loadDiscover(refresh) {
+    clearTimeout(M.disc.timer);
+    try {
+      const r = await getJSON("/api/music/discover" + (refresh ? "?refresh=1" : ""));
+      if (r.ok) Object.assign(M.disc, { tracks: r.tracks || [], updated: r.updated || 0, building: !!r.building, error: r.error || "", seeds: r.seeds || [], loaded: true });
+    } catch (e) { M.disc.loaded = true; }
+    if (M.disc.building && M.disc.polls++ < 60) M.disc.timer = setTimeout(() => loadDiscover(false), 4000);
+    else M.disc.polls = 0;
+    if (S.view === "music" && (M.tab === "home" || M.tab === "discover")) {
+      if (M.tab === "discover" && !M.disc.building) M.discoverSeeded = false;
+      renderTab();
+    }
+  }
+  const discovered = () => (M.disc.tracks || []).map((t) => ({ ...t, kind: "sc" }));
 
   async function searchSc() {
     const input = $('[data-music="sc-query"]');
@@ -1281,6 +1331,13 @@
     if (act === "listen") playLive();
     else if (act === "home-play") { if (M.homeRecs.length) playQueue(M.homeRecs, 0); }
     else if (act === "home-unheard-play") { if (M.homeUnheard.length) playQueue(M.homeUnheard, 0); }
+    else if (act === "disc-refresh") { M.disc.building = true; renderTab(); loadDiscover(true); }
+    else if (act === "disc-no") {
+      const track = findTrack(t.dataset.key); if (!track) return;
+      M.disc.tracks = M.disc.tracks.filter((x) => x.url !== track.url); renderTab();
+      const r = await postJSON("/api/music/discover", { action: "dislike", track });
+      if (!r.ok) toast(r.error || "Couldn't save that."); else { toast("Got it — fewer like that."); Object.assign(M.disc, { tracks: r.tracks || M.disc.tracks, building: !!r.building }); if (r.building) loadDiscover(false); else renderTab(); }
+    }
     else if (act === "home-history-retry") { const pending = refreshHomeHistory(); renderTab(); pending.then(() => { if (S.view === "music" && M.tab === "home") renderTab(); }); }
     else if (act === "home-likes") { M.tab = "likes"; renderPage(); }
     else if (act === "home-playlists") { M.tab = "playlists"; renderPage(); }

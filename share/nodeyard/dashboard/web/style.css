@@ -1001,3 +1001,9 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .hl-pre { max-height: 300px; overflow: auto; margin: 8px 0 0; padding: 10px; border-radius: 10px; background: var(--panel2); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .hl-wol-form { grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 8px; }
 @media (max-width: 640px) { .hl-spark { display: none; } .hl-name { max-width: 100%; } }
+
+/* Music: why a new song was picked */
+.sc-why { margin-top: 2px; color: var(--accent, #8ba2ff); font-size: 11.5px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.sc-discover-meta .sc-why { color: #ffffffd0; font-size: 13px; white-space: normal; }
+.sc-disc-status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+.sc-disc-status .spin.small { width: 12px; height: 12px; border-width: 2px; margin: 0; }
