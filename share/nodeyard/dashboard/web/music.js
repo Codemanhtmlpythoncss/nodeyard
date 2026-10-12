@@ -63,6 +63,8 @@
       ".sc-tabs button:hover{background:rgba(125,160,200,.15);color:var(--ink,#eaf1ff)}" +
       ".sc-tabs button.on{background:var(--sc,#ff5500);color:#fff;box-shadow:0 3px 10px rgba(255,85,0,.38)}" +
       ".sc-row{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;padding:8px 2px;border-bottom:1px solid var(--line)}" +
+      ".sc-cover{position:relative;width:46px;height:46px;flex:none;border-radius:8px;overflow:hidden;display:grid;place-items:center;background:linear-gradient(135deg,rgba(255,85,0,.3),rgba(125,160,200,.16));color:var(--ink2,#b9c6dd);font-size:21px}" +
+      ".sc-cover img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}" +
       ".sc-row .meta{flex:1;min-width:0;overflow:hidden}" +
       ".sc-row .btn,.sc-row a.btn{flex:none}" +
       ".sc-row .meta div{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" +
@@ -71,6 +73,7 @@
       ".ny-viz-top{display:block;width:100%;height:56px;margin:2px 0 14px;border-radius:12px;background:linear-gradient(180deg,rgba(255,85,0,.05),rgba(125,160,200,.06))}" +
       "@media (max-width:760px){#ny-player{bottom:56px}#ny-player .np{max-width:100px}#ny-player canvas{display:none}}";
     document.head.appendChild(style);
+    document.addEventListener("error", (e) => { if (e.target && e.target.matches && e.target.matches(".sc-cover img")) e.target.remove(); }, true);
     // SoundCloud-ish accent available as --sc (falls back to orange).
     document.documentElement.style.setProperty("--sc", getComputedStyle(document.documentElement).getPropertyValue("--sc") || "#ff5500");
     bar = document.createElement("div");
@@ -398,8 +401,10 @@
   function trackRow(t, onplay, extra) {
     const dur = t.duration_ms ? fmtTime(t.duration_ms / 1000) : (t.size ? (t.size / 1048576).toFixed(1) + " MB" : "");
     const playing = isPlaying(t);
+    const cover = t.artwork_url ? "/api/music/art?url=" + encodeURIComponent(t.artwork_url) : (t.path ? "/api/music/art?path=" + encodeURIComponent(t.path) : "");
     return html`<div class="sc-row">
       <button class="sc-pbtn ${playing ? "" : "ghost"}" data-play="${onplay}" title="Play">${playing ? "⏸" : "▶"}</button>
+      <div class="sc-cover" aria-hidden="true">♪${cover ? html`<img src="${cover}" alt="" loading="lazy">` : ""}</div>
       <div class="meta"><div><b>${titleOf(t)}</b></div><div class="faint small">${subOf(t)}${dur ? " · " + dur : ""}</div></div>
       ${extra || ""}
       <button class="btn small" data-music="add" data-key="${trackKey(t)}" title="Add to a playlist">＋</button>

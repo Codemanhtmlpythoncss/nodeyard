@@ -26,6 +26,9 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
 AUDIO_EXT = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".ogg": "audio/ogg", ".oga": "audio/ogg",
              ".opus": "audio/ogg", ".m4a": "audio/mp4", ".mp4": "audio/mp4", ".aac": "audio/aac",
@@ -208,7 +211,8 @@ class Music:
                 queue.append({"kind": "sc", "url": url[:1000],
                               "title": str(track.get("title") or "Untitled")[:300],
                               "artist": str(track.get("artist") or "SoundCloud")[:200],
-                              "duration_ms": duration})
+                              "duration_ms": duration,
+                              "artwork_url": track.get("artwork_url") if self._soundcloud_art_url(track.get("artwork_url")) else ""})
             elif track.get("path") and self.resolve(str(track.get("path"))):
                 queue.append({"kind": "local", "path": str(track["path"])[:1000],
                               "name": str(track.get("name") or track["path"])[:300],
@@ -554,6 +558,99 @@ class Music:
     def _valid_sc_url(url):
         return bool(re.match(r"^https?://(www\.|m\.|on\.|api\.)?soundcloud\.com/[^\s]+$", str(url or "").strip(), re.I))
 
+    @staticmethod
+    def _soundcloud_art_url(url):
+        try:
+            url = str(url or "")
+            if len(url) > 2000:
+                return False
+            parsed = urllib.parse.urlparse(url)
+            return (parsed.scheme == "https" and parsed.hostname == "i1.sndcdn.com" and not parsed.username and
+                    not parsed.password and parsed.port in (None, 443) and len(parsed.path) < 1000)
+        except ValueError:
+            return False
+
+    def artwork(self, path="", image_url=""):
+        """Return an approved SoundCloud cover or a cover embedded in a confined local track."""
+        folder = os.path.join(self.cache_dir(), "covers")
+        if image_url:
+            if not self._soundcloud_art_url(image_url):
+                return None, ""
+            key = hashlib.sha256(image_url.encode("utf-8")).hexdigest()
+            cached = os.path.join(folder, key + ".img")
+            typefile = cached + ".type"
+            try:
+                with open(cached, "rb") as f:
+                    data = f.read()
+                with open(typefile, "r", encoding="ascii") as f:
+                    ctype = f.read(32)
+                if data and ctype in ("image/jpeg", "image/png", "image/webp"):
+                    return data, ctype
+            except OSError:
+                pass
+            try:
+                class SafeRedirect(urllib.request.HTTPRedirectHandler):
+                    def redirect_request(self, request, fp, code, message, headers, new_url):
+                        if not Music._soundcloud_art_url(new_url):
+                            return None
+                        return super().redirect_request(request, fp, code, message, headers, new_url)
+                request = urllib.request.Request(image_url, headers={"User-Agent": "Nodeyard Music/1.0"})
+                with urllib.request.build_opener(SafeRedirect).open(request, timeout=8) as response:
+                    if not self._soundcloud_art_url(response.geturl()):
+                        return None, ""
+                    ctype = response.headers.get_content_type()
+                    data = response.read(2 * 1024 * 1024 + 1)
+                if ctype not in ("image/jpeg", "image/png", "image/webp") or len(data) > 2 * 1024 * 1024:
+                    return None, ""
+                os.makedirs(folder, mode=0o700, exist_ok=True)
+                with open(cached, "wb") as f:
+                    os.chmod(cached, 0o600)
+                    f.write(data)
+                with open(typefile, "w", encoding="ascii") as f:
+                    os.chmod(typefile, 0o600)
+                    f.write(ctype)
+                return data, ctype
+            except (OSError, ValueError, urllib.error.URLError):
+                return None, ""
+        full = self.resolve(path)
+        if not full:
+            return None, ""
+        stem, _ext = os.path.splitext(full)
+        for ext, ctype in ((".jpg", "image/jpeg"), (".jpeg", "image/jpeg"), (".png", "image/png"), (".webp", "image/webp")):
+            try:
+                with open(stem + ext, "rb") as f:
+                    data = f.read(2 * 1024 * 1024 + 1)
+                if data and len(data) <= 2 * 1024 * 1024:
+                    return data, ctype
+            except OSError:
+                pass
+        ffmpeg = self.ffmpeg()
+        if not ffmpeg:
+            return None, ""
+        try:
+            signature = "%s:%s:%s" % (full, os.path.getmtime(full), os.path.getsize(full))
+            cached = os.path.join(folder, hashlib.sha256(signature.encode("utf-8")).hexdigest() + ".jpg")
+            with open(cached, "rb") as f:
+                data = f.read(2 * 1024 * 1024 + 1)
+            if data and len(data) <= 2 * 1024 * 1024:
+                return data, "image/jpeg"
+        except OSError:
+            pass
+        try:
+            result = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-i", full, "-map", "0:v:0",
+                                     "-frames:v", "1", "-vf", "scale=300:300:force_original_aspect_ratio=decrease",
+                                     "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=12)
+            if result.returncode or not result.stdout or len(result.stdout) > 2 * 1024 * 1024:
+                return None, ""
+            os.makedirs(folder, mode=0o700, exist_ok=True)
+            with open(cached, "wb") as f:
+                os.chmod(cached, 0o600)
+                f.write(result.stdout)
+            return result.stdout, "image/jpeg"
+        except (OSError, subprocess.SubprocessError):
+            return None, ""
+
     def _tool(self, name):
         """Find a helper sc-pick installed, wherever it was run from. The dashboard runs as a different user (often
         root) than the person who ran sc-pick, so look in every home's sc-pick bin and /usr/local/bin, not just ours."""
@@ -623,7 +720,8 @@ class Music:
                 duration_ms = 0
             rows.append({"title": str(e.get("title") or "Untitled")[:300],
                          "artist": str(e.get("uploader") or e.get("channel") or e.get("uploader_id") or "Unknown artist")[:200],
-                         "duration_ms": max(0, duration_ms), "url": url[:1000]})
+                         "duration_ms": max(0, duration_ms), "url": url[:1000],
+                         "artwork_url": e.get("thumbnail") if self._soundcloud_art_url(e.get("thumbnail")) else ""})
         if nodrm and rows:
             try:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
@@ -649,7 +747,8 @@ class Music:
         row = {"title": str(track.get("title") or "Untitled")[:300],
                "artist": str(track.get("artist") or "Unknown artist")[:200],
                "duration_ms": max(0, min(86_400_000, duration_ms)),
-               "url": str(track["url"])[:1000]}
+               "url": str(track["url"])[:1000],
+               "artwork_url": track.get("artwork_url") if self._soundcloud_art_url(track.get("artwork_url")) else ""}
         with self.lock:
             cfg = self.cfg()
             saved = cfg.get("sc_likes")
@@ -825,7 +924,8 @@ class Music:
                 duration_ms = 0
             rows.append({"title": str(e.get("title") or "Untitled")[:300],
                          "artist": str(e.get("uploader") or e.get("channel") or e.get("uploader_id") or "")[:200],
-                         "duration_ms": max(0, duration_ms), "url": u[:1000]})
+                         "duration_ms": max(0, duration_ms), "url": u[:1000],
+                         "artwork_url": e.get("thumbnail") if self._soundcloud_art_url(e.get("thumbnail")) else ""})
         title = str((data.get("title") if isinstance(data, dict) else "") or "Playlist")[:200]
         if not rows:
             return False, "No playable tracks found at that URL.", []
@@ -854,7 +954,8 @@ class Music:
             except (TypeError, ValueError):
                 dur = 0
             return {"kind": "sc", "url": str(t["url"])[:1000], "title": str(t.get("title") or "Untitled")[:300],
-                    "artist": str(t.get("artist") or "")[:200], "duration_ms": dur}
+                    "artist": str(t.get("artist") or "")[:200], "duration_ms": dur,
+                    "artwork_url": t.get("artwork_url") if self._soundcloud_art_url(t.get("artwork_url")) else ""}
         if t.get("kind") == "local" and t.get("path") and self.resolve(t.get("path")):
             return {"kind": "local", "path": str(t["path"])[:1000], "name": str(t.get("name") or t["path"])[:300],
                     "folder": str(t.get("folder") or "")[:300]}
@@ -1002,6 +1103,12 @@ def register(ctx, args):
         ok, msg, tracks = music.sc_playlist(q.get("url", [""])[0])
         return h._json({"ok": ok, "title": msg if ok else "", "error": "" if ok else msg, "tracks": tracks}, 200 if ok else 400)
 
+    def _art(h, q):
+        data, ctype = music.artwork(q.get("path", [""])[0], q.get("url", [""])[0])
+        if not data:
+            return h._send(404, "Artwork not found", "text/plain; charset=utf-8")
+        return h._send(200, data, ctype)
+
     def _playlists(h, q):
         pid = q.get("id", [""])[0]
         if pid:
@@ -1086,7 +1193,7 @@ def register(ctx, args):
                            "/api/music/playback": _playback_get,
                            "/api/music/ai": _ai_library,
                            "/api/music/sc-stream": _sc_stream, "/api/music/sc-playlist": _sc_playlist,
-                           "/api/music/playlists": _playlists})
+                           "/api/music/playlists": _playlists, "/api/music/art": _art})
     ctx.post_routes.update({"/api/music/config": _config, "/api/audio/test": _test,
                             "/api/audio/setup-server": _setup_audio, "/api/music/sc-download": _sc_download,
                             "/api/music/playback": _playback_post,
