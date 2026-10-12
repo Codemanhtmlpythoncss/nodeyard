@@ -23,7 +23,7 @@ import connections
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, "galaxy3d")
-PAGES = {"/g3": "wall", "/g3/": "wall", "/g3/wall": "wall", "/g3/nexus": "nexus", "/g3/desk": "desk"}
+PAGES = {"/g3": "wall", "/g3/": "wall", "/g3/wall": "wall", "/g3/embed": "wall", "/g3/nexus": "nexus", "/g3/desk": "desk"}
 CATS = ["ai", "media", "network", "monitor", "web", "infra"]
 PALETTE = {"ai": "#ff4fa3", "media": "#38e1ff", "network": "#37f5a0", "monitor": "#ffb347", "web": "#9b8cff", "infra": "#8fb0d0", "stopped": "#ff5a6a"}
 ACCENTS = ["#5ad7ff", "#ffb347", "#b48cff", "#5dffa8", "#ff7aa8", "#ffd84d"]

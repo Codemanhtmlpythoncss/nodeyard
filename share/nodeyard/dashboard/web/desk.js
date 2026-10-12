@@ -62,7 +62,7 @@
     if (id === "clocks") return widget(id, html`<div class="desk-clocks">${[["Jersey", "Europe/Jersey"], ["New York", "America/New_York"], ["Tokyo", "Asia/Tokyo"], ["Sydney", "Australia/Sydney"]].map(([name, zone]) => html`<div><span>${name}</span><b data-zone="${zone}">--:--</b></div>`)}</div>`);
     if (id === "cluster") return widget(id, html`<div class="desk-cluster"><div><b data-cluster="nodes">—</b><span>ready nodes</span></div><div><b data-cluster="pods">—</b><span>running pods</span></div><div><b data-cluster="workloads">—</b><span>workloads</span></div></div><p class="desk-muted" data-cluster-note>${S.d ? "Live dashboard data" : "Waiting for cluster data"}</p>`);
     if (id === "music") return widget(id, html`<div class="desk-music-art">♫</div><p>Pick up where you left off in your library, Discover or DJ.</p><button type="button" class="btn primary" data-desk="music">Open Music</button>`);
-    if (id === "links") return widget(id, html`<div class="desk-links"><button type="button" class="btn" data-desk="overview">Overview</button><button type="button" class="btn" data-desk="music">Music</button><button type="button" class="btn" data-desk="ai">AI</button><a class="btn" href="/g3/">AI galaxy</a><button type="button" class="btn" data-desk="settings">Settings</button></div>`);
+    if (id === "links") return widget(id, html`<div class="desk-links"><button type="button" class="btn" data-desk="overview">Overview</button><button type="button" class="btn" data-desk="music">Music</button><button type="button" class="btn" data-desk="ai">AI</button><button type="button" class="btn" data-desk="galaxy">AI galaxy</button><button type="button" class="btn" data-desk="settings">Settings</button></div>`);
     if (id === "mascot") { const n = ((D.mascot % mascotLines.length) + mascotLines.length) % mascotLines.length; return widget(id, html`<button type="button" class="desk-mascot" data-desk="mascot" aria-label="Say something encouraging"><span aria-hidden="true">${["🪴", "🦊", "🐸", "🐧", "🐱"][n]}</span><b>${mascotLines[n]}</b><small>Tap me</small></button>`); }
     return "";
   }
@@ -124,7 +124,7 @@
     else if (action === "focus-reset") { D.focus = { mode: "focus", remaining: 1500, running: false, until: 0 }; save(); drawWidgets(); paintMode(); }
     else if (action === "mascot") { D.mascot++; save(); drawWidgets(); paintMode(); }
     else if (action === "music") go("music");
-    else if (["overview", "ai", "settings"].includes(action)) go(action);
+    else if (["overview", "ai", "settings", "galaxy"].includes(action)) go(action);
   }
   function submit(e) {
     const form = e.target.closest("form[data-desk-form]"); if (!form) return;

@@ -511,32 +511,9 @@
 
   V.galaxy = {
     build() {
-      NY.freshHTML($("#view"), raw('<div class="ux" id="gx"><canvas id="gx-c" aria-label="Your cluster drawn as galaxies: one per machine, with their traffic and the AI"></canvas>' +
-        '<div class="ux-tl"><div class="ux-clock" id="ux-clock"></div><div class="ux-date" id="ux-date"></div><div class="ux-sub" id="ux-cluster"></div></div>' +
-        '<div class="ux-tr"><div class="ux-head" id="ux-head"></div><div class="ux-sub" id="ux-headsub"></div><div class="ux-ticker" id="ux-ticker"></div></div>' +
-        '<div class="ux-side left" id="ux-left"></div><div class="ux-side right" id="ux-right"></div>' +
-        '<div class="ux-bottom"><div class="ux-title" id="ux-title">OVERVIEW</div><div class="ux-sub" id="ux-overview"></div>' +
-        '<div class="ux-answer hide" id="ux-answer" aria-live="polite"></div>' +
-        '<form class="ux-ask" id="ux-ask"><input id="ux-q" placeholder="Ask your cluster\'s AI…  (e.g. why is debian-worker down?)" autocomplete="off" aria-label="Ask the AI helper"><button class="btn small primary" id="ux-send" type="submit">Ask</button></form>' +
-        '<div class="ux-legend"><span style="--c:255,200,90">AI</span><span style="--c:110,170,255">system</span><span style="--c:70,225,205">nodeyard</span><span style="--c:195,145,255">apps</span><span style="--c:255,90,90">failing</span><span style="--c:120,180,255">traffic</span><span style="--c:255,205,110">model link</span></div></div>' +
-        '<div class="ux-tools"><button class="btn small" data-gx="tour" title="Fly from galaxy to galaxy by itself">Tour</button><button class="btn small" data-gx="full" title="Full screen, for a spare display">Full screen</button></div></div>'));
-      if (G.scene) G.scene.destroy();
-      G.laid = false;
-      G.scene = new Universe($("#gx-c"));
-      G.scene.onFocus = () => paint();
-      G.scene.space = () => {   // the free middle: inside the side cards, below the clock, above the AI helper
-        const box = $("#gx"), r = box.getBoundingClientRect(), L = $("#ux-left"), R = $("#ux-right"), T = $(".ux-tl"), B = $(".ux-bottom");
-        const vis = (el) => el && el.offsetParent !== null && getComputedStyle(el).display !== "none";
-        const left = vis(L) ? L.getBoundingClientRect().right - r.left : 0, right = vis(R) ? r.right - R.getBoundingClientRect().left : 0;
-        return { side: Math.max(left, right, 0) + 14, top: (T ? T.getBoundingClientRect().bottom - r.top : 90) + 18, bottom: (B ? r.bottom - B.getBoundingClientRect().top : 170) + 8 };
-      };
-      G.scene.start();
-      if (S.d) track(S.d);
-      paint(); paintAnswer(); tick();
-      clearInterval(G.poll); pollActivity();
-      G.poll = setInterval(() => { if (!$("#gx")) { clearInterval(G.poll); G.poll = 0; return; } tick(); if (!document.hidden) pollActivity(); }, 1000);
+      NY.freshHTML($("#view"), html`<div class="galaxy-embed"><iframe src="/g3/embed" title="AI Galaxy" allow="fullscreen"></iframe></div>`);
     },
-    update() { if (S.d) track(S.d); paint(); },
+    update() {},
   };
   document.addEventListener("submit", (e) => { if (e.target.id === "ux-ask") { e.preventDefault(); const q = $("#ux-q"); ask(q.value); if (!G.ask.busy) q.value = ""; else q.value = ""; } });
   document.addEventListener("click", (e) => {

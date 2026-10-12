@@ -19,7 +19,7 @@
     { id: "storage", label: "Storage", icon: "storage", sub: "Disks and volumes" },
     { id: "hardware", label: "Hardware", icon: "hardware", sub: "What every machine is made of, and how fast it really is" },
     { id: "ai", label: "AI", icon: "ai", sub: "Models running on your cluster" },
-    { id: "galaxy", label: "AI galaxy", icon: "galaxy", sub: "Your cluster and its AI, live", href: "/g3/" },   // the 3D screens (#galaxy is the light one)
+    { id: "galaxy", label: "AI galaxy", icon: "galaxy", sub: "Your cluster and its AI, live" },
     { id: "events", label: "Events", icon: "events", sub: "What Kubernetes has been doing" },
     { id: "alerts", label: "Alerts", icon: "alerts", sub: "Things that need your attention" },
     { id: "doctor", label: "Doctor", icon: "doctor", sub: "Checks for common problems, with one-click fixes" },
