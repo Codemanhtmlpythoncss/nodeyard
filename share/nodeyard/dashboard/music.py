@@ -29,6 +29,42 @@ MAX_TRACKS = 3000
 _live_slots = threading.BoundedSemaphore(2)
 _sc_slots = threading.BoundedSemaphore(3)
 
+# Best-effort one-click to give a headless control node an audio stack, so live forwarding has something to capture:
+# install PulseAudio, run it in system mode with a null sink (default) whose .monitor the dashboard can capture, and
+# expose an anonymous unix socket at /run/pulse/native. A server-side player (e.g. sc-pick's mpv) then plays into the
+# null sink and the dashboard forwards it to any browser. The dashboard unit sets PULSE_SERVER to this socket.
+SERVER_AUDIO_SCRIPT = r"""set -e
+echo '== install PulseAudio =='
+if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y pulseaudio pulseaudio-utils
+elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm pulseaudio libpulse
+elif command -v dnf >/dev/null 2>&1; then dnf install -y pulseaudio pulseaudio-utils
+else echo 'no known package manager'; fi
+echo '== config: anonymous socket + null sink =='
+mkdir -p /etc/pulse
+cat > /etc/pulse/nodeyard-system.pa <<'PA'
+load-module module-native-protocol-unix auth-anonymous=1 socket=/run/pulse/native
+load-module module-null-sink sink_name=nodeyard sink_properties=device.description=NodeyardOutput
+set-default-sink nodeyard
+load-module module-always-sink
+PA
+echo '== service =='
+cat > /etc/systemd/system/pulseaudio-system.service <<'SVC'
+[Unit]
+Description=PulseAudio system mode for nodeyard audio forwarding
+After=network.target
+[Service]
+ExecStart=/usr/bin/pulseaudio --system --disallow-exit --exit-idle-time=-1 --file=/etc/pulse/nodeyard-system.pa
+Restart=on-failure
+RuntimeDirectory=pulse
+RuntimeDirectoryMode=0755
+SVC
+systemctl daemon-reload
+systemctl enable --now pulseaudio-system.service || echo 'could not start the service'
+sleep 2
+PULSE_SERVER=unix:/run/pulse/native pactl info 2>&1 | head -3 || true
+echo '== done =='
+"""
+
 
 class Music:
     def __init__(self, state_dir, demo=False, terminal_user=""):
@@ -518,6 +554,19 @@ def register(ctx, args):
         ok, msg = music.test_forward()
         return h._json({"ok": ok, "message": msg, "source": music.default_source()})
 
+    def _setup_audio(h, body):
+        if demo:
+            return h._json({"ok": True, "message": "(demo) would install PulseAudio and a null sink on the server."})
+        try:
+            subprocess.Popen(["systemd-run", "--unit", "nodeyard-audio-setup", "--collect", "--setenv=HOME=/root",
+                              "/bin/sh", "-c", SERVER_AUDIO_SCRIPT], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError as e:
+            return h._json({"ok": False, "error": "Couldn't start audio setup: %s" % e}, 500)
+        return h._json({"ok": True, "message": "Setting up server audio (PulseAudio + a null sink). When it finishes, "
+                        "redeploy (Settings → Update everything) so the dashboard connects to it, then play something on "
+                        "the server and press Test capture. Watch: journalctl -u nodeyard-audio-setup -f"})
+
     def _sc_playlist(h, q):
         ok, msg, tracks = music.sc_playlist(q.get("url", [""])[0])
         return h._json({"ok": ok, "title": msg if ok else "", "error": "" if ok else msg, "tracks": tracks}, 200 if ok else 400)
@@ -620,6 +669,7 @@ def register(ctx, args):
                            "/api/music/sc-stream": _sc_stream, "/api/music/sc-playlist": _sc_playlist,
                            "/api/music/playlists": _playlists})
     ctx.post_routes.update({"/api/music/config": _config, "/api/audio/test": _test,
+                            "/api/audio/setup-server": _setup_audio,
                             "/api/music/like": _sc_like, "/api/music/playlist": _playlist})
 
 

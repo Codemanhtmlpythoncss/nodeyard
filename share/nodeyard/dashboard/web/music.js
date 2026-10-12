@@ -330,6 +330,7 @@
         <div class="row mt" style="gap:8px;align-items:center">
           <button class="btn small" data-music="fw-test">Test capture</button>
           ${fw.enabled && fw.available ? raw('<button class="btn small primary" data-music="listen">Listen now</button>') : ""}</div>
+        ${!fw.available ? raw('<div class="mt"><button class="btn small primary" data-music="audio-setup">Set up server audio automatically</button> <span id="audio-setup-msg" class="small faint"></span><div class="small faint mt">Installs PulseAudio + a null sink on the server so forwarding has something to capture. Play audio on the server (e.g. sc-pick), then it forwards to any browser. Best-effort; redeploy afterwards.</div></div>') : ""}
         <details class="mt"><summary class="small faint">Choose a source instead of automatic</summary>
           ${raw('<select class="select mt" data-music="fw-source">' + srcOpts + "</select>")}</details>
         <div id="fw-test-out" class="small mt"></div>`;
@@ -471,6 +472,10 @@
     else if (act === "fw-test") {
       const out = $("#fw-test-out"); if (out) out.textContent = "Testing…";
       const r = await postJSON("/api/audio/test", {}); if (out) out.innerHTML = (r.ok ? '<span style="color:var(--ok,#3ecf8e)">✓ </span>' : '<span class="err">✕ </span>') + esc(r.message || r.error || "");
+    }
+    else if (act === "audio-setup") {
+      const out = $("#audio-setup-msg"); if (out) out.textContent = "Setting up… (installing PulseAudio)";
+      const r = await postJSON("/api/audio/setup-server", {}); if (out) out.textContent = r.message || r.error || "";
     }
   });
 

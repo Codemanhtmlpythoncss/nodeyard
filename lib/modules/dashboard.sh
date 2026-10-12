@@ -394,6 +394,8 @@ Type=simple
 ExecStart=${py} ${args}
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=HOME=/tmp
+# So audio forwarding can reach a system PulseAudio (set up from the Music page); harmless if none is running.
+Environment=PULSE_SERVER=unix:/run/pulse/native
 Restart=on-failure
 RestartSec=5
 # It reads the cluster through its API and answers web requests. Signed-in
