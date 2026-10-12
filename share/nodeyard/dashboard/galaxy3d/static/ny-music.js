@@ -3,6 +3,7 @@
   "use strict";
   var state = null, audio = null, bar = null, title = null, playButton = null, repeatButton = null, repeatIcon = null, repeatMode = null;
   var shuffleOrder = null, shufflePos = 0;
+  var eqContext = null, eqSource = null, eqNodes = [];
   var historySince = 0, historyElapsed = 0, lastHistorySaved = 0, lastPlaybackSaved = 0, saving = false;
   function api(path, body, keepalive) {
     var opts = { method: body ? "POST" : "GET", credentials: "same-origin", cache: "no-store" };
@@ -12,6 +13,28 @@
   }
   function src(track) {
     return track.url ? "/api/music/sc-stream?url=" + encodeURIComponent(track.url) : "/api/music/track?path=" + encodeURIComponent(track.path);
+  }
+  function applyEq(mode) {
+    var presets = { flat: [0, 0, 0, 0, 0], bass: [6, 3, 0, 0, 0], treble: [0, 0, 0, 3, 6],
+      rock: [4, 2, -1, 2, 4], electronic: [5, 1, -2, 3, 5], vocal: [-1, 1, 3, 2, -1], classical: [2, 0, -1, 2, 3] };
+    if (!Object.prototype.hasOwnProperty.call(presets, mode)) mode = "flat";
+    state.eq = mode;
+    if (mode === "flat" && !eqNodes.length) return;
+    try {
+      if (!eqContext) {
+        var AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return;
+        eqContext = new AudioCtx(); eqSource = eqContext.createMediaElementSource(audio);
+        eqNodes = [60, 250, 1000, 4000, 10000].map(function (frequency, i) {
+          var filter = eqContext.createBiquadFilter(); filter.type = i === 0 ? "lowshelf" : i === 4 ? "highshelf" : "peaking";
+          filter.frequency.value = frequency; if (filter.type === "peaking") filter.Q.value = 0.9; return filter;
+        });
+        var previous = eqSource;
+        eqNodes.forEach(function (filter) { previous.connect(filter); previous = filter; });
+        previous.connect(eqContext.destination);
+      }
+      presets[mode].forEach(function (gain, i) { eqNodes[i].gain.setTargetAtTime(gain, eqContext.currentTime, 0.035); });
+    } catch (e) { /* keep normal playback if this browser lacks Web Audio */ }
   }
   function historyTrack(track) { return track.url ? Object.assign({}, track, { kind: "sc" }) : Object.assign({}, track, { kind: "local" }); }
   function beginHistory() {
@@ -37,6 +60,7 @@
   function playbackPayload(handoff) {
     return { queue: state.queue, index: state.index, position: audio.currentTime || 0, volume: audio.volume,
       rate: audio.playbackRate || state.rate || 1,
+      eq: state.eq || "flat",
       playing: !audio.paused, shuffle: !!state.shuffle, repeat: state.repeat || "off", history_id: state.history_id || "",
       history_seconds: Math.floor(historyElapsed + (historySince && !audio.paused ? (performance.now() - historySince) / 1000 : 0)), handoff: !!handoff };
   }
@@ -131,6 +155,8 @@
     state.rate = Math.max(0.5, Math.min(2, Number.isFinite(+saved.rate) ? +saved.rate : 1));
     audio.defaultPlaybackRate = state.rate; audio.playbackRate = state.rate;
     audio.preservesPitch = true; audio.webkitPreservesPitch = true;
+    applyEq(saved.eq);
+    audio.addEventListener("play", function () { if (eqContext && eqContext.state === "suspended") eqContext.resume().catch(function () {}); });
     audio.addEventListener("ratechange", function () {
       var rate = Math.max(0.5, Math.min(2, Number.isFinite(+audio.playbackRate) ? +audio.playbackRate : 1));
       if (Math.abs(rate - state.rate) > 0.001) { state.rate = rate; save(false, true); }

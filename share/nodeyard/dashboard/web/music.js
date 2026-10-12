@@ -23,15 +23,20 @@
 
   const M = {
     data: null, tab: "home", homeHistory: [], homeRecs: [],
-    queue: [], idx: -1, live: false, seekable: true, shuffle: false, shuffleOrder: null, shufflePos: 0, repeat: "off", rate: 1,
+    queue: [], idx: -1, live: false, seekable: true, shuffle: false, shuffleOrder: null, shufflePos: 0, repeat: "off", rate: 1, eq: "flat",
     scResults: [], scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
     discoverTracks: [], discoverIndex: 0, discoverQuery: "", discoverPointerX: 0, discoverSearched: false,
     dj: readDJState(),
     historyId: "", historyElapsed: 0, historySince: 0, lastHistorySave: 0, lastPlaybackSave: 0, restored: false, stopping: false,
     hideDrm: (() => { try { return localStorage.getItem("ny-hidedrm") === "1"; } catch (e) { return false; } })(),
   };
+  const EQ_PRESETS = {
+    flat: [0, 0, 0, 0, 0], bass: [6, 3, 0, 0, 0], treble: [0, 0, 0, 3, 6],
+    rock: [4, 2, -1, 2, 4], electronic: [5, 1, -2, 3, 5], vocal: [-1, 1, 3, 2, -1], classical: [2, 0, -1, 2, 3],
+  };
+  const EQ_OPTIONS = '<option value="flat">Flat</option><option value="bass">Bass boost</option><option value="treble">Treble</option><option value="rock">Rock</option><option value="electronic">Electronic</option><option value="vocal">Vocal</option><option value="classical">Classical</option>';
   let audio = null, bar = null;
-  let actx = null, analyser = null, vizData = null, vizSource = null, vizRAF = 0;
+  let actx = null, analyser = null, vizData = null, vizSource = null, vizRAF = 0, eqNodes = [];
 
   // ---- the persistent player bar ------------------------------------------
   function ensureBar() {
@@ -95,6 +100,7 @@
       '<button id="ny-repeat" title="Loop: Off (click to change)" aria-label="Loop: Off (click to change)" aria-pressed="false">🔁</button><span id="ny-repeat-state" class="loop-state">Off</span>' +
       '<button id="ny-copy" title="Copy SoundCloud link" aria-label="Copy SoundCloud link">⧉</button>' +
       '<label class="faint small" title="Playback speed">Speed <select id="ny-rate" aria-label="Playback speed"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="1.75">1.75×</option><option value="2">2×</option></select></label>' +
+      '<label class="faint small" title="Equalizer">EQ <select id="ny-eq" aria-label="Equalizer mode">' + EQ_OPTIONS + '</select></label>' +
       '<button id="ny-vol-i" title="Volume">🔊</button><input type="range" id="ny-vol" min="0" max="1" value="1" step="0.05" style="width:70px" aria-label="Volume">' +
       '<button id="ny-close" title="Close player">✕</button>';
     document.body.appendChild(bar);
@@ -127,6 +133,7 @@
     $("#ny-repeat").onclick = () => { M.repeat = M.repeat === "off" ? "one" : M.repeat === "one" ? "all" : "off"; paintBtn(); savePlayback(false, true); };
     $("#ny-copy").onclick = copyCurrentLink;
     $("#ny-rate").onchange = (e) => setPlaybackRate(e.target.value, true);
+    $("#ny-eq").onchange = (e) => setEqualizer(e.target.value, true);
     $("#ny-seek").oninput = (e) => { if (audio.duration && M.seekable && !M.live) audio.currentTime = (e.target.value / 100) * audio.duration; };
     $("#ny-vol").oninput = (e) => { audio.volume = +e.target.value; savePlayback(false, false); };
   }
@@ -140,8 +147,18 @@
         analyser = actx.createAnalyser();
         analyser.fftSize = 256;
         analyser.smoothingTimeConstant = 0.8;
-        vizSource.connect(analyser);
+        eqNodes = [60, 250, 1000, 4000, 10000].map((frequency, i) => {
+          const filter = actx.createBiquadFilter();
+          filter.type = i === 0 ? "lowshelf" : i === 4 ? "highshelf" : "peaking";
+          filter.frequency.value = frequency;
+          if (filter.type === "peaking") filter.Q.value = 0.9;
+          return filter;
+        });
+        let previous = vizSource;
+        eqNodes.forEach((filter) => { previous.connect(filter); previous = filter; });
+        previous.connect(analyser);
         analyser.connect(actx.destination);
+        setEqualizer(M.eq, false);
         vizData = new Uint8Array(analyser.frequencyBinCount);
         // A routed element goes silent if the context suspends (tab switch, heavy WebGL like the 3D galaxy, browser
         // throttling), which stopped the music when moving around the dashboard. Resume whenever that happens.
@@ -193,6 +210,13 @@
       audio.webkitPreservesPitch = true;
     }
     const select = $("#ny-rate"); if (select) select.value = String(rate);
+    if (persist) savePlayback(false, true);
+  }
+  function setEqualizer(mode, persist) {
+    M.eq = Object.prototype.hasOwnProperty.call(EQ_PRESETS, mode) ? mode : "flat";
+    const gains = EQ_PRESETS[M.eq];
+    eqNodes.forEach((filter, i) => filter.gain.setTargetAtTime(gains[i], actx.currentTime, 0.035));
+    const select = $("#ny-eq"); if (select) select.value = M.eq;
     if (persist) savePlayback(false, true);
   }
   function tick() {
@@ -273,6 +297,7 @@
     const body = { queue: M.queue.map(trackForApi), index: M.idx, position: audio.currentTime || 0,
       volume: audio.volume, playing: !audio.paused, shuffle: M.shuffle, repeat: M.repeat,
       rate: audio.playbackRate || M.rate,
+      eq: M.eq,
       history_id: M.historyId, history_seconds: history ? history.seconds : M.historyElapsed, handoff: !!handoff };
     if (!keepalive && Date.now() - M.lastPlaybackSave < 15000) return;
     M.lastPlaybackSave = Date.now();
@@ -294,6 +319,7 @@
       M.queue = state.queue; M.idx = Math.max(0, Math.min(+state.index || 0, M.queue.length - 1));
       M.shuffle = !!state.shuffle; M.repeat = ["off", "all", "one"].includes(state.repeat) ? state.repeat : "off";
       setPlaybackRate(state.rate, false);
+      setEqualizer(state.eq, false);
       M.historyId = state.history_id || ""; M.historyElapsed = Math.max(0, +state.history_seconds || 0); M.historySince = 0;
       const track = M.queue[M.idx]; if (!track) return;
       if (M.shuffle) resetShuffle(M.idx);

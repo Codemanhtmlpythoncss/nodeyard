@@ -35,6 +35,7 @@ AUDIO_EXT = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".ogg": "audio/ogg", "
              ".wav": "audio/wav", ".aiff": "audio/aiff", ".wma": "audio/x-ms-wma"}
 MAX_TRACKS = 3000
 DOWNLOAD_PREFIX = "__nodeyard_downloads__/"
+EQ_MODES = {"flat", "bass", "treble", "rock", "electronic", "vocal", "classical"}
 _live_slots = threading.BoundedSemaphore(2)
 _sc_slots = threading.BoundedSemaphore(3)
 
@@ -228,11 +229,13 @@ class Music:
             return False, "Invalid playback position, volume or speed.", {}
         index = max(0, min(index, len(queue) - 1))
         repeat = body.get("repeat") if body.get("repeat") in ("off", "all", "one") else "off"
+        eq_value = body.get("eq")
+        eq = eq_value if isinstance(eq_value, str) and eq_value in EQ_MODES else "flat"
         try:
             history_seconds = max(0, min(86_400, int(float(body.get("history_seconds") or 0))))
         except (TypeError, ValueError):
             history_seconds = 0
-        state = {"queue": queue, "index": index, "position": position, "volume": volume, "rate": rate,
+        state = {"queue": queue, "index": index, "position": position, "volume": volume, "rate": rate, "eq": eq,
                  "playing": body.get("playing") is True, "shuffle": body.get("shuffle") is True,
                  "repeat": repeat, "history_id": str(body.get("history_id") or "")[:80], "history_seconds": history_seconds,
                  "handoff": body.get("handoff") is True, "updated": time.time()}
