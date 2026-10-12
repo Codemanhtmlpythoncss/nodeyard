@@ -46,7 +46,7 @@
     } catch (e) { return freshState(); }
   }
   const D = readState();
-  const save = () => store.set("desk.v1", JSON.stringify(D));
+  const save = () => store.set("desk.v1", JSON.stringify(D, (k, v) => (k === "weatherBusy" ? undefined : v)));
   const title = (id) => (CATALOG.find((x) => x[0] === id) || [id, id])[1];
   const removeButton = (id) => D.customizing ? html`<span class="desk-move"><button type="button" data-desk="move" data-id="${id}" data-dir="-1" aria-label="Move ${title(id)} earlier" ${D.widgets.indexOf(id) === 0 ? "disabled" : ""}>‹</button><button type="button" data-desk="move" data-id="${id}" data-dir="1" aria-label="Move ${title(id)} later" ${D.widgets.indexOf(id) === D.widgets.length - 1 ? "disabled" : ""}>›</button></span><button class="desk-remove" type="button" data-desk="remove" data-id="${id}" aria-label="Remove ${title(id)}">×</button>` : "";
   function widget(id, body) { return html`<article class="desk-widget" data-widget="${id}" ${D.customizing ? raw('draggable="true"') : ""}><header><h2>${title(id)}</h2>${removeButton(id)}</header><div class="desk-widget-body">${body}</div></article>`; }
@@ -75,7 +75,7 @@
       <div class="desk-chat-status" data-chat="status"></div>
       <form class="desk-chat-form" data-desk-form="chat"><textarea class="input" data-desk-input="chat" rows="2" maxlength="4000" placeholder="Ask anything…" title="Enter sends · Shift+Enter adds a line" aria-label="Message for the AI">${D.chatDraft}</textarea><button class="btn primary" type="submit" data-chat="send">Send</button></form></div>`);
     if (id === "todo") return widget(id, html`<form class="desk-form" data-desk-form="todo"><input class="input" name="task" maxlength="120" placeholder="Add a task…" aria-label="New task"><button class="btn primary" type="submit">Add</button></form><ul class="desk-tasks">${D.tasks.length ? raw(D.tasks.map((t, i) => '<li class="' + (t.done ? 'done' : '') + '"><label><input type="checkbox" data-desk="task-toggle" data-index="' + i + '" ' + (t.done ? 'checked' : '') + '><span>' + esc(t.text) + '</span></label><button type="button" data-desk="task-delete" data-index="' + i + '" aria-label="Delete task">×</button></li>').join("")) : html`<li class="desk-empty">Nothing on the list yet.</li>`}</ul>`);
-    if (id === "weather") return widget(id, html`<div class="desk-form"><input class="input" data-desk-input="location" maxlength="100" value="${D.location}" placeholder="Town or city" aria-label="Weather location"><button class="btn" type="button" data-desk="weather">Get weather</button></div><div class="desk-weather">${D.weatherError ? html`<p class="desk-error">${D.weatherError}</p>` : D.weather ? html`<pre>${D.weather}</pre>` : html`<p class="desk-empty">Choose a location to load the forecast.</p>`}</div>`);
+    if (id === "weather") return widget(id, html`<form class="desk-form" data-desk-form="weather"><input class="input" data-desk-input="location" maxlength="100" value="${D.location}" placeholder="Town or city (or Town, Country)" aria-label="Weather location"><button class="btn" type="submit" data-desk="weather-go">${D.weatherBusy ? "Loading…" : "Get weather"}</button></form><div class="desk-weather" data-weather>${weatherBody()}</div>`);
     if (id === "calendar") return widget(id, calendar());
     if (id === "notes") return widget(id, html`<textarea class="input desk-notes" data-desk-input="notes" maxlength="5000" placeholder="Jot something down…" aria-label="Desk notes">${D.notes}</textarea><div class="desk-note-status">Saved in this browser</div>`);
     if (id === "focus") return widget(id, html`<div class="desk-focus"><div class="desk-focus-time" data-focus-time>${timerText()}</div><div class="desk-muted" data-focus-mode>${D.focus.mode === "focus" ? "Focus" : "Break"}</div><div class="row"><button type="button" class="btn primary" data-desk="focus-toggle">${D.focus.running ? "Pause" : "Start"}</button><button type="button" class="btn" data-desk="focus-reset">Reset</button></div></div>`);
@@ -91,6 +91,19 @@
     if (id === "mascot") { const n = ((D.mascot % mascotLines.length) + mascotLines.length) % mascotLines.length; return widget(id, html`<button type="button" class="desk-mascot" data-desk="mascot" aria-label="Say something encouraging"><span aria-hidden="true">${["🪴", "🦊", "🐸", "🐧", "🐱"][n]}</span><b>${mascotLines[n]}</b><small>Tap me</small></button>`); }
     return "";
   }
+  function weatherBody() {
+    const w = D.wx;
+    if (D.weatherError) return html`<p class="desk-error">${D.weatherError}</p>`;
+    if (!w || !w.now) return html`<p class="desk-empty">${D.weatherBusy ? "Loading the forecast…" : "Choose a place to see the weather. It refreshes itself every half hour."}</p>`;
+    const deg = (v) => (v == null ? "–" : Math.round(v) + "°");
+    const dayName = (d, i) => (i === 0 ? "Today" : new Intl.DateTimeFormat(undefined, { weekday: "short" }).format(new Date(d + "T12:00:00")));
+    const n = w.now;
+    return html`<div class="desk-wx-now"><span class="desk-wx-icon" aria-hidden="true">${n.icon}</span><b>${deg(n.temp)}</b><div><div>${n.desc}</div>
+        <small>Feels ${deg(n.feels)} · 💧 ${n.humidity == null ? "–" : Math.round(n.humidity) + "%"} · 💨 ${n.wind == null ? "–" : Math.round(n.wind) + " km/h"}</small></div></div>
+      <div class="desk-wx-days">${(w.days || []).map((d, i) => html`<div><span>${dayName(d.date, i)}</span><b aria-hidden="true">${d.icon}</b><small>${deg(d.max)} / ${deg(d.min)}</small>${d.rain ? html`<small class="rain">${Math.round(d.rain * 10) / 10} mm</small>` : ""}</div>`)}</div>
+      <p class="desk-muted">${w.place}${w.region ? ", " + w.region : ""} · updated ${new Date((w.fetched || Date.now() / 1000) * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}${w.others && w.others.length ? html` · <span title="${"Also: " + w.others.join("; ")}">not this one? add the country</span>` : ""}</p>`;
+  }
+  function paintWeather() { const el = $('[data-widget="weather"] [data-weather]'); if (el) el.innerHTML = String(weatherBody()); const b = $('[data-widget="weather"] [data-desk="weather-go"]'); if (b) { b.textContent = D.weatherBusy ? "Loading…" : "Get weather"; b.disabled = !!D.weatherBusy; } }
   function timerText() { const left = D.focus.running ? Math.max(0, Math.ceil((D.focus.until - Date.now()) / 1000)) : Math.max(0, +D.focus.remaining || 0); return String(Math.floor(left / 60)).padStart(2, "0") + ":" + String(left % 60).padStart(2, "0"); }
   function countdownText() { const diff = Math.ceil((new Date(D.countdown.date + "T00:00:00") - new Date(new Date().toDateString())) / 86400000); return diff < 0 ? "That date has passed." : diff === 0 ? "Today! 🎉" : diff + " day" + (diff === 1 ? "" : "s") + " to go"; }
   function drawWidgets() {
@@ -123,6 +136,7 @@
     if (CH.busy) paintChatStatus();
     if (now.getSeconds() % 5 === 0) paintSystem();
     if (D.widgets.includes("services") && Date.now() - SV.at > 30000 && !document.hidden) loadServices();
+    if (now.getSeconds() === 30 && weatherStale() && !document.hidden) getWeather(true);
   }
   function updateCluster() {
     const el = $('[data-widget="cluster"]'); if (!el) return;
@@ -135,16 +149,20 @@
   }
   function openPicker() { drawPicker(); $("#desk-picker").hidden = false; $("#desk-picker-backdrop").hidden = false; $("#desk-picker").querySelector("[data-desk=picker-close]").focus(); }
   function closePicker() { const p = $("#desk-picker"); if (p) p.hidden = true; const backdrop = $("#desk-picker-backdrop"); if (backdrop) backdrop.hidden = true; }
-  async function getWeather(btn) {
-    const loc = D.location.trim(); if (!loc) { toast("Enter a town or city first."); $("[data-desk-input=location]")?.focus(); return; }
-    btn.disabled = true; btn.textContent = "Loading…"; D.weatherError = ""; save();
+  async function getWeather(quiet) {
+    const loc = (D.location || "").trim();
+    if (!loc) { if (!quiet) { toast("Enter a town or city first."); $("[data-desk-input=location]")?.focus(); } return; }
+    if (D.weatherBusy) return;
+    D.weatherBusy = true; if (!quiet) D.weatherError = ""; paintWeather();
     try {
-      const r = await postJSON("/api/v1/web/tool", { tool: "Weather", args: { location: loc } });
+      const r = await getJSON("/api/homelab/weather?location=" + encodeURIComponent(loc));
       if (!r.ok) throw new Error(r.error || "Weather is unavailable.");
-      D.weather = r.summary || r.text || "No forecast returned."; D.weatherError = "";
-    } catch (e) { D.weatherError = e.message || "Couldn't load weather."; }
-    save(); drawWidgets(); paintMode();
+      D.wx = r; D.weatherError = ""; D.weather = "";
+    } catch (e) { if (!quiet || !D.wx) D.weatherError = e.message || "Couldn't load the weather."; }
+    D.weatherBusy = false; save(); paintWeather();
   }
+  // the forecast keeps itself fresh while the Desk is open (and when it opens with an old one)
+  const weatherStale = () => D.widgets.includes("weather") && D.location && !D.weatherBusy && (!D.wx || Date.now() / 1000 - (D.wx.fetched || 0) > 1800);
   // ---- music player: drives the dashboard's one shared player (music.js), so playback carries on across pages ----
   const P = { data: null, loading: false, error: "", loadedAt: 0, tracks: null, tracksFor: "" };
   const fmtTime = (s) => (isFinite(s) && s > 0 ? Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0") : "0:00");
@@ -424,7 +442,7 @@
     else if (action === "customize") { D.customizing = !D.customizing; save(); drawWidgets(); paintMode(); }
     else if (action === "add-widget") openPicker();
     else if (action === "task-delete") { D.tasks.splice(+b.dataset.index, 1); save(); drawWidgets(); paintMode(); }
-    else if (action === "weather") getWeather(b);
+    else if (action === "weather") getWeather(false);
     else if (action === "cal-prev" || action === "cal-next") { D.calendarOffset += action === "cal-prev" ? -1 : 1; save(); drawWidgets(); paintMode(); }
     else if (action === "focus-toggle") { if (D.focus.running) { D.focus.remaining = Math.max(0, Math.ceil((D.focus.until - Date.now()) / 1000)); D.focus.running = false; } else { D.focus.until = Date.now() + Math.max(1, D.focus.remaining) * 1000; D.focus.running = true; } save(); drawWidgets(); paintMode(); }
     else if (action === "focus-reset") { D.focus = { mode: "focus", remaining: 1500, running: false, until: 0 }; save(); drawWidgets(); paintMode(); }
@@ -451,6 +469,7 @@
     e.preventDefault(); const data = new FormData(form);
     if (form.dataset.deskForm === "todo") { const text = String(data.get("task") || "").trim(); if (!text) return; D.tasks.push({ text, done: false }); D.tasks = D.tasks.slice(-100); save(); drawWidgets(); paintMode(); $("[data-widget=todo] input[name=task]")?.focus(); }
     else if (form.dataset.deskForm === "chat") sendChat();
+    else if (form.dataset.deskForm === "weather") { D.location = String(data.get("location") || $('[data-desk-input="location"]')?.value || "").trim(); getWeather(false); }
     else if (form.dataset.deskForm === "countdown") { const date = String(data.get("date") || ""), titleText = String(data.get("title") || "").trim(); D.countdown = date ? { date, title: titleText || "Countdown" } : null; save(); drawWidgets(); paintMode(); }
   }
   function change(e) {
@@ -491,6 +510,7 @@
       NY.freshHTML($("#view"), html`<main class="desk-page"><header class="desk-top"><a class="desk-brand" href="#overview">nodeyard <span>desk</span></a><div class="desk-actions"><button type="button" class="btn" data-desk="customize" aria-pressed="${D.customizing}">Arrange</button><button type="button" class="btn primary" data-desk="add-widget">＋ Add widgets</button><button type="button" class="btn" data-desk="overview">Dashboard</button></div></header><section class="desk-hero"><div class="desk-greeting" data-desk-greeting></div><time class="desk-clock" data-desk-time></time><div class="desk-date" data-desk-date></div></section><section class="desk-widgets" id="desk-widgets" aria-label="Desk widgets"></section><div class="desk-foot">Your selected dashboard wallpaper · widgets save in this browser</div><button id="desk-picker-backdrop" class="desk-picker-backdrop" type="button" data-desk="picker-close" aria-label="Close widget picker" hidden></button><section class="desk-picker" id="desk-picker" role="dialog" aria-modal="true" aria-label="Add a widget" hidden></section></main>`);
       CH.targets = (CH.targets || []).some((x) => x.ready) ? CH.targets : null;   // look again if no model was ready last time
       drawWidgets(); paintMode(); tick();
+      if (weatherStale()) getWeather(true);
       if (NY.music && (D.widgets.includes("player") || D.widgets.includes("music"))) NY.music.restore();
     },
     update() { tick(); },

@@ -824,6 +824,17 @@ body.desk-mode #view { min-height: 100%; }
 .desk-empty, .desk-muted { margin: 10px 0 0; color: #ffffffa8; font-size: 12.5px; }
 .desk-error { color: #ffd2d2; }
 .desk-weather pre { max-height: 200px; overflow: auto; white-space: pre-wrap; font: inherit; font-size: 13px; color: #fffffff0; }
+.desk-weather { margin-top: 10px; }
+.desk-wx-now { display: flex; align-items: center; gap: 12px; }
+.desk-wx-icon { font-size: 40px; line-height: 1; filter: drop-shadow(0 4px 10px #0005); }
+.desk-wx-now > b { font-size: 38px; font-weight: 650; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+.desk-wx-now small { color: #ffffffb0; font-size: 12px; }
+.desk-wx-days { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 12px; }
+.desk-wx-days > div { display: grid; justify-items: center; gap: 2px; padding: 8px 4px; border-radius: 12px; background: #ffffff10; text-align: center; }
+.desk-wx-days span { color: #ffffffc0; font-size: 12px; }
+.desk-wx-days b { font-size: 22px; font-weight: 400; }
+.desk-wx-days small { font-size: 12px; font-variant-numeric: tabular-nums; }
+.desk-wx-days small.rain { color: #9cc9ff; font-size: 11px; }
 .desk-calendar { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; text-align: center; font-variant-numeric: tabular-nums; }
 .desk-calendar > span { display: grid; place-items: center; min-height: 25px; color: #ffffffe8; font-size: 12px; }
 .desk-calendar > span:nth-child(-n+7) { color: #ffffff96; font-size: 10px; font-weight: 700; }

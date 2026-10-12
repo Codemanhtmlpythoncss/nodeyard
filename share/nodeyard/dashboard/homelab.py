@@ -259,6 +259,74 @@ def alert_key(a):
     return "%s|%s|%s|%s" % (a.get("kind", ""), a.get("ref", ""), a.get("level", ""), re.sub(r"[\d.,]+", "#", a.get("title", "")))
 
 
+# --------------------------------------------------------------------------- weather (the Desk widget)
+
+WMO = {0: ("Clear", "☀️"), 1: ("Mainly clear", "🌤️"), 2: ("Partly cloudy", "⛅"), 3: ("Overcast", "☁️"), 45: ("Fog", "🌫️"), 48: ("Rime fog", "🌫️"),
+       51: ("Light drizzle", "🌦️"), 53: ("Drizzle", "🌦️"), 55: ("Heavy drizzle", "🌧️"), 56: ("Freezing drizzle", "🌧️"), 57: ("Freezing drizzle", "🌧️"),
+       61: ("Light rain", "🌦️"), 63: ("Rain", "🌧️"), 65: ("Heavy rain", "🌧️"), 66: ("Freezing rain", "🌧️"), 67: ("Freezing rain", "🌧️"),
+       71: ("Light snow", "🌨️"), 73: ("Snow", "🌨️"), 75: ("Heavy snow", "❄️"), 77: ("Snow grains", "🌨️"), 80: ("Light showers", "🌦️"),
+       81: ("Showers", "🌧️"), 82: ("Violent showers", "⛈️"), 85: ("Snow showers", "🌨️"), 86: ("Heavy snow showers", "❄️"),
+       95: ("Thunderstorm", "⛈️"), 96: ("Thunderstorm, hail", "⛈️"), 99: ("Thunderstorm, hail", "⛈️")}
+WEATHER_TTL = 600
+
+
+def _get_json(url, timeout=10):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout) as r:
+        return json.loads(r.read(2 * 1024 * 1024).decode("utf-8"))
+
+
+def weather(location, demo=False):
+    """Now and the next 3 days for a place, from Open-Meteo (free, no key). "Name, Country" picks between places of one name."""
+    loc = re.sub(r"\s+", " ", str(location or "")).strip()[:100]
+    if len(loc) < 2:
+        raise HomelabError("Type a town or city.")
+    if demo:
+        return {"place": loc.split(",")[0].title(), "region": "Demo", "now": {"temp": 14.2, "feels": 12.8, "code": 2, "desc": "Partly cloudy", "icon": "⛅",
+                "humidity": 71, "wind": 18.4, "rain": 0.0, "is_day": True},
+                "days": [{"date": time.strftime("%Y-%m-%d", time.localtime(time.time() + i * 86400)), "min": 9 + i, "max": 15 + i, "code": c,
+                          "desc": WMO[c][0], "icon": WMO[c][1], "rain": r} for i, (c, r) in enumerate(((2, 0.0), (61, 2.4), (0, 0.0)))], "others": []}
+    wanted = [w.strip().lower() for w in loc.split(",")]
+    try:
+        geo = _get_json("https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode({"name": wanted[0], "count": 10, "format": "json"}))
+    except (OSError, ValueError) as e:
+        raise HomelabError("The weather service didn't answer: %s" % _net_error(e), 502)
+    res = geo.get("results") or []
+    if not res:
+        raise HomelabError("Couldn't find a place called \u201c%s\u201d." % loc, 404)
+
+    def score(r):
+        where = " ".join(str(r.get(k, "")) for k in ("admin1", "admin2", "country", "country_code")).lower()
+        # a hint after the comma first, then an exact name, then a country or island (Jersey the island over a village), then size
+        return (sum(1 for w in wanted[1:] if w and w in where), r.get("name", "").lower() == wanted[0],
+                str(r.get("feature_code", "")).startswith("PCL"), r.get("population") or 0)
+    res.sort(key=score, reverse=True)
+    pick = res[0]
+    try:
+        j = _get_json("https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode({
+            "latitude": pick["latitude"], "longitude": pick["longitude"], "timezone": "auto", "forecast_days": 3,
+            "current": "temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,precipitation,weather_code,is_day",
+            "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code"}))
+    except (OSError, ValueError) as e:
+        raise HomelabError("The weather service didn't answer: %s" % _net_error(e), 502)
+    c, d = j.get("current") or {}, j.get("daily") or {}
+    code = c.get("weather_code")
+    days = []
+    for i, day in enumerate(d.get("time") or []):
+        dc = (d.get("weather_code") or [None] * 3)[i]
+        days.append({"date": day, "min": (d.get("temperature_2m_min") or [None] * 3)[i], "max": (d.get("temperature_2m_max") or [None] * 3)[i],
+                     "rain": (d.get("precipitation_sum") or [None] * 3)[i], "code": dc, "desc": WMO.get(dc, ("", ""))[0], "icon": WMO.get(dc, ("", "🌡️"))[1]})
+    icon = WMO.get(code, ("", "🌡️"))[1]
+    if code in (0, 1) and c.get("is_day") == 0:
+        icon = "🌙"
+    return {"place": pick.get("name", loc), "region": ", ".join(x for x in (pick.get("admin1"), pick.get("country")) if x and x != pick.get("name")),
+            "now": {"temp": c.get("temperature_2m"), "feels": c.get("apparent_temperature"), "humidity": c.get("relative_humidity_2m"),
+                    "wind": c.get("wind_speed_10m"), "rain": c.get("precipitation"), "code": code, "desc": WMO.get(code, ("", ""))[0], "icon": icon,
+                    "is_day": c.get("is_day") != 0},
+            "days": days,
+            "others": ["%s, %s" % (r.get("name", ""), r.get("country") or r.get("admin1") or "") for r in res[1:4]] if len(wanted) == 1 else []}
+
+
 # --------------------------------------------------------------------------- the store
 
 class Homelab:
@@ -972,6 +1040,27 @@ def register(ctx, args):
         "/api/v1/metrics": metrics,
         "/api/v1/services": wrap(lambda h, q: {"services": hl.services()}),   # (for `nodeyard services` and scripts, with the API key)
     })
+    wcache, wlock = {}, threading.Lock()
+
+    def weather_route(h, q):
+        loc = q.get("location", [""])[0]
+        key = loc.strip().lower()
+        with wlock:
+            hit = wcache.get(key)
+        if hit and time.time() - hit[0] < WEATHER_TTL:
+            return h._json(dict(hit[1], ok=True, cached=True))
+        try:
+            data = weather(loc, demo=demo)
+        except HomelabError as e:
+            return h._json({"ok": False, "error": str(e)}, e.code)
+        data["fetched"] = int(time.time())
+        with wlock:
+            if len(wcache) > 50:
+                wcache.clear()
+            wcache[key] = (time.time(), data)
+        return h._json(dict(data, ok=True))
+
+    ctx.get_routes["/api/homelab/weather"] = weather_route
     ctx.post_routes.update({
         "/api/homelab/service": wrap(lambda h, b: {"service": hl.update_service(b) if b.get("id") else hl.add_service(b)}),
         "/api/homelab/service-delete": wrap(lambda h, b: (hl.delete_service(str(b.get("id") or "")), {})[1]),
