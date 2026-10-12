@@ -119,10 +119,14 @@
     const s = T.settings;
     if (!s) return setHTML(el, html`<div class="card"><div class="empty"><div class="spin"></div>Loading settings…</div></div>`);
     const theme = store.get("theme", "auto"), bg = s.background;
+    const appearance = window.NodeyardWindowAppearance ? window.NodeyardWindowAppearance.read() : { transparency: 45, allTransparent: false };
     const d = s.chat_defaults || {};
     const gateNets = s.gate ? s.gate.trusted.join("\n") : "127.0.0.0/8\n10.0.0.0/8\n172.16.0.0/12\n192.168.0.0/16\n100.64.0.0/10\n::1/128\nfc00::/7\nfd7a:115c:a1e0::/48";
     NY.freshHTML(el, html`${s.demo ? html`<div class="banner">Demo: changes here aren't saved anywhere.</div>` : ""}
       ${themeCard(theme)}
+      ${card("Window appearance", html`<p class="muted small" style="margin-top:0">Saved in this browser and applied across the Nodeyard dashboard, Music and AI Galaxy.</p>
+        ${field(html`Window transparency <b id="st-window-alpha-v">${appearance.transparency}%</b>`, html`<input type="range" id="st-window-alpha" min="0" max="85" step="5" value="${appearance.transparency}" class="range">`, "Choose the transparency level, then turn on the switch to apply it to every window.")}
+        <label class="check"><input type="checkbox" id="st-all-windows-transparent" ${appearance.allTransparent ? raw("checked") : ""}> <span>All windows transparent</span></label>`)}
       ${card("Update", html`<p class="muted small" style="margin-top:0">Update nodeyard (the dashboard and its dependencies), <span class="mono">sc-pick</span>, and the audio/download tools (ffmpeg, PulseAudio, yt-dlp), then restart the dashboard on the new version. Runs on the server.</p>
         <button class="btn primary" data-st="update-all">Update everything</button>
         <span id="st-update-msg" class="small faint" style="margin-left:10px"></span>`)}
@@ -334,6 +338,10 @@
   });
   document.addEventListener("change", async (e) => {
     if (e.target.id === "st-chat-nolimit") { $("#st-chat-max").disabled = e.target.checked; return; }
+    if (e.target.id === "st-all-windows-transparent") {
+      if (window.NodeyardWindowAppearance) window.NodeyardWindowAppearance.setAllTransparent(e.target.checked);
+      return;
+    }
     if (e.target.id !== "st-bg-file") return;
     const f = e.target.files && e.target.files[0]; if (!f) return;
     const video = /^video\/(mp4|webm)$/.test(f.type);
@@ -359,6 +367,11 @@
   let styleTimer = null;
   document.addEventListener("input", (e) => {
     if (e.target.id === "st-chat-temp") { $("#st-chat-temp-v").textContent = e.target.value; return; }
+    if (e.target.id === "st-window-alpha") {
+      if (window.NodeyardWindowAppearance) window.NodeyardWindowAppearance.setTransparency(e.target.value);
+      const value = $("#st-window-alpha-v"); if (value) value.textContent = e.target.value + "%";
+      return;
+    }
     if (e.target.id !== "st-blur" && e.target.id !== "st-dim") return;
     const s = T.settings; if (!s || !s.background) return;
     const blur = +$("#st-blur").value, dim = +$("#st-dim").value;
