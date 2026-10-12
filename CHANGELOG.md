@@ -29,6 +29,12 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   up while it tours unless you hide them (H, or Tab › Panels), and the tour can be set to stay on the overview.
 - The galaxy screens say "k3s nodes" and "nodes" where the original said Proxmox's "PVE".
 - The Mac app's galaxy shows the 2D Universe page (and says why) when the cluster's dashboard is too old for the 3D one.
+- **Music player and audio forwarding** (optional, new **Music** page), all streamed by the server so a browser only
+  needs the dashboard. Point it at a folder of music on the host and it lists and plays the files, with a persistent
+  player bar (play/pause, seek, volume, next/prev) that stays as you move around the dashboard; seeking works over HTTP
+  Range, and every served path is checked to be inside that folder. Live audio forwarding (opt-in) captures the host's
+  own audio output with ffmpeg and streams it to the browser as live MP3 — pick the capture source; it shows why it's
+  unavailable when the host has no ffmpeg or capture device.
 - **Register your own self-hosted APIs** (new **APIs** page in the dashboard). Add search engines (SearXNG, Whoogle,
   your own) and plain REST endpoints; the dashboard calls them for you (so a client only needs the dashboard) and the
   AI chat gets one tool per API. You set the exact base URL, and that host is the only one ever contacted — the model

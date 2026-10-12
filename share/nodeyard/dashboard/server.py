@@ -586,6 +586,8 @@ def main():
     terminal.register(ctx, a)
     import apiregistry   # the user's own self-hosted APIs (search + REST), as AI tools and dashboard UI
     apiregistry.register(ctx, a)
+    import music         # optional: a folder music player and host-audio forwarding, both streamed server-side
+    music.register(ctx, a)
     import galaxy3d      # the 3D galaxy screens (/g3/), fed from k3s
     galaxy3d.register(ctx, a)
     import selfupdate    # restarts on the new program after an update (the page files are already new)
