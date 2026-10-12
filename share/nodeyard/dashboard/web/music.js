@@ -681,7 +681,7 @@
   function likeBtn(t) {
     const liked = M.scLikes.some((x) => x.url === t.url);
     return html`<button class="btn small" data-music="sc-like" data-key="${t.url}" title="${liked ? "Unlike" : "Like"}">${liked ? "♥" : "♡"}</button>
-      <button class="btn small" data-music="sc-dl" data-key="${t.url}" title="Download to the music folder">⬇</button>`;
+      <button class="btn small" data-music="sc-dl" data-key="${t.url}" title="Download to Nodeyard Music">⬇</button>`;
   }
 
   function renderPlaylists(el) {
@@ -756,7 +756,7 @@
           ${raw('<select class="select mt" data-music="fw-source">' + srcOpts + "</select>")}</details>
         <div id="fw-test-out" class="small mt"></div>`;
     setHTML(el, html`
-      ${card("Music folder", html`<p class="muted small" style="margin-top:0">The server plays audio files from one folder on the host (the control node, not your Mac). Everyone signed in can listen.</p>
+      ${card("Music folder", html`<p class="muted small" style="margin-top:0">The server plays audio files from one folder on the host (the control node, not your Mac). Everyone signed in can listen. Downloads from this page go into the private Downloads folder in your library.</p>
         <div class="row" style="gap:8px"><input class="input" data-music="dir" value="${d.dir || ""}" placeholder="/home/your-user/Music/soundcloud" spellcheck="false" style="flex:1">
           <button class="btn" data-music="browse">Browse…</button><button class="btn primary" data-music="save-dir">Save</button></div>`)}
       ${card("Recently played cache", html`<p class="muted small" style="margin-top:0">Played SoundCloud songs stay in a private cache folder so they load faster next time. When full, the oldest song is removed.</p>
@@ -925,7 +925,7 @@
     else if (act === "sc-dl") {
       toast("Downloading to the music folder…");
       const r = await postJSON("/api/music/sc-download", { url: t.dataset.key });
-      toast(r.ok ? "Saved to the music folder." : (r.error || "Download failed."));
+      toast(r.ok ? (r.text || "Saved to Nodeyard Music.") : (r.error || "Download failed."));
     }
     else if (act === "add") { const tr = findTrack(t.dataset.key); if (tr) openAddPicker(tr); }
     else if (act === "pk-cancel") closeAddPicker();

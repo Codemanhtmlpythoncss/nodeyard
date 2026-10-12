@@ -31,6 +31,7 @@ AUDIO_EXT = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".ogg": "audio/ogg", "
              ".opus": "audio/ogg", ".m4a": "audio/mp4", ".mp4": "audio/mp4", ".aac": "audio/aac",
              ".wav": "audio/wav", ".aiff": "audio/aiff", ".wma": "audio/x-ms-wma"}
 MAX_TRACKS = 3000
+DOWNLOAD_PREFIX = "__nodeyard_downloads__/"
 _live_slots = threading.BoundedSemaphore(2)
 _sc_slots = threading.BoundedSemaphore(3)
 
@@ -115,6 +116,9 @@ class Music:
 
     def cache_dir(self):
         return os.path.join(os.path.dirname(self.path), "music-cache")
+
+    def download_dir(self):
+        return os.path.join(os.path.dirname(self.path), "music-downloads")
 
     def cache_limit(self):
         try:
@@ -372,34 +376,43 @@ class Music:
 
     def tracks(self):
         base = self._base()
-        if not base or not os.path.isdir(base):
-            return []
         out = []
-        for root, dirs, files in os.walk(base):
-            depth = root[len(base):].count(os.sep)
-            if depth >= 5:
-                dirs[:] = []
-                continue
-            dirs.sort()
-            for name in sorted(files):
-                ext = os.path.splitext(name)[1].lower()
-                if ext not in AUDIO_EXT:
+        roots = [(base, "")] if base and os.path.isdir(base) else []
+        downloaded = self.download_dir()
+        if os.path.isdir(downloaded):
+            roots.append((downloaded, DOWNLOAD_PREFIX))
+        for library, prefix in roots:
+            for root, dirs, files in os.walk(library):
+                depth = root[len(library):].count(os.sep)
+                if depth >= 5:
+                    dirs[:] = []
                     continue
-                full = os.path.join(root, name)
-                rel = os.path.relpath(full, base)
-                try:
-                    size = os.path.getsize(full)
-                except OSError:
-                    continue
-                folder = os.path.dirname(rel)
-                out.append({"path": rel, "name": os.path.splitext(name)[0], "folder": folder, "size": size})
-                if len(out) >= MAX_TRACKS:
-                    return out
+                dirs.sort()
+                for name in sorted(files):
+                    ext = os.path.splitext(name)[1].lower()
+                    if ext not in AUDIO_EXT:
+                        continue
+                    full = os.path.join(root, name)
+                    rel = os.path.relpath(full, library)
+                    try:
+                        size = os.path.getsize(full)
+                    except OSError:
+                        continue
+                    folder = os.path.dirname(rel)
+                    if prefix:
+                        folder = os.path.join("Downloads", folder) if folder else "Downloads"
+                    out.append({"path": prefix + rel, "name": os.path.splitext(name)[0], "folder": folder, "size": size})
+                    if len(out) >= MAX_TRACKS:
+                        return out
         return out
 
     def resolve(self, rel):
         """The absolute path for a track, only if it is a real audio file inside the configured folder."""
+        rel = str(rel or "")
         base = self._base()
+        if rel.startswith(DOWNLOAD_PREFIX):
+            base = self.download_dir()
+            rel = rel[len(DOWNLOAD_PREFIX):]
         if not base or not rel or ".." in rel.split("/"):
             return None
         full = os.path.realpath(os.path.join(base, rel.lstrip("/")))
@@ -749,9 +762,11 @@ class Music:
         yt = self.yt_dlp()
         if not yt:
             return False, "yt-dlp isn't installed (Settings → Update everything)."
-        base = self._base()
-        if not base or not os.path.isdir(base):
-            return False, "Set a music folder first (in Settings)."
+        base = self.download_dir()
+        try:
+            os.makedirs(base, mode=0o700, exist_ok=True)
+        except OSError as e:
+            return False, "Couldn't open Nodeyard's writable music downloads folder: %s" % e
         archive = os.path.join(base, ".sc-archive.txt")
         out = os.path.join(base, "%(uploader|Unknown Artist)s - %(title).200B [%(id)s].%(ext)s")
         cmd = [yt, "-q", "--no-warnings", "--no-playlist", "-f", "bestaudio/best", "--no-overwrites",
@@ -767,7 +782,7 @@ class Music:
             return False, "Couldn't run yt-dlp: %s" % e
         tail = "\n".join((p.stdout or "").strip().splitlines()[-6:])
         if p.returncode == 0:
-            return True, tail or "Saved to the music folder."
+            return True, "Saved in Music → Library → Downloads." + (("\n" + tail) if tail else "")
         return False, tail or "Download failed."
 
     def sc_playlist(self, url):
