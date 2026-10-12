@@ -171,11 +171,18 @@
   }
   function closeStream() { if (es) { es.close(); es = null; } }
   async function start() {
-    try { const h = await getJSON("/api/history?points=720"); if (h.ok) S.hist = h.points; } catch (e) { /* the chart fills in as data arrives */ }
+    await loadHistory();
     try { await load(); } finally {   // live updates start even if the first drawing failed
       connectStream();
       schedule();
     }
+  }
+  // Only as much history as the chosen chart range shows (at the fastest 2 s reads); more is fetched if it grows.
+  const historyFor = (range) => Math.min(720, Math.ceil(range / 2) + 10);
+  async function loadHistory() {
+    const want = historyFor(S.range);
+    if (S.histPoints >= want) return;
+    try { const h = await getJSON("/api/history?points=" + want); if (h.ok) { S.hist = h.points; S.histPoints = want; } } catch (e) { /* the chart fills in as data arrives */ }
   }
   function schedule() {
     clearTimeout(S.timer);
@@ -1111,7 +1118,7 @@
     if (t.closest("[data-mobile-signout]")) { $("#signout").click(); return; }
     if ((el = t.closest("[data-copy]"))) { e.preventDefault(); e.stopPropagation(); copyText(el.dataset.copy); return; }
     if ((el = t.closest("[data-act]"))) { e.preventDefault(); act(el.dataset.act, el); return; }
-    if ((el = t.closest("[data-set]"))) { const [p, v] = el.dataset.set.split(":"); if (p === "range") { S.range = +v; store.set("range", v); } else setPath(p, v); if (S.d) { V[S.view].update(); updateDrawer(false); } syncControls(); return; }
+    if ((el = t.closest("[data-set]"))) { const [p, v] = el.dataset.set.split(":"); if (p === "range") { S.range = +v; store.set("range", v); if (historyFor(S.range) > (S.histPoints || 0)) loadHistory().then(() => { if (S.d) V[S.view].update(); }); } else setPath(p, v); if (S.d) { V[S.view].update(); updateDrawer(false); } syncControls(); return; }
     if ((el = t.closest("th[data-sort]"))) { const [id, k] = el.dataset.sort.split("|"), st = S.sort[id] || (S.sort[id] = { k, dir: 1 }); if (st.k === k) st.dir = -st.dir; else { st.k = k; st.dir = 1; } V[S.view].update(); updateDrawer(false); return; }
     if ((el = t.closest("[data-open]"))) { e.preventDefault(); closeModals(); openDrawer(el.dataset.open); return; }
     if ((el = t.closest("[data-goto]"))) { const [view, qs] = el.dataset.goto.split("?"); const o = {}; if (qs) qs.split("&").forEach((kv2) => { const [k, v] = kv2.split("="); o[k] = decodeURIComponent(v); }); go(view, o); return; }

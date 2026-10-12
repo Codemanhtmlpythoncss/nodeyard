@@ -165,11 +165,21 @@ def _gpu_mem(n):
     return sum(x["mem_used"] for x in g) if g else None
 
 
+def _r(v, digits):
+    """Rounded for the charts: full float precision tripled the size of the history the page downloads."""
+    if v is None:
+        return None
+    try:
+        return round(v, digits) if digits else int(round(v))
+    except (TypeError, ValueError):
+        return None
+
+
 def sample(state, t):
     return {
-        "t": t, "pods": sum(1 for p in state["pods"] if p["status"] == "Running"),
-        "nodes": {n["name"]: [n["cpu_used"], n["mem_used"], n["net_rx_rate"], n["net_tx_rate"],
-                              (n.get("hw") or {}).get("temp_c"), (n.get("hw") or {}).get("freq_mhz"), ((n.get("hw") or {}).get("load") or [None])[0],
-                              _gpu_use(n), _gpu_mem(n), n.get("disk_used")]
+        "t": round(t, 2), "pods": sum(1 for p in state["pods"] if p["status"] == "Running"),
+        "nodes": {n["name"]: [_r(n["cpu_used"], 3), _r(n["mem_used"], 0), _r(n["net_rx_rate"], 0), _r(n["net_tx_rate"], 0),
+                              _r((n.get("hw") or {}).get("temp_c"), 1), _r((n.get("hw") or {}).get("freq_mhz"), 0), _r(((n.get("hw") or {}).get("load") or [None])[0], 2),
+                              _r(_gpu_use(n), 1), _r(_gpu_mem(n), 0), _r(n.get("disk_used"), 0)]
                   for n in state["nodes"]},
     }
