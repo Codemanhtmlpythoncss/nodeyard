@@ -264,7 +264,7 @@
   U.hooks.push(() => {
     if (!S.res) return;
     const alerts = S.res.alerts || [];
-    const down = alerts.filter((a) => a.kind === "monitor" && a.level === "critical" && / is down$/.test(a.title)).length;
+    const down = S.res.monitor ? S.res.monitor.down : 0;
     ["#nav-n-services", "#mobile-n-services"].forEach((sel) => { const el = $(sel); if (el) { el.textContent = down || ""; el.className = "n " + (down ? "bad" : ""); } });
     const crit = new Map(alerts.filter((a) => a.level === "critical").map((a) => [a.kind + "|" + a.ref + "|" + a.title.replace(/[\d.,]+/g, "#"), a]));
     if (known === null) { known = new Set(crit.keys()); return; }

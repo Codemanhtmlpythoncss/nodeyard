@@ -16,6 +16,7 @@ ny_cmd "dashboard https" dashboard_https_cmd "Dashboard" "A secure https:// addr
 ny_cmd "dashboard agent install" dashboard_agent_install_cmd "Dashboard" "Run the read-only node agent on every node (processes, CPU clocks, temperatures)" dashboard
 ny_cmd "dashboard agent remove" dashboard_agent_remove_cmd "Dashboard" "Remove the node agents" dashboard
 ny_cmd "dashboard agent status" dashboard_agent_status_cmd "Dashboard" "Show the node agents" dashboard
+ny_cmd "services" dashboard_services_cmd "Dashboard" "Show the service monitor: which of your watched services are up" dashboard json
 
 DASH_UNIT="nodeyard-dashboard"
 
@@ -829,6 +830,56 @@ dashboard_run_cmd() {
         local rc=$?
         [[ "$rc" -eq 130 || "$rc" -eq 143 ]] || ny_die "The dashboard stopped with an error (exit ${rc})." "See the message above."
     }
+    return 0
+}
+
+dashboard_services_cmd_help() {
+    cat <<'HELP'
+Usage: nodeyard services [--json]
+
+  Lists the services the dashboard watches (add them on its Services page) with their status,
+  latency and uptime over the last 24 hours. It asks the dashboard running on this machine,
+  using the server API key, so run it with sudo.
+HELP
+}
+
+# dashboard_services_cmd -- the service monitor's view, from the running dashboard
+dashboard_services_cmd() {
+    [[ $# -eq 0 ]] || ny_usage_error "Unexpected argument: $1"
+    ny_deps_ensure "the service list" curl python3
+    dashboard_is_active || ny_die "The dashboard isn't running." "Start it with: sudo nodeyard dashboard start" "$NY_E_PRECONDITION"
+    ny_secret_exists "$DASH_AI_KEY" || ny_die "There is no server API key yet." "Create one with: sudo nodeyard ai key --rotate" "$NY_E_PRECONDITION"
+    local port out
+    port="$(dashboard_unit_value port)"
+    port="${port:-$DASH_DEFAULT_PORT}"
+    # (the key goes to curl on stdin, never on a command line other users could read in ps)
+    out="$(printf 'header = "Authorization: Bearer %s"\n' "$(ny_secret_get "$DASH_AI_KEY")" |
+        curl -fsS --max-time 15 -K - "http://127.0.0.1:${port}/api/v1/services" 2>/dev/null)" ||
+        ny_die "The dashboard didn't answer." "Check it with: nodeyard dashboard status. An older dashboard has no service monitor: update nodeyard." "$NY_E_PRECONDITION"
+    if [[ "$NY_JSON" -eq 1 ]]; then
+        ny_json_out "$out"
+        return 0
+    fi
+    printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+rows = d.get("services") or []
+if not rows:
+    print("No services are watched yet. Add them on the dashboard'"'"'s Services page.")
+    sys.exit(0)
+order = {"down": 0, "degraded": 1, "pending": 2, "up": 3, "paused": 4}
+rows.sort(key=lambda s: (order.get(s["status"], 5), s["name"].lower()))
+w = max(len(s["name"]) for s in rows)
+for s in rows:
+    last = s.get("last") or {}
+    ms = ("%.0f ms" % last["ms"]) if s["status"] == "up" and last.get("ms") is not None else ""
+    up = ("%.2f%%" % s["uptime"]) if s.get("uptime") is not None else "-"
+    note = last.get("error", "") if s["status"] not in ("up", "paused") else ""
+    print("%-8s %-*s  %-5s %8s  %8s  %s%s" % (s["status"].upper(), w, s["name"], s["kind"], ms, up, s["target"], ("  (" + note + ")") if note else ""))
+up = sum(1 for s in rows if s["status"] == "up")
+active = sum(1 for s in rows if s["status"] != "paused")
+print("\n%d of %d services up." % (up, active))
+'
     return 0
 }
 

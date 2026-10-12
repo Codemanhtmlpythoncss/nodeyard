@@ -401,6 +401,21 @@ class Homelab:
                 good[i] += 1 if x[1] else 0
         return [round(good[i] / total[i], 3) if total[i] else None for i in range(n)]
 
+    def summary(self):
+        """Counts for the live page state (cheap: no history is read)."""
+        with self.lock:
+            out = {"total": len(self.cfg["services"]), "up": 0, "down": 0, "paused": 0}
+            for s in self.cfg["services"]:
+                live = self.live.get(s["id"], {})
+                last = live.get("last")
+                if s.get("paused"):
+                    out["paused"] += 1
+                elif last is not None and last.get("ok"):
+                    out["up"] += 1
+                elif last is not None and live.get("fails", 0) >= 2:
+                    out["down"] += 1
+            return out
+
     def add_service(self, body):
         with self.lock:
             if len(self.cfg["services"]) >= MAX_SERVICES:
@@ -955,6 +970,7 @@ def register(ctx, args):
         "/api/homelab/suggestions": wrap(lambda h, q: {"suggestions": hl.suggestions()}),
         "/api/homelab/export": lambda h, q: h._json(hl.export(), extra={"Content-Disposition": 'attachment; filename="nodeyard-homelab.json"'}),
         "/api/v1/metrics": metrics,
+        "/api/v1/services": wrap(lambda h, q: {"services": hl.services()}),   # (for `nodeyard services` and scripts, with the API key)
     })
     ctx.post_routes.update({
         "/api/homelab/service": wrap(lambda h, b: {"service": hl.update_service(b) if b.get("id") else hl.add_service(b)}),

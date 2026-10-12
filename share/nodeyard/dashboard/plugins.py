@@ -47,7 +47,7 @@ PLUGINS = [
      ["dashboard", "Mac app"], "full shell (you type every command; node shells can be root)", True, ["/api/term/"], []),
     ("homelab", "Homelab tools", "Watches your services (HTTP, TCP, ping) with uptime and certificate expiry, sends alerts to your own webhook, "
      "wakes machines with Wake-on-LAN, runs network diagnostics from this server and serves Prometheus metrics.",
-     ["dashboard", "Prometheus"], "checks addresses you add; sends only to the webhook you set", True, ["/api/homelab/", "/api/v1/metrics"], []),
+     ["dashboard", "Prometheus"], "checks addresses you add; sends only to the webhook you set", True, ["/api/homelab/", "/api/v1/metrics", "/api/v1/services"], []),
     ("devices", "Device connections", "Finds each machine's Wi-Fi/LAN and Tailscale addresses and checks them; per-device overrides.",
      ["dashboard", "Mac app"], "read-only checks; settings change only how devices are reached", True, ["/api/devices/"], []),
     ("models", "Model management", "Downloads, runs, switches, unloads and deletes models (split llama.cpp and Ollama), and automatic unloading.",

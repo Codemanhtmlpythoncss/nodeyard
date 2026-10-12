@@ -7,6 +7,42 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ## [Unreleased]
 
+### Added
+
+- **Services page: a monitor for your own services.** Add HTTP(S), TCP and ping checks (with expected status codes,
+  a required word on the page, groups and how often to check). Each shows 24 hours of uptime bars, latency, the last
+  error and, for HTTPS, days until the certificate expires. History survives restarts. A service that fails twice in
+  a row, or a certificate within 14 days of expiry, becomes an alert. **Suggest** offers the cluster's NodePort,
+  LoadBalancer and Ingress addresses; **Export** and **Import** back the list up. The Overview gains a Services card
+  and the menu shows how many are down. `nodeyard services` lists them in a terminal.
+- **Notifications** to your own webhook: ntfy, Discord, Slack/Mattermost, Gotify or plain JSON. An alert is sent once
+  it has lasted a minute, a flap that clears and returns within 15 minutes stays quiet, many at once arrive as one
+  message, and clearing is announced too. Send a test and see recent deliveries. Optional desktop notifications for
+  new critical alerts while a dashboard tab is in the background.
+- **Tools page:** ping, DNS lookup, port check, HTTP check (status, redirect, server, certificate) and traceroute, all
+  run from the server; **Wake-on-LAN** with saved machines; and **Prometheus metrics** at `/api/v1/metrics` (nodes,
+  pods, workloads, alerts and the service monitor; the server API key is the bearer token).
+- New alerts: a disk that will be full within a day at its current rate, and a Kubernetes Service with no ready pods.
+- **Desk:** a Music player (play/pause, previous/next, seek, shuffle, volume, sleep timer, and songs from your likes,
+  library or playlists), a compact AI chat that streams answers while the music keeps playing (stop, copy, and a
+  notice when an answer is cut off), Services and System load widgets, and moving widgets with arrows or by dragging
+  in Arrange mode. Existing desks get the player and chat once; their layout and data are kept.
+- **Music:** lock-screen, media-key and headphone controls; a sleep timer (15, 30 or 60 minutes or the end of the
+  song); a working mute button; and keys on Music and Desk (Space play/pause, arrows skip 10 s, Shift+arrows change
+  song, m mutes).
+- The dashboard can be added to a phone's home screen as an app (icon, name and shortcuts).
+
+### Changed
+
+- **Faster pages over Tailscale:** page files are kept in memory with an ETag (an unchanged file is a 304 with no
+  body) and sent gzip-compressed (the main script drops from about 104 KB to 29 KB); large API answers and the live
+  update stream are compressed too, and every open dashboard shares one encoded copy of each update.
+- `/api/health` also says how old the cluster data is, for outside uptime monitors (still no sign-in, and nothing
+  about the cluster).
+- Responses carry a Permissions-Policy (only the microphone, for voice chat) and no longer name the Python version.
+- The Music player bar fits phones and mid-size windows, and sits at the bottom on the Desk.
+- The keyboard help lists the number-key pages correctly.
+
 ### Fixed
 
 - **An update now runs the new dashboard.** `install.sh` and `nodeyard update` replaced the files but left the old

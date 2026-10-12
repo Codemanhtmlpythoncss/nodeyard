@@ -172,6 +172,9 @@ def state_response(srv, with_agents=False):
                  "interval": srv.store.interval, "now": time.time(), "host": socket.gethostname()})
     if srv.mode != "demo" and getattr(srv, "port", None):
         snap["https_url"] = tsserve.https_url(srv.port)
+    hl = getattr(srv, "homelab", None)
+    if hl is not None:   # the service monitor's counts, for the Overview and the Services badge
+        snap["monitor"] = hl.summary()
     su = getattr(srv, "selfupdate", None)
     if su is not None:   # the page reloads itself when this changes, and shows a pending update
         snap.update({"build": su.build, "update_pending": su.pending_since is not None})

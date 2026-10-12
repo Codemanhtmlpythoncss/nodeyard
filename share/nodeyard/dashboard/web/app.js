@@ -276,7 +276,8 @@
         ${gpuKpi(t, kpi)}
         ${kpi("Network", html`↓ ${fmt.rate(t.net_rx_rate)}`, "↑ " + fmt.rate(t.net_tx_rate) + " · all nodes", null, spark(rxS, { color: "var(--accent2)" }))}
         ${kpi("Workloads", html`${d.workloads.length}<small> · ${healthyW} healthy</small>`, plural(d.namespaces.length, "namespace") + " · " + plural(d.services.length, "service") + " · " + plural(nodePorts, "NodePort"), null)}
-        ${kpi("Restarts", t.restarts, d.pods.filter((p) => p.restarts > 0).length + " pods have restarted", null)}`);
+        ${kpi("Restarts", t.restarts, d.pods.filter((p) => p.restarts > 0).length + " pods have restarted", null)}
+        ${(() => { const m = S.res.monitor, active = m ? m.total - m.paused : 0; return m && m.total ? kpi("Services", html`${m.up}<small> / ${active} up</small>`, html`<a href="#services">${m.down ? plural(m.down, "service") + " down" : active - m.up ? "Checking " + (active - m.up) : "All answering"}</a>`, donut(frac(m.up, active), { color: m.down ? "var(--bad)" : "var(--good)" })) : ""; })()}`);
 
       const cpu = nodeSeries(0), mem = nodeSeries(1), nodeLeg = legend(cpu.series);
       const rx = sumSeries(2), tx = sumSeries(3), pts = histPts(), ts = pts.map((p) => p.t);
