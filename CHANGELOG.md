@@ -22,7 +22,7 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 - **Tools page:** ping, DNS lookup, port check, HTTP check (status, redirect, server, certificate) and traceroute, all
   run from the server; **Wake-on-LAN** with saved machines; and **Prometheus metrics** at `/api/v1/metrics` (nodes,
   pods, workloads, alerts and the service monitor; the server API key is the bearer token).
-- New alerts: a disk that will be full within a day at its current rate, and a Kubernetes Service with no ready pods.
+- New alert: a disk that will be full within a day at its current rate.
 - **Desk:** a Music player (play/pause, previous/next, seek, shuffle, volume, sleep timer, and songs from your likes,
   library or playlists), a compact AI chat that streams answers while the music keeps playing (stop, copy, and a
   notice when an answer is cut off), Services and System load widgets, and moving widgets with arrows or by dragging
