@@ -198,10 +198,10 @@
     const dur = t.duration_ms ? fmtTime(t.duration_ms / 1000) : (t.size ? (t.size / 1048576).toFixed(1) + " MB" : "");
     const playing = isPlaying(t);
     return html`<div class="sc-row">
-      <button class="sc-pbtn ${playing ? "" : "ghost"}" data-play='${esc(onplay)}' title="Play">${playing ? "⏸" : "▶"}</button>
-      <div class="meta"><div><b>${esc(titleOf(t))}</b></div><div class="faint small">${esc(subOf(t))}${dur ? " · " + dur : ""}</div></div>
+      <button class="sc-pbtn ${playing ? "" : "ghost"}" data-play="${onplay}" title="Play">${playing ? "⏸" : "▶"}</button>
+      <div class="meta"><div><b>${titleOf(t)}</b></div><div class="faint small">${subOf(t)}${dur ? " · " + dur : ""}</div></div>
       ${extra || ""}
-      <button class="btn small" data-music="add" data-key="${esc(trackKey(t))}" title="Add to a playlist">＋</button>
+      <button class="btn small" data-music="add" data-key="${trackKey(t)}" title="Add to a playlist">＋</button>
     </div>`;
   }
 
@@ -236,7 +236,7 @@
     const sc = (M.data || {}).sc || {};
     const setBody = M.scSet
       ? html`<div class="row" style="justify-content:space-between;align-items:center;margin-top:4px">
-          <b>${esc(M.scSet.title)} <span class="faint small">(${M.scSet.tracks.length})</span></b>
+          <b>${M.scSet.title} <span class="faint small">(${M.scSet.tracks.length})</span></b>
           <button class="btn small primary" data-music="play-set">▶ Play all</button></div>
         ${M.scSet.tracks.map((t) => trackRow(t, "set:" + trackKey(t), likeBtn(t)))}`
       : "";
@@ -261,8 +261,8 @@
   }
   function likeBtn(t) {
     const liked = M.scLikes.some((x) => x.url === t.url);
-    return html`<button class="btn small" data-music="sc-like" data-key="${esc(t.url)}" title="${liked ? "Unlike" : "Like"}">${liked ? "♥" : "♡"}</button>
-      <a class="btn small" href="${esc(t.url)}" target="_blank" rel="noopener noreferrer" title="Open on SoundCloud">↗</a>`;
+    return html`<button class="btn small" data-music="sc-like" data-key="${t.url}" title="${liked ? "Unlike" : "Like"}">${liked ? "♥" : "♡"}</button>
+      <a class="btn small" href="${t.url}" target="_blank" rel="noopener noreferrer" title="Open on SoundCloud">↗</a>`;
   }
 
   function renderPlaylists(el) {
@@ -271,11 +271,11 @@
       setHTML(el, html`<div class="card">
         <div class="row" style="justify-content:space-between;align-items:center">
           <div class="row" style="gap:8px;align-items:center"><button class="btn small" data-music="pl-back">← Playlists</button>
-            <b style="font-size:17px">${esc(p.name)}</b> <span class="faint small">(${(p.tracks || []).length})</span></div>
+            <b style="font-size:17px">${p.name}</b> <span class="faint small">(${(p.tracks || []).length})</span></div>
           <div class="row" style="gap:6px">
             ${(p.tracks || []).length ? raw('<button class="btn small primary" data-music="pl-play">▶ Play all</button>') : ""}
-            <button class="btn small" data-music="pl-rename" data-id="${esc(p.id)}">Rename</button>
-            <button class="btn small" data-music="pl-delete" data-id="${esc(p.id)}">Delete</button></div>
+            <button class="btn small" data-music="pl-rename" data-id="${p.id}">Rename</button>
+            <button class="btn small" data-music="pl-delete" data-id="${p.id}">Delete</button></div>
         </div>
         <div class="mt">${(p.tracks || []).length
           ? p.tracks.map((t, i) => trackRow(t, "pl:" + i, raw('<button class="btn small" data-music="pl-remove" data-i="' + i + '" title="Remove">✕</button>')))
@@ -287,9 +287,9 @@
         <button class="btn primary" data-music="pl-create">Create</button></div>
       <div class="mt">${M.playlists.length
         ? M.playlists.map((p) => html`<div class="sc-row">
-            <button class="sc-pbtn ghost" data-music="pl-open" data-id="${esc(p.id)}" title="Open">♪</button>
-            <div class="meta" data-music="pl-open" data-id="${esc(p.id)}" style="cursor:pointer"><div><b>${esc(p.name)}</b></div><div class="faint small">${p.count} track${p.count === 1 ? "" : "s"}</div></div>
-            <button class="btn small" data-music="pl-delete" data-id="${esc(p.id)}">✕</button></div>`)
+            <button class="sc-pbtn ghost" data-music="pl-open" data-id="${p.id}" title="Open">♪</button>
+            <div class="meta" data-music="pl-open" data-id="${p.id}" style="cursor:pointer"><div><b>${p.name}</b></div><div class="faint small">${p.count} track${p.count === 1 ? "" : "s"}</div></div>
+            <button class="btn small" data-music="pl-delete" data-id="${p.id}">✕</button></div>`)
         : html`<div class="empty">No playlists yet. Create one above.</div>`}</div></div>`);
   }
 
@@ -310,7 +310,7 @@
     const shown = q ? tracks.filter((t) => (t.name + " " + (t.folder || "")).toLowerCase().includes(q)) : tracks;
     setHTML(el, html`<div class="card">
       <div class="row" style="justify-content:space-between;align-items:center;gap:8px">
-        <input class="input" data-music="lib-filter" value="${esc(M._libq || "")}" placeholder="Filter the library…" style="flex:1">
+        <input class="input" data-music="lib-filter" value="${M._libq || ""}" placeholder="Filter the library…" style="flex:1">
         ${shown.length ? raw('<button class="btn small primary" data-music="lib-play">▶ Play all</button>') : ""}</div>
       ${!(M.data || {}).dir ? html`<p class="small mt">No music folder set — pick one in <b>Settings</b>.</p>` : ""}
       <div class="mt">${shown.length
@@ -323,10 +323,10 @@
     const srcOpts = ['<option value="">Automatic (the server\'s output)</option>']
       .concat((fw.sources || []).map((s) => '<option value="' + esc(s) + '"' + (s === fw.source ? " selected" : "") + ">" + esc(s) + "</option>")).join("");
     const fwBody = !fw.ffmpeg
-      ? html`<p class="muted small">ffmpeg isn't installed on the server, so live audio forwarding isn't available.${fw.reason ? " " + esc(fw.reason) : ""}</p>`
+      ? html`<p class="muted small">ffmpeg isn't installed on the server, so live audio forwarding isn't available.${fw.reason ? " " + fw.reason : ""}</p>`
       : html`<label class="check"><input type="checkbox" data-music="fw-toggle" ${fw.enabled ? raw("checked") : ""}> <span>Forward the server's audio output to the browser — captured <b>automatically</b></span></label>
-        <div class="small faint mt">Capturing: <span class="mono">${esc(fw.auto_source || "auto")}</span>${fw.source ? " (chosen)" : " (auto)"}</div>
-        ${fw.reason ? html`<p class="err small mt">${esc(fw.reason)}</p>` : ""}
+        <div class="small faint mt">Capturing: <span class="mono">${fw.auto_source || "auto"}</span>${fw.source ? " (chosen)" : " (auto)"}</div>
+        ${fw.reason ? html`<p class="err small mt">${fw.reason}</p>` : ""}
         <div class="row mt" style="gap:8px;align-items:center">
           <button class="btn small" data-music="fw-test">Test capture</button>
           ${fw.enabled && fw.available ? raw('<button class="btn small primary" data-music="listen">Listen now</button>') : ""}</div>
@@ -335,7 +335,7 @@
         <div id="fw-test-out" class="small mt"></div>`;
     setHTML(el, html`
       ${card("Music folder", html`<p class="muted small" style="margin-top:0">The server plays audio files from one folder on the host (the control node, not your Mac). Everyone signed in can listen.</p>
-        <div class="row" style="gap:8px"><input class="input" data-music="dir" value="${esc(d.dir || "")}" placeholder="/home/your-user/Music/soundcloud" spellcheck="false" style="flex:1">
+        <div class="row" style="gap:8px"><input class="input" data-music="dir" value="${d.dir || ""}" placeholder="/home/your-user/Music/soundcloud" spellcheck="false" style="flex:1">
           <button class="btn" data-music="browse">Browse…</button><button class="btn primary" data-music="save-dir">Save</button></div>`)}
       ${card("Live audio forwarding", fwBody)}`);
   }
@@ -404,10 +404,10 @@
     try {
       const r = await getJSON("/api/music/search?q=" + encodeURIComponent(query));
       M._searched = true;
-      if (!r.ok) { if (el) setHTML(el, html`<div class="empty">${esc(r.error || "Search failed.")}</div>`); return; }
+      if (!r.ok) { if (el) setHTML(el, html`<div class="empty">${r.error || "Search failed."}</div>`); return; }
       M.scResults = Array.isArray(r.tracks) ? r.tracks : [];
       renderTab();
-    } catch (e) { if (el) setHTML(el, html`<div class="empty">${esc(e.message || "Search failed.")}</div>`); }
+    } catch (e) { if (el) setHTML(el, html`<div class="empty">${e.message || "Search failed."}</div>`); }
   }
   async function loadSet() {
     const input = $('[data-music="set-url"]');
@@ -415,7 +415,7 @@
     if (!url) return;
     const el = $("#sc-set"); if (el) setHTML(el, html`<div class="empty"><div class="spin"></div>Loading playlist…</div>`);
     const r = await getJSON("/api/music/sc-playlist?url=" + encodeURIComponent(url));
-    if (!r.ok) { if (el) setHTML(el, html`<div class="empty">${esc(r.error || "Couldn't load that.")}</div>`); return; }
+    if (!r.ok) { if (el) setHTML(el, html`<div class="empty">${r.error || "Couldn't load that."}</div>`); return; }
     M.scSet = { title: r.title || "Playlist", tracks: r.tracks || [] };
     renderTab();
   }
