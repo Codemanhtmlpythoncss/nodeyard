@@ -11,19 +11,28 @@
 
   // One-click setups: fill the fiddly fields so you only type the base URL.
   const PRESETS = {
-    searxng: { name: "SearXNG", kind: "search", method: "GET", base: "http://searxng.nodeyard-apps.svc:8080/search", description: "Search the web through my SearXNG",
+    searxng: { name: "SearXNG", blurb: "Private web search (deploy it below)", kind: "search", method: "GET", base: "http://127.0.0.1:30880/search", description: "Search the web through my SearXNG",
                query_param: "q", extra_params: { format: "json" }, result: { items: "results", title: "title", url: "url", snippet: "content" } },
-    jellyfin: { name: "Jellyfin", kind: "rest", method: "GET", base: "http://jellyfin.lan:8096", description: "My Jellyfin media server (try path /Items or /Users)",
+    jellyfin: { name: "Jellyfin", blurb: "Your media server library", kind: "rest", method: "GET", base: "http://jellyfin.lan:8096", description: "My Jellyfin media server (try path /Items or /Users)",
                 auth: { type: "header", name: "X-Emby-Token", value: "" } },
-    ollama: { name: "Ollama", kind: "rest", method: "GET", base: "http://ollama.lan:11434", description: "My Ollama server (try path /api/tags)", auth: { type: "none" } },
-    homeassistant: { name: "Home Assistant", kind: "rest", method: "GET", base: "http://homeassistant.lan:8123/api", description: "My Home Assistant (try path /states)",
+    ollama: { name: "Ollama", blurb: "Local LLM models & generation", kind: "rest", method: "GET", base: "http://ollama.lan:11434", description: "My Ollama server (try path /api/tags)", auth: { type: "none" } },
+    homeassistant: { name: "Home Assistant", blurb: "Smart-home states & control", kind: "rest", method: "GET", base: "http://homeassistant.lan:8123/api", description: "My Home Assistant (try path /states)",
                      auth: { type: "bearer", value: "" } },
-    grafana: { name: "Grafana", kind: "rest", method: "GET", base: "http://grafana.lan:3000/api", description: "My Grafana (try path /search or /dashboards)",
+    grafana: { name: "Grafana", blurb: "Dashboards & metrics", kind: "rest", method: "GET", base: "http://grafana.lan:3000/api", description: "My Grafana (try path /search or /dashboards)",
                auth: { type: "bearer", value: "" } },
-    immich: { name: "Immich", kind: "rest", method: "GET", base: "http://immich.lan:2283/api", description: "My Immich photos (try path /server-info)",
+    immich: { name: "Immich", blurb: "Self-hosted photos", kind: "rest", method: "GET", base: "http://immich.lan:2283/api", description: "My Immich photos (try path /server-info)",
               auth: { type: "header", name: "x-api-key", value: "" } },
-    search: { name: "", kind: "search", method: "GET", base: "", description: "", query_param: "q", extra_params: {}, result: { items: "", title: "title", url: "url", snippet: "" } },
-    rest: { name: "", kind: "rest", method: "GET", base: "", description: "" },
+    gitea: { name: "Gitea", blurb: "Your Git repos & issues", kind: "rest", method: "GET", base: "http://gitea.lan:3000/api/v1", description: "My Gitea (try /repos/search; key value is 'token <yourtoken>')",
+             auth: { type: "header", name: "Authorization", value: "" } },
+    nextcloud: { name: "Nextcloud", blurb: "Files, calendar & contacts", kind: "rest", method: "GET", base: "http://nextcloud.lan/ocs/v2.php", description: "My Nextcloud OCS API (also add header OCS-APIRequest: true)",
+                 extra_params: { format: "json" }, auth: { type: "bearer", value: "" } },
+    paperless: { name: "Paperless-ngx", blurb: "Document archive & search", kind: "rest", method: "GET", base: "http://paperless.lan:8000/api", description: "My Paperless-ngx (try /documents/?query=; key value is 'Token <yourtoken>')",
+                 auth: { type: "header", name: "Authorization", value: "" } },
+    portainer: { name: "Portainer", blurb: "Container management", kind: "rest", method: "GET", base: "http://portainer.lan:9000/api", description: "My Portainer (try path /endpoints)",
+                 auth: { type: "header", name: "X-API-Key", value: "" } },
+    prometheus: { name: "Prometheus", blurb: "Metrics query API", kind: "rest", method: "GET", base: "http://prometheus.lan:9090/api/v1", description: "My Prometheus (try /query?query=up)", auth: { type: "none" } },
+    search: { name: "", blurb: "Any JSON search engine", kind: "search", method: "GET", base: "", description: "", query_param: "q", extra_params: {}, result: { items: "", title: "title", url: "url", snippet: "" } },
+    rest: { name: "", blurb: "Any REST API", kind: "rest", method: "GET", base: "", description: "" },
   };
 
   async function load() {
@@ -92,16 +101,16 @@
     const el = $("#view"); if (!el || S.view !== "apis") return;
     const intro = html`<section class="card"><h3>Your self-hosted APIs</h3>
       <p class="muted small" style="margin-top:0">Register search engines (SearXNG, your own) and REST APIs. The dashboard calls them for you, and the AI chat gets one tool per API. The host you set is the only one ever contacted — the model only supplies the query and parameters.</p>
-      ${A.editing ? "" : html`<div class="row mt" style="gap:8px;flex-wrap:wrap;align-items:center">
-        <span class="small faint">Quick setup — fills everything but the URL and key:</span>
-        <button class="btn small primary" data-api="preset" data-preset="searxng">SearXNG</button>
-        <button class="btn small" data-api="preset" data-preset="jellyfin">Jellyfin</button>
-        <button class="btn small" data-api="preset" data-preset="ollama">Ollama</button>
-        <button class="btn small" data-api="preset" data-preset="homeassistant">Home Assistant</button>
-        <button class="btn small" data-api="preset" data-preset="grafana">Grafana</button>
-        <button class="btn small" data-api="preset" data-preset="immich">Immich</button>
-        <button class="btn small" data-api="preset" data-preset="search">Blank search</button>
-        <button class="btn small" data-api="preset" data-preset="rest">Blank REST</button></div>`}</section>`;
+      ${A.editing ? "" : html`<div style="margin-top:12px">
+        <div class="small faint" style="margin-bottom:6px">Quick setup — pick an app and it fills everything but the URL and key:</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px">${raw(Object.keys(PRESETS).map((k) => {
+          const p = PRESETS[k];
+          return '<button data-api="preset" data-preset="' + k + '" style="text-align:left;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:transparent;cursor:pointer;color:inherit">' +
+            '<b style="display:block">' + esc(p.name || (k === "search" ? "Blank search" : "Blank REST")) + '</b>' +
+            '<span class="faint small">' + esc(p.blurb || "") + "</span></button>";
+        }).join(""))}</div>
+        ${raw('<button class="btn small primary" data-api="deploy-searxng" style="margin-top:10px">⚡ Deploy SearXNG on the cluster</button>')}
+        <span id="searxng-msg" class="small faint" style="margin-left:8px"></span></div>`}</section>`;
     const body = A.editing === "new" ? form(A.preset || {}) : (A.editing ? form(A.list.find((x) => x.id === A.editing) || {}) : "");
     const list = A.list.length ? A.list.map(apiCard) : (A.editing ? "" : html`<div class="card mt"><div class="empty">No APIs yet. Add one to use it from chat.</div></div>`);
     NY.freshHTML(el, html`${intro}${body}${list}`);
@@ -131,6 +140,12 @@
     const act = t.dataset.api, id = t.dataset.id;
     if (act === "new") { A.preset = null; A.editing = "new"; render(); }
     else if (act === "preset") { A.preset = JSON.parse(JSON.stringify(PRESETS[t.dataset.preset] || {})); A.editing = "new"; render(); }
+    else if (act === "deploy-searxng") {
+      const msg = document.getElementById("searxng-msg"); if (msg) msg.textContent = "Deploying…";
+      const r = await postJSON("/api/apps/searxng", {});
+      if (msg) msg.textContent = r.ok ? (r.message || "Deploying.") : (r.error || "Couldn't deploy.");
+      if (r.ok) { await load(); render(); const m2 = document.getElementById("searxng-msg"); if (m2) m2.textContent = r.message || "Deployed."; }
+    }
     else if (act === "cancel") { A.preset = null; A.editing = null; render(); }
     else if (act === "edit") { A.editing = id; render(); }
     else if (act === "delete") {

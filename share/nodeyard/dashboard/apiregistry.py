@@ -16,7 +16,9 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import socket
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -289,6 +291,96 @@ class Registry:
         return specs
 
 
+SEARXNG_NODEPORT = 30880
+
+
+def _searxng_manifest(secret):
+    """A self-contained SearXNG (Namespace + ConfigMap enabling the JSON API + Deployment + NodePort Service).
+    NodePort so the dashboard on the control node can reach it at 127.0.0.1:<port>."""
+    return """apiVersion: v1
+kind: Namespace
+metadata:
+  name: nodeyard-apps
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: searxng-settings
+  namespace: nodeyard-apps
+data:
+  settings.yml: |
+    use_default_settings: true
+    server:
+      secret_key: "%s"
+      limiter: false
+      image_proxy: false
+    search:
+      formats:
+        - html
+        - json
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: searxng
+  namespace: nodeyard-apps
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: searxng
+  template:
+    metadata:
+      labels:
+        app: searxng
+    spec:
+      containers:
+        - name: searxng
+          image: searxng/searxng:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SEARXNG_BASE_URL
+              value: "http://localhost:%d/"
+          volumeMounts:
+            - name: settings
+              mountPath: /etc/searxng
+              readOnly: true
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              memory: "512Mi"
+      volumes:
+        - name: settings
+          configMap:
+            name: searxng-settings
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: searxng
+  namespace: nodeyard-apps
+spec:
+  type: NodePort
+  selector:
+    app: searxng
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: %d
+""" % (secret, SEARXNG_NODEPORT, SEARXNG_NODEPORT)
+
+
+def _searxng_api_body():
+    return {"name": "SearXNG", "kind": "search", "method": "GET",
+            "base": "http://127.0.0.1:%d/search" % SEARXNG_NODEPORT,
+            "description": "Search the web through my self-hosted SearXNG",
+            "query_param": "q", "extra_params": {"format": "json"},
+            "result": {"items": "results", "title": "title", "url": "url", "snippet": "content"}}
+
+
 def register(ctx, args):
     demo = bool(getattr(args, "demo", False))
     reg = Registry(getattr(args, "state_dir", "") or "/var/lib/nodeyard/dashboard")
@@ -320,5 +412,41 @@ def register(ctx, args):
             return h._json({"ok": False, "error": str(e)}, 502)
         return h._json({"ok": True, "text": text})
 
+    def _deploy_searxng(h, body):
+        """One-click: apply a SearXNG Deployment+NodePort to the k3s cluster and register it as a search API.
+        kubectl runs outside the dashboard's sandbox via a transient systemd unit, like the other system actions."""
+        if demo:
+            try:
+                reg.save(_searxng_api_body())
+            except RegistryError:
+                pass
+            return h._json({"ok": True, "message": "(demo) would deploy SearXNG to the cluster and register it as an API."})
+        manifest = _searxng_manifest(secrets.token_hex(24))
+        script = ("set -e\nexport KUBECONFIG=\"${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}\"\n"
+                  "KC=\"$(command -v kubectl || echo 'k3s kubectl')\"\n"
+                  "$KC apply -f - <<'NYMANIFEST'\n" + manifest + "NYMANIFEST\n")
+        try:
+            p = subprocess.run(["systemd-run", "--quiet", "--collect", "--wait", "--pipe", "--service-type=exec",
+                                "--setenv=HOME=/root", "/bin/sh", "-c", script],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", timeout=120)
+        except (OSError, subprocess.SubprocessError) as e:
+            return h._json({"ok": False, "error": "Couldn't apply the SearXNG manifest: %s" % e}, 500)
+        out = (p.stdout or "").strip()
+        if p.returncode != 0:
+            return h._json({"ok": False, "error": ("kubectl failed:\n" + out)[:900]}, 500)
+        api_id = None
+        try:
+            existing = next((e for e in reg.list() if (e.get("base") or "").startswith("http://127.0.0.1:%d" % SEARXNG_NODEPORT)), None)
+            body2 = _searxng_api_body()
+            if existing:
+                body2["id"] = existing["id"]
+            api_id = reg.save(body2)
+        except RegistryError:
+            pass
+        return h._json({"ok": True, "api_id": api_id,
+                        "message": "SearXNG is deploying on the cluster — pulling the image can take a few minutes. It's registered as a search API (127.0.0.1:%d/search) and will answer once the pod is Ready." % SEARXNG_NODEPORT,
+                        "output": out[-500:]})
+
     ctx.get_routes["/api/apis"] = _apis
-    ctx.post_routes.update({"/api/apis/save": _save, "/api/apis/delete": _delete, "/api/apis/call": _call, "/api/apis/test": _call})
+    ctx.post_routes.update({"/api/apis/save": _save, "/api/apis/delete": _delete, "/api/apis/call": _call,
+                            "/api/apis/test": _call, "/api/apps/searxng": _deploy_searxng})
