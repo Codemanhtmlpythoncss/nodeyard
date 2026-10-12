@@ -2,6 +2,7 @@
 (function () {
   "use strict";
   var state = null, audio = null, bar = null, title = null, playButton = null, repeatButton = null, repeatIcon = null, repeatMode = null;
+  var shuffleOrder = null, shufflePos = 0;
   var historySince = 0, historyElapsed = 0, lastHistorySaved = 0, lastPlaybackSaved = 0, saving = false;
   function api(path, body, keepalive) {
     var opts = { method: body ? "POST" : "GET", credentials: "same-origin", cache: "no-store" };
@@ -59,6 +60,14 @@
     repeatButton.setAttribute("aria-label", repeatButton.title);
     repeatButton.setAttribute("aria-pressed", state.repeat === "off" ? "false" : "true");
   }
+  function resetShuffle(exclude) {
+    shuffleOrder = null; shufflePos = 0;
+    if (!state || !state.shuffle || state.queue.length < 2) return;
+    shuffleOrder = state.queue.map(function (_track, i) { return i; }).filter(function (i) { return i !== exclude; });
+    for (var i = shuffleOrder.length - 1; i > 0; i--) {
+      var j = Math.floor(Math.random() * (i + 1)), swap = shuffleOrder[i]; shuffleOrder[i] = shuffleOrder[j]; shuffleOrder[j] = swap;
+    }
+  }
   function makeBar() {
     var css = document.createElement("style");
     css.textContent = "#ny-music{position:fixed;right:14px;bottom:14px;z-index:10001;display:flex;align-items:center;gap:7px;max-width:calc(100vw - 28px);padding:7px 10px;border:1px solid rgba(100,175,255,.3);border-radius:12px;background:rgba(5,10,22,.86);box-shadow:0 8px 28px rgba(0,0,0,.35);backdrop-filter:blur(10px);color:#e5efff;font:12px ui-monospace,Menlo,monospace}" +
@@ -84,21 +93,38 @@
   function select(i) {
     if (!state || i < 0 || i >= state.queue.length) return;
     syncHistory(true); state.history_id = ""; historyElapsed = 0; historySince = 0;
-    state.index = i; audio.src = src(state.queue[i]); audio.currentTime = 0;
+    state.index = i; if (state.shuffle) resetShuffle(i); audio.src = src(state.queue[i]); audio.currentTime = 0;
     audio.play().then(function () { beginHistory(); save(false, true); }).catch(function () {});
     paint(); save(false, true);
   }
   function advance() {
     if (!state || !state.queue.length) return;
     var i = state.index + 1;
-    if (state.shuffle && state.queue.length > 1) { i = Math.floor(Math.random() * (state.queue.length - 1)); if (i >= state.index) i++; }
+    if (state.shuffle && state.queue.length > 1) {
+      if (!shuffleOrder) resetShuffle(state.index);
+      if (shufflePos >= shuffleOrder.length) {
+        if (state.repeat !== "all") { audio.pause(); save(false, true); return; }
+        resetShuffle(state.index);
+      }
+      i = shuffleOrder[shufflePos++];
+      selectShuffled(i);
+      return;
+    }
     if (i >= state.queue.length) i = state.repeat === "all" ? 0 : -1;
     if (i < 0) { audio.pause(); save(false, true); return; }
     select(i);
   }
+  function selectShuffled(i) {
+    if (!state || i < 0 || i >= state.queue.length) return;
+    syncHistory(true); state.history_id = ""; historyElapsed = 0; historySince = 0;
+    state.index = i; audio.src = src(state.queue[i]); audio.currentTime = 0;
+    audio.play().then(function () { beginHistory(); save(false, true); }).catch(function () {});
+    paint(); save(false, true);
+  }
   function restore(saved) {
     if (!saved || !Array.isArray(saved.queue) || !saved.queue.length) return;
     state = saved; state.index = Math.max(0, Math.min(+saved.index || 0, state.queue.length - 1));
+    resetShuffle(state.index);
     historyElapsed = Math.max(0, +saved.history_seconds || 0); historySince = 0; audio = new Audio(); audio.preload = "auto";
     audio.volume = Math.max(0, Math.min(1, Number.isFinite(+saved.volume) ? +saved.volume : 1));
     audio.src = src(state.queue[state.index]);

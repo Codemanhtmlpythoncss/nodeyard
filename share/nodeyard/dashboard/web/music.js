@@ -23,7 +23,7 @@
 
   const M = {
     data: null, tab: "search",
-    queue: [], idx: -1, live: false, seekable: true, shuffle: false, repeat: "off",
+    queue: [], idx: -1, live: false, seekable: true, shuffle: false, shuffleOrder: null, shufflePos: 0, repeat: "off",
     scResults: [], scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
     dj: readDJState(),
     historyId: "", historyElapsed: 0, historySince: 0, lastHistorySave: 0, lastPlaybackSave: 0, restored: false, stopping: false,
@@ -111,7 +111,7 @@
     $("#ny-prev").onclick = () => { if (!M.live) play(M.idx - 1); };
     $("#ny-next").onclick = () => { if (!M.live) next(); };
     $("#ny-close").onclick = stop;
-    $("#ny-shuffle").onclick = () => { M.shuffle = !M.shuffle; paintBtn(); savePlayback(false, true); };
+    $("#ny-shuffle").onclick = () => { M.shuffle = !M.shuffle; resetShuffle(M.idx); paintBtn(); savePlayback(false, true); };
     $("#ny-repeat").onclick = () => { M.repeat = M.repeat === "off" ? "one" : M.repeat === "one" ? "all" : "off"; paintBtn(); savePlayback(false, true); };
     $("#ny-copy").onclick = copyCurrentLink;
     $("#ny-seek").oninput = (e) => { if (audio.duration && M.seekable && !M.live) audio.currentTime = (e.target.value / 100) * audio.duration; };
@@ -269,6 +269,7 @@
       M.shuffle = !!state.shuffle; M.repeat = ["off", "all", "one"].includes(state.repeat) ? state.repeat : "off";
       M.historyId = state.history_id || ""; M.historyElapsed = Math.max(0, +state.history_seconds || 0); M.historySince = 0;
       const track = M.queue[M.idx]; if (!track) return;
+      if (M.shuffle) resetShuffle(M.idx);
       audio.volume = Math.max(0, Math.min(1, +state.volume || 0));
       audio.src = srcFor(track);
       const resumeAt = Math.max(0, +state.position || 0);
@@ -290,13 +291,21 @@
     M.queue = (tracks || []).slice();
     play(i || 0);
   }
-  function play(i) {
+  function resetShuffle(exclude) {
+    M.shuffleOrder = null; M.shufflePos = 0;
+    if (!M.shuffle || M.queue.length < 2) return;
+    const order = Array.from({ length: M.queue.length }, (_, i) => i).filter((i) => i !== exclude);
+    for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+    M.shuffleOrder = order;
+  }
+  function play(i, shuffled) {
     ensureBar();
     if (i < 0 || i >= M.queue.length) return;
     M.stopping = false;
     historyProgress(true);
     M.historyId = ""; M.historyElapsed = 0; M.historySince = 0; M.lastHistorySave = 0;
     M.idx = i; M.live = false;
+    if (M.shuffle && !shuffled) resetShuffle(i);
     const t = M.queue[i];
     audio.defaultPlaybackRate = 1;
     audio.playbackRate = 1;
@@ -330,9 +339,12 @@
   }
   function next() {
     if (M.shuffle && M.queue.length > 1) {
-      let i = Math.floor(Math.random() * (M.queue.length - 1));
-      if (i >= M.idx) i++;
-      play(i);
+      if (!M.shuffleOrder) resetShuffle(M.idx);
+      if (M.shufflePos >= M.shuffleOrder.length) {
+        if (M.repeat !== "all") { audio.pause(); return; }
+        resetShuffle(M.idx);
+      }
+      play(M.shuffleOrder[M.shufflePos++], true);
       return;
     }
     if (M.idx + 1 < M.queue.length) play(M.idx + 1);
