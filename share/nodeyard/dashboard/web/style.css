@@ -228,6 +228,30 @@ svg { display: block; }
 .empty { text-align: center; padding: 38px 18px; color: var(--muted); }
 .empty b { display: block; color: var(--text); font-size: 15px; margin-bottom: 6px; }
 
+/* A single Settings preference applies to window surfaces across the dashboard. */
+:root.ny-all-windows-transparent .card,
+:root.ny-all-windows-transparent .hero,
+:root.ny-all-windows-transparent .dev,
+:root.ny-all-windows-transparent .dev-sum,
+:root.ny-all-windows-transparent .dev-note,
+:root.ny-all-windows-transparent .tip,
+:root.ny-all-windows-transparent .drawer,
+:root.ny-all-windows-transparent .modal,
+:root.ny-all-windows-transparent .toast,
+:root.ny-all-windows-transparent .mobile-menu,
+:root.ny-all-windows-transparent .mobile-tabs,
+:root.ny-all-windows-transparent .side,
+:root.ny-all-windows-transparent .devices,
+:root.ny-all-windows-transparent .top,
+:root.ny-all-windows-transparent .pill,
+:root.ny-all-windows-transparent .banner,
+:root.ny-all-windows-transparent .cmd,
+:root.ny-all-windows-transparent .logbox,
+:root.ny-all-windows-transparent .desk-widget,
+:root.ny-all-windows-transparent .desk-picker {
+  background: color-mix(in srgb, var(--solid) var(--ny-window-alpha, 55%), transparent) !important;
+}
+
 /* ---- chips, badges, bars ---- */
 .chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 99px; font-size: 12px; background: var(--panel2); color: var(--muted); border: 1px solid transparent; white-space: nowrap; }
 .chip.accent { background: rgba(124, 140, 255, .16); color: var(--accent); }

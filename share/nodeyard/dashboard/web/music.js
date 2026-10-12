@@ -14,7 +14,8 @@
       const saved = JSON.parse(localStorage.getItem("ny-music-dj") || "{}");
       if (!saved || typeof saved !== "object") return initial;
       return Object.assign(initial, saved, {
-        messages: Array.isArray(saved.messages) ? saved.messages.slice(-16).filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string") : [],
+        messages: Array.isArray(saved.messages) ? saved.messages.slice(-16).filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+          .map((m) => Object.assign({}, m, { content: m.role === "assistant" ? readableDJMessage(m.content) : m.content })) : [],
         draft: saved.draft && Array.isArray(saved.draft.tracks) ? saved.draft : null,
         targets: null, busy: false,
       });
@@ -24,7 +25,7 @@
   const M = {
     data: null, tab: "home", homeHistory: [], homeHistoryReady: false, homeHistoryError: false, homeSessionHeard: new Set(), homeRecs: [], homeUnheard: [],
     queue: [], idx: -1, live: false, seekable: true, shuffle: false, shuffleOrder: null, shufflePos: 0, repeat: "off", rate: 1, eq: "flat",
-    scResults: [], scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
+    scResults: [], playlistResults: [], searchQuery: "", searchError: "", scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
     discoverTracks: [], discoverIndex: 0, discoverSeeded: false, discoverPointerY: null, discoverWheelAt: 0,
     dj: readDJState(),
     historyId: "", historyElapsed: 0, historySince: 0, lastHistorySave: 0, lastPlaybackSave: 0, restored: false, stopping: false,
@@ -536,7 +537,7 @@
     if (!M.dj.active) {
       setHTML(el, html`<div class="card">
         <div class="row" style="justify-content:space-between;align-items:center;gap:10px"><div><h3 style="margin:0">Nodeyard DJ</h3><div class="muted small mt">A private, local AI host for your music. Ask for a vibe, activity, or custom playlist.</div></div><span class="chip">Ready when you are</span></div>
-        <p class="small mt">The DJ can use your music library, local likes and listening history. It only picks tracks already in that collection.</p>
+        <p class="small mt">Likes help set the mood. For normal requests, the DJ also picks unliked songs from your library and listening history; ask for your liked songs when you want a likes-only mix.</p>
         <div class="row wrap mt" style="gap:10px;align-items:flex-end">
           <label class="small">AI model<select class="select mt" data-music="dj-target" ${ready ? "" : "disabled"}>${raw(djTargets())}</select></label>
           ${typeof speechSynthesis !== "undefined" ? html`<label class="small">Voice<select class="select mt" data-music="dj-voice">${raw(djVoiceOptions())}</select></label><button class="btn" data-music="dj-preview-voice">▶ Preview voice</button>` : ""}
@@ -574,7 +575,7 @@
     const chat = $("#dj-chat"); if (chat) chat.scrollTop = chat.scrollHeight;
   }
   async function djCatalog() {
-    const actions = ["liked", "history", "library"];
+    const actions = ["liked", "history"];
     const pages = await Promise.all(actions.map((action) => getJSON("/api/music/ai?action=" + action + "&offset=0&limit=50").catch(() => ({ ok: false, tracks: [] }))));
     const map = new Map();
     function add(track, source) {
@@ -585,12 +586,39 @@
       if (source === "history") { item.plays++; item.lastPlayed = Math.max(item.lastPlayed, +track.played_at || 0); }
     }
     pages.forEach((page, i) => (page.tracks || []).forEach((track) => add(track, actions[i])));
-    const rows = Array.from(map.values()).slice(0, 150);
-    return rows.map((item, i) => {
+    const localTracks = Array.isArray((M.data || {}).tracks) ? M.data.tracks : [];
+    localTracks.forEach((track) => add(track, "library"));
+    if (!localTracks.length) {
+      const page = await getJSON("/api/music/ai?action=library&offset=0&limit=50").catch(() => ({ ok: false, tracks: [] }));
+      (page.tracks || []).forEach((track) => add(track, "library"));
+    }
+    const all = Array.from(map.values());
+    const spread = (rows, limit) => {
+      if (rows.length <= limit) return rows;
+      const out = [], step = rows.length / limit;
+      for (let i = 0; i < limit; i++) out.push(rows[Math.floor((i + .5) * step)]);
+      return out;
+    };
+    const selected = [], seen = new Set();
+    const append = (rows, limit) => spread(rows, Math.max(0, limit)).forEach((item) => {
+      const key = item.track.url || item.track.path;
+      if (key && !seen.has(key) && selected.length < 150) { seen.add(key); selected.push(item); }
+    });
+    const unliked = all.filter((item) => !item.sources.has("liked"));
+    const liked = all.filter((item) => item.sources.has("liked"));
+    const library = unliked.filter((item) => item.sources.has("library"));
+    const historyOnly = unliked.filter((item) => !item.sources.has("library") && item.sources.has("history"));
+    append(library, 100);
+    append(historyOnly, 25);
+    append(liked, 25);
+    if (selected.length < 150) append(unliked.filter((item) => !seen.has(item.track.url || item.track.path)), 150 - selected.length);
+    if (selected.length < 150) append(liked.filter((item) => !seen.has(item.track.url || item.track.path)), 150 - selected.length);
+    return selected.map((item, i) => {
       const t = item.track, local = !t.url;
       return { id: "t" + String(i + 1).padStart(3, "0"), track: { ...t, kind: local ? "local" : "sc" },
         info: { id: "t" + String(i + 1).padStart(3, "0"), title: local ? t.name : t.title, artist: local ? (t.folder || "your library") : (t.artist || "SoundCloud"),
-          sources: Array.from(item.sources), plays: item.plays, last_played: item.lastPlayed || undefined } };
+          sources: Array.from(item.sources), liked: item.sources.has("liked"), from_library: item.sources.has("library"),
+          in_listening_history: item.sources.has("history"), plays: item.plays, last_played: item.lastPlayed || undefined } };
     });
   }
   async function readDJStream(response) {
@@ -619,10 +647,28 @@
     const clean = String(text || "").replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
     const first = clean.indexOf("{"), last = clean.lastIndexOf("}");
     if (first < 0 || last <= first) return { speech: clean, playlist_name: "", track_ids: [] };
-    try {
-      const obj = JSON.parse(clean.slice(first, last + 1));
-      return obj && typeof obj === "object" ? obj : { speech: clean, playlist_name: "", track_ids: [] };
-    } catch (e) { return { speech: clean, playlist_name: "", track_ids: [] }; }
+    const candidates = [clean, clean.slice(first, last + 1)];
+    for (const candidate of candidates) {
+      try {
+        let obj = JSON.parse(candidate);
+        if (typeof obj === "string") obj = JSON.parse(obj);
+        if (obj && typeof obj === "object" && !Array.isArray(obj) && (typeof obj.speech === "string" || typeof obj.response === "string")) return obj;
+      } catch (e) { /* try the extracted object or speech field */ }
+    }
+    const speechField = /"speech"\s*:\s*("(?:\\.|[^"\\])*")/.exec(clean);
+    if (speechField) {
+      try { return { speech: JSON.parse(speechField[1]), playlist_name: "", track_ids: [] }; } catch (e) { /* show the original response */ }
+    }
+    return { speech: clean, playlist_name: "", track_ids: [] };
+  }
+  function readableDJMessage(content) {
+    const text = String(content || ""), clean = text.trim();
+    if (!/^\s*(?:```|\{)/.test(clean)) return text;
+    const parsed = parseDJAnswer(clean), speech = String(parsed.speech || parsed.response || "").trim();
+    if (!speech || speech === clean) return text;
+    const ids = Array.isArray(parsed.track_ids) ? parsed.track_ids : [];
+    const name = String(parsed.playlist_name || "").trim();
+    return speech + (ids.length ? "\n\nI put together “" + (name || "Your mix") + "” with " + ids.length + " tracks." : "");
   }
   async function sendDJRequest(prompt, hidden) {
     if (M.dj.busy) return;
@@ -635,7 +681,7 @@
       const catalog = await djCatalog();
       if (!catalog.length) throw new Error("There are no songs for the DJ yet. Set a Music folder, like some SoundCloud songs, or listen to a few tracks first.");
       const catalogText = catalog.map((x) => x.info);
-      const system = "You are Nodeyard DJ, a warm, confident, conversational music host. Sound like a natural radio presenter: short, personal, lightly playful, never overdo catchphrases. Use the listening history and likes to personalize, but never claim you listened to audio or know lyrics unless given. The user owns or selected this collection; recommend only tracks listed in the catalogue below. The user request may be a vibe, activity, artist/style preference, or a follow-up. If you need one key detail, ask one concise question and return no tracks. Otherwise create a useful mix. Reply with exactly one JSON object and no markdown: {\"speech\":\"spoken response, 1-3 short sentences\",\"playlist_name\":\"short name or empty string\",\"track_ids\":[\"t001\"]}. For a playlist, include 5-20 catalogue IDs in a deliberate order. If there are fewer suitable songs, use fewer. If this is only a greeting or clarifying question, playlist_name must be empty and track_ids must be []. Never invent IDs.\nCATALOGUE:\n" + JSON.stringify(catalogText);
+      const system = "You are Nodeyard DJ, a warm, confident, conversational music host. Sound like a natural radio presenter: short, personal, lightly playful, never overdo catchphrases. Use listening history and likes to personalize, but never claim you listened to audio or know lyrics unless given. Recommend only catalogue tracks. The user request may be a vibe, activity, artist/style preference, or follow-up. If you need one key detail, ask one concise question and return no tracks. Otherwise create a useful mix. IMPORTANT: for ordinary vibe/activity requests, use unliked tracks from the user's library and listening history first; likes are taste context, not the default source. Never make a mix only from liked tracks when unliked catalogue tracks are available. Include at least half unliked tracks where possible. Only focus on liked tracks when the user explicitly asks for their likes/favourites. Catalogue fields `liked`, `from_library`, and `in_listening_history` tell you which tracks are liked or unliked. Reply with exactly one JSON object and no markdown: {\"speech\":\"spoken response, 1-3 short sentences\",\"playlist_name\":\"short name or empty string\",\"track_ids\":[\"t001\"]}. For a playlist, include 5-20 catalogue IDs in a deliberate order. If there are fewer suitable songs, use fewer. If this is only a greeting or clarifying question, playlist_name must be empty and track_ids must be []. Never invent IDs.\nCATALOGUE:\n" + JSON.stringify(catalogText);
       const history = (M.dj.messages || []).slice(-8).filter((m) => !m.hidden);
       if (!hidden && history.length && history[history.length - 1].role === "user" && history[history.length - 1].content === userText) history.pop();
       const messages = [{ role: "system", content: system }].concat(history.map((m) => ({ role: m.role, content: m.content })), [{ role: "user", content: userText }]);
@@ -644,8 +690,26 @@
         body: JSON.stringify({ model: M.dj.target, messages, temperature: 0.65, max_tokens: 1400, stream: true }) });
       const parsed = parseDJAnswer(await readDJStream(response));
       const speech = String(parsed.speech || parsed.response || "").trim().slice(0, 2400) || "I couldn't put that into words. Try asking me a different way.";
-      const byId = new Map(catalog.map((x) => [x.id, x.track]));
-      const selected = Array.isArray(parsed.track_ids) ? parsed.track_ids.slice(0, 40).map((id) => byId.get(String(id))).filter(Boolean) : [];
+      const byId = new Map(catalog.map((x) => [x.id, x]));
+      let selectedRows = Array.isArray(parsed.track_ids) ? parsed.track_ids.slice(0, 40).map((id) => byId.get(String(id))).filter(Boolean) : [];
+      selectedRows = Array.from(new Map(selectedRows.map((row) => [trackKey(row.track), row])).values());
+      const asksForLikes = /\b(?:liked songs|my likes|from my likes|favorites?|favourites?|songs?\s+(?:that\s+)?i\s+(?:already\s+)?liked|songs?\s+i(?:'|’)ve liked)\b/i.test(userText);
+      const selectedKeys = new Set(selectedRows.map((row) => trackKey(row.track)));
+      const freshRows = catalog.filter((row) => !row.info.liked && !selectedKeys.has(trackKey(row.track)));
+      if (!asksForLikes && freshRows.length && selectedRows.length > 1) {
+        const targetFresh = Math.ceil(selectedRows.length / 2);
+        let freshCount = selectedRows.filter((row) => !row.info.liked).length;
+        for (let i = selectedRows.length - 1; i >= 0 && freshCount < targetFresh && freshRows.length; i--) {
+          if (selectedRows[i].info.liked) {
+            const replacement = freshRows.shift();
+            selectedKeys.delete(trackKey(selectedRows[i].track));
+            selectedRows[i] = replacement;
+            selectedKeys.add(trackKey(replacement.track));
+            freshCount++;
+          }
+        }
+      }
+      const selected = selectedRows.map((row) => row.track);
       const name = String(parsed.playlist_name || "").trim().slice(0, 120);
       const assistantText = selected.length ? speech + "\n\nI’ve queued “" + (name || "Your mix") + "” with " + selected.length + " tracks and am starting playback now." : speech;
       M.dj.messages.push({ role: "assistant", content: assistantText });
@@ -841,6 +905,12 @@
 
   function renderSearch(el) {
     const sc = (M.data || {}).sc || {};
+    const playlistResults = M.playlistResults.length
+      ? html`<div class="section-title">Your playlists</div>${M.playlistResults.map((p) => html`<div class="sc-row">
+          <button class="sc-pbtn ghost" data-music="pl-open" data-id="${p.id}" title="Open playlist">♪</button>
+          <div class="meta" data-music="pl-open" data-id="${p.id}" style="cursor:pointer"><div><b>${p.name}</b></div><div class="faint small">${p.count} track${p.count === 1 ? "" : "s"}</div></div>
+          <button class="btn small" data-music="pl-open" data-id="${p.id}">Open</button></div>`)}`
+      : "";
     const setBody = M.scSet
       ? html`<div class="row" style="justify-content:space-between;align-items:center;margin-top:4px">
           <b>${M.scSet.title} <span class="faint small">(${M.scSet.tracks.length})</span></b>
@@ -849,15 +919,15 @@
       : "";
     const results = M.scResults.length
       ? html`<div class="section-title">Results</div>${M.scResults.map((t) => trackRow(t, "res:" + trackKey(t), likeBtn(t)))}`
-      : (M._searched ? html`<div class="empty">No ${M.hideDrm ? "playable " : ""}results${M.hideDrm ? " — all matches were DRM-protected" : ""}.</div>` : "");
+      : "";
     setHTML(el, html`
       <div class="card">
-        <div class="row" style="gap:8px"><input class="input" data-music="sc-query" placeholder="Search SoundCloud for a song, artist…" spellcheck="false" style="flex:1">
-          <button class="btn primary" data-music="sc-search" ${sc.search_ready ? "" : "disabled"}>Search</button></div>
+        <div class="row" style="gap:8px"><input class="input" data-music="sc-query" value="${M.searchQuery}" placeholder="Search songs, artists and playlists…" spellcheck="false" style="flex:1">
+          <button class="btn primary" data-music="sc-search">Search</button></div>
         <label class="check mt" style="font-size:13px"><input type="checkbox" data-music="nodrm" ${M.hideDrm ? raw("checked") : ""}> <span>Only show playable tracks — hide DRM-protected (Go+) ones <span class="faint">(slower; checks each result)</span></span></label>
-        ${!sc.search_ready ? html`<p class="small mt">SoundCloud search needs <span class="mono">yt-dlp</span> on the server. Use <b>Settings → Update everything</b> (installs it), then search.</p>` : ""}
+        ${!sc.search_ready ? html`<p class="small mt">SoundCloud search needs <span class="mono">yt-dlp</span> on the server. You can still search your saved playlists. Use <b>Settings → Update everything</b> to install SoundCloud search.</p>` : ""}
         ${sc.search_ready && !sc.stream_ready ? html`<p class="small faint mt">In-browser playback also needs ffmpeg — run <b>Settings → Update everything</b>. Until then use ＋ to save tracks and ↗ to open on SoundCloud.</p>` : ""}
-        <div id="sc-results" class="mt">${results}</div>
+        <div id="sc-results" class="mt">${M.searchError ? html`<p class="note warn small">${M.searchError}</p>` : ""}${playlistResults}${results}${M._searched && !M.playlistResults.length && !M.scResults.length && !M.searchError ? html`<div class="empty">No ${M.hideDrm ? "playable " : ""}results${M.hideDrm ? " — all matches were DRM-protected" : ""}.</div>` : ""}</div>
       </div>
       <div class="card">
         <h3 style="margin-top:0">Play a song link</h3>
@@ -1042,14 +1112,18 @@
     const input = $('[data-music="sc-query"]');
     const query = (input && input.value || "").trim();
     if (query.length < 2) { toast("Enter at least two characters to search."); return; }
+    M.searchQuery = query;
+    const lower = query.toLocaleLowerCase();
+    M.playlistResults = M.playlists.filter((p) => String(p.name || "").toLocaleLowerCase().includes(lower));
+    M.searchError = "";
     const el = $("#sc-results"); if (el) setHTML(el, html`<div class="empty"><div class="spin"></div>${M.hideDrm ? "Searching and checking which tracks are playable…" : "Searching…"}</div>`);
     try {
       const r = await getJSON("/api/music/search?q=" + encodeURIComponent(query) + (M.hideDrm ? "&nodrm=1" : ""));
       M._searched = true;
-      if (!r.ok) { if (el) setHTML(el, html`<div class="empty">${r.error || "Search failed."}</div>`); return; }
+      if (!r.ok) { M.scResults = []; M.searchError = r.error || "SoundCloud search failed."; renderTab(); return; }
       M.scResults = Array.isArray(r.tracks) ? r.tracks : [];
       renderTab();
-    } catch (e) { if (el) setHTML(el, html`<div class="empty">${e.message || "Search failed."}</div>`); }
+    } catch (e) { M._searched = true; M.scResults = []; M.searchError = e.message || "SoundCloud search failed."; renderTab(); }
   }
   async function loadSet() {
     const input = $('[data-music="set-url"]');
