@@ -309,35 +309,38 @@ class Music:
         if self.demo:
             return True, "", [{"title": "Demo track", "artist": "Demo artist", "duration_ms": 185000,
                                 "url": "https://soundcloud.com/demo/demo-track"}]
-        cli = self.soundcloud_cli()
-        if not cli:
-            return False, "sc-pick's search helper is not installed on the server. Run sc-pick once from the server's Terminal page, then search again.", []
-        fields = "title,artist,duration_ms,url"
+        yt = self.yt_dlp()
+        if not yt:
+            return False, "yt-dlp isn't installed on the server yet. Use Settings → Update everything (it installs yt-dlp), then search again.", []
         try:
-            result = subprocess.run([cli, "search", query, "--kind", "tracks", "-n", "25", "-o", "tsv",
-                                     "--no-header", "--fields", fields], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    text=True, errors="replace", timeout=35, check=False)
+            result = subprocess.run([yt, "-q", "--no-warnings", "--flat-playlist", "-J", "scsearch25:" + query],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", timeout=40)
         except subprocess.TimeoutExpired:
             return False, "SoundCloud search took too long. Try a shorter search.", []
         except OSError as e:
-            return False, "Couldn't start sc-pick search: %s" % e, []
+            return False, "Couldn't run the search: %s" % e, []
         if result.returncode:
             message = (result.stderr or result.stdout or "Search failed.").strip().splitlines()
             return False, "\n".join(message[-5:])[:600], []
+        try:
+            data = json.loads(result.stdout or "{}")
+        except ValueError:
+            return False, "Couldn't read the search results.", []
         rows = []
-        for line in result.stdout.splitlines():
-            parts = line.split("\t", 3)
-            if len(parts) != 4:
+        for e in (data.get("entries") or []):
+            if not isinstance(e, dict):
                 continue
-            title, artist, duration, url = (p.strip() for p in parts)
+            url = e.get("webpage_url") or e.get("url") or ""
             if not self._valid_sc_url(url):
                 continue
+            dur = e.get("duration")
             try:
-                duration_ms = max(0, int(duration))
-            except ValueError:
+                duration_ms = int(float(dur) * 1000) if dur else 0
+            except (TypeError, ValueError):
                 duration_ms = 0
-            rows.append({"title": title[:300] or "Untitled", "artist": artist[:200] or "Unknown artist",
-                         "duration_ms": duration_ms, "url": url[:1000]})
+            rows.append({"title": str(e.get("title") or "Untitled")[:300],
+                         "artist": str(e.get("uploader") or e.get("channel") or e.get("uploader_id") or "Unknown artist")[:200],
+                         "duration_ms": max(0, duration_ms), "url": url[:1000]})
         return True, "", rows
 
     def sc_likes(self):
@@ -522,7 +525,7 @@ def register(ctx, args):
                                     "enabled": bool(c.get("forward_enabled")),
                                     "source": c.get("forward_source", ""), "auto_source": music.default_source() if have_ff else "",
                                     "sources": music.sources(), "ffmpeg": have_ff},
-                        "sc": {"search_ready": demo or bool(music.soundcloud_cli()), "stream_ready": music.stream_ready(),
+                        "sc": {"search_ready": demo or bool(music.yt_dlp()), "stream_ready": music.stream_ready(),
                                "likes": music.sc_likes()},
                         "playlists": music.playlists()})
 

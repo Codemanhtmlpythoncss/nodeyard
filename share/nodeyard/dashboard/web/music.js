@@ -247,8 +247,8 @@
       <div class="card">
         <div class="row" style="gap:8px"><input class="input" data-music="sc-query" placeholder="Search SoundCloud for a song, artist…" spellcheck="false" style="flex:1">
           <button class="btn primary" data-music="sc-search" ${sc.search_ready ? "" : "disabled"}>Search</button></div>
-        ${!sc.search_ready ? html`<p class="small mt">The search helper isn't installed yet. Run <span class="mono">sc-pick</span> once from the server's Terminal, or use <b>Settings → Update everything</b>.</p>` : ""}
-        ${!sc.stream_ready ? html`<p class="small faint mt">In-browser playback needs yt-dlp + ffmpeg on the server — run <b>Settings → Update everything</b>. Until then use ＋ to save tracks and Open to listen on SoundCloud.</p>` : ""}
+        ${!sc.search_ready ? html`<p class="small mt">SoundCloud search needs <span class="mono">yt-dlp</span> on the server. Use <b>Settings → Update everything</b> (installs it), then search.</p>` : ""}
+        ${sc.search_ready && !sc.stream_ready ? html`<p class="small faint mt">In-browser playback also needs ffmpeg — run <b>Settings → Update everything</b>. Until then use ＋ to save tracks and ↗ to open on SoundCloud.</p>` : ""}
         <div id="sc-results" class="mt">${results}</div>
       </div>
       <div class="card">
