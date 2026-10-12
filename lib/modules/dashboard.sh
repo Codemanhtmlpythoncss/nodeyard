@@ -401,9 +401,7 @@ RestartSec=5
 # nodeyard's own state and logs, and nothing else on the system.
 NoNewPrivileges=true
 ProtectSystem=strict
-# read-only, not hidden: the music player streams audio files from a folder the
-# user picks (often under /home), so /home must be readable (never written).
-ProtectHome=read-only
+ProtectHome=false
 PrivateTmp=true
 PrivateDevices=true
 ProtectKernelTunables=true
