@@ -375,7 +375,9 @@
     const sc = (t.kind === "sc" || t.url);
     M.seekable = true;     // the server buffers both local files and SoundCloud, so seeking & resume work
     audio.src = srcFor(t);
-    audio.play().then(() => savePlayback(false, true)).catch(() => {});
+    audio.play().then(() => savePlayback(false, true)).catch((e) => {
+      if (e && e.name === "NotAllowedError") toast("Playback was blocked. Press Play to start the songs.");
+    });
     $("#ny-np-title").textContent = titleOf(t);
     $("#ny-np-sub").textContent = sc ? subOf(t) + " · loading…" : subOf(t);
     $("#ny-live-pill").hidden = true;
@@ -496,6 +498,16 @@
       rest = rest.slice(end).trimStart();
     }
   }
+  function previewDJVoice() {
+    if (typeof speechSynthesis === "undefined" || typeof SpeechSynthesisUtterance === "undefined") { toast("Voice preview isn't available in this browser."); return; }
+    speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance("Hey, it’s your Nodeyard DJ. Tell me what you’re in the mood for, and I’ll line up the songs.");
+    const voice = djVoices().find((v) => v.name === M.dj.voice) || djBestVoice();
+    if (voice) { utterance.voice = voice; utterance.lang = voice.lang; }
+    utterance.rate = 0.96; utterance.pitch = 1.02;
+    utterance.onerror = () => toast("Couldn't preview that voice.");
+    speechSynthesis.speak(utterance);
+  }
   function djTargets() {
     if (M.dj.targets === null) loadDJTargets();
     const ready = ((M.dj.targets || {}).targets || []).filter((x) => x.ready);
@@ -527,7 +539,7 @@
         <p class="small mt">The DJ can use your music library, local likes and listening history. It only picks tracks already in that collection.</p>
         <div class="row wrap mt" style="gap:10px;align-items:flex-end">
           <label class="small">AI model<select class="select mt" data-music="dj-target" ${ready ? "" : "disabled"}>${raw(djTargets())}</select></label>
-          ${typeof speechSynthesis !== "undefined" ? html`<label class="small">Voice<select class="select mt" data-music="dj-voice">${raw(djVoiceOptions())}</select></label>` : ""}
+          ${typeof speechSynthesis !== "undefined" ? html`<label class="small">Voice<select class="select mt" data-music="dj-voice">${raw(djVoiceOptions())}</select></label><button class="btn" data-music="dj-preview-voice">▶ Preview voice</button>` : ""}
           <button class="btn primary" data-music="dj-start" ${ready ? "" : "disabled"}>▶ Start DJ</button>
         </div>
         <div class="faint small mt">${voiceNote}</div>
@@ -542,7 +554,7 @@
         <button class="btn small" data-music="dj-stop">Stop DJ</button></div>
       <div class="row wrap mt" style="gap:8px;align-items:flex-end">
         <label class="small">AI model<select class="select mt" data-music="dj-target">${raw(djTargets())}</select></label>
-        ${typeof speechSynthesis !== "undefined" ? html`<label class="small">Voice<select class="select mt" data-music="dj-voice">${raw(djVoiceOptions())}</select></label>
+        ${typeof speechSynthesis !== "undefined" ? html`<label class="small">Voice<select class="select mt" data-music="dj-voice">${raw(djVoiceOptions())}</select></label><button class="btn" data-music="dj-preview-voice">▶ Preview voice</button>
           <label class="check small"><input type="checkbox" data-music="dj-speak" ${M.dj.speak !== false ? raw("checked") : ""}> <span>Speak replies</span></label>` : ""}
       </div>
       <div id="dj-chat" style="max-height:380px;overflow:auto;display:flex;flex-direction:column;gap:10px;margin-top:14px">
@@ -550,8 +562,8 @@
         ${M.dj.busy ? html`<div class="empty"><div class="spin"></div>DJ is thinking…</div>` : ""}
       </div>
       ${M.dj.draft && M.dj.draft.tracks && M.dj.draft.tracks.length ? html`<div class="mt" style="border-top:1px solid var(--line);padding-top:12px">
-        <div class="row wrap" style="justify-content:space-between;align-items:center;gap:8px"><b>Mix preview: ${M.dj.draft.name} <span class="faint small">(${M.dj.draft.tracks.length} tracks)</span></b>
-          <div class="row" style="gap:6px"><button class="btn small primary" data-music="dj-play">▶ Play mix</button><button class="btn small" data-music="dj-save" ${M.dj.draft.saved ? "disabled" : ""}>${M.dj.draft.saved ? "Saved ✓" : "Save playlist"}</button></div></div>
+        <div class="row wrap" style="justify-content:space-between;align-items:center;gap:8px"><b>DJ set: ${M.dj.draft.name} <span class="faint small">(${M.dj.draft.tracks.length} tracks)</span></b>
+          <div class="row" style="gap:6px"><button class="btn small primary" data-music="dj-play">▶ Play set</button><button class="btn small" data-music="dj-save" ${M.dj.draft.saved ? "disabled" : ""}>${M.dj.draft.saved ? "Saved ✓" : "Save playlist"}</button></div></div>
         <div class="mt">${M.dj.draft.tracks.map((t, i) => trackRow(t, "dj:" + i))}</div></div>` : ""}
       <div class="row wrap mt" style="gap:8px;align-items:flex-end">
         <textarea class="input" data-music="dj-request" rows="2" placeholder="What are you in the mood for? e.g. make me a mellow late-night mix from songs I've liked" style="flex:1;min-width:240px;resize:vertical" ${M.dj.busy ? "disabled" : ""}></textarea>
@@ -635,10 +647,12 @@
       const byId = new Map(catalog.map((x) => [x.id, x.track]));
       const selected = Array.isArray(parsed.track_ids) ? parsed.track_ids.slice(0, 40).map((id) => byId.get(String(id))).filter(Boolean) : [];
       const name = String(parsed.playlist_name || "").trim().slice(0, 120);
-      const assistantText = selected.length ? speech + "\n\nI’ve put together “" + (name || "Your mix") + "” with " + selected.length + " tracks." : speech;
+      const assistantText = selected.length ? speech + "\n\nI’ve queued “" + (name || "Your mix") + "” with " + selected.length + " tracks and am starting playback now." : speech;
       M.dj.messages.push({ role: "assistant", content: assistantText });
-      if (selected.length && name) M.dj.draft = { name, tracks: selected, saved: false };
-      else M.dj.draft = null;
+      if (selected.length) {
+        M.dj.draft = { name: name || "Your mix", tracks: selected, saved: false };
+        playQueue(selected, 0);
+      } else M.dj.draft = null;
       saveDJ(); speakDJ(speech);
     } catch (e) {
       const message = e.name === "AbortError" ? "I stopped that request." : (e.message || "The DJ couldn't answer.");
@@ -1111,6 +1125,7 @@
     else if (act === "home-playlists") { M.tab = "playlists"; renderPage(); }
     else if (act === "dj-start") startDJ();
     else if (act === "dj-stop") stopDJ();
+    else if (act === "dj-preview-voice") previewDJVoice();
     else if (act === "dj-send") {
       const input = $('[data-music="dj-request"]'), request = (input && input.value || "").trim();
       if (input) input.value = "";
