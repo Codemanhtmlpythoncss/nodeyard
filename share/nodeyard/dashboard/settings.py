@@ -719,14 +719,21 @@ def register(ctx, args):
         Runs outside the dashboard's sandbox via a detached systemd unit, like the other system-changing actions."""
         if getattr(args, "demo", False):
             return h._json({"ok": True, "message": "(demo) nothing was updated."})
+        # Everything the Music page needs, installed system-wide (/usr/local/bin) so the dashboard finds it whatever
+        # user it runs as: the SoundCloud search helper (soundcloud-cli, built with Go — same as sc-pick's first run),
+        # the arch-correct yt-dlp binary (streaming + playlists), ffmpeg (transcode) and PulseAudio (forwarding).
         script = (
             "echo '== nodeyard =='; curl -fsSL https://raw.githubusercontent.com/Codemanhtmlpythoncss/nodeyard/main/install.sh | bash -s -- --yes --force; "
             "echo '== sc-pick =='; curl -fsSL https://raw.githubusercontent.com/Codemanhtmlpythoncss/sc-pick/main/sc-pick -o /usr/local/bin/sc-pick && chmod +x /usr/local/bin/sc-pick; "
-            "echo '== audio/download deps =='; "
-            "if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y ffmpeg pulseaudio-utils; "
-            "elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm ffmpeg libpulse; "
-            "elif command -v dnf >/dev/null 2>&1; then dnf install -y ffmpeg pulseaudio-utils; fi; "
-            "python3 -m pip install --upgrade --quiet yt-dlp 2>/dev/null || true; "
+            "echo '== packages (ffmpeg, PulseAudio, Go) =='; "
+            "if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y ffmpeg pulseaudio-utils golang-go; "
+            "elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm ffmpeg libpulse go; "
+            "elif command -v dnf >/dev/null 2>&1; then dnf install -y ffmpeg pulseaudio-utils golang; fi; "
+            "echo '== yt-dlp =='; "
+            "case \"$(uname -m)\" in x86_64|amd64) F=yt-dlp_linux;; aarch64|arm64) F=yt-dlp_linux_aarch64;; armv7l|armv6l) F=yt-dlp_linux_armv7l;; *) F=yt-dlp_linux;; esac; "
+            "curl -fsSL \"https://github.com/yt-dlp/yt-dlp/releases/latest/download/$F\" -o /usr/local/bin/yt-dlp && chmod +x /usr/local/bin/yt-dlp; "
+            "echo '== SoundCloud search helper =='; "
+            "if command -v go >/dev/null 2>&1; then GOBIN=/usr/local/bin GOFLAGS=-mod=mod GOPATH=/root/go HOME=/root go install github.com/tamnd/soundcloud-cli/cmd/soundcloud@latest || echo 'soundcloud-cli build failed'; fi; "
             "echo '== restart =='; nodeyard dashboard start --yes; echo '== done =='"
         )
         try:
@@ -734,7 +741,7 @@ def register(ctx, args):
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         except OSError as e:
             return h._json({"ok": False, "error": "Couldn't start the update: %s" % e}, 500)
-        return h._json({"ok": True, "message": "Update started — nodeyard, sc-pick and the audio/download tools. The dashboard will restart on the new version. Watch it in Terminal: journalctl -u nodeyard-update -f"})
+        return h._json({"ok": True, "message": "Update started — nodeyard, sc-pick, the SoundCloud search helper, yt-dlp, ffmpeg and PulseAudio. Building the search helper with Go can take a few minutes. The dashboard restarts when done. Watch it in Terminal: journalctl -u nodeyard-update -f"})
 
     ctx.get_routes.update({
         "/api/settings": wrap(lambda h, q: s.view(h._token())),
