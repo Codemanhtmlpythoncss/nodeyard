@@ -14,7 +14,8 @@
       const saved = JSON.parse(localStorage.getItem("ny-music-dj") || "{}");
       if (!saved || typeof saved !== "object") return initial;
       return Object.assign(initial, saved, {
-        messages: Array.isArray(saved.messages) ? saved.messages.slice(-16).filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string") : [],
+        messages: Array.isArray(saved.messages) ? saved.messages.slice(-16).filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+          .map((m) => Object.assign({}, m, { content: m.role === "assistant" ? readableDJMessage(m.content) : m.content })) : [],
         draft: saved.draft && Array.isArray(saved.draft.tracks) ? saved.draft : null,
         targets: null, busy: false,
       });
@@ -619,10 +620,28 @@
     const clean = String(text || "").replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
     const first = clean.indexOf("{"), last = clean.lastIndexOf("}");
     if (first < 0 || last <= first) return { speech: clean, playlist_name: "", track_ids: [] };
-    try {
-      const obj = JSON.parse(clean.slice(first, last + 1));
-      return obj && typeof obj === "object" ? obj : { speech: clean, playlist_name: "", track_ids: [] };
-    } catch (e) { return { speech: clean, playlist_name: "", track_ids: [] }; }
+    const candidates = [clean, clean.slice(first, last + 1)];
+    for (const candidate of candidates) {
+      try {
+        let obj = JSON.parse(candidate);
+        if (typeof obj === "string") obj = JSON.parse(obj);
+        if (obj && typeof obj === "object" && !Array.isArray(obj) && (typeof obj.speech === "string" || typeof obj.response === "string")) return obj;
+      } catch (e) { /* try the extracted object or speech field */ }
+    }
+    const speechField = /"speech"\s*:\s*("(?:\\.|[^"\\])*")/.exec(clean);
+    if (speechField) {
+      try { return { speech: JSON.parse(speechField[1]), playlist_name: "", track_ids: [] }; } catch (e) { /* show the original response */ }
+    }
+    return { speech: clean, playlist_name: "", track_ids: [] };
+  }
+  function readableDJMessage(content) {
+    const text = String(content || ""), clean = text.trim();
+    if (!/^\s*(?:```|\{)/.test(clean)) return text;
+    const parsed = parseDJAnswer(clean), speech = String(parsed.speech || parsed.response || "").trim();
+    if (!speech || speech === clean) return text;
+    const ids = Array.isArray(parsed.track_ids) ? parsed.track_ids : [];
+    const name = String(parsed.playlist_name || "").trim();
+    return speech + (ids.length ? "\n\nI put together “" + (name || "Your mix") + "” with " + ids.length + " tracks." : "");
   }
   async function sendDJRequest(prompt, hidden) {
     if (M.dj.busy) return;
