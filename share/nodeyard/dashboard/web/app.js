@@ -19,7 +19,7 @@
     { id: "storage", label: "Storage", icon: "storage", sub: "Disks and volumes" },
     { id: "hardware", label: "Hardware", icon: "hardware", sub: "What every machine is made of, and how fast it really is" },
     { id: "ai", label: "AI", icon: "ai", sub: "Models running on your cluster" },
-    { id: "galaxy", label: "AI galaxy", icon: "galaxy", sub: "Your cluster and its AI, live", href: "/g3/" },   // the 3D screens (#galaxy is the light one)
+    { id: "galaxy", label: "AI galaxy", icon: "galaxy", sub: "Your cluster and its AI, live" },
     { id: "events", label: "Events", icon: "events", sub: "What Kubernetes has been doing" },
     { id: "alerts", label: "Alerts", icon: "alerts", sub: "Things that need your attention" },
     { id: "doctor", label: "Doctor", icon: "doctor", sub: "Checks for common problems, with one-click fixes" },
@@ -28,6 +28,7 @@
     { id: "apis", label: "APIs", icon: "commands", sub: "Your own self-hosted APIs, for the dashboard and the AI" },
     { id: "music", label: "Music", icon: "play", sub: "Play a folder of music, or forward the server's audio" },
     { id: "settings", label: "Settings", icon: "settings", sub: "Passwords, keys, the dashboard itself and how it looks" },
+    { id: "desk", label: "Desk", icon: "desk", sub: "Your wallpaper, clock and widgets" },
     { id: "guide", label: "Setup guide", icon: "help", sub: "Setting up and using this dashboard, step by step" },
   ];
 
@@ -803,7 +804,7 @@
   }
 
   // ---------------------------------------------------------------- chrome, routing, search
-  const MOBILE_PRIMARY = new Set(["overview", "nodes", "pods", "ai"]);
+  const MOBILE_PRIMARY = new Set(["overview", "nodes", "pods", "ai", "desk"]);
   let mobileMenuReturnFocus = null;
   function buildNav() {
     const link = (v, mobile) => (v.href ? '<a href="' + v.href + '"' : '<a href="#' + v.id + '" data-view="' + v.id + '"') + (mobile ? ' class="mobile-section-link"' : "") + '><svg class="icon"><use href="#i-' + v.icon + '"/></svg><span class="nav-label">' + esc(v.label) + '</span><span class="n" id="' + (mobile ? "mobile-n-" : "nav-n-") + v.id + '"></span></a>';
@@ -827,6 +828,7 @@
   }
   function renderChrome() {
     const v = VIEWS.find((x) => x.id === S.view);
+    document.body.classList.toggle("desk-mode", S.view === "desk");
     $$("[data-view]").forEach((a) => {
       const active = a.dataset.view === S.view;
       a.classList.toggle("on", active);
@@ -902,13 +904,14 @@
   function render() {
     renderChrome();
     const content = $("#content");
-    if (!S.d) {
+    const v = V[S.view];
+    const standalone = S.view === "desk";
+    if (!S.d && !standalone) {
       if (!$("#view")) setHTML(content, html`<div id="banners"></div><div class="loading"><div><div class="spin"></div>${S.res && S.res.error ? "Waiting for the cluster: " + S.res.error : "Reading your cluster…"}</div></div>`);
       return;
     }
     if (!$("#view")) { setHTML(content, html`<div id="banners"></div><div id="view"></div>`); S.built = null; }
-    setHTML($("#banners"), banners());
-    const v = V[S.view];
+    setHTML($("#banners"), standalone ? "" : banners());
     if (!v) { setTimeout(queueRender, 200); return; }   // that page's script hasn't loaded yet
     const keep = $$(".tablewrap").map((el) => [el.scrollLeft, el.scrollTop]), rebuilt = S.built !== S.view;
     if (rebuilt) { v.build(); S.built = S.view; $("#view").classList.remove("fade"); void $("#view").offsetWidth; $("#view").classList.add("fade"); syncControls(); }

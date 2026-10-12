@@ -48,7 +48,7 @@ MIME = {
 # Needed to show the sign-in page; everything else waits for a session.
 PUBLIC_FILES = ("/login", "/login.html", "/login.js", "/style.css", "/theme.js")
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; "
-       "connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+       "connect-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 
 
 # --------------------------------------------------------------------------- store
@@ -152,13 +152,14 @@ class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype, extra=None):
         if isinstance(body, str):
             body = body.encode("utf-8")
+        frameable = self.path.split("?", 1)[0] == "/g3/embed"
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Frame-Options", "SAMEORIGIN" if frameable else "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", CSP)
+        self.send_header("Content-Security-Policy", CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'") if frameable else CSP)
         self.send_header("Cache-Control", "no-store" if ctype.startswith("application/json") else "no-cache")
         for k, v in (extra or {}).items():
             self.send_header(k, v)

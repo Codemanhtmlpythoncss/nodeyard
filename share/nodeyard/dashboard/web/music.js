@@ -22,10 +22,10 @@
   }
 
   const M = {
-    data: null, tab: "home", homeHistory: [], homeRecs: [],
+    data: null, tab: "home", homeHistory: [], homeHistoryReady: false, homeHistoryError: false, homeSessionHeard: new Set(), homeRecs: [], homeUnheard: [],
     queue: [], idx: -1, live: false, seekable: true, shuffle: false, shuffleOrder: null, shufflePos: 0, repeat: "off", rate: 1, eq: "flat",
     scResults: [], scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
-    discoverTracks: [], discoverIndex: 0, discoverQuery: "", discoverPointerX: 0, discoverSearched: false,
+    discoverTracks: [], discoverIndex: 0, discoverSeeded: false, discoverPointerY: null, discoverWheelAt: 0,
     dj: readDJState(),
     historyId: "", historyElapsed: 0, historySince: 0, lastHistorySave: 0, lastPlaybackSave: 0, restored: false, stopping: false,
     hideDrm: (() => { try { return localStorage.getItem("ny-hidedrm") === "1"; } catch (e) { return false; } })(),
@@ -71,17 +71,19 @@
       ".sc-row{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;padding:8px 2px;border-bottom:1px solid var(--line)}" +
       ".sc-cover{position:relative;width:46px;height:46px;flex:none;border-radius:8px;overflow:hidden;display:grid;place-items:center;background:linear-gradient(135deg,rgba(255,85,0,.3),rgba(125,160,200,.16));color:var(--ink2,#b9c6dd);font-size:21px}" +
       ".sc-cover img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}" +
-      ".sc-discover{position:relative;min-height:430px;display:flex;align-items:flex-end;overflow:hidden;border-radius:18px;background-color:#151b2e;background-position:center;background-size:cover;color:white}" +
-      ".sc-discover::before{content:'';position:absolute;inset:0;background:linear-gradient(0deg,rgba(7,10,20,.94),rgba(7,10,20,.15) 78%)}" +
-      ".sc-discover-content{position:relative;width:100%;padding:clamp(20px,5vw,48px)}.sc-discover-content h2{font-size:clamp(25px,5vw,42px);margin:8px 0}.sc-discover-controls{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:14px}" +
-      ".sc-discover-controls button{min-width:46px;min-height:42px}.sc-discover-search{display:flex;gap:8px;flex-wrap:wrap}.sc-discover-search .input{flex:1;min-width:180px}" +
+      ".sc-discover-feed{width:min(100%,640px);margin:0 auto}.sc-discover-feed-head{display:flex;justify-content:space-between;align-items:center;margin:0 4px 10px;color:var(--ink2,#b9c6dd)}.sc-discover-feed-head h2{margin:0;color:var(--ink,#eaf1ff)}.sc-discover-feed-head span{font-size:12px}.sc-discover-feed-head b{font-size:12px}" +
+      ".sc-discover-card{position:relative;isolation:isolate;height:min(72dvh,800px);min-height:440px;overflow:hidden;border:1px solid rgba(255,255,255,.12);border-radius:22px;background-color:#151b2e;background-position:center;background-size:cover;color:white;touch-action:pan-x;overscroll-behavior:contain;box-shadow:0 16px 45px rgba(0,0,0,.25)}" +
+      ".sc-discover-card::before{content:'';position:absolute;inset:-14px;z-index:-1;background:inherit;background-position:center;background-size:cover;filter:blur(18px) brightness(.55);transform:scale(1.05)}.sc-discover-shade{position:absolute;inset:0;z-index:0;background:linear-gradient(180deg,rgba(7,10,20,.08),rgba(7,10,20,.1) 34%,rgba(7,10,20,.9) 100%)}" +
+      ".sc-discover-cover{position:absolute;z-index:1;top:8%;left:50%;transform:translateX(-50%);width:min(58%,330px);aspect-ratio:1;display:grid;place-items:center;overflow:hidden;border-radius:18px;background:rgba(8,12,22,.48);font-size:54px;box-shadow:0 16px 42px rgba(0,0,0,.38)}.sc-discover-cover img{width:100%;height:100%;object-fit:cover}" +
+      ".sc-discover-actions{position:absolute;z-index:2;right:16px;bottom:120px;display:grid;justify-items:center;gap:5px}.sc-discover-actions button,.sc-discover-nav button{width:44px;height:44px;border:1px solid rgba(255,255,255,.35);border-radius:50%;background:rgba(12,16,28,.52);backdrop-filter:blur(10px);color:white;font-size:20px;cursor:pointer}.sc-discover-actions button:hover,.sc-discover-nav button:hover{background:rgba(255,85,0,.84)}.sc-discover-actions small{margin:0 0 8px;font-size:11px;text-shadow:0 1px 4px #000}" +
+      ".sc-discover-meta{position:absolute;z-index:2;left:clamp(18px,4vw,40px);right:82px;bottom:58px;text-shadow:0 1px 5px rgba(0,0,0,.6)}.sc-discover-meta h2{font-size:clamp(22px,4vw,34px);line-height:1.12;margin:8px 0;overflow-wrap:anywhere}.sc-discover-meta>div{font-size:14px;color:rgba(255,255,255,.82)}.sc-discover-nav{position:absolute;z-index:3;right:18px;bottom:24px;display:flex;gap:7px}.sc-discover-nav button{width:36px;height:36px;font-size:17px}.sc-discover-nav button:disabled{opacity:.38;cursor:default}.sc-discover-hint{position:absolute;z-index:2;left:18px;bottom:20px;font-size:11px;color:rgba(255,255,255,.72);text-shadow:0 1px 4px #000}" +
       ".sc-row .meta{flex:1;min-width:0;overflow:hidden}" +
       ".sc-row .btn,.sc-row a.btn{flex:none}" +
       ".sc-row .meta div{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" +
       ".sc-pbtn{flex:none;width:38px;height:38px;border-radius:50%;background:var(--sc,#ff5500);color:#fff;border:0;cursor:pointer;font-size:15px}" +
       ".sc-pbtn.ghost{background:rgba(125,160,200,.16);color:var(--ink,#eaf1ff)}" +
       ".ny-viz-top{display:block;width:100%;height:56px;margin:2px 0 14px;border-radius:12px;background:linear-gradient(180deg,rgba(255,85,0,.05),rgba(125,160,200,.06))}" +
-      "@media (max-width:760px){#ny-player{bottom:56px}#ny-player .np{max-width:100px}#ny-player canvas{display:none}}";
+      "@media (max-width:760px){#ny-player{bottom:56px}#ny-player .np{max-width:100px}#ny-player canvas{display:none}.sc-discover-card{height:min(70dvh,720px);min-height:400px}.sc-discover-cover{top:10%;width:min(68%,300px)}.sc-discover-meta{left:18px;bottom:62px}.sc-discover-actions{right:12px;bottom:118px}}";
     document.head.appendChild(style);
     document.addEventListener("error", (e) => { if (e.target && e.target.matches && e.target.matches(".sc-cover img")) e.target.remove(); }, true);
     // SoundCloud-ish accent available as --sc (falls back to orange).
@@ -121,7 +123,11 @@
     audio.addEventListener("play", () => { startViz(); paintBtn(); savePlayback(false, false); });
     audio.addEventListener("playing", () => {
       const t = M.queue[M.idx];
-      if (t && !M.live) { $("#ny-np-sub").textContent = subOf(t); beginHistory(t); }
+      if (t && !M.live) {
+        $("#ny-np-sub").textContent = subOf(t); beginHistory(t);
+        const discoverIndex = M.discoverTracks.findIndex((item) => trackKey(item) === trackKey(t));
+        if (M.tab === "discover" && discoverIndex >= 0 && discoverIndex !== M.discoverIndex) { M.discoverIndex = discoverIndex; renderTab(); }
+      }
     });
     audio.addEventListener("pause", () => { historyProgress(true); paintBtn(); if (!M.stopping) savePlayback(false, true); });
     audio.addEventListener("error", onAudioError);
@@ -268,6 +274,11 @@
     return { action, id: M.historyId, seconds: Math.floor(seconds), track: trackForApi(t) };
   }
   function beginHistory(track) {
+    const key = trackKey(track);
+    if (key) {
+      M.homeSessionHeard.add(key);
+      if (M.tab === "home") renderTab();
+    }
     if (!M.historyId) {
       M.historyId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2);
       M.historyElapsed = 0;
@@ -364,7 +375,9 @@
     const sc = (t.kind === "sc" || t.url);
     M.seekable = true;     // the server buffers both local files and SoundCloud, so seeking & resume work
     audio.src = srcFor(t);
-    audio.play().then(() => savePlayback(false, true)).catch(() => {});
+    audio.play().then(() => savePlayback(false, true)).catch((e) => {
+      if (e && e.name === "NotAllowedError") toast("Playback was blocked. Press Play to start the songs.");
+    });
     $("#ny-np-title").textContent = titleOf(t);
     $("#ny-np-sub").textContent = sc ? subOf(t) + " · loading…" : subOf(t);
     $("#ny-live-pill").hidden = true;
@@ -485,6 +498,16 @@
       rest = rest.slice(end).trimStart();
     }
   }
+  function previewDJVoice() {
+    if (typeof speechSynthesis === "undefined" || typeof SpeechSynthesisUtterance === "undefined") { toast("Voice preview isn't available in this browser."); return; }
+    speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance("Hey, it’s your Nodeyard DJ. Tell me what you’re in the mood for, and I’ll line up the songs.");
+    const voice = djVoices().find((v) => v.name === M.dj.voice) || djBestVoice();
+    if (voice) { utterance.voice = voice; utterance.lang = voice.lang; }
+    utterance.rate = 0.96; utterance.pitch = 1.02;
+    utterance.onerror = () => toast("Couldn't preview that voice.");
+    speechSynthesis.speak(utterance);
+  }
   function djTargets() {
     if (M.dj.targets === null) loadDJTargets();
     const ready = ((M.dj.targets || {}).targets || []).filter((x) => x.ready);
@@ -516,7 +539,7 @@
         <p class="small mt">The DJ can use your music library, local likes and listening history. It only picks tracks already in that collection.</p>
         <div class="row wrap mt" style="gap:10px;align-items:flex-end">
           <label class="small">AI model<select class="select mt" data-music="dj-target" ${ready ? "" : "disabled"}>${raw(djTargets())}</select></label>
-          ${typeof speechSynthesis !== "undefined" ? html`<label class="small">Voice<select class="select mt" data-music="dj-voice">${raw(djVoiceOptions())}</select></label>` : ""}
+          ${typeof speechSynthesis !== "undefined" ? html`<label class="small">Voice<select class="select mt" data-music="dj-voice">${raw(djVoiceOptions())}</select></label><button class="btn" data-music="dj-preview-voice">▶ Preview voice</button>` : ""}
           <button class="btn primary" data-music="dj-start" ${ready ? "" : "disabled"}>▶ Start DJ</button>
         </div>
         <div class="faint small mt">${voiceNote}</div>
@@ -531,7 +554,7 @@
         <button class="btn small" data-music="dj-stop">Stop DJ</button></div>
       <div class="row wrap mt" style="gap:8px;align-items:flex-end">
         <label class="small">AI model<select class="select mt" data-music="dj-target">${raw(djTargets())}</select></label>
-        ${typeof speechSynthesis !== "undefined" ? html`<label class="small">Voice<select class="select mt" data-music="dj-voice">${raw(djVoiceOptions())}</select></label>
+        ${typeof speechSynthesis !== "undefined" ? html`<label class="small">Voice<select class="select mt" data-music="dj-voice">${raw(djVoiceOptions())}</select></label><button class="btn" data-music="dj-preview-voice">▶ Preview voice</button>
           <label class="check small"><input type="checkbox" data-music="dj-speak" ${M.dj.speak !== false ? raw("checked") : ""}> <span>Speak replies</span></label>` : ""}
       </div>
       <div id="dj-chat" style="max-height:380px;overflow:auto;display:flex;flex-direction:column;gap:10px;margin-top:14px">
@@ -539,8 +562,8 @@
         ${M.dj.busy ? html`<div class="empty"><div class="spin"></div>DJ is thinking…</div>` : ""}
       </div>
       ${M.dj.draft && M.dj.draft.tracks && M.dj.draft.tracks.length ? html`<div class="mt" style="border-top:1px solid var(--line);padding-top:12px">
-        <div class="row wrap" style="justify-content:space-between;align-items:center;gap:8px"><b>Mix preview: ${M.dj.draft.name} <span class="faint small">(${M.dj.draft.tracks.length} tracks)</span></b>
-          <div class="row" style="gap:6px"><button class="btn small primary" data-music="dj-play">▶ Play mix</button><button class="btn small" data-music="dj-save" ${M.dj.draft.saved ? "disabled" : ""}>${M.dj.draft.saved ? "Saved ✓" : "Save playlist"}</button></div></div>
+        <div class="row wrap" style="justify-content:space-between;align-items:center;gap:8px"><b>DJ set: ${M.dj.draft.name} <span class="faint small">(${M.dj.draft.tracks.length} tracks)</span></b>
+          <div class="row" style="gap:6px"><button class="btn small primary" data-music="dj-play">▶ Play set</button><button class="btn small" data-music="dj-save" ${M.dj.draft.saved ? "disabled" : ""}>${M.dj.draft.saved ? "Saved ✓" : "Save playlist"}</button></div></div>
         <div class="mt">${M.dj.draft.tracks.map((t, i) => trackRow(t, "dj:" + i))}</div></div>` : ""}
       <div class="row wrap mt" style="gap:8px;align-items:flex-end">
         <textarea class="input" data-music="dj-request" rows="2" placeholder="What are you in the mood for? e.g. make me a mellow late-night mix from songs I've liked" style="flex:1;min-width:240px;resize:vertical" ${M.dj.busy ? "disabled" : ""}></textarea>
@@ -624,10 +647,12 @@
       const byId = new Map(catalog.map((x) => [x.id, x.track]));
       const selected = Array.isArray(parsed.track_ids) ? parsed.track_ids.slice(0, 40).map((id) => byId.get(String(id))).filter(Boolean) : [];
       const name = String(parsed.playlist_name || "").trim().slice(0, 120);
-      const assistantText = selected.length ? speech + "\n\nI’ve put together “" + (name || "Your mix") + "” with " + selected.length + " tracks." : speech;
+      const assistantText = selected.length ? speech + "\n\nI’ve queued “" + (name || "Your mix") + "” with " + selected.length + " tracks and am starting playback now." : speech;
       M.dj.messages.push({ role: "assistant", content: assistantText });
-      if (selected.length && name) M.dj.draft = { name, tracks: selected, saved: false };
-      else M.dj.draft = null;
+      if (selected.length) {
+        M.dj.draft = { name: name || "Your mix", tracks: selected, saved: false };
+        playQueue(selected, 0);
+      } else M.dj.draft = null;
       saveDJ(); speakDJ(speech);
     } catch (e) {
       const message = e.name === "AbortError" ? "I stopped that request." : (e.message || "The DJ couldn't answer.");
@@ -703,15 +728,72 @@
     }).sort((a, b) => b.score - a.score).slice(0, 18).map((x) => x.track);
   }
 
+  function homeUnheardRecommendations() {
+    if (!M.homeHistoryReady) return [];
+    const heard = new Set([...(M.homeHistory || []).map(trackKey), ...M.homeSessionHeard]);
+    const candidates = new Map();
+    function add(track, liked) {
+      const key = trackKey(track);
+      if (!key || heard.has(key)) return;
+      const found = candidates.get(key);
+      if (found) { found.liked = found.liked || liked; return; }
+      candidates.set(key, { key, liked, track: { ...track, kind: track.url ? "sc" : "local" } });
+    }
+    M.scLikes.forEach((t) => add(t, true));
+    (((M.data || {}).tracks) || []).forEach((t) => add(t, false));
+    const day = Math.floor(Date.now() / 86400000);
+    function stable(key) { let h = 2166136261; for (const c of key + day) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967295; }
+    return Array.from(candidates.values()).sort((a, b) => (Number(b.liked) * 2 + stable(b.key)) - (Number(a.liked) * 2 + stable(a.key)))
+      .slice(0, 18).map((x) => x.track);
+  }
+
+  function discoverRecommendations() {
+    const rows = [], seen = new Set();
+    const candidates = (M.homeHistoryReady ? homeUnheardRecommendations() : []).concat(homeRecommendations());
+    candidates.forEach((track) => { const key = trackKey(track); if (key && !seen.has(key)) { seen.add(key); rows.push(track); } });
+    return rows;
+  }
+
   function renderHome(el) {
     M.homeRecs = homeRecommendations();
+    M.homeUnheard = homeUnheardRecommendations();
     const tracks = M.homeRecs;
+    const unheard = M.homeUnheard;
+    const likes = M.scLikes.slice(0, 12);
+    const playlists = M.playlists.slice(0, 10);
+    const unseenContent = !M.homeHistoryReady
+      ? html`<div class="empty">${M.homeHistoryError ? "Couldn't check your listening history." : "Checking your listening history…"} ${M.homeHistoryError ? raw('<button class="btn small mt" data-music="home-history-retry">Try again</button>') : ""}</div>`
+      : unheard.length
+        ? unheard.map((t) => trackRow(t, "new:" + trackKey(t), t.url ? likeBtn(t) : ""))
+        : html`<div class="empty">You’ve heard every song we can see in your library and likes. Add more songs to find new ones.</div>`;
     setHTML(el, html`<div class="card">
+      <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h2 style="margin:0">New to you</h2>
+        <div class="muted small mt">Songs from your library and likes that aren’t in your saved listening history.</div></div>
+        ${unheard.length ? raw('<button class="btn primary" data-music="home-unheard-play">▶ Play new songs</button>') : ""}</div>
+      <div class="mt">${unseenContent}</div>
+    </div>
+    <div class="card mt">
       <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h2 style="margin:0">Made for you</h2>
         <div class="muted small mt">Ranked by a local algorithm using your library, likes and listening history. No AI.</div></div>
         ${tracks.length ? raw('<button class="btn primary" data-music="home-play">▶ Play recommendations</button>') : ""}</div>
       <div class="mt">${tracks.length ? tracks.map((t) => trackRow(t, "rec:" + trackKey(t), t.url ? likeBtn(t) : ""))
         : html`<div class="empty">Add songs to your library, like a few tracks, or listen to music to build your recommendations.</div>`}</div>
+    </div>
+    <div class="card mt">
+      <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h2 style="margin:0">Your likes <span class="faint small">(${M.scLikes.length})</span></h2>
+        <div class="muted small mt">Songs you’ve saved in Nodeyard.</div></div>
+        ${M.scLikes.length > likes.length ? raw('<button class="btn" data-music="home-likes">View all likes</button>') : ""}</div>
+      <div class="mt">${likes.length ? likes.map((t, i) => trackRow(t, "like:" + i, likeBtn(t))) : html`<div class="empty">Like a song in Search or Discover and it will show up here.</div>`}</div>
+    </div>
+    <div class="card mt">
+      <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h2 style="margin:0">Your playlists <span class="faint small">(${M.playlists.length})</span></h2>
+        <div class="muted small mt">Pick up a mix you’ve made.</div></div>
+        ${M.playlists.length > playlists.length ? raw('<button class="btn" data-music="home-playlists">View all playlists</button>') : ""}</div>
+      <div class="mt">${playlists.length ? playlists.map((p) => html`<div class="sc-row">
+        <button class="sc-pbtn ghost" data-music="pl-open" data-id="${p.id}" title="Open playlist">♪</button>
+        <div class="meta" data-music="pl-open" data-id="${p.id}" style="cursor:pointer"><div><b>${p.name}</b></div><div class="faint small">${p.count || 0} track${+p.count === 1 ? "" : "s"}</div></div>
+        <button class="btn small" data-music="pl-open" data-id="${p.id}">Open</button></div>`)
+        : html`<div class="empty">Create a playlist from Search, Likes, Library or the DJ.</div>`}</div>
     </div>`);
   }
 
@@ -722,39 +804,34 @@
   }
 
   function renderDiscover(el) {
+    if (!M.discoverSeeded) { M.discoverTracks = discoverRecommendations(); M.discoverIndex = 0; M.discoverSeeded = true; }
     const tracks = M.discoverTracks || [];
     const track = tracks[M.discoverIndex];
     if (!track) {
-      setHTML(el, html`<div class="card">
-        <h2 style="margin-top:0">Discover</h2><p class="muted small">Search SoundCloud, then browse one song at a time. Use the arrows, ← / → keys, or swipe the cover.</p>
-        <div class="sc-discover-search"><input class="input" data-music="discover-query" value="${M.discoverQuery}" placeholder="Artist, track, or vibe…">
-          <button class="btn primary" data-music="discover-search">Discover songs</button></div>
-        <div class="empty mt">${M.discoverSearched ? "No songs found. Try another search." : "Enter a search to start discovering songs."}</div>
+      setHTML(el, html`<div class="card"><h2 style="margin-top:0">Discover · For you</h2>
+        <p class="muted">Your feed uses saved songs from your library, listening history and likes. It doesn’t need a search.</p>
+        <div class="empty">Add music to your library or like a song to seed your recommendations.</div>
+        <div class="row wrap mt"><button class="btn" data-music="discover-library">Open Library</button><button class="btn" data-music="discover-likes">Open Likes</button></div>
       </div>`);
       return;
     }
     const art = artworkSource(track);
-    const background = art ? "background-image:linear-gradient(0deg,rgba(7,10,20,.94),rgba(7,10,20,.15) 78%),url('" + art + "')" : "";
+    const background = art ? "background-image:url('" + art + "')" : "";
     const liked = M.scLikes.some((item) => item.url === track.url);
-    setHTML(el, html`<div class="card">
-      <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h2 style="margin:0">Discover</h2><div class="muted small mt">Browse songs with the arrows, ← / → keys, or swipe the cover.</div></div>
-        <div class="faint small">${M.discoverIndex + 1} of ${tracks.length}</div></div>
-      <div class="sc-discover mt" data-discover-stage style="${background}" tabindex="0" aria-label="Discover song: ${titleOf(track)}">
-        <div class="sc-discover-content"><span class="chip">SoundCloud discovery</span><h2>${titleOf(track)}</h2><div>${subOf(track)}${track.duration_ms ? " · " + fmtTime(track.duration_ms / 1000) : ""}</div>
-          <div class="sc-discover-controls">
-            <button class="btn" data-music="discover-prev" ${M.discoverIndex <= 0 ? "disabled" : ""} aria-label="Previous song">←</button>
-            <button class="btn primary" data-music="discover-play">▶ Play</button>
-            <button class="btn" data-music="discover-next" ${M.discoverIndex >= tracks.length - 1 ? "disabled" : ""} aria-label="Next song">→</button>
-          </div>
-          <div class="sc-discover-controls">
-            <button class="btn" data-music="discover-like">${liked ? "♥ Liked" : "♡ Like"}</button>
-            <button class="btn" data-music="discover-add">＋ Add to playlist</button>
-          </div>
-        </div>
-      </div>
-      <div class="sc-discover-search mt"><input class="input" data-music="discover-query" value="${M.discoverQuery}" placeholder="Find more by artist, track, or vibe…">
-        <button class="btn" data-music="discover-search">Search</button></div>
-    </div>`);
+    setHTML(el, html`<div class="sc-discover-feed"><header class="sc-discover-feed-head"><div><h2>Discover</h2><span>For you · from your music</span></div><b>${M.discoverIndex + 1} / ${tracks.length}</b></header>
+      <article class="sc-discover-card" data-discover-stage style="${background}" tabindex="0" aria-label="Discover song: ${titleOf(track)}. Swipe up or down to browse.">
+        <div class="sc-discover-shade"></div>
+        <div class="sc-discover-cover">${art ? html`<img src="${art}" alt="${titleOf(track)} artwork" loading="lazy">` : html`<span aria-hidden="true">♫</span>`}</div>
+        <aside class="sc-discover-actions">
+          ${track.url ? html`<button type="button" data-music="discover-like" aria-label="${liked ? "Unlike" : "Like"} song">${liked ? "♥" : "♡"}</button><small>${liked ? "Liked" : "Like"}</small>` : ""}
+          <button type="button" data-music="discover-play" aria-label="Play song">▶</button><small>Play</small>
+          <button type="button" data-music="discover-add" aria-label="Add song to playlist">＋</button><small>Save</small>
+        </aside>
+        <div class="sc-discover-meta"><span class="chip">${track.url ? "SoundCloud" : "Your library"}</span><h2>${titleOf(track)}</h2>
+          <div>${subOf(track)}${track.duration_ms ? " · " + fmtTime(track.duration_ms / 1000) : ""}</div></div>
+        <div class="sc-discover-nav"><button type="button" data-music="discover-prev" ${M.discoverIndex <= 0 ? "disabled" : ""} aria-label="Previous song">⌃</button><button type="button" data-music="discover-next" ${M.discoverIndex >= tracks.length - 1 ? "disabled" : ""} aria-label="Next song">⌄</button></div>
+        <div class="sc-discover-hint">Swipe or scroll · ↑ / ↓</div>
+      </article></div>`);
   }
   function moveDiscover(delta) {
     if (!M.discoverTracks.length) return;
@@ -939,9 +1016,26 @@
     const r = await postJSON("/api/music/config", { dir }); if (r.ok) { await load(); renderPage(); toast("Saved."); } else toast(r.error || "Not saved.");
   }
 
+  async function refreshHomeHistory() {
+    M.homeHistoryReady = false; M.homeHistoryError = false;
+    try {
+      const first = await getJSON("/api/music/ai?action=history&offset=0&limit=50");
+      if (!first.ok || !Array.isArray(first.tracks)) throw new Error(first.error || "History is unavailable.");
+      const total = Math.max(first.tracks.length, Math.min(500, +first.total || 0));
+      const offsets = [];
+      for (let offset = 50; offset < total; offset += 50) offsets.push(offset);
+      const pages = await Promise.all(offsets.map((offset) => getJSON("/api/music/ai?action=history&offset=" + offset + "&limit=50")));
+      if (pages.some((page) => !page.ok || !Array.isArray(page.tracks))) throw new Error("Some listening history pages could not be loaded.");
+      M.homeHistory = first.tracks.concat(...pages.map((page) => page.tracks));
+      M.homeHistoryReady = true;
+    } catch (e) {
+      M.homeHistory = []; M.homeHistoryError = true;
+    }
+  }
+
   async function load() {
     try { const r = await getJSON("/api/music"); if (r.ok) M.data = r; } catch (e) { /* signed out */ }
-    try { const r = await getJSON("/api/music/ai?action=history&offset=0&limit=50"); M.homeHistory = r.ok && Array.isArray(r.tracks) ? r.tracks : []; } catch (e) { M.homeHistory = []; }
+    await refreshHomeHistory();
   }
 
   async function searchSc() {
@@ -956,19 +1050,6 @@
       M.scResults = Array.isArray(r.tracks) ? r.tracks : [];
       renderTab();
     } catch (e) { if (el) setHTML(el, html`<div class="empty">${e.message || "Search failed."}</div>`); }
-  }
-  async function discoverSearch() {
-    const input = $('[data-music="discover-query"]');
-    const query = (input && input.value || M.discoverQuery || "").trim();
-    if (query.length < 2) { toast("Enter at least two characters to discover songs."); return; }
-    M.discoverQuery = query; M.discoverSearched = true;
-    const el = $("#sc-tab"); if (el) setHTML(el, html`<div class="card"><div class="empty"><div class="spin"></div>Finding songs…</div></div>`);
-    try {
-      const r = await getJSON("/api/music/search?q=" + encodeURIComponent(query) + (M.hideDrm ? "&nodrm=1" : ""));
-      if (!r.ok) { M.discoverTracks = []; toast(r.error || "Discover search failed."); }
-      else { M.discoverTracks = Array.isArray(r.tracks) ? r.tracks : []; M.discoverIndex = 0; }
-      renderTab();
-    } catch (e) { M.discoverTracks = []; renderTab(); toast(e.message || "Discover search failed."); }
   }
   async function loadSet() {
     const input = $('[data-music="set-url"]');
@@ -1029,15 +1110,22 @@
     if (pb) { startPlay(pb.dataset.play); return; }
     const t = e.target.closest && e.target.closest("[data-music], [data-tab]"); if (!t) return;
     if (t.dataset.tab) {
-      M.tab = t.dataset.tab; M.openPl = null; renderPage();
-      if (M.tab === "home") getJSON("/api/music/ai?action=history&offset=0&limit=50").then((r) => { if (r.ok) { M.homeHistory = Array.isArray(r.tracks) ? r.tracks : []; renderTab(); } }).catch(() => {});
+      M.tab = t.dataset.tab; M.openPl = null;
+      if (M.tab === "discover") M.discoverSeeded = false;
+      renderPage();
+      if (M.tab === "home" || M.tab === "discover") { const requestedTab = M.tab; const pending = refreshHomeHistory(); renderTab(); pending.then(() => { if (S.view === "music" && M.tab === requestedTab) { if (requestedTab === "discover") M.discoverSeeded = false; renderTab(); } }); }
       return;
     }
     const act = t.dataset.music;
     if (act === "listen") playLive();
     else if (act === "home-play") { if (M.homeRecs.length) playQueue(M.homeRecs, 0); }
+    else if (act === "home-unheard-play") { if (M.homeUnheard.length) playQueue(M.homeUnheard, 0); }
+    else if (act === "home-history-retry") { const pending = refreshHomeHistory(); renderTab(); pending.then(() => { if (S.view === "music" && M.tab === "home") renderTab(); }); }
+    else if (act === "home-likes") { M.tab = "likes"; renderPage(); }
+    else if (act === "home-playlists") { M.tab = "playlists"; renderPage(); }
     else if (act === "dj-start") startDJ();
     else if (act === "dj-stop") stopDJ();
+    else if (act === "dj-preview-voice") previewDJVoice();
     else if (act === "dj-send") {
       const input = $('[data-music="dj-request"]'), request = (input && input.value || "").trim();
       if (input) input.value = "";
@@ -1056,12 +1144,13 @@
     else if (act === "b-cancel") closeBrowse();
     else if (act === "b-use") { closeBrowse(); await saveDir(t.dataset.path); }
     else if (act === "sc-search") await searchSc();
-    else if (act === "discover-search") await discoverSearch();
     else if (act === "discover-prev") moveDiscover(-1);
     else if (act === "discover-next") moveDiscover(1);
     else if (act === "discover-play") { if (M.discoverTracks[M.discoverIndex]) playQueue(M.discoverTracks, M.discoverIndex); }
     else if (act === "discover-like") { const tr = M.discoverTracks[M.discoverIndex]; if (tr) await toggleLike(tr.url); }
     else if (act === "discover-add") { const tr = M.discoverTracks[M.discoverIndex]; if (tr) openAddPicker(tr); }
+    else if (act === "discover-library") { M.tab = "library"; renderPage(); }
+    else if (act === "discover-likes") { M.tab = "likes"; renderPage(); }
     else if (act === "play-url") await playTrackLink();
     else if (act === "load-set") await loadSet();
     else if (act === "play-set") { if (M.scSet) playQueue(M.scSet.tracks, 0); }
@@ -1125,6 +1214,7 @@
     else if (kind === "dj") { if (M.dj.draft) playQueue(M.dj.draft.tracks, +rest); }
     else if (kind === "lib") { const lib = filteredLib(); const i = lib.findIndex((x) => trackKey(x) === rest); if (i >= 0) playQueue(lib, i); }
     else if (kind === "rec") { const i = M.homeRecs.findIndex((x) => trackKey(x) === rest); if (i >= 0) playQueue(M.homeRecs, i); }
+    else if (kind === "new") { const i = M.homeUnheard.findIndex((x) => trackKey(x) === rest); if (i >= 0) playQueue(M.homeUnheard, i); }
   }
   async function toggleLike(url) {
     const track = findTrack(url); if (!track) return;
@@ -1141,29 +1231,31 @@
   }
 
   document.addEventListener("input", (e) => {
-    if (e.target.matches('[data-music="discover-query"]')) M.discoverQuery = e.target.value;
-    else if (e.target.matches('[data-music="lib-filter"]')) { M._libq = e.target.value; renderTab(); const inp = $('[data-music="lib-filter"]'); if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); } }
+    if (e.target.matches('[data-music="lib-filter"]')) { M._libq = e.target.value; renderTab(); const inp = $('[data-music="lib-filter"]'); if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); } }
   });
   document.addEventListener("keydown", (e) => {
-    if (S.view === "music" && M.tab === "discover" && (e.key === "ArrowLeft" || e.key === "ArrowRight") &&
+    if (S.view === "music" && M.tab === "discover" && (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) &&
         !e.target.matches("input,textarea,select,[contenteditable=true]")) {
-      e.preventDefault(); moveDiscover(e.key === "ArrowLeft" ? -1 : 1); return;
+      e.preventDefault(); moveDiscover(e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : 1); return;
     }
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && e.target.matches('[data-music="dj-request"]')) { e.preventDefault(); $('[data-music="dj-send"]')?.click(); return; }
     if (e.key !== "Enter") return;
-    if (e.target.matches('[data-music="discover-query"]')) { e.preventDefault(); discoverSearch(); }
     if (e.target.matches('[data-music="sc-query"]')) { e.preventDefault(); searchSc(); }
     else if (e.target.matches('[data-music="track-url"]')) { e.preventDefault(); playTrackLink(); }
     else if (e.target.matches('[data-music="set-url"]')) { e.preventDefault(); loadSet(); }
   });
   document.addEventListener("pointerdown", (e) => {
-    if (M.tab === "discover" && e.target.closest("[data-discover-stage]")) M.discoverPointerX = e.clientX;
+    if (M.tab === "discover" && e.target.closest("[data-discover-stage]")) M.discoverPointerY = e.clientY;
   });
   document.addEventListener("pointerup", (e) => {
-    if (!M.discoverPointerX) return;
-    const delta = e.clientX - M.discoverPointerX; M.discoverPointerX = 0;
+    if (M.discoverPointerY === null) return;
+    const delta = e.clientY - M.discoverPointerY; M.discoverPointerY = null;
     if (Math.abs(delta) > 55 && !e.target.closest("button")) moveDiscover(delta < 0 ? 1 : -1);
   });
+  document.addEventListener("wheel", (e) => {
+    if (M.tab !== "discover" || !e.target.closest("[data-discover-stage]") || Math.abs(e.deltaY) < 25 || Date.now() - M.discoverWheelAt < 450) return;
+    e.preventDefault(); M.discoverWheelAt = Date.now(); moveDiscover(e.deltaY > 0 ? 1 : -1);
+  }, { passive: false });
   document.addEventListener("change", async (e) => {
     const t = e.target.closest && e.target.closest("[data-music]"); if (!t) return;
     if (t.dataset.music === "cache-limit") { const r = await postJSON("/api/music/config", { cache_limit: +t.value }); if (r.ok) { await load(); renderTab(); toast("Recent song cache updated."); } else toast(r.error || "Couldn't update the cache size."); }

@@ -7,6 +7,16 @@
   var page = /\/nexus/.test(location.pathname) ? "nexus" : /\/desk/.test(location.pathname) ? "desk" : "wall";
   var MODES = [["wall", "Wall"], ["showcase", "Showcase"], ["ops", "Ops"], ["night", "Night"], ["alert", "Alert"]];
   var panel = null, mode = "";
+  var windowTransparency = (function () {
+    try { var saved = localStorage.getItem("galaxy.windowTransparency"); return saved == null ? 45 : Math.max(0, Math.min(85, Number(saved) || 0)); }
+    catch (e) { return 45; }
+  })();
+  var allWindowsTransparent = (function () { try { return localStorage.getItem("galaxy.allWindowsTransparent") === "1"; } catch (e) { return false; } })();
+
+  function applyWindowAppearance() {
+    document.documentElement.style.setProperty("--ny-window-opacity", String(1 - windowTransparency / 100));
+    if (document.body) document.body.classList.toggle("ny-all-windows-transparent", allWindowsTransparent);
+  }
 
   function css() {
     var s = document.createElement("style");
@@ -29,6 +39,9 @@
       "#ny-ctl .on{background:rgba(90,215,255,.22)!important;color:#fff;box-shadow:inset 0 0 0 1px #5ad7ff}" +
       "#ny-ctl kbd{font:inherit;font-size:10px;color:#8fa7d2;border:1px solid rgba(143,167,210,.35);border-radius:4px;padding:0 4px}" +
       "#ny-ctl .keys{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;color:#9db3dc;font-size:11px}" +
+      "#ny-ctl .window-opacity{display:flex;align-items:center;gap:8px}#ny-ctl .window-opacity input{width:100%;accent-color:#5ad7ff}#ny-ctl .window-opacity b{width:36px;text-align:right;color:#dbe8ff;font-size:10px}" +
+      "#ny-ctl .checkrow{display:flex;align-items:center;gap:8px;color:#cfe0ff;font-size:11px;margin:8px 0 0;cursor:pointer}#ny-ctl .checkrow input{accent-color:#5ad7ff}" +
+      "body.ny-all-windows-transparent .panel,body.ny-all-windows-transparent .card{background:rgba(5,10,22,var(--ny-window-opacity,.55))!important}" +
       "#ny-ctl .note{color:#6f86b3;font-size:10.5px;margin-top:4px}" +
       "#ny-hint{position:fixed;left:96px;bottom:8px;z-index:9999;font:11px ui-monospace,Menlo,monospace;color:#7fa3c8;opacity:.5}";
     document.head.appendChild(s);
@@ -72,6 +85,11 @@
     if (H) look.push(btn("key:p", "Privacy", !!H.privacy, "P"));
     if (C) look.push(btn("tour-x", "Extra camera moves: " + (cinematics() ? "on" : "off"), cinematics()), btn("key:m", "Play one", false, "M"));
     if (look.length) h += '<div class="k">Look</div><div class="r">' + look.join("") + "</div>";
+
+    h += '<div class="k">Window appearance</div>' +
+      '<div class="row"><span>Transparency</span><div class="window-opacity"><input type="range" min="0" max="85" step="5" value="' + windowTransparency + '" data-ny-window-alpha aria-label="Window transparency"><b data-ny-window-value>' + windowTransparency + '%</b></div></div>' +
+      '<label class="checkrow"><input type="checkbox" data-ny-all-transparent' + (allWindowsTransparent ? " checked" : "") + '> <span>All windows transparent</span></label>' +
+      '<div class="note">The slider is applied when all windows are transparent.</div>';
 
     h += '<div class="k">Keys</div><div class="keys">' +
       "<kbd>Tab</kbd><span>this panel</span>" + (page !== "desk" ? "<kbd>1</kbd><span>to <kbd>5</kbd> display mode</span>" : "") +
@@ -123,6 +141,20 @@
     if (b) act(b.getAttribute("data-ny"));
     else if (!panel.contains(e.target)) close();
   }, true);
+  document.addEventListener("input", function (e) {
+    if (!e.target.matches("[data-ny-window-alpha]")) return;
+    windowTransparency = Math.max(0, Math.min(85, Number(e.target.value) || 0));
+    try { localStorage.setItem("galaxy.windowTransparency", String(windowTransparency)); } catch (er) {}
+    applyWindowAppearance();
+    var value = document.querySelector("[data-ny-window-value]"); if (value) value.textContent = windowTransparency + "%";
+  });
+  document.addEventListener("change", function (e) {
+    if (!e.target.matches("[data-ny-all-transparent]")) return;
+    allWindowsTransparent = e.target.checked;
+    try { localStorage.setItem("galaxy.allWindowsTransparent", allWindowsTransparent ? "1" : "0"); } catch (er) {}
+    applyWindowAppearance();
+  });
   document.addEventListener("fullscreenchange", paint);
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", css); else css();
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", function () { css(); applyWindowAppearance(); });
+  else { css(); applyWindowAppearance(); }
 })();
