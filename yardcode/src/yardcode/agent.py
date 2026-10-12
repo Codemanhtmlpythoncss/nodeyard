@@ -142,7 +142,7 @@ class Agent:
         self.memory_text, self.memory_info = memory.load(self.ctx.cwd)
 
     LEAN_HIDDEN = {"Arxiv", "Wikipedia", "FileSearch", "Memory", "BashOutput", "KillShell", "MultiEdit"}
-    TINY_KEEP = {"Read", "Write", "Edit", "Bash", "Grep", "Glob", "WebSearch", "WebFetch", "Weather"}
+    TINY_KEEP = {"Read", "Write", "Edit", "Bash", "Grep", "Glob", "WebSearch", "WebFetch", "Weather", "MusicLibrary", "CreateMusicPlaylist"}
 
     def lean(self):
         return self.tier() != "full"

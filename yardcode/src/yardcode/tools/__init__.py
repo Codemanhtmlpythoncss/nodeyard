@@ -1,6 +1,7 @@
 """The built-in tools, as a list the agent turns into its tool box."""
 from .files import FILE_TOOLS
 from .misc import MISC_TOOLS
+from .music import MUSIC_TOOLS
 from .shell import SHELL_TOOLS
 from .web import WEB_TOOLS
 
@@ -10,6 +11,7 @@ GROUPS = [
     ("Shell", ["Bash", "BashOutput", "KillShell", "Python", "Terminal"]),
     ("Web", ["WebSearch", "WebFetch", "Wikipedia", "Arxiv", "Weather"]),
     ("Thinking", ["TodoWrite", "Calculator", "FileSearch", "Memory", "AskUserQuestion", "ExitPlanMode", "Task"]),
+    ("Music", ["MusicLibrary", "CreateMusicPlaylist"]),
     ("Cluster", ["Model"]),
 ]
 
@@ -17,7 +19,7 @@ GROUPS = [
 def builtin(settings, with_cluster=False):
     disabled = set(settings.get("tools.disabled") or [])
     tools = []
-    for cls in FILE_TOOLS + SHELL_TOOLS + WEB_TOOLS + MISC_TOOLS:
+    for cls in FILE_TOOLS + SHELL_TOOLS + WEB_TOOLS + MISC_TOOLS + MUSIC_TOOLS:
         if cls.name in disabled:
             continue
         if cls.name == "Model" and not with_cluster:

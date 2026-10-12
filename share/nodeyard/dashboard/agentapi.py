@@ -1,9 +1,10 @@
-"""Plugins for the dashboard chat: the AI can search the web, read pages, look things up, calculate, run Python and use files,
+"""Plugins for the dashboard chat: the AI can search the web, look things up, read your music library and history,
+create playlists, calculate, run Python and use files,
 by running yardcode's agent for the conversation and streaming what it does to the page.
 
-Each chat gets its own `yardcode --serve-json` process (JSON lines in and out, see yardcode/src/yardcode/serve.py). Tools that only
-read the internet run inside the dashboard's own sandbox; Python, files and shell run as the terminal user (never root), only over
-Tailscale or your own network, and every change asks you first (a card with Allow / Deny in the chat).
+Each chat gets its own `yardcode --serve-json` process (JSON lines in and out, see yardcode/src/yardcode/serve.py). Music tools
+read the signed-in user's local Nodeyard music data; playlist writes ask first. Python, files and shell run as the terminal
+user (never root), only over Tailscale or your own network, and every change asks you first (a card with Allow / Deny in the chat).
 """
 import json
 import os
@@ -24,6 +25,7 @@ PLUGINS = [
     ("weather", "Weather", "Current weather and a 3-day forecast for any place", ["Weather"], False),
     ("calculator", "Calculator", "Exact maths instead of guessing", ["Calculator"], False),
     ("tasks", "Task list", "Keeps a visible to-do list for bigger jobs", ["TodoWrite"], False),
+    ("music", "Music", "Reads your liked songs and listening history and can create playlists from your own music", ["MusicLibrary", "CreateMusicPlaylist"], False),
     ("python", "Code interpreter", "Runs Python the AI writes, like a notebook (asks you first)", ["Python"], True),
     ("files", "Files and shell", "Reads and edits files and runs commands in a work folder (asks you first)", ["Read", "Write", "Edit", "LS", "Glob", "Grep", "Bash"], True),
 ]
@@ -157,22 +159,35 @@ class Agents:
         key = (headers.get("Authorization") or "").replace("Bearer ", "", 1).strip()
         return "http://%s:%d/v1" % (host, port), key, model
 
-    def _argv(self, plugins, max_tokens, target="split"):
+    def _argv(self, plugins, max_tokens, target="split", music_cookie=""):
         tools = sorted({t for p in plugins for t in BY_ID[p][3]})
         base, key, model = self._model(target)
         code = any(BY_ID[p][4] for p in plugins)
+        music_enabled = "music" in plugins
         env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "YARDCODE_API_KEY": key, "YARDCODE_HOME": "/tmp/yardcode-dash",
                "YARDCODE_DATA": "/tmp/yardcode-dash-data", "HOME": "/tmp"}
+        if music_enabled:
+            addrs = getattr(self.ctx, "listen_addrs", []) or ["127.0.0.1"]
+            address = next((a for a in addrs if a not in ("0.0.0.0", "::", "::1")), "127.0.0.1")
+            if "::" in addrs and not any(a in ("0.0.0.0", "127.0.0.1") for a in addrs):
+                address = "::1"
+            elif address == "127.0.0.1" and "::1" in addrs and "127.0.0.1" not in addrs:
+                address = "::1"
+            host = "[%s]" % address if ":" in address else address
+            env["NODEYARD_MUSIC_URL"] = "http://%s:%d" % (host, int(getattr(self.ctx, "port", 9092) or 9092))
+            env["NODEYARD_MUSIC_COOKIE"] = str(music_cookie or "")[:2048]
         cmd = [sys.executable, self.bin, "--serve-json", "--no-session", "--tools", ",".join(tools), "--api-base", base, "--model", model, "--max-tokens", str(max_tokens or 0),
                "--permission-mode", "default", "--no-color"]
         if code:   # outside the dashboard's sandbox, as the terminal user, in their home folder
             cmd = ["systemd-run", "--quiet", "--collect", "--pipe", "--wait", "--uid=" + self.user, "--setenv=YARDCODE_API_KEY", "-p", "WorkingDirectory=~",
                    "--setenv=LANG=C.UTF-8", "--description=nodeyard dashboard AI plugins"] + cmd
+            if music_enabled:
+                cmd[cmd.index("--description=nodeyard dashboard AI plugins"):cmd.index("--description=nodeyard dashboard AI plugins")] = ["--setenv=NODEYARD_MUSIC_URL", "--setenv=NODEYARD_MUSIC_COOKIE"]
         else:
             cmd += ["--cwd", "/tmp"]
         return cmd, env
 
-    def get(self, h, cid, plugins, max_tokens, create=True, target="split"):
+    def get(self, h, cid, plugins, max_tokens, create=True, target="split", music_cookie=""):
         owner = h._token() or "local"
         # A different model (or the split model running something else) needs a new helper.
         sig = ",".join(sorted(plugins)) + "|" + str(max_tokens or 0) + "|" + target + "|" + self._model_id(target)
@@ -190,7 +205,7 @@ class Agents:
                 else:
                     if not self.bin:
                         raise AgentError("yardcode isn't installed next to nodeyard on this server.", 501)
-                    argv, env = self._argv(plugins, max_tokens, target)
+                    argv, env = self._argv(plugins, max_tokens, target, music_cookie)
                     pr = Proc(owner, sig, argv, env)
                 self.procs[cid] = pr
             return pr, owner
@@ -218,7 +233,8 @@ class Agents:
         if len(text) > 200000:
             return h._json({"ok": False, "error": "That message is too long."}, 413)
         try:
-            pr, _ = self.get(h, cid, plugins, int(body.get("max_tokens") or 0), target=target)
+            pr, _ = self.get(h, cid, plugins, int(body.get("max_tokens") or 0), target=target,
+                             music_cookie=h.headers.get("Cookie", "") if "music" in plugins else "")
         except AgentError as e:
             return h._json({"ok": False, "error": str(e)}, e.code)
         fresh = not getattr(pr, "started", False)

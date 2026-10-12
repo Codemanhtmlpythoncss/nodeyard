@@ -8,13 +8,35 @@
   const U = NY.ui;
   const { S, V, $, card, toast, getJSON, postJSON } = U;
 
+  function readDJState() {
+    const initial = { active: false, target: "", voice: "", speak: true, messages: [], draft: null, targets: null, busy: false };
+    try {
+      const saved = JSON.parse(localStorage.getItem("ny-music-dj") || "{}");
+      if (!saved || typeof saved !== "object") return initial;
+      return Object.assign(initial, saved, {
+        messages: Array.isArray(saved.messages) ? saved.messages.slice(-16).filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string") : [],
+        draft: saved.draft && Array.isArray(saved.draft.tracks) ? saved.draft : null,
+        targets: null, busy: false,
+      });
+    } catch (e) { return initial; }
+  }
+
   const M = {
-    data: null, tab: "search",
-    queue: [], idx: -1, live: false, seekable: true, shuffle: false, repeat: false,
+    data: null, tab: "home", homeHistory: [], homeRecs: [],
+    queue: [], idx: -1, live: false, seekable: true, shuffle: false, shuffleOrder: null, shufflePos: 0, repeat: "off", rate: 1, eq: "flat",
     scResults: [], scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
+    discoverTracks: [], discoverIndex: 0, discoverQuery: "", discoverPointerX: 0, discoverSearched: false,
+    dj: readDJState(),
+    historyId: "", historyElapsed: 0, historySince: 0, lastHistorySave: 0, lastPlaybackSave: 0, restored: false, stopping: false,
+    hideDrm: (() => { try { return localStorage.getItem("ny-hidedrm") === "1"; } catch (e) { return false; } })(),
   };
+  const EQ_PRESETS = {
+    flat: [0, 0, 0, 0, 0], bass: [6, 3, 0, 0, 0], treble: [0, 0, 0, 3, 6],
+    rock: [4, 2, -1, 2, 4], electronic: [5, 1, -2, 3, 5], vocal: [-1, 1, 3, 2, -1], classical: [2, 0, -1, 2, 3],
+  };
+  const EQ_OPTIONS = '<option value="flat">Flat</option><option value="bass">Bass boost</option><option value="treble">Treble</option><option value="rock">Rock</option><option value="electronic">Electronic</option><option value="vocal">Vocal</option><option value="classical">Classical</option>';
   let audio = null, bar = null;
-  let actx = null, analyser = null, vizData = null, vizSource = null, vizRAF = 0;
+  let actx = null, analyser = null, vizData = null, vizSource = null, vizRAF = 0, eqNodes = [];
 
   // ---- the persistent player bar ------------------------------------------
   function ensureBar() {
@@ -31,7 +53,13 @@
       "#ny-player canvas{width:120px;height:30px;flex:none;opacity:.95}" +
       "#ny-player button{background:none;border:0;color:inherit;cursor:pointer;font-size:16px;padding:4px;border-radius:6px}" +
       "#ny-player button:hover{background:rgba(125,160,200,.14)}" +
+      "#ny-player select{background:rgba(125,160,200,.10);border:1px solid var(--line,rgba(125,160,200,.18));color:inherit;border-radius:6px;padding:4px;font-size:12px}" +
+      "#ny-player button:disabled{opacity:.4;cursor:default}" +
       "#ny-player button.act{color:var(--sc,#ff5500)}" +
+      "#ny-player button.act::after{content:'';position:absolute;left:50%;bottom:1px;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--sc,#ff5500)}" +
+      "#ny-player #ny-shuffle,#ny-player #ny-repeat{position:relative}" +
+      "#ny-player .loop-state{font-size:10px;font-weight:700;letter-spacing:.03em;color:var(--ink3,#8fa3c0);min-width:46px}" +
+      "#ny-player .loop-state.on{color:var(--sc,#ff5500)}" +
       "#ny-player .seek{flex:1;display:flex;align-items:center;gap:8px;min-width:110px}" +
       "#ny-player input[type=range]{flex:1;accent-color:var(--sc,#ff5500)}" +
       "#ny-player .t{font-variant-numeric:tabular-nums;color:var(--ink3,#8fa3c0);font-size:11px;min-width:38px}" +
@@ -41,6 +69,12 @@
       ".sc-tabs button:hover{background:rgba(125,160,200,.15);color:var(--ink,#eaf1ff)}" +
       ".sc-tabs button.on{background:var(--sc,#ff5500);color:#fff;box-shadow:0 3px 10px rgba(255,85,0,.38)}" +
       ".sc-row{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;padding:8px 2px;border-bottom:1px solid var(--line)}" +
+      ".sc-cover{position:relative;width:46px;height:46px;flex:none;border-radius:8px;overflow:hidden;display:grid;place-items:center;background:linear-gradient(135deg,rgba(255,85,0,.3),rgba(125,160,200,.16));color:var(--ink2,#b9c6dd);font-size:21px}" +
+      ".sc-cover img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}" +
+      ".sc-discover{position:relative;min-height:430px;display:flex;align-items:flex-end;overflow:hidden;border-radius:18px;background-color:#151b2e;background-position:center;background-size:cover;color:white}" +
+      ".sc-discover::before{content:'';position:absolute;inset:0;background:linear-gradient(0deg,rgba(7,10,20,.94),rgba(7,10,20,.15) 78%)}" +
+      ".sc-discover-content{position:relative;width:100%;padding:clamp(20px,5vw,48px)}.sc-discover-content h2{font-size:clamp(25px,5vw,42px);margin:8px 0}.sc-discover-controls{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:14px}" +
+      ".sc-discover-controls button{min-width:46px;min-height:42px}.sc-discover-search{display:flex;gap:8px;flex-wrap:wrap}.sc-discover-search .input{flex:1;min-width:180px}" +
       ".sc-row .meta{flex:1;min-width:0;overflow:hidden}" +
       ".sc-row .btn,.sc-row a.btn{flex:none}" +
       ".sc-row .meta div{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" +
@@ -49,6 +83,7 @@
       ".ny-viz-top{display:block;width:100%;height:56px;margin:2px 0 14px;border-radius:12px;background:linear-gradient(180deg,rgba(255,85,0,.05),rgba(125,160,200,.06))}" +
       "@media (max-width:760px){#ny-player{bottom:56px}#ny-player .np{max-width:100px}#ny-player canvas{display:none}}";
     document.head.appendChild(style);
+    document.addEventListener("error", (e) => { if (e.target && e.target.matches && e.target.matches(".sc-cover img")) e.target.remove(); }, true);
     // SoundCloud-ish accent available as --sc (falls back to orange).
     document.documentElement.style.setProperty("--sc", getComputedStyle(document.documentElement).getPropertyValue("--sc") || "#ff5500");
     bar = document.createElement("div");
@@ -62,28 +97,45 @@
       '<div class="seek"><span class="t" id="ny-cur">0:00</span><input type="range" id="ny-seek" min="0" max="100" value="0" step="0.1" aria-label="Seek"><span class="t" id="ny-dur">0:00</span></div>' +
       '<span class="live-pill" id="ny-live-pill" hidden>● LIVE</span>' +
       '<button id="ny-shuffle" title="Shuffle">🔀</button>' +
-      '<button id="ny-repeat" title="Repeat">🔁</button>' +
+      '<button id="ny-repeat" title="Loop: Off (click to change)" aria-label="Loop: Off (click to change)" aria-pressed="false">🔁</button><span id="ny-repeat-state" class="loop-state">Off</span>' +
+      '<button id="ny-copy" title="Copy SoundCloud link" aria-label="Copy SoundCloud link">⧉</button>' +
+      '<label class="faint small" title="Playback speed">Speed <select id="ny-rate" aria-label="Playback speed"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="1.75">1.75×</option><option value="2">2×</option></select></label>' +
+      '<label class="faint small" title="Equalizer">EQ <select id="ny-eq" aria-label="Equalizer mode">' + EQ_OPTIONS + '</select></label>' +
       '<button id="ny-vol-i" title="Volume">🔊</button><input type="range" id="ny-vol" min="0" max="1" value="1" step="0.05" style="width:70px" aria-label="Volume">' +
       '<button id="ny-close" title="Close player">✕</button>';
     document.body.appendChild(bar);
     audio = new Audio();
     audio.preload = "metadata";
     audio.crossOrigin = "anonymous";
-    audio.addEventListener("timeupdate", tick);
+    audio.defaultPlaybackRate = 1;
+    audio.playbackRate = 1;
+    audio.preservesPitch = true;
+    audio.webkitPreservesPitch = true;
+    audio.addEventListener("ratechange", () => {
+      const rate = Math.max(0.5, Math.min(2, +audio.playbackRate || 1));
+      if (Math.abs(rate - M.rate) > 0.001) { M.rate = rate; $("#ny-rate").value = String(rate); savePlayback(false, true); }
+    });
+    audio.addEventListener("timeupdate", () => { tick(); historyProgress(false); savePlayback(false, false); });
     audio.addEventListener("durationchange", tick);
     audio.addEventListener("ended", onEnded);
-    audio.addEventListener("play", () => { startViz(); paintBtn(); });
-    audio.addEventListener("playing", () => { const t = M.queue[M.idx]; if (t && !M.live) $("#ny-np-sub").textContent = subOf(t); });
-    audio.addEventListener("pause", paintBtn);
+    audio.addEventListener("play", () => { startViz(); paintBtn(); savePlayback(false, false); });
+    audio.addEventListener("playing", () => {
+      const t = M.queue[M.idx];
+      if (t && !M.live) { $("#ny-np-sub").textContent = subOf(t); beginHistory(t); }
+    });
+    audio.addEventListener("pause", () => { historyProgress(true); paintBtn(); if (!M.stopping) savePlayback(false, true); });
     audio.addEventListener("error", onAudioError);
     $("#ny-play").onclick = () => { if (audio.paused) audio.play(); else audio.pause(); };
     $("#ny-prev").onclick = () => { if (!M.live) play(M.idx - 1); };
     $("#ny-next").onclick = () => { if (!M.live) next(); };
     $("#ny-close").onclick = stop;
-    $("#ny-shuffle").onclick = () => { M.shuffle = !M.shuffle; paintBtn(); };
-    $("#ny-repeat").onclick = () => { M.repeat = !M.repeat; paintBtn(); };
+    $("#ny-shuffle").onclick = () => { M.shuffle = !M.shuffle; resetShuffle(M.idx); paintBtn(); savePlayback(false, true); };
+    $("#ny-repeat").onclick = () => { M.repeat = M.repeat === "off" ? "one" : M.repeat === "one" ? "all" : "off"; paintBtn(); savePlayback(false, true); };
+    $("#ny-copy").onclick = copyCurrentLink;
+    $("#ny-rate").onchange = (e) => setPlaybackRate(e.target.value, true);
+    $("#ny-eq").onchange = (e) => setEqualizer(e.target.value, true);
     $("#ny-seek").oninput = (e) => { if (audio.duration && M.seekable && !M.live) audio.currentTime = (e.target.value / 100) * audio.duration; };
-    $("#ny-vol").oninput = (e) => { audio.volume = +e.target.value; };
+    $("#ny-vol").oninput = (e) => { audio.volume = +e.target.value; savePlayback(false, false); };
   }
 
   // ---- CAVA-style visualizer ----------------------------------------------
@@ -95,8 +147,18 @@
         analyser = actx.createAnalyser();
         analyser.fftSize = 256;
         analyser.smoothingTimeConstant = 0.8;
-        vizSource.connect(analyser);
+        eqNodes = [60, 250, 1000, 4000, 10000].map((frequency, i) => {
+          const filter = actx.createBiquadFilter();
+          filter.type = i === 0 ? "lowshelf" : i === 4 ? "highshelf" : "peaking";
+          filter.frequency.value = frequency;
+          if (filter.type === "peaking") filter.Q.value = 0.9;
+          return filter;
+        });
+        let previous = vizSource;
+        eqNodes.forEach((filter) => { previous.connect(filter); previous = filter; });
+        previous.connect(analyser);
         analyser.connect(actx.destination);
+        setEqualizer(M.eq, false);
         vizData = new Uint8Array(analyser.frequencyBinCount);
         // A routed element goes silent if the context suspends (tab switch, heavy WebGL like the 3D galaxy, browser
         // throttling), which stopped the music when moving around the dashboard. Resume whenever that happens.
@@ -138,6 +200,25 @@
   }
 
   const fmtTime = (s) => (isFinite(s) && s >= 0 ? Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0") : "0:00");
+  function setPlaybackRate(value, persist) {
+    const rate = Math.max(0.5, Math.min(2, Number(value) || 1));
+    M.rate = rate;
+    if (audio) {
+      audio.defaultPlaybackRate = rate;
+      audio.playbackRate = rate;
+      audio.preservesPitch = true;
+      audio.webkitPreservesPitch = true;
+    }
+    const select = $("#ny-rate"); if (select) select.value = String(rate);
+    if (persist) savePlayback(false, true);
+  }
+  function setEqualizer(mode, persist) {
+    M.eq = Object.prototype.hasOwnProperty.call(EQ_PRESETS, mode) ? mode : "flat";
+    const gains = EQ_PRESETS[M.eq];
+    eqNodes.forEach((filter, i) => filter.gain.setTargetAtTime(gains[i], actx.currentTime, 0.035));
+    const select = $("#ny-eq"); if (select) select.value = M.eq;
+    if (persist) savePlayback(false, true);
+  }
   function tick() {
     if (!bar) return;
     $("#ny-cur").textContent = fmtTime(audio.currentTime);
@@ -151,7 +232,20 @@
     if (!bar) return;
     $("#ny-play").textContent = audio.paused ? "▶" : "⏸";
     $("#ny-shuffle").classList.toggle("act", M.shuffle);
-    $("#ny-repeat").classList.toggle("act", M.repeat);
+    $("#ny-shuffle").title = M.shuffle ? "Shuffle on" : "Shuffle off";
+    const rep = $("#ny-repeat");
+    rep.classList.toggle("act", M.repeat !== "off");
+    rep.textContent = M.repeat === "one" ? "🔂" : "🔁";
+    const repeatLabel = M.repeat === "one" ? "Song" : M.repeat === "all" ? "Playlist" : "Off";
+    rep.title = "Loop: " + repeatLabel + " (click to change)";
+    rep.setAttribute("aria-label", rep.title);
+    rep.setAttribute("aria-pressed", M.repeat === "off" ? "false" : "true");
+    const repeatState = $("#ny-repeat-state"); if (repeatState) repeatState.textContent = repeatLabel;
+    if (repeatState) repeatState.classList.toggle("on", M.repeat !== "off");
+    const current = M.queue[M.idx];
+    const copy = $("#ny-copy");
+    copy.disabled = !(current && current.url);
+    copy.title = copy.disabled ? "No SoundCloud link for this track" : "Copy SoundCloud link";
     if (S.view === "music") renderTab();
   }
 
@@ -163,19 +257,114 @@
   const titleOf = (t) => (t.kind === "sc" || t.url ? t.title : t.name) || "Untitled";
   const subOf = (t) => (t.kind === "sc" || t.url ? (t.artist || "SoundCloud") : (t.folder || "music"));
 
+  function trackForApi(t) {
+    if (!t) return null;
+    return t.url ? { ...t, kind: "sc" } : { ...t, kind: "local" };
+  }
+  function historyBody(action) {
+    const t = M.queue[M.idx]; if (!M.historyId || !t || M.live) return null;
+    let seconds = M.historyElapsed;
+    if (M.historySince && !audio.paused) seconds += (performance.now() - M.historySince) / 1000;
+    return { action, id: M.historyId, seconds: Math.floor(seconds), track: trackForApi(t) };
+  }
+  function beginHistory(track) {
+    if (!M.historyId) {
+      M.historyId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2);
+      M.historyElapsed = 0;
+      postJSON("/api/music/history", { action: "start", id: M.historyId, seconds: 0, track: trackForApi(track) }).catch(() => {});
+    }
+    if (!M.historySince) M.historySince = performance.now();
+  }
+  function historyProgress(flush, keepalive) {
+    const t = M.queue[M.idx];
+    if (!M.historyId || !t || M.live) return;
+    if (M.historySince) {
+      M.historyElapsed += Math.max(0, (performance.now() - M.historySince) / 1000);
+      M.historySince = audio.paused ? 0 : performance.now();
+    }
+    if (!flush && Date.now() - M.lastHistorySave < 15000) return;
+    const body = historyBody("progress");
+    if (body) {
+      M.lastHistorySave = Date.now();
+      if (keepalive) fetch("/api/music/history", { method: "POST", keepalive: true, credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify(body) }).catch(() => {});
+      else postJSON("/api/music/history", body).catch(() => {});
+    }
+  }
+  function savePlayback(handoff, keepalive) {
+    if (M.idx < 0 || !M.queue.length || M.live || !audio) return;
+    const history = historyBody("progress");
+    const body = { queue: M.queue.map(trackForApi), index: M.idx, position: audio.currentTime || 0,
+      volume: audio.volume, playing: !audio.paused, shuffle: M.shuffle, repeat: M.repeat,
+      rate: audio.playbackRate || M.rate,
+      eq: M.eq,
+      history_id: M.historyId, history_seconds: history ? history.seconds : M.historyElapsed, handoff: !!handoff };
+    if (!keepalive && Date.now() - M.lastPlaybackSave < 15000) return;
+    M.lastPlaybackSave = Date.now();
+    if (keepalive) {
+      fetch("/api/music/playback", { method: "POST", keepalive: true, credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify(body) }).catch(() => {});
+    } else postJSON("/api/music/playback", body).catch(() => {});
+  }
+  async function restorePlayback() {
+    if (M.restored) return;
+    M.restored = true;
+    try {
+      const r = await getJSON("/api/music/playback");
+      const state = r.playback || {};
+      // The native app replaces the Music WKWebView when the user selects AI Galaxy, so pagehide is not guaranteed.
+      // Restore any recent player state; the `playing` flag still keeps paused tracks paused.
+      if (!r.ok || !Array.isArray(state.queue) || !state.queue.length || Date.now() / 1000 - (+state.updated || 0) > 180) return;
+      ensureBar();
+      M.queue = state.queue; M.idx = Math.max(0, Math.min(+state.index || 0, M.queue.length - 1));
+      M.shuffle = !!state.shuffle; M.repeat = ["off", "all", "one"].includes(state.repeat) ? state.repeat : "off";
+      setPlaybackRate(state.rate, false);
+      setEqualizer(state.eq, false);
+      M.historyId = state.history_id || ""; M.historyElapsed = Math.max(0, +state.history_seconds || 0); M.historySince = 0;
+      const track = M.queue[M.idx]; if (!track) return;
+      if (M.shuffle) resetShuffle(M.idx);
+      audio.volume = Math.max(0, Math.min(1, +state.volume || 0));
+      audio.src = srcFor(track);
+      const resumeAt = Math.max(0, +state.position || 0);
+      audio.addEventListener("loadedmetadata", () => { if (resumeAt < audio.duration) audio.currentTime = resumeAt; }, { once: true });
+      $("#ny-np-title").textContent = titleOf(track); $("#ny-np-sub").textContent = subOf(track) + " · resuming…";
+      $("#ny-vol").value = audio.volume; bar.classList.add("on"); paintBtn();
+      if (state.playing) audio.play().catch(() => { $("#ny-np-sub").textContent = subOf(track) + " · press play to resume"; });
+      savePlayback(false, true);
+    } catch (e) { /* music state is optional */ }
+  }
+  window.addEventListener("pagehide", () => {
+    historyProgress(true, true);
+    savePlayback(true, true);
+  });
+
   function playQueue(tracks, i) {
+    historyProgress(true);
+    M.historyId = ""; M.historyElapsed = 0; M.historySince = 0;
     M.queue = (tracks || []).slice();
     play(i || 0);
   }
-  function play(i) {
+  function resetShuffle(exclude) {
+    M.shuffleOrder = null; M.shufflePos = 0;
+    if (!M.shuffle || M.queue.length < 2) return;
+    const order = Array.from({ length: M.queue.length }, (_, i) => i).filter((i) => i !== exclude);
+    for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+    M.shuffleOrder = order;
+  }
+  function play(i, shuffled) {
     ensureBar();
     if (i < 0 || i >= M.queue.length) return;
+    M.stopping = false;
+    historyProgress(true);
+    M.historyId = ""; M.historyElapsed = 0; M.historySince = 0; M.lastHistorySave = 0;
     M.idx = i; M.live = false;
+    if (M.shuffle && !shuffled) resetShuffle(i);
     const t = M.queue[i];
+    setPlaybackRate(M.rate, false);
     const sc = (t.kind === "sc" || t.url);
     M.seekable = true;     // the server buffers both local files and SoundCloud, so seeking & resume work
     audio.src = srcFor(t);
-    audio.play().catch(() => {});
+    audio.play().then(() => savePlayback(false, true)).catch(() => {});
     $("#ny-np-title").textContent = titleOf(t);
     $("#ny-np-sub").textContent = sc ? subOf(t) + " · loading…" : subOf(t);
     $("#ny-live-pill").hidden = true;
@@ -195,24 +384,41 @@
   }
   function onEnded() {
     if (M.live) return;
-    if (M.repeat) { play(M.idx); return; }
+    historyProgress(true);
+    const body = historyBody("complete"); if (body) postJSON("/api/music/history", body).catch(() => {});
+    if (M.repeat === "one") { play(M.idx); return; }
     next();
   }
   function next() {
-    if (M.shuffle && M.queue.length > 1) { play(Math.floor(Math.random() * M.queue.length)); return; }
-    if (M.idx + 1 < M.queue.length) play(M.idx + 1); else audio.pause();
+    if (M.shuffle && M.queue.length > 1) {
+      if (!M.shuffleOrder) resetShuffle(M.idx);
+      if (M.shufflePos >= M.shuffleOrder.length) {
+        if (M.repeat !== "all") { audio.pause(); return; }
+        resetShuffle(M.idx);
+      }
+      play(M.shuffleOrder[M.shufflePos++], true);
+      return;
+    }
+    if (M.idx + 1 < M.queue.length) play(M.idx + 1);
+    else if (M.repeat === "all" && M.queue.length) play(0);
+    else audio.pause();
   }
   function stop() {
+    historyProgress(true);
+    M.stopping = true;
     if (audio) { audio.pause(); audio.removeAttribute("src"); audio.load(); }
     if (bar) bar.classList.remove("on");
-    M.live = false; M.idx = -1;
+    M.live = false; M.idx = -1; M.historyId = "";
+    postJSON("/api/music/playback", { clear: true }).catch(() => {});
     if (S.view === "music") renderTab();
   }
   function playLive() {
     ensureBar();
+    historyProgress(true); M.stopping = true;
     M.live = true; M.idx = -1; M.seekable = false;
     audio.src = "/api/audio/live?t=" + Date.now();
     audio.play().catch(() => toast("Couldn't start the live audio."));
+    postJSON("/api/music/playback", { clear: true }).catch(() => {});
     $("#ny-np-title").textContent = "Server audio";
     $("#ny-np-sub").textContent = "live from the host";
     $("#ny-live-pill").hidden = false;
@@ -226,12 +432,221 @@
   function trackRow(t, onplay, extra) {
     const dur = t.duration_ms ? fmtTime(t.duration_ms / 1000) : (t.size ? (t.size / 1048576).toFixed(1) + " MB" : "");
     const playing = isPlaying(t);
+    const cover = artworkSource(t);
     return html`<div class="sc-row">
       <button class="sc-pbtn ${playing ? "" : "ghost"}" data-play="${onplay}" title="Play">${playing ? "⏸" : "▶"}</button>
+      <div class="sc-cover" aria-hidden="true">♪${cover ? html`<img src="${cover}" alt="" loading="lazy">` : ""}</div>
       <div class="meta"><div><b>${titleOf(t)}</b></div><div class="faint small">${subOf(t)}${dur ? " · " + dur : ""}</div></div>
       ${extra || ""}
       <button class="btn small" data-music="add" data-key="${trackKey(t)}" title="Add to a playlist">＋</button>
     </div>`;
+  }
+
+  // ---- the local AI DJ ----------------------------------------------------
+  function saveDJ() {
+    try {
+      localStorage.setItem("ny-music-dj", JSON.stringify({ active: !!M.dj.active, target: M.dj.target || "", voice: M.dj.voice || "",
+        speak: M.dj.speak !== false, messages: (M.dj.messages || []).slice(-16), draft: M.dj.draft || null }));
+    } catch (e) { /* private browser storage may be disabled */ }
+  }
+  const DJ_ROBOTIC = /\b(albert|bad news|bahh|bells|boing|bubbles|cellos|eddy|flo|fred|good news|grandma|grandpa|jester|junior|kathy|organ|ralph|reed|rocko|sandy|shelley|superstar|trinoids|whisper|wobble|zarvox|compact|eloquence)\b/i;
+  function djVoices() { return typeof speechSynthesis === "undefined" ? [] : speechSynthesis.getVoices(); }
+  function djVoiceScore(v) {
+    const want = (navigator.language || "en").slice(0, 2).toLowerCase();
+    let score = (v.lang || "").toLowerCase().startsWith(want) ? 100 : 0;
+    if (/premium|neural|natural/i.test(v.name)) score += 60;
+    else if (/enhanced|siri/i.test(v.name)) score += 45;
+    else if (/^google/i.test(v.name)) score += 35;
+    if (DJ_ROBOTIC.test(v.name)) score -= 90;
+    if (v.default) score += 4;
+    if (v.localService) score += 2;
+    return score;
+  }
+  function djBestVoice() { return djVoices().slice().sort((a, b) => djVoiceScore(b) - djVoiceScore(a))[0] || null; }
+  function djVoiceOptions() {
+    const voices = djVoices().slice().sort((a, b) => djVoiceScore(b) - djVoiceScore(a)), best = djBestVoice();
+    return '<option value=""' + (M.dj.voice ? "" : " selected") + ">Automatic" + (best ? ": " + esc(best.name) : " (browser default)") + "</option>" +
+      voices.map((v) => '<option value="' + esc(v.name) + '"' + (v.name === M.dj.voice ? " selected" : "") + ">" + esc(v.name + " (" + v.lang + ")" + (djVoiceScore(v) >= 135 ? " · natural" : "")) + "</option>").join("");
+  }
+  function speakDJ(text) {
+    if (M.dj.speak === false || typeof speechSynthesis === "undefined" || typeof SpeechSynthesisUtterance === "undefined") return;
+    const clean = String(text || "").replace(/https?:\/\/\S+/g, "a link").replace(/[*_`#]/g, "").replace(/\s+/g, " ").trim();
+    if (!clean) return;
+    speechSynthesis.cancel();
+    const voice = djVoices().find((v) => v.name === M.dj.voice) || djBestVoice();
+    let rest = clean;
+    while (rest) {
+      let end = Math.min(rest.length, 220);
+      if (end < rest.length) { const cut = rest.lastIndexOf(" ", end); if (cut > 100) end = cut; }
+      const utterance = new SpeechSynthesisUtterance(rest.slice(0, end));
+      if (voice) { utterance.voice = voice; utterance.lang = voice.lang; }
+      utterance.rate = 0.96; utterance.pitch = 1.02;
+      speechSynthesis.speak(utterance);
+      rest = rest.slice(end).trimStart();
+    }
+  }
+  function djTargets() {
+    if (M.dj.targets === null) loadDJTargets();
+    const ready = ((M.dj.targets || {}).targets || []).filter((x) => x.ready);
+    const keep = M.dj.target;
+    return ready.length
+      ? ready.map((x) => '<option value="' + esc(x.id) + '"' + (x.id === keep ? " selected" : "") + ">" + esc(x.name + (x.kind === "ollama" ? " · " + (x.detail || "Ollama") : " · split model")) + "</option>").join("")
+      : '<option value="">' + (M.dj.targets ? "No model is ready" : "Loading models…") + "</option>";
+  }
+  async function loadDJTargets() {
+    if (M.dj.targets !== null || M.dj.loadingTargets) return;
+    M.dj.loadingTargets = true;
+    try {
+      const r = await getJSON("/api/ai/targets");
+      M.dj.targets = r.ok ? r : { targets: [], error: r.error || "Couldn't load the AI models." };
+      const ready = (r.targets || []).filter((x) => x.ready);
+      if (!ready.some((x) => x.id === M.dj.target)) M.dj.target = ready.length ? ready[0].id : "";
+    } catch (e) { M.dj.targets = { targets: [], error: e.message || "Couldn't load the AI models." }; }
+    M.dj.loadingTargets = false;
+    if (S.view === "music" && M.tab === "dj") renderTab();
+  }
+  function renderDJ(el) {
+    const ready = ((M.dj.targets || {}).targets || []).some((x) => x.ready);
+    const voiceNote = typeof speechSynthesis === "undefined"
+      ? "Speech isn't available in this browser; the DJ will still answer in text."
+      : "Uses your browser's best available voice. Enhanced, Natural, Neural or Premium voices sound most lifelike when installed.";
+    if (!M.dj.active) {
+      setHTML(el, html`<div class="card">
+        <div class="row" style="justify-content:space-between;align-items:center;gap:10px"><div><h3 style="margin:0">Nodeyard DJ</h3><div class="muted small mt">A private, local AI host for your music. Ask for a vibe, activity, or custom playlist.</div></div><span class="chip">Ready when you are</span></div>
+        <p class="small mt">The DJ can use your music library, local likes and listening history. It only picks tracks already in that collection.</p>
+        <div class="row wrap mt" style="gap:10px;align-items:flex-end">
+          <label class="small">AI model<select class="select mt" data-music="dj-target" ${ready ? "" : "disabled"}>${raw(djTargets())}</select></label>
+          ${typeof speechSynthesis !== "undefined" ? html`<label class="small">Voice<select class="select mt" data-music="dj-voice">${raw(djVoiceOptions())}</select></label>` : ""}
+          <button class="btn primary" data-music="dj-start" ${ready ? "" : "disabled"}>▶ Start DJ</button>
+        </div>
+        <div class="faint small mt">${voiceNote}</div>
+        ${M.dj.targets && !ready ? html`<p class="note warn small mt">${M.dj.targets.error || "No AI model is ready. Start one under AI → Models, then come back here."}</p>` : ""}
+      </div>`);
+      if (M.dj.targets === null) loadDJTargets();
+      return;
+    }
+    const messages = (M.dj.messages || []).filter((m) => !m.hidden);
+    setHTML(el, html`<div class="card">
+      <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h3 style="margin:0">Nodeyard DJ <span class="chip good">${M.dj.busy ? "thinking" : "on air"}</span></h3><div class="faint small mt">Ask for a mood, moment, or playlist. The DJ knows your likes and recent plays.</div></div>
+        <button class="btn small" data-music="dj-stop">Stop DJ</button></div>
+      <div class="row wrap mt" style="gap:8px;align-items:flex-end">
+        <label class="small">AI model<select class="select mt" data-music="dj-target">${raw(djTargets())}</select></label>
+        ${typeof speechSynthesis !== "undefined" ? html`<label class="small">Voice<select class="select mt" data-music="dj-voice">${raw(djVoiceOptions())}</select></label>
+          <label class="check small"><input type="checkbox" data-music="dj-speak" ${M.dj.speak !== false ? raw("checked") : ""}> <span>Speak replies</span></label>` : ""}
+      </div>
+      <div id="dj-chat" style="max-height:380px;overflow:auto;display:flex;flex-direction:column;gap:10px;margin-top:14px">
+        ${messages.map((m) => html`<div style="align-self:${m.role === "user" ? "flex-end" : "flex-start"};max-width:min(88%,720px);padding:10px 13px;border-radius:14px;background:${m.role === "user" ? "rgba(255,85,0,.16)" : "var(--panel2,rgba(125,160,200,.09))"}"><div class="small">${m.role === "assistant" ? "🎙 DJ" : "You"}</div><div style="white-space:pre-wrap;margin-top:3px">${m.content}</div></div>`)}
+        ${M.dj.busy ? html`<div class="empty"><div class="spin"></div>DJ is thinking…</div>` : ""}
+      </div>
+      ${M.dj.draft && M.dj.draft.tracks && M.dj.draft.tracks.length ? html`<div class="mt" style="border-top:1px solid var(--line);padding-top:12px">
+        <div class="row wrap" style="justify-content:space-between;align-items:center;gap:8px"><b>Mix preview: ${M.dj.draft.name} <span class="faint small">(${M.dj.draft.tracks.length} tracks)</span></b>
+          <div class="row" style="gap:6px"><button class="btn small primary" data-music="dj-play">▶ Play mix</button><button class="btn small" data-music="dj-save" ${M.dj.draft.saved ? "disabled" : ""}>${M.dj.draft.saved ? "Saved ✓" : "Save playlist"}</button></div></div>
+        <div class="mt">${M.dj.draft.tracks.map((t, i) => trackRow(t, "dj:" + i))}</div></div>` : ""}
+      <div class="row wrap mt" style="gap:8px;align-items:flex-end">
+        <textarea class="input" data-music="dj-request" rows="2" placeholder="What are you in the mood for? e.g. make me a mellow late-night mix from songs I've liked" style="flex:1;min-width:240px;resize:vertical" ${M.dj.busy ? "disabled" : ""}></textarea>
+        <button class="btn primary" data-music="dj-send" ${M.dj.busy ? "disabled" : ""}>Ask DJ</button>
+      </div>
+      <div class="faint small mt">${voiceNote}</div>
+    </div>`);
+    const chat = $("#dj-chat"); if (chat) chat.scrollTop = chat.scrollHeight;
+  }
+  async function djCatalog() {
+    const actions = ["liked", "history", "library"];
+    const pages = await Promise.all(actions.map((action) => getJSON("/api/music/ai?action=" + action + "&offset=0&limit=50").catch(() => ({ ok: false, tracks: [] }))));
+    const map = new Map();
+    function add(track, source) {
+      const key = track && (track.url || track.path); if (!key) return;
+      let item = map.get(key);
+      if (!item) { item = { track, sources: new Set(), plays: 0, lastPlayed: 0 }; map.set(key, item); }
+      item.sources.add(source);
+      if (source === "history") { item.plays++; item.lastPlayed = Math.max(item.lastPlayed, +track.played_at || 0); }
+    }
+    pages.forEach((page, i) => (page.tracks || []).forEach((track) => add(track, actions[i])));
+    const rows = Array.from(map.values()).slice(0, 150);
+    return rows.map((item, i) => {
+      const t = item.track, local = !t.url;
+      return { id: "t" + String(i + 1).padStart(3, "0"), track: { ...t, kind: local ? "local" : "sc" },
+        info: { id: "t" + String(i + 1).padStart(3, "0"), title: local ? t.name : t.title, artist: local ? (t.folder || "your library") : (t.artist || "SoundCloud"),
+          sources: Array.from(item.sources), plays: item.plays, last_played: item.lastPlayed || undefined } };
+    });
+  }
+  async function readDJStream(response) {
+    if (!response.ok) { let body = {}; try { body = await response.json(); } catch (e) { } throw new Error(body.error || "The AI model couldn't answer."); }
+    if (!response.body || !response.body.getReader) return (await response.text());
+    const reader = response.body.getReader(), decoder = new TextDecoder();
+    let pending = "", answer = "";
+    while (true) {
+      const part = await reader.read();
+      pending += decoder.decode(part.value || new Uint8Array(), { stream: !part.done });
+      const lines = pending.split(/\r?\n/); pending = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim(); if (!data || data === "[DONE]") continue;
+        let event; try { event = JSON.parse(data); } catch (e) { continue; }
+        if (event.error) throw new Error(typeof event.error === "string" ? event.error : (event.error.message || "The model stopped."));
+        const delta = event.choices && event.choices[0] && event.choices[0].delta;
+        if (delta && typeof delta.content === "string") answer += delta.content;
+        else if (delta && Array.isArray(delta.content)) answer += delta.content.map((x) => x.text || "").join("");
+      }
+      if (part.done) break;
+    }
+    return answer;
+  }
+  function parseDJAnswer(text) {
+    const clean = String(text || "").replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
+    const first = clean.indexOf("{"), last = clean.lastIndexOf("}");
+    if (first < 0 || last <= first) return { speech: clean, playlist_name: "", track_ids: [] };
+    try {
+      const obj = JSON.parse(clean.slice(first, last + 1));
+      return obj && typeof obj === "object" ? obj : { speech: clean, playlist_name: "", track_ids: [] };
+    } catch (e) { return { speech: clean, playlist_name: "", track_ids: [] }; }
+  }
+  async function sendDJRequest(prompt, hidden) {
+    if (M.dj.busy) return;
+    if (!M.dj.target) { toast("Choose a ready AI model first."); return; }
+    const userText = String(prompt || "").trim().slice(0, 4000); if (!userText) return;
+    if (!hidden) M.dj.messages.push({ role: "user", content: userText });
+    M.dj.busy = true; M.dj.error = "";
+    const controller = new AbortController(); M.dj.controller = controller; saveDJ(); renderTab();
+    try {
+      const catalog = await djCatalog();
+      if (!catalog.length) throw new Error("There are no songs for the DJ yet. Set a Music folder, like some SoundCloud songs, or listen to a few tracks first.");
+      const catalogText = catalog.map((x) => x.info);
+      const system = "You are Nodeyard DJ, a warm, confident, conversational music host. Sound like a natural radio presenter: short, personal, lightly playful, never overdo catchphrases. Use the listening history and likes to personalize, but never claim you listened to audio or know lyrics unless given. The user owns or selected this collection; recommend only tracks listed in the catalogue below. The user request may be a vibe, activity, artist/style preference, or a follow-up. If you need one key detail, ask one concise question and return no tracks. Otherwise create a useful mix. Reply with exactly one JSON object and no markdown: {\"speech\":\"spoken response, 1-3 short sentences\",\"playlist_name\":\"short name or empty string\",\"track_ids\":[\"t001\"]}. For a playlist, include 5-20 catalogue IDs in a deliberate order. If there are fewer suitable songs, use fewer. If this is only a greeting or clarifying question, playlist_name must be empty and track_ids must be []. Never invent IDs.\nCATALOGUE:\n" + JSON.stringify(catalogText);
+      const history = (M.dj.messages || []).slice(-8).filter((m) => !m.hidden);
+      if (!hidden && history.length && history[history.length - 1].role === "user" && history[history.length - 1].content === userText) history.pop();
+      const messages = [{ role: "system", content: system }].concat(history.map((m) => ({ role: m.role, content: m.content })), [{ role: "user", content: userText }]);
+      const response = await fetch("/api/v1/chat/completions", { method: "POST", cache: "no-store", credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, signal: controller.signal,
+        body: JSON.stringify({ model: M.dj.target, messages, temperature: 0.65, max_tokens: 1400, stream: true }) });
+      const parsed = parseDJAnswer(await readDJStream(response));
+      const speech = String(parsed.speech || parsed.response || "").trim().slice(0, 2400) || "I couldn't put that into words. Try asking me a different way.";
+      const byId = new Map(catalog.map((x) => [x.id, x.track]));
+      const selected = Array.isArray(parsed.track_ids) ? parsed.track_ids.slice(0, 40).map((id) => byId.get(String(id))).filter(Boolean) : [];
+      const name = String(parsed.playlist_name || "").trim().slice(0, 120);
+      const assistantText = selected.length ? speech + "\n\nI’ve put together “" + (name || "Your mix") + "” with " + selected.length + " tracks." : speech;
+      M.dj.messages.push({ role: "assistant", content: assistantText });
+      if (selected.length && name) M.dj.draft = { name, tracks: selected, saved: false };
+      else M.dj.draft = null;
+      saveDJ(); speakDJ(speech);
+    } catch (e) {
+      const message = e.name === "AbortError" ? "I stopped that request." : (e.message || "The DJ couldn't answer.");
+      if (e.name !== "AbortError") { M.dj.messages.push({ role: "assistant", content: message }); M.dj.error = message; }
+      saveDJ();
+    } finally {
+      if (M.dj.controller === controller) { M.dj.busy = false; M.dj.controller = null; saveDJ(); renderTab(); }
+    }
+  }
+  function startDJ() {
+    if (!M.dj.target) { toast("No ready AI model. Start one under AI → Models."); return; }
+    M.dj.active = true; M.dj.messages = []; M.dj.draft = null; M.dj.speak = M.dj.speak !== false; saveDJ(); renderTab();
+    sendDJRequest("Start my DJ session. Welcome me in one short, warm line, then ask what vibe or activity I want. Do not make a playlist yet.", true);
+  }
+  function stopDJ() {
+    if (M.dj.controller) M.dj.controller.abort();
+    M.dj.controller = null;
+    if (typeof speechSynthesis !== "undefined") speechSynthesis.cancel();
+    M.dj.active = false; M.dj.busy = false; saveDJ(); renderTab();
   }
 
   // ---- tabs ---------------------------------------------------------------
@@ -240,7 +655,7 @@
     const d = M.data || {};
     M.scLikes = Array.isArray((d.sc || {}).likes) ? d.sc.likes : [];
     M.playlists = Array.isArray(d.playlists) ? d.playlists : [];
-    const tabs = [["search", "Search"], ["playlists", "Playlists"], ["likes", "Likes"], ["library", "Library"], ["settings", "Settings"]];
+    const tabs = [["home", "Home"], ["discover", "Discover"], ["search", "Search"], ["dj", "DJ"], ["playlists", "Playlists"], ["likes", "Likes"], ["library", "Library"], ["settings", "Settings"]];
     NY.freshHTML(el, html`
       <div class="row" style="align-items:center;gap:10px;margin-bottom:6px">
         <div style="font-size:22px;font-weight:800;letter-spacing:.3px">nodecloud <span style="color:var(--sc,#ff5500)">♪</span></div>
@@ -256,11 +671,95 @@
   function renderTab() {
     if (S.view !== "music") return;
     const el = $("#sc-tab"); if (!el || !M.data) return;
-    if (M.tab === "search") renderSearch(el);
+    if (M.tab === "home") renderHome(el);
+    else if (M.tab === "discover") renderDiscover(el);
+    else if (M.tab === "search") renderSearch(el);
+    else if (M.tab === "dj") renderDJ(el);
     else if (M.tab === "playlists") renderPlaylists(el);
     else if (M.tab === "likes") renderLikes(el);
     else if (M.tab === "library") renderLibrary(el);
     else if (M.tab === "settings") renderSettings(el);
+  }
+
+  function homeRecommendations() {
+    const tracks = new Map();
+    function add(track, source) {
+      const key = trackKey(track); if (!key) return;
+      let item = tracks.get(key);
+      if (!item) { item = { track: { ...track, kind: track.url ? "sc" : "local" }, sources: new Set(), plays: 0, last: 0, completed: false }; tracks.set(key, item); }
+      item.sources.add(source);
+      if (source === "history") { item.plays++; item.last = Math.max(item.last, +track.played_at || 0); item.completed = item.completed || !!track.completed; }
+    }
+    M.scLikes.forEach((t) => add(t, "liked"));
+    (M.homeHistory || []).forEach((t) => add(t, "history"));
+    (((M.data || {}).tracks) || []).forEach((t) => add(t, "library"));
+    const day = Math.floor(Date.now() / 86400000);
+    function stable(key) { let h = 2166136261; for (const c of key + day) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967295; }
+    return Array.from(tracks.entries()).map(([key, item]) => {
+      const ageDays = item.last ? Math.max(0, (Date.now() / 1000 - item.last) / 86400) : 30;
+      const score = (item.sources.has("liked") ? 8 : 0) + Math.min(item.plays, 5) * 1.5 + (item.completed ? 1 : 0) +
+        (item.sources.has("library") && !item.sources.has("history") ? 3 : 0) + Math.max(0, 5 - Math.log2(ageDays + 1)) + stable(key);
+      return { track: item.track, score };
+    }).sort((a, b) => b.score - a.score).slice(0, 18).map((x) => x.track);
+  }
+
+  function renderHome(el) {
+    M.homeRecs = homeRecommendations();
+    const tracks = M.homeRecs;
+    setHTML(el, html`<div class="card">
+      <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h2 style="margin:0">Made for you</h2>
+        <div class="muted small mt">Ranked by a local algorithm using your library, likes and listening history. No AI.</div></div>
+        ${tracks.length ? raw('<button class="btn primary" data-music="home-play">▶ Play recommendations</button>') : ""}</div>
+      <div class="mt">${tracks.length ? tracks.map((t) => trackRow(t, "rec:" + trackKey(t), t.url ? likeBtn(t) : ""))
+        : html`<div class="empty">Add songs to your library, like a few tracks, or listen to music to build your recommendations.</div>`}</div>
+    </div>`);
+  }
+
+  function artworkSource(t) {
+    if (t && t.artwork_url) return "/api/music/art?url=" + encodeURIComponent(t.artwork_url);
+    if (t && t.path) return "/api/music/art?path=" + encodeURIComponent(t.path);
+    return "";
+  }
+
+  function renderDiscover(el) {
+    const tracks = M.discoverTracks || [];
+    const track = tracks[M.discoverIndex];
+    if (!track) {
+      setHTML(el, html`<div class="card">
+        <h2 style="margin-top:0">Discover</h2><p class="muted small">Search SoundCloud, then browse one song at a time. Use the arrows, ← / → keys, or swipe the cover.</p>
+        <div class="sc-discover-search"><input class="input" data-music="discover-query" value="${M.discoverQuery}" placeholder="Artist, track, or vibe…">
+          <button class="btn primary" data-music="discover-search">Discover songs</button></div>
+        <div class="empty mt">${M.discoverSearched ? "No songs found. Try another search." : "Enter a search to start discovering songs."}</div>
+      </div>`);
+      return;
+    }
+    const art = artworkSource(track);
+    const background = art ? "background-image:linear-gradient(0deg,rgba(7,10,20,.94),rgba(7,10,20,.15) 78%),url('" + art + "')" : "";
+    const liked = M.scLikes.some((item) => item.url === track.url);
+    setHTML(el, html`<div class="card">
+      <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h2 style="margin:0">Discover</h2><div class="muted small mt">Browse songs with the arrows, ← / → keys, or swipe the cover.</div></div>
+        <div class="faint small">${M.discoverIndex + 1} of ${tracks.length}</div></div>
+      <div class="sc-discover mt" data-discover-stage style="${background}" tabindex="0" aria-label="Discover song: ${titleOf(track)}">
+        <div class="sc-discover-content"><span class="chip">SoundCloud discovery</span><h2>${titleOf(track)}</h2><div>${subOf(track)}${track.duration_ms ? " · " + fmtTime(track.duration_ms / 1000) : ""}</div>
+          <div class="sc-discover-controls">
+            <button class="btn" data-music="discover-prev" ${M.discoverIndex <= 0 ? "disabled" : ""} aria-label="Previous song">←</button>
+            <button class="btn primary" data-music="discover-play">▶ Play</button>
+            <button class="btn" data-music="discover-next" ${M.discoverIndex >= tracks.length - 1 ? "disabled" : ""} aria-label="Next song">→</button>
+          </div>
+          <div class="sc-discover-controls">
+            <button class="btn" data-music="discover-like">${liked ? "♥ Liked" : "♡ Like"}</button>
+            <button class="btn" data-music="discover-add">＋ Add to playlist</button>
+          </div>
+        </div>
+      </div>
+      <div class="sc-discover-search mt"><input class="input" data-music="discover-query" value="${M.discoverQuery}" placeholder="Find more by artist, track, or vibe…">
+        <button class="btn" data-music="discover-search">Search</button></div>
+    </div>`);
+  }
+  function moveDiscover(delta) {
+    if (!M.discoverTracks.length) return;
+    M.discoverIndex = Math.max(0, Math.min(M.discoverTracks.length - 1, M.discoverIndex + delta));
+    renderTab();
   }
 
   function renderSearch(el) {
@@ -273,14 +772,22 @@
       : "";
     const results = M.scResults.length
       ? html`<div class="section-title">Results</div>${M.scResults.map((t) => trackRow(t, "res:" + trackKey(t), likeBtn(t)))}`
-      : (M._searched ? html`<div class="empty">No results.</div>` : "");
+      : (M._searched ? html`<div class="empty">No ${M.hideDrm ? "playable " : ""}results${M.hideDrm ? " — all matches were DRM-protected" : ""}.</div>` : "");
     setHTML(el, html`
       <div class="card">
         <div class="row" style="gap:8px"><input class="input" data-music="sc-query" placeholder="Search SoundCloud for a song, artist…" spellcheck="false" style="flex:1">
           <button class="btn primary" data-music="sc-search" ${sc.search_ready ? "" : "disabled"}>Search</button></div>
+        <label class="check mt" style="font-size:13px"><input type="checkbox" data-music="nodrm" ${M.hideDrm ? raw("checked") : ""}> <span>Only show playable tracks — hide DRM-protected (Go+) ones <span class="faint">(slower; checks each result)</span></span></label>
         ${!sc.search_ready ? html`<p class="small mt">SoundCloud search needs <span class="mono">yt-dlp</span> on the server. Use <b>Settings → Update everything</b> (installs it), then search.</p>` : ""}
         ${sc.search_ready && !sc.stream_ready ? html`<p class="small faint mt">In-browser playback also needs ffmpeg — run <b>Settings → Update everything</b>. Until then use ＋ to save tracks and ↗ to open on SoundCloud.</p>` : ""}
         <div id="sc-results" class="mt">${results}</div>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">Play a song link</h3>
+        <p class="muted small" style="margin-top:0">Paste a link to one SoundCloud song to open it here.</p>
+        <div class="row" style="gap:8px"><input class="input" data-music="track-url" value="${M._trackUrl || ""}" placeholder="https://soundcloud.com/artist/song" spellcheck="false" style="flex:1">
+          <button class="btn primary" data-music="play-url">Play link</button></div>
+        <div id="sc-track-link-status" class="mt"></div>
       </div>
       <div class="card">
         <h3 style="margin-top:0">Open a SoundCloud playlist / set</h3>
@@ -293,7 +800,7 @@
   function likeBtn(t) {
     const liked = M.scLikes.some((x) => x.url === t.url);
     return html`<button class="btn small" data-music="sc-like" data-key="${t.url}" title="${liked ? "Unlike" : "Like"}">${liked ? "♥" : "♡"}</button>
-      <button class="btn small" data-music="sc-dl" data-key="${t.url}" title="Download to the music folder">⬇</button>`;
+      <button class="btn small" data-music="sc-dl" data-key="${t.url}" title="Download to Nodeyard Music">⬇</button>`;
   }
 
   function renderPlaylists(el) {
@@ -351,6 +858,8 @@
 
   function renderSettings(el) {
     const d = M.data || {}; const fw = d.forward || {};
+    const cache = d.recent_cache || { limit: 20, count: 0, folder: "" };
+    const cacheOptions = [10, 20, 30, 50, 100, 200].map((n) => '<option value="' + n + '"' + (+cache.limit === n ? " selected" : "") + '>' + n + ' songs</option>').join("");
     const srcOpts = ['<option value="">Automatic (the server\'s output)</option>']
       .concat((fw.sources || []).map((s) => '<option value="' + esc(s) + '"' + (s === fw.source ? " selected" : "") + ">" + esc(s) + "</option>")).join("");
     const fwBody = !fw.ffmpeg
@@ -366,15 +875,19 @@
           ${raw('<select class="select mt" data-music="fw-source">' + srcOpts + "</select>")}</details>
         <div id="fw-test-out" class="small mt"></div>`;
     setHTML(el, html`
-      ${card("Music folder", html`<p class="muted small" style="margin-top:0">The server plays audio files from one folder on the host (the control node, not your Mac). Everyone signed in can listen.</p>
+      ${card("Music folder", html`<p class="muted small" style="margin-top:0">The server plays audio files from one folder on the host (the control node, not your Mac). Everyone signed in can listen. Downloads from this page go into the private Downloads folder in your library.</p>
         <div class="row" style="gap:8px"><input class="input" data-music="dir" value="${d.dir || ""}" placeholder="/home/your-user/Music/soundcloud" spellcheck="false" style="flex:1">
           <button class="btn" data-music="browse">Browse…</button><button class="btn primary" data-music="save-dir">Save</button></div>`)}
+      ${card("Recently played cache", html`<p class="muted small" style="margin-top:0">Played SoundCloud songs stay in a private cache folder so they load faster next time. When full, the oldest song is removed.</p>
+        <div class="row wrap" style="gap:10px;align-items:center"><label class="small">Keep up to <select class="select" data-music="cache-limit">${raw(cacheOptions)}</select></label>
+          <span class="faint small">${cache.count} cached · ${cache.folder || "music cache"}</span></div>`)}
       ${card("Live audio forwarding", fwBody)}`);
   }
 
   // ---- add-to-playlist picker --------------------------------------------
   function findTrack(key) {
-    return [M.queue, M.scResults, M.scLikes, (M.scSet && M.scSet.tracks) || [], (M.openPl && M.openPl.tracks) || [], (M.data || {}).tracks || []]
+    return [M.queue, M.scResults, M.discoverTracks, M.scLikes, (M.scSet && M.scSet.tracks) || [], (M.openPl && M.openPl.tracks) || [],
+      (M.dj.draft && M.dj.draft.tracks) || [], (M.data || {}).tracks || []]
       .flat().find((t) => t && trackKey(t) === key) || null;
   }
   function openAddPicker(track) {
@@ -426,20 +939,36 @@
     const r = await postJSON("/api/music/config", { dir }); if (r.ok) { await load(); renderPage(); toast("Saved."); } else toast(r.error || "Not saved.");
   }
 
-  async function load() { try { const r = await getJSON("/api/music"); if (r.ok) M.data = r; } catch (e) { /* signed out */ } }
+  async function load() {
+    try { const r = await getJSON("/api/music"); if (r.ok) M.data = r; } catch (e) { /* signed out */ }
+    try { const r = await getJSON("/api/music/ai?action=history&offset=0&limit=50"); M.homeHistory = r.ok && Array.isArray(r.tracks) ? r.tracks : []; } catch (e) { M.homeHistory = []; }
+  }
 
   async function searchSc() {
     const input = $('[data-music="sc-query"]');
     const query = (input && input.value || "").trim();
     if (query.length < 2) { toast("Enter at least two characters to search."); return; }
-    const el = $("#sc-results"); if (el) setHTML(el, html`<div class="empty"><div class="spin"></div>Searching…</div>`);
+    const el = $("#sc-results"); if (el) setHTML(el, html`<div class="empty"><div class="spin"></div>${M.hideDrm ? "Searching and checking which tracks are playable…" : "Searching…"}</div>`);
     try {
-      const r = await getJSON("/api/music/search?q=" + encodeURIComponent(query));
+      const r = await getJSON("/api/music/search?q=" + encodeURIComponent(query) + (M.hideDrm ? "&nodrm=1" : ""));
       M._searched = true;
       if (!r.ok) { if (el) setHTML(el, html`<div class="empty">${r.error || "Search failed."}</div>`); return; }
       M.scResults = Array.isArray(r.tracks) ? r.tracks : [];
       renderTab();
     } catch (e) { if (el) setHTML(el, html`<div class="empty">${e.message || "Search failed."}</div>`); }
+  }
+  async function discoverSearch() {
+    const input = $('[data-music="discover-query"]');
+    const query = (input && input.value || M.discoverQuery || "").trim();
+    if (query.length < 2) { toast("Enter at least two characters to discover songs."); return; }
+    M.discoverQuery = query; M.discoverSearched = true;
+    const el = $("#sc-tab"); if (el) setHTML(el, html`<div class="card"><div class="empty"><div class="spin"></div>Finding songs…</div></div>`);
+    try {
+      const r = await getJSON("/api/music/search?q=" + encodeURIComponent(query) + (M.hideDrm ? "&nodrm=1" : ""));
+      if (!r.ok) { M.discoverTracks = []; toast(r.error || "Discover search failed."); }
+      else { M.discoverTracks = Array.isArray(r.tracks) ? r.tracks : []; M.discoverIndex = 0; }
+      renderTab();
+    } catch (e) { M.discoverTracks = []; renderTab(); toast(e.message || "Discover search failed."); }
   }
   async function loadSet() {
     const input = $('[data-music="set-url"]');
@@ -451,21 +980,89 @@
     M.scSet = { title: r.title || "Playlist", tracks: r.tracks || [] };
     renderTab();
   }
+  async function playTrackLink() {
+    const input = $('[data-music="track-url"]');
+    const url = (input && input.value || "").trim();
+    if (!url) { toast("Paste a SoundCloud song link first."); return; }
+    M._trackUrl = url;
+    const out = $("#sc-track-link-status");
+    if (out) setHTML(out, html`<div class="empty"><div class="spin"></div>Opening song link…</div>`);
+    try {
+      const r = await getJSON("/api/music/sc-playlist?url=" + encodeURIComponent(url));
+      if (!r.ok) {
+        if (out) setHTML(out, html`<div class="err small">${r.error || "Couldn't open that link."}</div>`);
+        return;
+      }
+      const tracks = Array.isArray(r.tracks) ? r.tracks : [];
+      if (tracks.length !== 1) {
+        if (out) setHTML(out, html`<div class="err small">That link has multiple tracks. Load it in the playlist section below.</div>`);
+        return;
+      }
+      playQueue([{ ...tracks[0], kind: "sc" }], 0);
+      toast("Opened song link.");
+    } catch (e) {
+      if (out) setHTML(out, html`<div class="err small">${e.message || "Couldn't open that link."}</div>`);
+    }
+  }
+  async function copyCurrentLink() {
+    const track = M.queue[M.idx];
+    if (!track || !track.url) { toast("This track has no SoundCloud link."); return; }
+    try {
+      await navigator.clipboard.writeText(track.url);
+    } catch (e) {
+      const input = document.createElement("textarea");
+      input.value = track.url;
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.appendChild(input);
+      input.select();
+      const copied = document.execCommand("copy");
+      input.remove();
+      if (!copied) { toast("Couldn't copy the link."); return; }
+    }
+    toast("SoundCloud link copied.");
+  }
 
   // ---- events -------------------------------------------------------------
   document.addEventListener("click", async (e) => {
     const pb = e.target.closest && e.target.closest("[data-play]");
     if (pb) { startPlay(pb.dataset.play); return; }
     const t = e.target.closest && e.target.closest("[data-music], [data-tab]"); if (!t) return;
-    if (t.dataset.tab) { M.tab = t.dataset.tab; M.openPl = null; renderPage(); return; }
+    if (t.dataset.tab) {
+      M.tab = t.dataset.tab; M.openPl = null; renderPage();
+      if (M.tab === "home") getJSON("/api/music/ai?action=history&offset=0&limit=50").then((r) => { if (r.ok) { M.homeHistory = Array.isArray(r.tracks) ? r.tracks : []; renderTab(); } }).catch(() => {});
+      return;
+    }
     const act = t.dataset.music;
     if (act === "listen") playLive();
+    else if (act === "home-play") { if (M.homeRecs.length) playQueue(M.homeRecs, 0); }
+    else if (act === "dj-start") startDJ();
+    else if (act === "dj-stop") stopDJ();
+    else if (act === "dj-send") {
+      const input = $('[data-music="dj-request"]'), request = (input && input.value || "").trim();
+      if (input) input.value = "";
+      if (request) sendDJRequest(request, false);
+    }
+    else if (act === "dj-play") { if (M.dj.draft && M.dj.draft.tracks.length) playQueue(M.dj.draft.tracks, 0); }
+    else if (act === "dj-save") {
+      if (!M.dj.draft || !M.dj.draft.tracks.length) return;
+      const r = await postJSON("/api/music/ai", { action: "create_playlist", name: M.dj.draft.name, tracks: M.dj.draft.tracks });
+      if (!r.ok) { toast(r.error || "Couldn't save the playlist."); return; }
+      M.dj.draft.saved = true; await load(); M.playlists = (M.data || {}).playlists || M.playlists; saveDJ(); renderTab(); toast("Saved to Playlists.");
+    }
     else if (act === "save-dir") await saveDir($('[data-music="dir"]').value.trim());
     else if (act === "browse") openBrowse($('[data-music="dir"]').value.trim());
     else if (act === "b-open" || act === "b-short") openBrowse(t.dataset.path);
     else if (act === "b-cancel") closeBrowse();
     else if (act === "b-use") { closeBrowse(); await saveDir(t.dataset.path); }
     else if (act === "sc-search") await searchSc();
+    else if (act === "discover-search") await discoverSearch();
+    else if (act === "discover-prev") moveDiscover(-1);
+    else if (act === "discover-next") moveDiscover(1);
+    else if (act === "discover-play") { if (M.discoverTracks[M.discoverIndex]) playQueue(M.discoverTracks, M.discoverIndex); }
+    else if (act === "discover-like") { const tr = M.discoverTracks[M.discoverIndex]; if (tr) await toggleLike(tr.url); }
+    else if (act === "discover-add") { const tr = M.discoverTracks[M.discoverIndex]; if (tr) openAddPicker(tr); }
+    else if (act === "play-url") await playTrackLink();
     else if (act === "load-set") await loadSet();
     else if (act === "play-set") { if (M.scSet) playQueue(M.scSet.tracks, 0); }
     else if (act === "likes-play") playQueue(M.scLikes, 0);
@@ -474,7 +1071,7 @@
     else if (act === "sc-dl") {
       toast("Downloading to the music folder…");
       const r = await postJSON("/api/music/sc-download", { url: t.dataset.key });
-      toast(r.ok ? "Saved to the music folder." : (r.error || "Download failed."));
+      toast(r.ok ? (r.text || "Saved to Nodeyard Music.") : (r.error || "Download failed."));
     }
     else if (act === "add") { const tr = findTrack(t.dataset.key); if (tr) openAddPicker(tr); }
     else if (act === "pk-cancel") closeAddPicker();
@@ -525,7 +1122,9 @@
     else if (kind === "set") { if (M.scSet) { const i = M.scSet.tracks.findIndex((x) => trackKey(x) === rest); if (i >= 0) playQueue(M.scSet.tracks, i); } }
     else if (kind === "like") playQueue(M.scLikes, +rest);
     else if (kind === "pl") { if (M.openPl) playQueue(M.openPl.tracks, +rest); }
+    else if (kind === "dj") { if (M.dj.draft) playQueue(M.dj.draft.tracks, +rest); }
     else if (kind === "lib") { const lib = filteredLib(); const i = lib.findIndex((x) => trackKey(x) === rest); if (i >= 0) playQueue(lib, i); }
+    else if (kind === "rec") { const i = M.homeRecs.findIndex((x) => trackKey(x) === rest); if (i >= 0) playQueue(M.homeRecs, i); }
   }
   async function toggleLike(url) {
     const track = findTrack(url); if (!track) return;
@@ -542,21 +1141,45 @@
   }
 
   document.addEventListener("input", (e) => {
-    if (e.target.matches('[data-music="lib-filter"]')) { M._libq = e.target.value; renderTab(); const inp = $('[data-music="lib-filter"]'); if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); } }
+    if (e.target.matches('[data-music="discover-query"]')) M.discoverQuery = e.target.value;
+    else if (e.target.matches('[data-music="lib-filter"]')) { M._libq = e.target.value; renderTab(); const inp = $('[data-music="lib-filter"]'); if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); } }
   });
   document.addEventListener("keydown", (e) => {
+    if (S.view === "music" && M.tab === "discover" && (e.key === "ArrowLeft" || e.key === "ArrowRight") &&
+        !e.target.matches("input,textarea,select,[contenteditable=true]")) {
+      e.preventDefault(); moveDiscover(e.key === "ArrowLeft" ? -1 : 1); return;
+    }
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && e.target.matches('[data-music="dj-request"]')) { e.preventDefault(); $('[data-music="dj-send"]')?.click(); return; }
     if (e.key !== "Enter") return;
+    if (e.target.matches('[data-music="discover-query"]')) { e.preventDefault(); discoverSearch(); }
     if (e.target.matches('[data-music="sc-query"]')) { e.preventDefault(); searchSc(); }
+    else if (e.target.matches('[data-music="track-url"]')) { e.preventDefault(); playTrackLink(); }
     else if (e.target.matches('[data-music="set-url"]')) { e.preventDefault(); loadSet(); }
+  });
+  document.addEventListener("pointerdown", (e) => {
+    if (M.tab === "discover" && e.target.closest("[data-discover-stage]")) M.discoverPointerX = e.clientX;
+  });
+  document.addEventListener("pointerup", (e) => {
+    if (!M.discoverPointerX) return;
+    const delta = e.clientX - M.discoverPointerX; M.discoverPointerX = 0;
+    if (Math.abs(delta) > 55 && !e.target.closest("button")) moveDiscover(delta < 0 ? 1 : -1);
   });
   document.addEventListener("change", async (e) => {
     const t = e.target.closest && e.target.closest("[data-music]"); if (!t) return;
-    if (t.dataset.music === "fw-toggle") { const r = await postJSON("/api/music/config", { forward_enabled: t.checked }); if (r.ok) { await load(); renderTab(); } }
+    if (t.dataset.music === "cache-limit") { const r = await postJSON("/api/music/config", { cache_limit: +t.value }); if (r.ok) { await load(); renderTab(); toast("Recent song cache updated."); } else toast(r.error || "Couldn't update the cache size."); }
+    else if (t.dataset.music === "dj-target") { M.dj.target = t.value; saveDJ(); }
+    else if (t.dataset.music === "dj-voice") { M.dj.voice = t.value; saveDJ(); }
+    else if (t.dataset.music === "dj-speak") { M.dj.speak = t.checked; saveDJ(); if (!t.checked && typeof speechSynthesis !== "undefined") speechSynthesis.cancel(); }
+    else if (t.dataset.music === "fw-toggle") { const r = await postJSON("/api/music/config", { forward_enabled: t.checked }); if (r.ok) { await load(); renderTab(); } }
     else if (t.dataset.music === "fw-source") { await postJSON("/api/music/config", { forward_source: t.value }); await load(); renderTab(); }
+    else if (t.dataset.music === "nodrm") { M.hideDrm = t.checked; try { localStorage.setItem("ny-hidedrm", t.checked ? "1" : "0"); } catch (e) { /* ignore */ } }
   });
 
   V.music = {
-    build() { ensureBar(); NY.freshHTML($("#view"), html`<div class="card"><div class="empty"><div class="spin"></div>Loading…</div></div>`); load().then(renderPage); },
+    build() { ensureBar(); NY.freshHTML($("#view"), html`<div class="card"><div class="empty"><div class="spin"></div>Loading…</div></div>`); load().then(renderPage); restorePlayback(); },
     update() { },
   };
+  if (typeof speechSynthesis !== "undefined") speechSynthesis.addEventListener("voiceschanged", () => {
+    const select = $('[data-music="dj-voice"]'); if (select) select.innerHTML = djVoiceOptions();
+  });
 })();

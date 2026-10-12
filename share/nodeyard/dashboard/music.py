@@ -8,12 +8,14 @@
   SoundCloud search uses the public sc-pick CLI installed for the terminal user; likes are saved locally here and
   never sent to a SoundCloud account.
 
-Config at <state_dir>/music.json: {"dir": "...", "forward_enabled": bool, "forward_source": "...", "sc_likes": []}.
+Config at <state_dir>/music.json also keeps local SoundCloud likes, listening history, saved playlists and playback position.
 The folder is the only place tracks are served from — every streamed path is resolved and checked to be inside it, so
 the folder picker can't be turned into a way to read the rest of the disk.
 """
 import collections
+import concurrent.futures
 import glob
+import hashlib
 import json
 import os
 import pwd
@@ -24,11 +26,16 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
 AUDIO_EXT = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".ogg": "audio/ogg", ".oga": "audio/ogg",
              ".opus": "audio/ogg", ".m4a": "audio/mp4", ".mp4": "audio/mp4", ".aac": "audio/aac",
              ".wav": "audio/wav", ".aiff": "audio/aiff", ".wma": "audio/x-ms-wma"}
 MAX_TRACKS = 3000
+DOWNLOAD_PREFIX = "__nodeyard_downloads__/"
+EQ_MODES = {"flat", "bass", "treble", "rock", "electronic", "vocal", "classical"}
 _live_slots = threading.BoundedSemaphore(2)
 _sc_slots = threading.BoundedSemaphore(3)
 
@@ -98,6 +105,7 @@ class Music:
         self.path = os.path.join(state_dir or "/var/lib/nodeyard/dashboard", "music.json")
         self.demo = demo
         self.lock = threading.RLock()
+        self.cache_lock = threading.RLock()
         self.home = ""
         if terminal_user:
             try:
@@ -109,6 +117,58 @@ class Music:
                 self.home = pwd.getpwuid(os.getuid()).pw_dir
             except (KeyError, OSError):
                 self.home = "/root"
+
+    def cache_dir(self):
+        return os.path.join(os.path.dirname(self.path), "music-cache")
+
+    def download_dir(self):
+        return os.path.join(os.path.dirname(self.path), "music-downloads")
+
+    def cache_limit(self):
+        try:
+            return max(1, min(200, int(self.cfg().get("cache_limit", 20))))
+        except (TypeError, ValueError):
+            return 20
+
+    def cache_info(self):
+        folder = self.cache_dir()
+        try:
+            count = sum(1 for name in os.listdir(folder) if name.endswith(".mp3") and os.path.isfile(os.path.join(folder, name)))
+        except OSError:
+            count = 0
+        return {"limit": self.cache_limit(), "count": count, "folder": folder}
+
+    def _cache_path(self, url):
+        return os.path.join(self.cache_dir(), hashlib.sha256(url.encode("utf-8")).hexdigest() + ".mp3")
+
+    def _prune_cache(self, limit=None):
+        folder = self.cache_dir()
+        try:
+            rows = [(os.path.getmtime(os.path.join(folder, name)), os.path.join(folder, name))
+                    for name in os.listdir(folder) if name.endswith(".mp3")]
+        except OSError:
+            return
+        maximum = self.cache_limit() if limit is None else max(1, min(200, int(limit)))
+        for _mtime, path in sorted(rows, reverse=True)[maximum:]:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def set_cache_limit(self, limit):
+        try:
+            amount = int(limit)
+        except (TypeError, ValueError):
+            return False
+        if amount < 1 or amount > 200:
+            return False
+        with self.lock:
+            cfg = self.cfg()
+            cfg["cache_limit"] = amount
+            self._save(cfg)
+        with self.cache_lock:
+            self._prune_cache(amount)
+        return True
 
     def cfg(self):
         try:
@@ -124,6 +184,188 @@ class Music:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(c, f)
         os.replace(tmp, self.path)
+
+    def playback(self):
+        state = self.cfg().get("playback")
+        return state if isinstance(state, dict) else {}
+
+    def set_playback(self, body):
+        with self.lock:
+            cfg = self.cfg()
+            if body.get("clear") is True:
+                cfg.pop("playback", None)
+                self._save(cfg)
+                return True, "", {}
+        tracks = body.get("queue")
+        if not isinstance(tracks, list) or len(tracks) > MAX_TRACKS:
+            return False, "Invalid playback queue.", {}
+        queue = []
+        for track in tracks:
+            if not isinstance(track, dict):
+                continue
+            url = str(track.get("url") or "").strip()
+            if self._valid_sc_url(url):
+                try:
+                    duration = max(0, min(86_400_000, int(track.get("duration_ms") or 0)))
+                except (TypeError, ValueError):
+                    duration = 0
+                queue.append({"kind": "sc", "url": url[:1000],
+                              "title": str(track.get("title") or "Untitled")[:300],
+                              "artist": str(track.get("artist") or "SoundCloud")[:200],
+                              "duration_ms": duration,
+                              "artwork_url": track.get("artwork_url") if self._soundcloud_art_url(track.get("artwork_url")) else ""})
+            elif track.get("path") and self.resolve(str(track.get("path"))):
+                queue.append({"kind": "local", "path": str(track["path"])[:1000],
+                              "name": str(track.get("name") or track["path"])[:300],
+                              "folder": str(track.get("folder") or "")[:300]})
+        if not queue:
+            return False, "The queue has no playable tracks.", {}
+        try:
+            index = int(body.get("index", 0))
+            position = max(0.0, min(86_400.0, float(body.get("position", 0))))
+            volume = max(0.0, min(1.0, float(body.get("volume", 1))))
+            rate = max(0.5, min(2.0, float(body.get("rate", 1))))
+        except (TypeError, ValueError):
+            return False, "Invalid playback position, volume or speed.", {}
+        index = max(0, min(index, len(queue) - 1))
+        repeat = body.get("repeat") if body.get("repeat") in ("off", "all", "one") else "off"
+        eq_value = body.get("eq")
+        eq = eq_value if isinstance(eq_value, str) and eq_value in EQ_MODES else "flat"
+        try:
+            history_seconds = max(0, min(86_400, int(float(body.get("history_seconds") or 0))))
+        except (TypeError, ValueError):
+            history_seconds = 0
+        state = {"queue": queue, "index": index, "position": position, "volume": volume, "rate": rate, "eq": eq,
+                 "playing": body.get("playing") is True, "shuffle": body.get("shuffle") is True,
+                 "repeat": repeat, "history_id": str(body.get("history_id") or "")[:80], "history_seconds": history_seconds,
+                 "handoff": body.get("handoff") is True, "updated": time.time()}
+        with self.lock:
+            cfg = self.cfg()
+            cfg["playback"] = state
+            self._save(cfg)
+        return True, "", state
+
+    def history_event(self, body):
+        """Keep a compact, private listening history in the dashboard's music.json."""
+        track = body.get("track")
+        if not isinstance(track, dict):
+            return False, "Choose a track from your music library.", []
+        item = self._norm_track(track)
+        if not item:
+            return False, "That track is no longer available in your music library.", []
+        event_id = str(body.get("id") or "")[:80]
+        action = str(body.get("action") or "start")
+        if not event_id or action not in ("start", "progress", "complete"):
+            return False, "Invalid listening history update.", []
+        try:
+            seconds = max(0, min(86_400, int(float(body.get("seconds") or 0))))
+        except (TypeError, ValueError):
+            seconds = 0
+        key = item.get("url") or item.get("path")
+        with self.lock:
+            cfg = self.cfg()
+            rows = cfg.get("history") if isinstance(cfg.get("history"), list) else []
+            row = next((x for x in rows if isinstance(x, dict) and x.get("id") == event_id), None)
+            if row is None:
+                row = dict(item, id=event_id, key=key, played_at=int(time.time()), seconds=0, completed=False)
+                if item.get("kind") == "local":
+                    row["library_dir"] = self._base()
+                rows.insert(0, row)
+            if (row.get("url") or row.get("path")) != key:
+                return False, "That listening session does not match the track.", []
+            row["seconds"] = max(int(row.get("seconds") or 0), seconds)
+            if action == "complete":
+                row["completed"] = True
+            cfg["history"] = rows[:500]
+            self._save(cfg)
+        return True, "", len(cfg["history"])
+
+    def ai_library(self, action="overview", query="", offset=0, limit=50):
+        """The AI can only see the configured library and music the user has liked or played."""
+        cfg = self.cfg()
+        likes = self.sc_likes()
+        history = cfg.get("history") if isinstance(cfg.get("history"), list) else []
+        root = self._base()
+        history = [x for x in history if isinstance(x, dict) and self._norm_track(x) and
+                   (x.get("kind") != "local" or x.get("library_dir") == root)]
+        local = self.tracks() if action in ("overview", "library") else []
+        playlists = self._playlists(cfg)
+        def public_track(track, kind):
+            norm = self._norm_track(dict(track, kind=kind))
+            if not norm:
+                return None
+            for field in ("seconds", "played_at", "completed"):
+                if field in track:
+                    norm[field] = track[field]
+            return norm
+        if action == "overview":
+            return {"action": "overview", "local_track_count": len(local), "liked_count": len(likes),
+                    "history_count": len(history), "playlists": [{"name": p.get("name", "Playlist"), "count": len(p.get("tracks") or [])} for p in playlists[:100]],
+                    "recent_history": [row for row in (public_track(x, x.get("kind") or ("sc" if x.get("url") else "local")) for x in history[:10]) if row],
+                    "liked_songs": [row for row in (public_track(x, "sc") for x in likes[:10]) if row]}
+        rows = likes if action == "liked" else history if action == "history" else local if action == "library" else None
+        if rows is None:
+            return {"error": "action must be overview, liked, history or library."}
+        if action == "library":
+            term = str(query or "").strip().casefold()
+            if term:
+                words = [w for w in re.split(r"\s+", term) if w]
+                rows = [x for x in rows if all(w in (x.get("name", "") + " " + x.get("folder", "")).casefold() for w in words)]
+        try:
+            off = max(0, int(offset))
+            size = max(1, min(50, int(limit)))
+        except (TypeError, ValueError):
+            off, size = 0, 50
+        kind = "sc" if action == "liked" else None
+        page = []
+        for row in rows[off:off + size]:
+            row_kind = kind or row.get("kind") or ("sc" if row.get("url") else "local")
+            item = public_track(row, row_kind)
+            if item:
+                page.append(item)
+        return {"action": action, "total": len(rows), "offset": off, "next_offset": off + size if off + size < len(rows) else None,
+                "tracks": page}
+
+    def create_ai_playlist(self, name, tracks):
+        """Save an AI playlist only from tracks already present in the user's library, likes or history."""
+        if not isinstance(tracks, list) or not tracks or len(tracks) > 200:
+            return False, "Choose between 1 and 200 tracks.", None
+        cfg = self.cfg()
+        allowed = {}
+        for track in self.tracks():
+            norm = self._norm_track(dict(track, kind="local"))
+            if norm:
+                allowed[norm.get("url") or norm.get("path")] = norm
+        for track in self.sc_likes():
+            norm = self._norm_track(dict(track, kind="sc"))
+            if norm:
+                allowed[norm.get("url") or norm.get("path")] = norm
+        for track in (cfg.get("history") if isinstance(cfg.get("history"), list) else []):
+            if isinstance(track, dict) and track.get("kind") == "local" and track.get("library_dir") != self._base():
+                continue
+            norm = self._norm_track(track)
+            if norm:
+                allowed[norm.get("url") or norm.get("path")] = norm
+        selected = []
+        seen = set()
+        for track in tracks:
+            if not isinstance(track, dict):
+                continue
+            key = str(track.get("url") or track.get("path") or "")
+            if key in allowed and key not in seen:
+                selected.append(allowed[key])
+                seen.add(key)
+        if not selected:
+            return False, "The playlist needs tracks from the configured library, liked songs or listening history.", None
+        with self.lock:
+            cfg = self.cfg()
+            playlists = self._playlists(cfg)
+            pid = secrets.token_hex(6)
+            playlist = {"id": pid, "name": (str(name or "").strip()[:120] or "AI playlist"),
+                        "created": int(time.time()), "tracks": selected}
+            cfg["playlists"] = [playlist] + playlists[:199]
+            self._save(cfg)
+        return True, "", playlist
 
     def _expand(self, path):
         path = str(path or "").strip()
@@ -141,34 +383,43 @@ class Music:
 
     def tracks(self):
         base = self._base()
-        if not base or not os.path.isdir(base):
-            return []
         out = []
-        for root, dirs, files in os.walk(base):
-            depth = root[len(base):].count(os.sep)
-            if depth >= 5:
-                dirs[:] = []
-                continue
-            dirs.sort()
-            for name in sorted(files):
-                ext = os.path.splitext(name)[1].lower()
-                if ext not in AUDIO_EXT:
+        roots = [(base, "")] if base and os.path.isdir(base) else []
+        downloaded = self.download_dir()
+        if os.path.isdir(downloaded):
+            roots.append((downloaded, DOWNLOAD_PREFIX))
+        for library, prefix in roots:
+            for root, dirs, files in os.walk(library):
+                depth = root[len(library):].count(os.sep)
+                if depth >= 5:
+                    dirs[:] = []
                     continue
-                full = os.path.join(root, name)
-                rel = os.path.relpath(full, base)
-                try:
-                    size = os.path.getsize(full)
-                except OSError:
-                    continue
-                folder = os.path.dirname(rel)
-                out.append({"path": rel, "name": os.path.splitext(name)[0], "folder": folder, "size": size})
-                if len(out) >= MAX_TRACKS:
-                    return out
+                dirs.sort()
+                for name in sorted(files):
+                    ext = os.path.splitext(name)[1].lower()
+                    if ext not in AUDIO_EXT:
+                        continue
+                    full = os.path.join(root, name)
+                    rel = os.path.relpath(full, library)
+                    try:
+                        size = os.path.getsize(full)
+                    except OSError:
+                        continue
+                    folder = os.path.dirname(rel)
+                    if prefix:
+                        folder = os.path.join("Downloads", folder) if folder else "Downloads"
+                    out.append({"path": prefix + rel, "name": os.path.splitext(name)[0], "folder": folder, "size": size})
+                    if len(out) >= MAX_TRACKS:
+                        return out
         return out
 
     def resolve(self, rel):
         """The absolute path for a track, only if it is a real audio file inside the configured folder."""
+        rel = str(rel or "")
         base = self._base()
+        if rel.startswith(DOWNLOAD_PREFIX):
+            base = self.download_dir()
+            rel = rel[len(DOWNLOAD_PREFIX):]
         if not base or not rel or ".." in rel.split("/"):
             return None
         full = os.path.realpath(os.path.join(base, rel.lstrip("/")))
@@ -310,6 +561,99 @@ class Music:
     def _valid_sc_url(url):
         return bool(re.match(r"^https?://(www\.|m\.|on\.|api\.)?soundcloud\.com/[^\s]+$", str(url or "").strip(), re.I))
 
+    @staticmethod
+    def _soundcloud_art_url(url):
+        try:
+            url = str(url or "")
+            if len(url) > 2000:
+                return False
+            parsed = urllib.parse.urlparse(url)
+            return (parsed.scheme == "https" and parsed.hostname == "i1.sndcdn.com" and not parsed.username and
+                    not parsed.password and parsed.port in (None, 443) and len(parsed.path) < 1000)
+        except ValueError:
+            return False
+
+    def artwork(self, path="", image_url=""):
+        """Return an approved SoundCloud cover or a cover embedded in a confined local track."""
+        folder = os.path.join(self.cache_dir(), "covers")
+        if image_url:
+            if not self._soundcloud_art_url(image_url):
+                return None, ""
+            key = hashlib.sha256(image_url.encode("utf-8")).hexdigest()
+            cached = os.path.join(folder, key + ".img")
+            typefile = cached + ".type"
+            try:
+                with open(cached, "rb") as f:
+                    data = f.read()
+                with open(typefile, "r", encoding="ascii") as f:
+                    ctype = f.read(32)
+                if data and ctype in ("image/jpeg", "image/png", "image/webp"):
+                    return data, ctype
+            except OSError:
+                pass
+            try:
+                class SafeRedirect(urllib.request.HTTPRedirectHandler):
+                    def redirect_request(self, request, fp, code, message, headers, new_url):
+                        if not Music._soundcloud_art_url(new_url):
+                            return None
+                        return super().redirect_request(request, fp, code, message, headers, new_url)
+                request = urllib.request.Request(image_url, headers={"User-Agent": "Nodeyard Music/1.0"})
+                with urllib.request.build_opener(SafeRedirect).open(request, timeout=8) as response:
+                    if not self._soundcloud_art_url(response.geturl()):
+                        return None, ""
+                    ctype = response.headers.get_content_type()
+                    data = response.read(2 * 1024 * 1024 + 1)
+                if ctype not in ("image/jpeg", "image/png", "image/webp") or len(data) > 2 * 1024 * 1024:
+                    return None, ""
+                os.makedirs(folder, mode=0o700, exist_ok=True)
+                with open(cached, "wb") as f:
+                    os.chmod(cached, 0o600)
+                    f.write(data)
+                with open(typefile, "w", encoding="ascii") as f:
+                    os.chmod(typefile, 0o600)
+                    f.write(ctype)
+                return data, ctype
+            except (OSError, ValueError, urllib.error.URLError):
+                return None, ""
+        full = self.resolve(path)
+        if not full:
+            return None, ""
+        stem, _ext = os.path.splitext(full)
+        for ext, ctype in ((".jpg", "image/jpeg"), (".jpeg", "image/jpeg"), (".png", "image/png"), (".webp", "image/webp")):
+            try:
+                with open(stem + ext, "rb") as f:
+                    data = f.read(2 * 1024 * 1024 + 1)
+                if data and len(data) <= 2 * 1024 * 1024:
+                    return data, ctype
+            except OSError:
+                pass
+        ffmpeg = self.ffmpeg()
+        if not ffmpeg:
+            return None, ""
+        try:
+            signature = "%s:%s:%s" % (full, os.path.getmtime(full), os.path.getsize(full))
+            cached = os.path.join(folder, hashlib.sha256(signature.encode("utf-8")).hexdigest() + ".jpg")
+            with open(cached, "rb") as f:
+                data = f.read(2 * 1024 * 1024 + 1)
+            if data and len(data) <= 2 * 1024 * 1024:
+                return data, "image/jpeg"
+        except OSError:
+            pass
+        try:
+            result = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-i", full, "-map", "0:v:0",
+                                     "-frames:v", "1", "-vf", "scale=300:300:force_original_aspect_ratio=decrease",
+                                     "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=12)
+            if result.returncode or not result.stdout or len(result.stdout) > 2 * 1024 * 1024:
+                return None, ""
+            os.makedirs(folder, mode=0o700, exist_ok=True)
+            with open(cached, "wb") as f:
+                os.chmod(cached, 0o600)
+                f.write(result.stdout)
+            return result.stdout, "image/jpeg"
+        except (OSError, subprocess.SubprocessError):
+            return None, ""
+
     def _tool(self, name):
         """Find a helper sc-pick installed, wherever it was run from. The dashboard runs as a different user (often
         root) than the person who ran sc-pick, so look in every home's sc-pick bin and /usr/local/bin, not just ours."""
@@ -328,7 +672,20 @@ class Music:
         """The public-search CLI installed by sc-pick (or system-wide by 'Update everything')."""
         return self._tool("soundcloud")
 
-    def sc_search(self, query):
+    def sc_is_playable(self, url):
+        """True if yt-dlp can actually fetch this track — i.e. it isn't DRM-protected (Go+-only) or private. A quick
+        --simulate (resolve only, no download). Used by the 'hide DRM' search filter."""
+        yt = self.yt_dlp()
+        if not yt or not self._valid_sc_url(url):
+            return False
+        try:
+            r = subprocess.run([yt, "-q", "--no-warnings", "--no-playlist", "--simulate", url],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+            return r.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    def sc_search(self, query, nodrm=False):
         query = str(query or "").strip()[:200]
         if len(query) < 2:
             return False, "Enter at least two characters to search.", []
@@ -366,7 +723,15 @@ class Music:
                 duration_ms = 0
             rows.append({"title": str(e.get("title") or "Untitled")[:300],
                          "artist": str(e.get("uploader") or e.get("channel") or e.get("uploader_id") or "Unknown artist")[:200],
-                         "duration_ms": max(0, duration_ms), "url": url[:1000]})
+                         "duration_ms": max(0, duration_ms), "url": url[:1000],
+                         "artwork_url": e.get("thumbnail") if self._soundcloud_art_url(e.get("thumbnail")) else ""})
+        if nodrm and rows:
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+                    ok = list(ex.map(lambda t: self.sc_is_playable(t["url"]), rows))
+                rows = [t for t, good in zip(rows, ok) if good]
+            except (OSError, RuntimeError):
+                pass
         return True, "", rows
 
     def sc_likes(self):
@@ -385,7 +750,8 @@ class Music:
         row = {"title": str(track.get("title") or "Untitled")[:300],
                "artist": str(track.get("artist") or "Unknown artist")[:200],
                "duration_ms": max(0, min(86_400_000, duration_ms)),
-               "url": str(track["url"])[:1000]}
+               "url": str(track["url"])[:1000],
+               "artwork_url": track.get("artwork_url") if self._soundcloud_art_url(track.get("artwork_url")) else ""}
         with self.lock:
             cfg = self.cfg()
             saved = cfg.get("sc_likes")
@@ -406,20 +772,38 @@ class Music:
         return self._tool("yt-dlp")
 
     def stream_ready(self):
-        return self.demo or bool(self.yt_dlp())
+        return self.demo or bool(self.yt_dlp() and self.ffmpeg())
 
     def sc_fetch(self, url):
-        """Download a SoundCloud track's audio into memory (transcoding to MP3 only when the source format isn't
-        browser-playable), caching it so playback is seekable, pause/resume works, and replays are instant. Returns
-        (bytes, content_type) or (None, error). Never writes to the music folder — that's only the explicit download."""
+        """Fetch a SoundCloud track and normalize it to 44.1 kHz stereo MP3 before serving. A single codec and sample
+        rate avoids format-dependent browser playback glitches. Cache the result so seeking and resume are reliable;
+        this never writes to the music folder (that's only the explicit download)."""
         if not self._valid_sc_url(url):
             return None, "not a SoundCloud URL"
         hit = _sc_cache_get(url)
         if hit:
+            try:
+                os.utime(self._cache_path(url), None)
+            except OSError:
+                pass
             return hit[0], hit[1]
+        with self.cache_lock:
+            cached_path = self._cache_path(url)
+            try:
+                with open(cached_path, "rb") as f:
+                    data = f.read()
+                if data:
+                    os.utime(cached_path, None)
+                    _sc_cache_put(url, data, "audio/mpeg")
+                    return data, "audio/mpeg"
+            except OSError:
+                pass
         yt = self.yt_dlp()
         if not yt:
             return None, "yt-dlp isn't installed"
+        ffmpeg = self.ffmpeg()
+        if not ffmpeg:
+            return None, "ffmpeg isn't installed"
         tmpdir = tempfile.mkdtemp(prefix="nysc.")
         try:
             tmpl = os.path.join(tmpdir, "a.%(ext)s")
@@ -438,28 +822,36 @@ class Music:
                 last = err.strip().splitlines()[-1:] or ["it may be private or geo-blocked"]
                 return None, last[0].replace("ERROR:", "").strip()[:200]
             path = os.path.join(tmpdir, files[0])
-            ext = os.path.splitext(path)[1].lower()
-            direct = {".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".mp4": "audio/mp4", ".aac": "audio/aac",
-                      ".ogg": "audio/ogg", ".opus": "audio/ogg", ".wav": "audio/wav"}
-            if ext in direct:
-                with open(path, "rb") as f:
-                    data = f.read()
-                ctype = direct[ext]
-            elif self.ffmpeg():
-                try:
-                    p = subprocess.run([self.ffmpeg(), "-hide_banner", "-loglevel", "error", "-i", path, "-c:a",
-                                        "libmp3lame", "-b:a", "192k", "-f", "mp3", "pipe:1"], stdout=subprocess.PIPE,
-                                       stderr=subprocess.DEVNULL, timeout=180)
-                    data, ctype = p.stdout, "audio/mpeg"
-                except (OSError, subprocess.SubprocessError):
-                    return None, "couldn't transcode the audio"
-            else:
-                with open(path, "rb") as f:
-                    data = f.read()
-                ctype = "application/octet-stream"
-            if not data:
-                return None, "the track came back empty"
+            try:
+                p = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-i", path, "-map", "0:a:0",
+                                    "-vn", "-ac", "2", "-ar", "44100", "-c:a", "libmp3lame", "-b:a", "192k",
+                                    "-f", "mp3", "pipe:1"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   timeout=180)
+            except (OSError, subprocess.SubprocessError):
+                return None, "couldn't normalize the audio"
+            if p.returncode or not p.stdout:
+                reason = p.stderr.decode("utf-8", "replace").strip().splitlines()
+                return None, (reason[-1][:200] if reason else "couldn't normalize the audio")
+            data, ctype = p.stdout, "audio/mpeg"
             _sc_cache_put(url, data, ctype)
+            with self.cache_lock:
+                try:
+                    folder = self.cache_dir()
+                    os.makedirs(folder, mode=0o700, exist_ok=True)
+                    os.chmod(folder, 0o700)
+                    target = self._cache_path(url)
+                    tmp = target + ".%s.tmp" % secrets.token_hex(6)
+                    with open(tmp, "wb") as f:
+                        os.chmod(tmp, 0o600)
+                        f.write(data)
+                    os.replace(tmp, target)
+                    self._prune_cache()
+                except OSError:
+                    try:
+                        if "tmp" in locals() and os.path.exists(tmp):
+                            os.unlink(tmp)
+                    except OSError:
+                        pass
             return data, ctype
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -472,9 +864,11 @@ class Music:
         yt = self.yt_dlp()
         if not yt:
             return False, "yt-dlp isn't installed (Settings → Update everything)."
-        base = self._base()
-        if not base or not os.path.isdir(base):
-            return False, "Set a music folder first (in Settings)."
+        base = self.download_dir()
+        try:
+            os.makedirs(base, mode=0o700, exist_ok=True)
+        except OSError as e:
+            return False, "Couldn't open Nodeyard's writable music downloads folder: %s" % e
         archive = os.path.join(base, ".sc-archive.txt")
         out = os.path.join(base, "%(uploader|Unknown Artist)s - %(title).200B [%(id)s].%(ext)s")
         cmd = [yt, "-q", "--no-warnings", "--no-playlist", "-f", "bestaudio/best", "--no-overwrites",
@@ -490,7 +884,7 @@ class Music:
             return False, "Couldn't run yt-dlp: %s" % e
         tail = "\n".join((p.stdout or "").strip().splitlines()[-6:])
         if p.returncode == 0:
-            return True, tail or "Saved to the music folder."
+            return True, "Saved in Music → Library → Downloads." + (("\n" + tail) if tail else "")
         return False, tail or "Download failed."
 
     def sc_playlist(self, url):
@@ -533,7 +927,8 @@ class Music:
                 duration_ms = 0
             rows.append({"title": str(e.get("title") or "Untitled")[:300],
                          "artist": str(e.get("uploader") or e.get("channel") or e.get("uploader_id") or "")[:200],
-                         "duration_ms": max(0, duration_ms), "url": u[:1000]})
+                         "duration_ms": max(0, duration_ms), "url": u[:1000],
+                         "artwork_url": e.get("thumbnail") if self._soundcloud_art_url(e.get("thumbnail")) else ""})
         title = str((data.get("title") if isinstance(data, dict) else "") or "Playlist")[:200]
         if not rows:
             return False, "No playable tracks found at that URL.", []
@@ -562,7 +957,8 @@ class Music:
             except (TypeError, ValueError):
                 dur = 0
             return {"kind": "sc", "url": str(t["url"])[:1000], "title": str(t.get("title") or "Untitled")[:300],
-                    "artist": str(t.get("artist") or "")[:200], "duration_ms": dur}
+                    "artist": str(t.get("artist") or "")[:200], "duration_ms": dur,
+                    "artwork_url": t.get("artwork_url") if self._soundcloud_art_url(t.get("artwork_url")) else ""}
         if t.get("kind") == "local" and t.get("path") and self.resolve(t.get("path")):
             return {"kind": "local", "path": str(t["path"])[:1000], "name": str(t.get("name") or t["path"])[:300],
                     "folder": str(t.get("folder") or "")[:300]}
@@ -619,6 +1015,7 @@ def register(ctx, args):
         c = music.cfg()
         have_ff = bool(music.ffmpeg())
         return h._json({"ok": True, "dir": c.get("dir", ""), "tracks": music.tracks(),
+                        "recent_cache": music.cache_info(),
                         "forward": {"available": music.forward_available(), "reason": music.forward_reason(),
                                     "enabled": bool(c.get("forward_enabled")),
                                     "source": c.get("forward_source", ""), "auto_source": music.default_source() if have_ff else "",
@@ -643,6 +1040,10 @@ def register(ctx, args):
             c["forward_enabled"] = bool(body.get("forward_enabled"))
         if "forward_source" in body:
             c["forward_source"] = str(body.get("forward_source") or "")[:200]
+        if "cache_limit" in body:
+            if not music.set_cache_limit(body.get("cache_limit")):
+                return h._json({"ok": False, "error": "Choose a cache size from 1 to 200 songs."}, 400)
+            c = music.cfg()
         music._save(c)
         return h._json({"ok": True})
 
@@ -650,8 +1051,34 @@ def register(ctx, args):
         return h._json(music.browse(q.get("path", [""])[0]))
 
     def _sc_search(h, q):
-        ok, error, tracks = music.sc_search(q.get("q", [""])[0])
+        nodrm = (q.get("nodrm", [""])[0] in ("1", "true", "yes"))
+        ok, error, tracks = music.sc_search(q.get("q", [""])[0], nodrm=nodrm)
         return h._json({"ok": ok, "error": error, "tracks": tracks}, 200 if ok else 400)
+
+    def _playback_get(h, q):
+        return h._json({"ok": True, "playback": music.playback()})
+
+    def _playback_post(h, body):
+        ok, error, state = music.set_playback(body)
+        return h._json({"ok": ok, "error": error, "playback": state}, 200 if ok else 400)
+
+    def _history_post(h, body):
+        ok, error, count = music.history_event(body)
+        return h._json({"ok": ok, "error": error, "count": count if ok else 0}, 200 if ok else 400)
+
+    def _ai_library(h, q):
+        action = str(q.get("action", ["overview"])[0] or "overview")[:20]
+        try:
+            data = music.ai_library(action, q.get("q", [""])[0], q.get("offset", [0])[0], q.get("limit", [50])[0])
+        except (OSError, ValueError) as e:
+            return h._json({"ok": False, "error": str(e)}, 400)
+        return h._json(dict(data, ok="error" not in data), 200 if "error" not in data else 400)
+
+    def _ai_playlist(h, body):
+        if body.get("action") != "create_playlist":
+            return h._json({"ok": False, "error": "action must be create_playlist."}, 400)
+        ok, error, playlist = music.create_ai_playlist(body.get("name"), body.get("tracks"))
+        return h._json({"ok": ok, "error": error, "playlist": playlist}, 200 if ok else 400)
 
     def _sc_like(h, body):
         liked = body.get("liked") is True
@@ -679,6 +1106,12 @@ def register(ctx, args):
         ok, msg, tracks = music.sc_playlist(q.get("url", [""])[0])
         return h._json({"ok": ok, "title": msg if ok else "", "error": "" if ok else msg, "tracks": tracks}, 200 if ok else 400)
 
+    def _art(h, q):
+        data, ctype = music.artwork(q.get("path", [""])[0], q.get("url", [""])[0])
+        if not data:
+            return h._send(404, "Artwork not found", "text/plain; charset=utf-8")
+        return h._send(200, data, ctype)
+
     def _playlists(h, q):
         pid = q.get("id", [""])[0]
         if pid:
@@ -697,6 +1130,9 @@ def register(ctx, args):
             return h._send(404, "Not found", "text/plain; charset=utf-8")
         if demo or not music.yt_dlp():
             return h._send(503, "SoundCloud playback needs yt-dlp on the server (Settings → Update everything).",
+                           "text/plain; charset=utf-8")
+        if not music.ffmpeg():
+            return h._send(503, "SoundCloud playback needs ffmpeg on the server (Settings → Update everything).",
                            "text/plain; charset=utf-8")
         if not _sc_slots.acquire(blocking=False):
             return h._send(429, "Too many at once. Try again in a moment.", "text/plain; charset=utf-8")
@@ -757,10 +1193,14 @@ def register(ctx, args):
 
     ctx.get_routes.update({"/api/music": _status, "/api/music/track": _track, "/api/audio/live": _live,
                            "/api/music/browse": _browse, "/api/music/search": _sc_search,
+                           "/api/music/playback": _playback_get,
+                           "/api/music/ai": _ai_library,
                            "/api/music/sc-stream": _sc_stream, "/api/music/sc-playlist": _sc_playlist,
-                           "/api/music/playlists": _playlists})
+                           "/api/music/playlists": _playlists, "/api/music/art": _art})
     ctx.post_routes.update({"/api/music/config": _config, "/api/audio/test": _test,
                             "/api/audio/setup-server": _setup_audio, "/api/music/sc-download": _sc_download,
+                            "/api/music/playback": _playback_post,
+                            "/api/music/history": _history_post, "/api/music/ai": _ai_playlist,
                             "/api/music/like": _sc_like, "/api/music/playlist": _playlist})
 
 

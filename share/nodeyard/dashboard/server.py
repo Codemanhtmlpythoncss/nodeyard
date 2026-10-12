@@ -553,7 +553,8 @@ def main():
         import agents as agentsmod
         agents = agentsmod.AgentPoller(a.agent_token_file)
     store = Store(source, a.interval, agents)
-    ctx = Context(store=store, source=source, mode="demo" if a.demo else "live", nd_version=a.nodeyard_version, auth=auth, port=a.port)
+    ctx = Context(store=store, source=source, mode="demo" if a.demo else "live", nd_version=a.nodeyard_version, auth=auth,
+                  port=a.port, listen_addrs=addrs)
 
     def agents_route(h, q):
         snap = store.snapshot()
@@ -602,6 +603,7 @@ def main():
             srv = make_listener(addr, port, ctx, a.verbose)
             port = srv.server_address[1]  # --port 0: every listener uses the first one's port
             servers.append(srv)
+        ctx.port = port
     except OSError as e:
         sys.exit("Cannot listen on %s:%d: %s" % (addr, port, e.strerror or e))
 
