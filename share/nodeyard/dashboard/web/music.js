@@ -24,7 +24,7 @@
   const M = {
     data: null, tab: "home", homeHistory: [], homeHistoryReady: false, homeHistoryError: false, homeSessionHeard: new Set(), homeRecs: [], homeUnheard: [],
     queue: [], idx: -1, live: false, seekable: true, shuffle: false, shuffleOrder: null, shufflePos: 0, repeat: "off", rate: 1, eq: "flat",
-    scResults: [], scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
+    scResults: [], playlistResults: [], searchQuery: "", searchError: "", scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
     discoverTracks: [], discoverIndex: 0, discoverSeeded: false, discoverPointerY: null, discoverWheelAt: 0,
     dj: readDJState(),
     historyId: "", historyElapsed: 0, historySince: 0, lastHistorySave: 0, lastPlaybackSave: 0, restored: false, stopping: false,
@@ -841,6 +841,12 @@
 
   function renderSearch(el) {
     const sc = (M.data || {}).sc || {};
+    const playlistResults = M.playlistResults.length
+      ? html`<div class="section-title">Your playlists</div>${M.playlistResults.map((p) => html`<div class="sc-row">
+          <button class="sc-pbtn ghost" data-music="pl-open" data-id="${p.id}" title="Open playlist">♪</button>
+          <div class="meta" data-music="pl-open" data-id="${p.id}" style="cursor:pointer"><div><b>${p.name}</b></div><div class="faint small">${p.count} track${p.count === 1 ? "" : "s"}</div></div>
+          <button class="btn small" data-music="pl-open" data-id="${p.id}">Open</button></div>`)}`
+      : "";
     const setBody = M.scSet
       ? html`<div class="row" style="justify-content:space-between;align-items:center;margin-top:4px">
           <b>${M.scSet.title} <span class="faint small">(${M.scSet.tracks.length})</span></b>
@@ -849,15 +855,15 @@
       : "";
     const results = M.scResults.length
       ? html`<div class="section-title">Results</div>${M.scResults.map((t) => trackRow(t, "res:" + trackKey(t), likeBtn(t)))}`
-      : (M._searched ? html`<div class="empty">No ${M.hideDrm ? "playable " : ""}results${M.hideDrm ? " — all matches were DRM-protected" : ""}.</div>` : "");
+      : "";
     setHTML(el, html`
       <div class="card">
-        <div class="row" style="gap:8px"><input class="input" data-music="sc-query" placeholder="Search SoundCloud for a song, artist…" spellcheck="false" style="flex:1">
-          <button class="btn primary" data-music="sc-search" ${sc.search_ready ? "" : "disabled"}>Search</button></div>
+        <div class="row" style="gap:8px"><input class="input" data-music="sc-query" value="${M.searchQuery}" placeholder="Search songs, artists and playlists…" spellcheck="false" style="flex:1">
+          <button class="btn primary" data-music="sc-search">Search</button></div>
         <label class="check mt" style="font-size:13px"><input type="checkbox" data-music="nodrm" ${M.hideDrm ? raw("checked") : ""}> <span>Only show playable tracks — hide DRM-protected (Go+) ones <span class="faint">(slower; checks each result)</span></span></label>
-        ${!sc.search_ready ? html`<p class="small mt">SoundCloud search needs <span class="mono">yt-dlp</span> on the server. Use <b>Settings → Update everything</b> (installs it), then search.</p>` : ""}
+        ${!sc.search_ready ? html`<p class="small mt">SoundCloud search needs <span class="mono">yt-dlp</span> on the server. You can still search your saved playlists. Use <b>Settings → Update everything</b> to install SoundCloud search.</p>` : ""}
         ${sc.search_ready && !sc.stream_ready ? html`<p class="small faint mt">In-browser playback also needs ffmpeg — run <b>Settings → Update everything</b>. Until then use ＋ to save tracks and ↗ to open on SoundCloud.</p>` : ""}
-        <div id="sc-results" class="mt">${results}</div>
+        <div id="sc-results" class="mt">${M.searchError ? html`<p class="note warn small">${M.searchError}</p>` : ""}${playlistResults}${results}${M._searched && !M.playlistResults.length && !M.scResults.length && !M.searchError ? html`<div class="empty">No ${M.hideDrm ? "playable " : ""}results${M.hideDrm ? " — all matches were DRM-protected" : ""}.</div>` : ""}</div>
       </div>
       <div class="card">
         <h3 style="margin-top:0">Play a song link</h3>
@@ -1042,14 +1048,18 @@
     const input = $('[data-music="sc-query"]');
     const query = (input && input.value || "").trim();
     if (query.length < 2) { toast("Enter at least two characters to search."); return; }
+    M.searchQuery = query;
+    const lower = query.toLocaleLowerCase();
+    M.playlistResults = M.playlists.filter((p) => String(p.name || "").toLocaleLowerCase().includes(lower));
+    M.searchError = "";
     const el = $("#sc-results"); if (el) setHTML(el, html`<div class="empty"><div class="spin"></div>${M.hideDrm ? "Searching and checking which tracks are playable…" : "Searching…"}</div>`);
     try {
       const r = await getJSON("/api/music/search?q=" + encodeURIComponent(query) + (M.hideDrm ? "&nodrm=1" : ""));
       M._searched = true;
-      if (!r.ok) { if (el) setHTML(el, html`<div class="empty">${r.error || "Search failed."}</div>`); return; }
+      if (!r.ok) { M.scResults = []; M.searchError = r.error || "SoundCloud search failed."; renderTab(); return; }
       M.scResults = Array.isArray(r.tracks) ? r.tracks : [];
       renderTab();
-    } catch (e) { if (el) setHTML(el, html`<div class="empty">${e.message || "Search failed."}</div>`); }
+    } catch (e) { M._searched = true; M.scResults = []; M.searchError = e.message || "SoundCloud search failed."; renderTab(); }
   }
   async function loadSet() {
     const input = $('[data-music="set-url"]');
