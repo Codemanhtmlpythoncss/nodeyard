@@ -55,6 +55,15 @@ struct ToolApproval: Identifiable {
     var detail: String
 }
 
+/// A multiple-choice question the model asked the user (the `ask_user` tool). The user picks one or more options, or
+/// writes their own; the answer is returned to the model as the tool result.
+struct UserQuestion: Identifiable {
+    var id: String
+    var question: String
+    var options: [String]
+    var allowMultiple: Bool
+}
+
 struct ChatRecord: Codable, Identifiable, Hashable {
     var id: String
     var title: String

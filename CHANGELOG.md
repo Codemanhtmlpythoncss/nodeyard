@@ -29,6 +29,10 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   up while it tours unless you hide them (H, or Tab › Panels), and the tour can be set to stay on the overview.
 - The galaxy screens say "k3s nodes" and "nodes" where the original said Proxmox's "PVE".
 - The Mac app's galaxy shows the 2D Universe page (and says why) when the cluster's dashboard is too old for the 3D one.
+- **The AI can ask you a multiple-choice question (Mac app).** A new `ask_user` tool lets the model put a question
+  with 2–5 options in front of you before it continues, instead of guessing. A polished card appears above the
+  message box: tap an option (or tick several when it allows multiple), or pick "Something else…" to type your own
+  answer, and your choice is handed back to the model.
 - **Run code from the Mac app.** Python, Bash and JavaScript blocks in an answer now have a **Run** button that runs
   the code in the dashboard's sandbox (as the terminal user, 30-second cap) and shows the output and exit code inline.
   When the code reads input, an **Input** box appears to type the stdin first. (The website chat already had Run; the

@@ -247,6 +247,7 @@ private struct ChatDetailView: View {
 
     private func composer(_ chat: ChatRecord) -> some View {
         VStack(alignment: .leading, spacing: 8) {
+            if let question = state.pendingQuestion { QuestionCard(question: question).transition(.move(edge: .bottom).combined(with: .opacity)) }
             if !state.stagedAttachments.isEmpty {
                 ScrollView(.horizontal) {
                     HStack(spacing: 8) {
@@ -393,6 +394,96 @@ private struct MessageCard: View {
                                                                                 in: RoundedRectangle(cornerRadius: 12))
         }
         .accessibilityElement(children: .contain)
+    }
+}
+
+/// The card shown when the model asks a multiple-choice question (the `ask_user` tool). Single-choice resolves on tap;
+/// multi-choice collects a set and submits. "Something else" reveals a field for the user's own answer.
+private struct QuestionCard: View {
+    @EnvironmentObject private var state: AppState
+    let question: UserQuestion
+    @State private var chosen: Set<String> = []
+    @State private var showCustom = false
+    @State private var custom = ""
+    @FocusState private var customFocused: Bool
+
+    private var canSubmit: Bool { !chosen.isEmpty || !custom.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 7) {
+                Image(systemName: "questionmark.bubble.fill").foregroundStyle(Color.accentColor)
+                Text("Nodeyard AI is asking").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                if question.allowMultiple { Text("Pick any").font(.caption2).foregroundStyle(.tertiary) }
+            }
+            Text(question.question).font(.headline).fixedSize(horizontal: false, vertical: true)
+            VStack(spacing: 6) {
+                ForEach(question.options, id: \.self) { option in
+                    optionRow(option)
+                }
+                customRow
+            }
+            if question.allowMultiple || showCustom {
+                HStack {
+                    Spacer()
+                    Button("Send answer") { submit() }.buttonStyle(.borderedProminent).disabled(!canSubmit)
+                }
+            }
+        }
+        .padding(14)
+        .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.accentColor.opacity(0.3)))
+    }
+
+    private func optionRow(_ option: String) -> some View {
+        let selected = chosen.contains(option)
+        return Button {
+            if question.allowMultiple {
+                if selected { chosen.remove(option) } else { chosen.insert(option) }
+            } else {
+                state.answerQuestion(option)
+            }
+        } label: {
+            HStack(spacing: 9) {
+                Image(systemName: question.allowMultiple ? (selected ? "checkmark.square.fill" : "square") : (selected ? "largecircle.fill.circle" : "circle"))
+                    .foregroundStyle(selected ? Color.accentColor : .secondary)
+                Text(option).frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.vertical, 8).padding(.horizontal, 10)
+            .background(selected ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+        }.buttonStyle(.plain)
+    }
+
+    private var customRow: some View {
+        VStack(spacing: 6) {
+            Button {
+                withAnimation { showCustom.toggle() }
+                if showCustom { customFocused = true }
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: showCustom ? "pencil.circle.fill" : "pencil.circle").foregroundStyle(showCustom ? Color.accentColor : .secondary)
+                    Text("Something else…").frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.vertical, 8).padding(.horizontal, 10)
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+                .contentShape(Rectangle())
+            }.buttonStyle(.plain)
+            if showCustom {
+                TextField("Type your own answer", text: $custom, axis: .vertical)
+                    .textFieldStyle(.roundedBorder).lineLimit(1...4).focused($customFocused)
+                    .onSubmit { if !question.allowMultiple { submit() } }
+            }
+        }
+    }
+
+    private func submit() {
+        var parts = question.options.filter { chosen.contains($0) }
+        let typed = custom.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !typed.isEmpty { parts.append(typed) }
+        guard !parts.isEmpty else { return }
+        state.answerQuestion(parts.joined(separator: "; "))
     }
 }
 

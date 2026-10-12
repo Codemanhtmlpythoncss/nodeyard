@@ -37,6 +37,7 @@ final class AppState: ObservableObject {
     @Published var renameChatID: String?
     @Published var renameDraft = ""
     @Published var pendingToolApproval: ToolApproval?
+    @Published var pendingQuestion: UserQuestion?
     @Published var workspace: Workspace = .chat
     /// Bumped when the AI starts using the Agent Browser, so the window opens where the user can watch.
     @Published var browserRequested = 0
@@ -53,6 +54,7 @@ final class AppState: ObservableObject {
     private var activeTask: Task<Void, Never>?
     private var streamStarted: Date?
     private var toolApprovalContinuation: CheckedContinuation<Bool, Never>?
+    private var questionContinuation: CheckedContinuation<String, Never>?
 
     init() {
         defaults = store.loadDefaults()
@@ -197,6 +199,7 @@ final class AppState: ObservableObject {
         SpeechReader.shared.stop()
         if VoiceChat.shared.isOn { VoiceChat.shared.stop() }
         resolveToolApproval(allow: false)
+        answerQuestion("(the user stopped before answering)")
         activeTask?.cancel(); activeTask = nil; isSending = false; info = "Generation stopped."
     }
 
@@ -210,6 +213,23 @@ final class AppState: ObservableObject {
         toolApprovalContinuation = nil
         pendingToolApproval = nil
         continuation?.resume(returning: allow)
+    }
+
+    /// Ask the user a multiple-choice question (the `ask_user` tool) and wait for their answer.
+    func askUser(question: String, options: [String], allowMultiple: Bool) async -> String {
+        guard questionContinuation == nil else { return "(a question is already waiting)" }
+        return await withCheckedContinuation { continuation in
+            questionContinuation = continuation
+            pendingQuestion = UserQuestion(id: UUID().uuidString, question: question, options: options, allowMultiple: allowMultiple)
+        }
+    }
+
+    /// The user answered the pending question (or stopped); hand the answer back to the model.
+    func answerQuestion(_ answer: String) {
+        let continuation = questionContinuation
+        questionContinuation = nil
+        pendingQuestion = nil
+        continuation?.resume(returning: answer)
     }
 
     private func performSend(chatID: String, retry: Bool) async {
@@ -362,6 +382,10 @@ final class AppState: ObservableObject {
 
     private func modelTools(for chat: ChatRecord) -> [[String: Any]] {
         var result: [[String: Any]] = []
+        result.append(tool("ask_user", "Ask the user a short multiple-choice question when you need a decision or clarification before continuing. Give 2–5 clear options. The user picks one (or more, if allow_multiple) or writes their own answer, and their choice is returned to you. Prefer this over guessing.",
+                           ["question": stringParameter("The question to ask the user"),
+                            "options": ["type": "array", "items": ["type": "string"], "description": "2–5 short answer choices"],
+                            "allow_multiple": ["type": "boolean", "description": "Let the user pick more than one option"]], required: ["question", "options"]))
         if chat.browserUse ?? defaults.browserUse ?? true {
             result.append(tool("browser_search", "Search the public web through Nodeyard and return sourced results.", ["query": stringParameter("Search query")], required: ["query"]))
             result.append(tool("browser_open", "Read a public web page as text. Use a URL returned by browser_search.", ["url": stringParameter("Public HTTP or HTTPS URL")], required: ["url"]))
@@ -403,6 +427,13 @@ final class AppState: ObservableObject {
         }
         do {
             switch call.function.name {
+            case "ask_user":
+                let question = (args["question"] as? String) ?? "Please choose:"
+                let options = (args["options"] as? [Any])?.compactMap { $0 as? String }.filter { !$0.isEmpty } ?? []
+                guard !options.isEmpty else { return "Tool error: give at least one option to choose from." }
+                let multiple = (args["allow_multiple"] as? Bool) ?? false
+                let answer = await askUser(question: question, options: Array(options.prefix(8)), allowMultiple: multiple)
+                return "The user answered: \(answer)"
             case "browser_search":
                 guard let query = args["query"] as? String, !query.isEmpty else { return "Tool error: give me a search query." }
                 return try await client.runWebTool("WebSearch", arguments: ["query": String(query.prefix(300))])
