@@ -28,6 +28,7 @@
     scResults: [], playlistResults: [], searchQuery: "", searchError: "", scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
     discoverTracks: [], discoverIndex: 0, discoverSeeded: false, discoverPointerY: null, discoverWheelAt: 0,
     dj: readDJState(),
+    sleep: null,   // the sleep timer: null, "end" (after this song) or a time in ms
     historyId: "", historyElapsed: 0, historySince: 0, lastHistorySave: 0, lastPlaybackSave: 0, restored: false, stopping: false,
     hideDrm: (() => { try { return localStorage.getItem("ny-hidedrm") === "1"; } catch (e) { return false; } })(),
   };
@@ -58,13 +59,14 @@
       "#ny-player button:disabled{opacity:.4;cursor:default}" +
       "#ny-player button.act{color:var(--sc,#ff5500)}" +
       "#ny-player button.act::after{content:'';position:absolute;left:50%;bottom:1px;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--sc,#ff5500)}" +
-      "#ny-player #ny-shuffle,#ny-player #ny-repeat{position:relative}" +
+      "#ny-player #ny-shuffle,#ny-player #ny-repeat,#ny-player #ny-sleep{position:relative}" +
       "#ny-player .loop-state{font-size:10px;font-weight:700;letter-spacing:.03em;color:var(--ink3,#8fa3c0);min-width:46px}" +
       "#ny-player .loop-state.on{color:var(--sc,#ff5500)}" +
       "#ny-player .seek{flex:1;display:flex;align-items:center;gap:8px;min-width:110px}" +
       "#ny-player input[type=range]{flex:1;accent-color:var(--sc,#ff5500)}" +
       "#ny-player .t{font-variant-numeric:tabular-nums;color:var(--ink3,#8fa3c0);font-size:11px;min-width:38px}" +
       "#ny-player .live-pill{color:#ff5a6a;font-weight:600;font-size:11px;letter-spacing:1px}" +
+      "@media (max-width:1100px){#ny-player{flex-wrap:wrap;row-gap:4px}#ny-player canvas,#ny-player #ny-repeat-state,#ny-player #ny-sleep-state{display:none}}" +
       ".sc-tabs{display:inline-flex;gap:3px;flex-wrap:wrap;margin:6px 0 18px;padding:4px;background:rgba(125,160,200,.08);border:1px solid var(--line);border-radius:999px}" +
       ".sc-tabs button{background:none;border:0;color:var(--ink2,#b9c6dd);cursor:pointer;padding:7px 18px;border-radius:999px;font-size:14px;font-weight:600;transition:background .15s,color .15s,box-shadow .15s}" +
       ".sc-tabs button:hover{background:rgba(125,160,200,.15);color:var(--ink,#eaf1ff)}" +
@@ -84,7 +86,7 @@
       ".sc-pbtn{flex:none;width:38px;height:38px;border-radius:50%;background:var(--sc,#ff5500);color:#fff;border:0;cursor:pointer;font-size:15px}" +
       ".sc-pbtn.ghost{background:rgba(125,160,200,.16);color:var(--ink,#eaf1ff)}" +
       ".ny-viz-top{display:block;width:100%;height:56px;margin:2px 0 14px;border-radius:12px;background:linear-gradient(180deg,rgba(255,85,0,.05),rgba(125,160,200,.06))}" +
-      "@media (max-width:760px){#ny-player{bottom:56px;gap:3px;padding-left:10px;padding-right:10px}body.desk-mode #ny-player{bottom:0}#ny-player .np{max-width:88px}#ny-player canvas,#ny-player label,#ny-player #ny-copy,#ny-player #ny-repeat-state,#ny-player #ny-vol,#ny-player #ny-vol-i,#ny-player .t{display:none}#ny-player .seek{min-width:40px}.sc-discover-card{height:min(70dvh,720px);min-height:400px}.sc-discover-cover{top:10%;width:min(68%,300px)}.sc-discover-meta{left:18px;bottom:62px}.sc-discover-actions{right:12px;bottom:118px}}";
+      "@media (max-width:760px){#ny-player{bottom:56px;gap:3px;padding-left:10px;padding-right:10px}body.desk-mode #ny-player{bottom:0}#ny-player .np{max-width:88px}#ny-player canvas,#ny-player label,#ny-player #ny-copy,#ny-player #ny-repeat-state,#ny-player #ny-sleep-state,#ny-player #ny-sleep,#ny-player #ny-vol,#ny-player #ny-vol-i,#ny-player .t{display:none}#ny-player .seek{min-width:40px}.sc-discover-card{height:min(70dvh,720px);min-height:400px}.sc-discover-cover{top:10%;width:min(68%,300px)}.sc-discover-meta{left:18px;bottom:62px}.sc-discover-actions{right:12px;bottom:118px}}";
     document.head.appendChild(style);
     document.addEventListener("error", (e) => { if (e.target && e.target.matches && e.target.matches(".sc-cover img")) e.target.remove(); }, true);
     // SoundCloud-ish accent available as --sc (falls back to orange).
@@ -104,7 +106,8 @@
       '<button id="ny-copy" title="Copy SoundCloud link" aria-label="Copy SoundCloud link">⧉</button>' +
       '<label class="faint small" title="Playback speed">Speed <select id="ny-rate" aria-label="Playback speed"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="1.75">1.75×</option><option value="2">2×</option></select></label>' +
       '<label class="faint small" title="Equalizer">EQ <select id="ny-eq" aria-label="Equalizer mode">' + EQ_OPTIONS + '</select></label>' +
-      '<button id="ny-vol-i" title="Volume">🔊</button><input type="range" id="ny-vol" min="0" max="1" value="1" step="0.05" style="width:70px" aria-label="Volume">' +
+      '<button id="ny-sleep" title="Sleep timer: off" aria-label="Sleep timer: off">⏾</button><span id="ny-sleep-state" class="loop-state"></span>' +
+      '<button id="ny-vol-i" title="Mute" aria-label="Mute">🔊</button><input type="range" id="ny-vol" min="0" max="1" value="1" step="0.05" style="width:70px" aria-label="Volume">' +
       '<button id="ny-close" title="Close player">✕</button>';
     document.body.appendChild(bar);
     audio = new Audio();
@@ -142,7 +145,80 @@
     $("#ny-rate").onchange = (e) => setPlaybackRate(e.target.value, true);
     $("#ny-eq").onchange = (e) => setEqualizer(e.target.value, true);
     $("#ny-seek").oninput = (e) => { if (audio.duration && M.seekable && !M.live) audio.currentTime = (e.target.value / 100) * audio.duration; };
-    $("#ny-vol").oninput = (e) => { audio.volume = +e.target.value; savePlayback(false, false); };
+    $("#ny-vol").oninput = (e) => { audio.volume = +e.target.value; if (audio.muted && audio.volume > 0) audio.muted = false; paintVolume(); savePlayback(false, false); };
+    $("#ny-vol-i").onclick = toggleMute;
+    $("#ny-sleep").onclick = cycleSleep;
+    audio.addEventListener("volumechange", () => { paintVolume(); notify(); });
+    setInterval(sleepTick, 1000);
+    mediaHandlers();
+  }
+
+  // ---- volume, mute and the sleep timer ------------------------------------
+  function paintVolume() {
+    const i = $("#ny-vol-i"); if (!i || !audio) return;
+    const quiet = audio.muted || audio.volume === 0;
+    i.textContent = quiet ? "🔇" : audio.volume < 0.5 ? "🔉" : "🔊";
+    i.title = quiet ? "Unmute" : "Mute"; i.setAttribute("aria-label", i.title);
+    const v = $("#ny-vol"); if (v && Math.abs(+v.value - audio.volume) > 0.001) v.value = audio.volume;
+  }
+  function toggleMute() { if (!audio) return; audio.muted = !audio.muted; if (!audio.muted && audio.volume === 0) audio.volume = 0.5; paintVolume(); }
+  function setVolume(v) { ensureBar(); audio.volume = Math.max(0, Math.min(1, +v || 0)); if (audio.volume > 0) audio.muted = false; paintVolume(); savePlayback(false, false); }
+  const SLEEP_STEPS = [null, 15, 30, 60, "end"];
+  function sleepLabel() {
+    if (!M.sleep) return "";
+    if (M.sleep === "end") return "end of song";
+    return Math.max(1, Math.ceil((M.sleep - Date.now()) / 60000)) + " min";
+  }
+  function cycleSleep() {
+    const now = M.sleep === "end" ? "end" : M.sleep ? Math.round((M.sleep - Date.now()) / 60000) : null;
+    const at = SLEEP_STEPS.findIndex((x) => x === now || (typeof x === "number" && typeof now === "number" && now <= x));
+    const nextStep = SLEEP_STEPS[(Math.max(0, at) + 1) % SLEEP_STEPS.length];
+    M.sleep = nextStep === null ? null : nextStep === "end" ? "end" : Date.now() + nextStep * 60000;
+    paintSleep(); notify();
+    toast(M.sleep ? "Sleep timer: music stops " + (M.sleep === "end" ? "after this song." : "in " + nextStep + " minutes.") : "Sleep timer off.");
+  }
+  function paintSleep() {
+    const b = $("#ny-sleep"), st = $("#ny-sleep-state"); if (!b) return;
+    const label = sleepLabel();
+    b.classList.toggle("act", !!M.sleep);
+    b.title = "Sleep timer: " + (label || "off") + " (click to change)"; b.setAttribute("aria-label", b.title);
+    if (st) { st.textContent = label; st.classList.toggle("on", !!label); }
+  }
+  function sleepTick() {
+    if (typeof M.sleep !== "number") return;
+    if (Date.now() >= M.sleep) { M.sleep = null; if (audio && !audio.paused) audio.pause(); paintSleep(); notify(); toast("Sleep timer: the music is paused. Good night."); }
+    else paintSleep();
+  }
+
+  // ---- lock screen, media keys and headphone buttons ------------------------------
+  let sessionKey = null;
+  function mediaHandlers() {
+    if (!("mediaSession" in navigator)) return;
+    const set = (action, fn) => { try { navigator.mediaSession.setActionHandler(action, fn); } catch (e) { /* not supported here */ } };
+    set("play", () => { if (audio) audio.play().catch(() => {}); });
+    set("pause", () => { if (audio) audio.pause(); });
+    set("stop", () => stop());
+    set("previoustrack", () => { if (!M.live && M.idx > 0) play(M.idx - 1); });
+    set("nexttrack", () => { if (!M.live && M.queue[M.idx]) next(); });
+    set("seekbackward", (d) => { if (audio && M.seekable && !M.live) audio.currentTime = Math.max(0, audio.currentTime - ((d && d.seekOffset) || 10)); });
+    set("seekforward", (d) => { if (audio && M.seekable && !M.live && audio.duration) audio.currentTime = Math.min(audio.duration - 0.5, audio.currentTime + ((d && d.seekOffset) || 10)); });
+    set("seekto", (d) => { if (audio && M.seekable && !M.live && d && d.seekTime != null) audio.currentTime = d.seekTime; });
+  }
+  function mediaSession() {
+    if (!("mediaSession" in navigator) || !audio) return;
+    try {
+      const t = M.live ? null : M.queue[M.idx], key = M.live ? "live" : t ? trackKey(t) : "";
+      if (key !== sessionKey) {
+        sessionKey = key;
+        const art = t ? artworkSource(t) : "";
+        navigator.mediaSession.metadata = !key ? null : new MediaMetadata({ title: M.live ? "Server audio" : titleOf(t), artist: M.live ? "Live from the host" : subOf(t),
+          album: "nodeyard", artwork: art ? [{ src: new URL(art, location.href).href, sizes: "512x512" }] : [] });
+      }
+      navigator.mediaSession.playbackState = !key ? "none" : audio.paused ? "paused" : "playing";
+      if (t && audio.duration && isFinite(audio.duration) && "setPositionState" in navigator.mediaSession) {
+        navigator.mediaSession.setPositionState({ duration: audio.duration, playbackRate: audio.playbackRate || 1, position: Math.min(audio.currentTime || 0, audio.duration) });
+      }
+    } catch (e) { /* metadata is a nicety */ }
   }
 
   // ---- CAVA-style visualizer ----------------------------------------------
@@ -234,6 +310,7 @@
     const sk = $("#ny-seek");
     sk.disabled = M.live || !M.seekable;
     if (M.seekable && !M.live && audio.duration) sk.value = (audio.currentTime / audio.duration) * 100;
+    if (!M.lastSession || Date.now() - M.lastSession > 5000) { M.lastSession = Date.now(); mediaSession(); }
     notify();
   }
   function paintBtn() {
@@ -255,6 +332,7 @@
     copy.disabled = !(current && current.url);
     copy.title = copy.disabled ? "No SoundCloud link for this track" : "Copy SoundCloud link";
     if (S.view === "music") renderTab();
+    mediaSession(); paintSleep();
     notify();
   }
 
@@ -402,6 +480,7 @@
     if (M.live) return;
     historyProgress(true);
     const body = historyBody("complete"); if (body) postJSON("/api/music/history", body).catch(() => {});
+    if (M.sleep === "end") { M.sleep = null; paintSleep(); notify(); toast("Sleep timer: stopped after that song. Good night."); return; }
     if (M.repeat === "one") { play(M.idx); return; }
     next();
   }
@@ -1315,6 +1394,15 @@
         !e.target.matches("input,textarea,select,[contenteditable=true]")) {
       e.preventDefault(); moveDiscover(e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : 1); return;
     }
+    if ((S.view === "music" || S.view === "desk") && !(e.target.matches && e.target.matches("input,textarea,select,[contenteditable=true]")) && !e.ctrlKey && !e.metaKey && !e.altKey && audio && (M.queue[M.idx] || M.live)) {
+      if (e.key === "m" || e.key === "M") { e.preventDefault(); toggleMute(); return; }
+      if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && !(S.view === "music" && M.tab === "discover")) {
+        e.preventDefault();
+        if (e.shiftKey) { if (e.key === "ArrowLeft") { if (M.idx > 0 && !M.live) play(M.idx - 1); } else if (!M.live) next(); }
+        else NY.music.skip(e.key === "ArrowLeft" ? -10 : 10);
+        return;
+      }
+    }
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && e.target.matches('[data-music="dj-request"]')) { e.preventDefault(); $('[data-music="dj-send"]')?.click(); return; }
     if (e.key !== "Enter") return;
     if (e.target.matches('[data-music="sc-query"]')) { e.preventDefault(); searchSc(); }
@@ -1355,7 +1443,8 @@
       const known = t && t.duration_ms ? t.duration_ms / 1000 : 0;
       return { live: M.live, track: t ? describe(t) : null, playing: !!(audio && !audio.paused && audio.src),
         current: audio ? audio.currentTime || 0 : 0, duration: known || (audio && isFinite(audio.duration) ? audio.duration : 0),
-        seekable: !!(t && M.seekable), hasPrev: !!t && M.idx > 0, hasNext: !!t && M.queue.length > 0, shuffle: M.shuffle, repeat: M.repeat };
+        seekable: !!(t && M.seekable), hasPrev: !!t && M.idx > 0, hasNext: !!t && M.queue.length > 0, shuffle: M.shuffle, repeat: M.repeat,
+        volume: audio ? audio.volume : 1, muted: !!(audio && audio.muted), sleep: sleepLabel() };
     },
     toggle() {
       if (!audio || (!M.live && !M.queue[M.idx])) return false;
@@ -1368,6 +1457,8 @@
     seek(fraction) { if (audio && !M.live && M.seekable && audio.duration) audio.currentTime = Math.max(0, Math.min(1, +fraction || 0)) * audio.duration; },
     setShuffle(on) { ensureBar(); M.shuffle = !!on; resetShuffle(M.idx); paintBtn(); savePlayback(false, true); },
     playQueue(tracks, i) { ensureBar(); playQueue(tracks, i); },
+    setVolume, toggleMute: () => { ensureBar(); toggleMute(); }, cycleSleep: () => { ensureBar(); cycleSleep(); },
+    skip(seconds) { if (audio && !M.live && M.seekable && audio.duration) audio.currentTime = Math.max(0, Math.min(audio.duration - 0.5, audio.currentTime + seconds)); },
     restore() { return restorePlayback(); },
   };
 

@@ -3,10 +3,11 @@
   "use strict";
   const { esc, html, raw } = NY;
   const U = NY.ui;
-  const { S, V, $, go, getJSON, postJSON, toast, store } = U;
+  const { S, V, $, go, getJSON, postJSON, toast, store } = U;   // (U.copyText for the chat's copy button)
 
   const CATALOG = [
     ["player", "Music player", "Play and pick songs without leaving the desk"], ["chat", "AI chat", "Ask your Nodeyard AI from the desk"],
+    ["services", "Services", "Which of your watched services are up"], ["system", "System load", "CPU, memory, disk and temperature across the cluster"],
     ["todo", "To-do list", "A small list for today"], ["weather", "Weather", "Conditions for a place you choose"],
     ["calendar", "Calendar", "A month at a glance"], ["notes", "Notes", "A saved scratchpad"],
     ["focus", "Focus timer", "A simple focus and break timer"], ["countdown", "Countdown", "Count down to a date"],
@@ -47,8 +48,8 @@
   const D = readState();
   const save = () => store.set("desk.v1", JSON.stringify(D));
   const title = (id) => (CATALOG.find((x) => x[0] === id) || [id, id])[1];
-  const removeButton = (id) => D.customizing ? html`<button class="desk-remove" type="button" data-desk="remove" data-id="${id}" aria-label="Remove ${title(id)}">×</button>` : "";
-  function widget(id, body) { return html`<article class="desk-widget" data-widget="${id}"><header><h2>${title(id)}</h2>${removeButton(id)}</header><div class="desk-widget-body">${body}</div></article>`; }
+  const removeButton = (id) => D.customizing ? html`<span class="desk-move"><button type="button" data-desk="move" data-id="${id}" data-dir="-1" aria-label="Move ${title(id)} earlier" ${D.widgets.indexOf(id) === 0 ? "disabled" : ""}>‹</button><button type="button" data-desk="move" data-id="${id}" data-dir="1" aria-label="Move ${title(id)} later" ${D.widgets.indexOf(id) === D.widgets.length - 1 ? "disabled" : ""}>›</button></span><button class="desk-remove" type="button" data-desk="remove" data-id="${id}" aria-label="Remove ${title(id)}">×</button>` : "";
+  function widget(id, body) { return html`<article class="desk-widget" data-widget="${id}" ${D.customizing ? raw('draggable="true"') : ""}><header><h2>${title(id)}</h2>${removeButton(id)}</header><div class="desk-widget-body">${body}</div></article>`; }
   function greeting() { const h = new Date().getHours(); return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"; }
   function quoteToday() { const d = new Date(); const day = Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86400000); return quotes[((day % quotes.length) + quotes.length) % quotes.length]; }
   function localDate(d) { return new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" }).format(d); }
@@ -62,9 +63,12 @@
     if (id === "player") return widget(id, html`<div class="desk-player">
       <div class="desk-np"><div class="desk-np-art" data-player="art" aria-hidden="true">♫</div><div class="desk-np-meta"><b data-player="title">Nothing playing</b><span data-player="sub">Pick a list below to start</span></div></div>
       <div class="desk-seek"><span data-player="cur">0:00</span><input type="range" min="0" max="1000" step="1" value="0" data-desk-input="seek" aria-label="Seek"><span data-player="dur">0:00</span></div>
-      <div class="desk-transport"><button type="button" data-desk="player-prev" aria-label="Previous song">⏮</button><button type="button" class="play" data-desk="player-toggle" aria-label="Play">▶</button><button type="button" data-desk="player-next" aria-label="Next song">⏭</button><button type="button" data-desk="player-shuffle" aria-pressed="false" aria-label="Shuffle">🔀</button></div>
+      <div class="desk-transport"><button type="button" data-desk="player-prev" aria-label="Previous song">⏮</button><button type="button" class="play" data-desk="player-toggle" aria-label="Play">▶</button><button type="button" data-desk="player-next" aria-label="Next song">⏭</button><button type="button" data-desk="player-shuffle" aria-pressed="false" aria-label="Shuffle">🔀</button><button type="button" data-desk="player-sleep" aria-label="Sleep timer">⏾</button></div>
+      <div class="desk-volume"><button type="button" data-desk="player-mute" aria-label="Mute">🔊</button><input type="range" min="0" max="1" step="0.05" value="1" data-desk-input="volume" aria-label="Volume"><span data-player="sleep"></span></div>
       <div class="desk-form"><select class="input" data-desk-input="player-source" aria-label="Play from"></select><button type="button" class="btn" data-desk="player-play-all">Play</button></div>
       <ul class="desk-player-list" data-player="list"></ul></div>`);
+    if (id === "services") return widget(id, html`<div class="desk-svc" data-svc="body"><p class="desk-empty">Loading services…</p></div>`);
+    if (id === "system") return widget(id, html`<div class="desk-sys" data-sys="body"></div>`);
     if (id === "chat") return widget(id, html`<div class="desk-chat">
       <div class="desk-form"><select class="input" data-desk-input="chat-target" aria-label="AI model"></select><button type="button" class="btn small" data-desk="chat-clear">Clear</button><button type="button" class="btn small" data-desk="ai">Open AI</button></div>
       <div class="desk-chat-log" data-chat="log" aria-live="polite"></div>
@@ -91,6 +95,8 @@
     host.innerHTML = D.widgets.map(renderWidget).join("") || '<div class="desk-no-widgets">Add a widget to make this desk yours.</div>';
     if (D.widgets.includes("player")) { if (!P.data || Date.now() - P.loadedAt > 60000) loadMusic(); drawPlayerList(); paintPlayer(); }
     if (D.widgets.includes("chat")) { if (CH.targets === null) loadTargets(); paintChatTargets(); CH.stick = true; paintChat(); }
+    if (D.widgets.includes("services")) { paintServices(); if (Date.now() - SV.at > 25000) loadServices(); }
+    if (D.widgets.includes("system")) paintSystem();
   }
   function drawPicker() {
     const picker = $("#desk-picker"); if (!picker) return;
@@ -111,6 +117,8 @@
     }
     updateCluster();
     if (CH.busy) paintChatStatus();
+    if (now.getSeconds() % 5 === 0) paintSystem();
+    if (D.widgets.includes("services") && Date.now() - SV.at > 30000 && !document.hidden) loadServices();
   }
   function updateCluster() {
     const el = $('[data-widget="cluster"]'); if (!el) return;
@@ -213,6 +221,12 @@
     const shuffle = w.querySelector('[data-desk="player-shuffle"]');
     shuffle.classList.toggle("on", st.shuffle); shuffle.setAttribute("aria-pressed", st.shuffle ? "true" : "false"); shuffle.title = st.shuffle ? "Shuffle on" : "Shuffle off";
     w.querySelectorAll(".desk-player-list li[data-key]").forEach((li) => li.classList.toggle("on", !!t && li.dataset.key === t.key));
+    const vol = w.querySelector('[data-desk-input="volume"]'), mute = w.querySelector('[data-desk="player-mute"]'), quiet = st.muted || !st.volume;
+    if (!vol.matches(":active")) vol.value = st.volume;
+    mute.textContent = quiet ? "🔇" : st.volume < 0.5 ? "🔉" : "🔊"; mute.setAttribute("aria-label", quiet ? "Unmute" : "Mute");
+    const sleep = w.querySelector('[data-desk="player-sleep"]');
+    sleep.classList.toggle("on", !!st.sleep); sleep.title = "Sleep timer: " + (st.sleep || "off");
+    q("sleep").textContent = st.sleep ? "Sleep · " + st.sleep : "";
   }
   function playFromList(i) {
     if (!NY.music || !P.tracks || !P.tracks.length) return;
@@ -221,6 +235,38 @@
   }
   document.addEventListener("ny-music", () => { if (S.view === "desk") paintPlayer(); });
   document.addEventListener("error", (e) => { if (e.target && e.target.matches && e.target.matches(".desk-np-art img")) e.target.remove(); }, true);
+
+  // ---- services (the Services page's monitor) and system load ----
+  const SV = { list: null, error: "", at: 0, loading: false };
+  async function loadServices() {
+    if (SV.loading) return;
+    SV.loading = true; SV.at = Date.now();
+    try { const r = await getJSON("/api/homelab/services"); if (!r.ok) throw new Error(r.error || "The service monitor is off."); SV.list = r.services || []; SV.error = ""; }
+    catch (e) { SV.error = e.message || "Couldn't load services."; }
+    SV.loading = false; paintServices();
+  }
+  function paintServices() {
+    const el = $('[data-widget="services"] [data-svc="body"]'); if (!el) return;
+    if (SV.list === null) { el.innerHTML = SV.error ? '<p class="desk-error">' + esc(SV.error) + "</p>" : '<p class="desk-empty">Loading services…</p>'; return; }
+    if (!SV.list.length) { el.innerHTML = '<p class="desk-empty">No services watched yet.</p><button type="button" class="btn" data-desk="services">Add services</button>'; return; }
+    const order = { down: 0, degraded: 1, pending: 2, up: 3, paused: 4 };
+    const up = SV.list.filter((s) => s.status === "up").length, active = SV.list.filter((s) => s.status !== "paused").length, bad = active - up;
+    const rows = SV.list.slice().sort((a, b) => order[a.status] - order[b.status] || a.name.localeCompare(b.name)).slice(0, 7);
+    el.innerHTML = '<div class="desk-svc-sum ' + (bad ? "bad" : "good") + '"><b>' + up + "/" + active + "</b><span>" + (bad ? bad + " need" + (bad === 1 ? "s" : "") + " attention" : "all up") + "</span></div>" +
+      '<ul class="desk-svc-list">' + rows.map((s) => '<li><i class="desk-dot ' + esc(s.status) + '"></i><span>' + esc(s.name) + "</span><small>" +
+        esc(s.status === "up" && s.last && s.last.ms != null ? Math.round(s.last.ms) + " ms" : s.status === "paused" ? "paused" : s.status === "pending" ? "checking" : "down") + "</small></li>").join("") + "</ul>" +
+      (SV.list.length > rows.length ? '<button type="button" class="btn small" data-desk="services">All ' + SV.list.length + " services</button>" : "");
+  }
+  function paintSystem() {
+    const el = $('[data-widget="system"] [data-sys="body"]'); if (!el) return;
+    if (!S.d) { el.innerHTML = '<p class="desk-empty">Waiting for cluster data…</p>'; return; }
+    const ns = S.d.nodes, sum = (k) => ns.reduce((a, n) => a + (+n[k] || 0), 0);
+    const pct = (used, total) => (total ? Math.round((100 * used) / total) : null);
+    const temps = ns.map((n) => (n.hw || {}).temp_c).filter((x) => x != null);
+    const rows = [["CPU", pct(sum("cpu_used"), sum("cpu_cores"))], ["Memory", pct(sum("mem_used"), sum("mem_total"))], ["Disk", pct(sum("disk_used"), sum("disk_total"))]];
+    el.innerHTML = rows.map(([name, v]) => '<div class="desk-sys-row"><span>' + name + '</span><div class="desk-sys-bar"><i class="' + (v >= 90 ? "bad" : v >= 75 ? "warn" : "") + '" style="width:' + (v == null ? 0 : Math.min(100, v)) + '%"></i></div><b>' + (v == null ? "–" : v + "%") + "</b></div>").join("") +
+      '<p class="desk-muted">' + ns.filter((n) => n.ready).length + "/" + ns.length + " nodes ready" + (temps.length ? " · hottest " + Math.round(Math.max(...temps)) + " °C" : "") + "</p>";
+  }
 
   // ---- AI chat: streams from the same /api/ai/chat the AI page uses; the conversation is kept in this browser ----
   const CH = { busy: false, ctrl: null, sid: "", wait: "", started: 0, targets: null, targetError: "", loadingTargets: false, stick: false, raf: 0 };
@@ -255,7 +301,8 @@
     const log = $('[data-widget="chat"] [data-chat="log"]'); if (!log) return;
     const near = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
     log.innerHTML = D.chat.length
-      ? D.chat.map((m) => '<div class="desk-msg ' + m.role + (m.error ? " error" : "") + '">' + (visibleText(m.content) ? chatHTML(m.content) : '<span class="desk-typing" aria-label="Waiting for the answer"><i></i><i></i><i></i></span>') + "</div>").join("")
+      ? D.chat.map((m, i) => '<div class="desk-msg ' + m.role + (m.error ? " error" : "") + '">' + (visibleText(m.content) ? chatHTML(m.content) : '<span class="desk-typing" aria-label="Waiting for the answer"><i></i><i></i><i></i></span>') +
+          (m.role === "assistant" && !m.pending && visibleText(m.content) ? '<button type="button" class="desk-copy" data-desk="chat-copy" data-index="' + i + '" aria-label="Copy this answer" title="Copy">⧉</button>' : "") + "</div>").join("")
       : '<p class="desk-empty">Ask a question. Answers stream in here, and your music keeps playing.</p>';
     if (near || CH.stick) log.scrollTop = log.scrollHeight;
     CH.stick = false;
@@ -333,7 +380,7 @@
     if (action === "add") { const id = b.dataset.id; if (KNOWN.has(id) && !D.widgets.includes(id)) { D.widgets.push(id); save(); drawWidgets(); drawPicker(); paintMode(); } }
     else if (action === "remove") { D.widgets = D.widgets.filter((x) => x !== b.dataset.id); save(); drawWidgets(); paintMode(); }
     else if (action === "picker-close") closePicker();
-    else if (action === "customize") { D.customizing = !D.customizing; save(); paintMode(); }
+    else if (action === "customize") { D.customizing = !D.customizing; save(); drawWidgets(); paintMode(); }
     else if (action === "add-widget") openPicker();
     else if (action === "task-delete") { D.tasks.splice(+b.dataset.index, 1); save(); drawWidgets(); paintMode(); }
     else if (action === "weather") getWeather(b);
@@ -348,6 +395,11 @@
     else if (action === "player-play-all") playFromList(null);
     else if (action === "player-track") playFromList(+b.dataset.index);
     else if (action === "player-retry") loadMusic();
+    else if (action === "player-mute") { if (NY.music) NY.music.toggleMute(); }
+    else if (action === "player-sleep") { if (NY.music) NY.music.cycleSleep(); }
+    else if (action === "services") go("services");
+    else if (action === "move") { const i = D.widgets.indexOf(b.dataset.id), j = i + (+b.dataset.dir); if (i >= 0 && j >= 0 && j < D.widgets.length) { [D.widgets[i], D.widgets[j]] = [D.widgets[j], D.widgets[i]]; save(); drawWidgets(); paintMode(); $(`[data-widget="${b.dataset.id}"] [data-desk="move"][data-dir="${b.dataset.dir}"]`)?.focus(); } }
+    else if (action === "chat-copy") { const m = D.chat[+b.dataset.index]; if (m) U.copyText(visibleText(m.content)); }
     else if (action === "chat-clear") { if (CH.busy) stopChat(); D.chat = []; save(); paintChat(); $('[data-desk-input="chat"]')?.focus(); }
     else if (action === "music") go("music");
     else if (["overview", "ai", "settings", "galaxy"].includes(action)) go(action);
@@ -371,11 +423,21 @@
     else if (el.matches('[data-desk-input="location"]')) { D.location = el.value; save(); }
     else if (el.matches('[data-desk-input="chat"]')) { D.chatDraft = el.value; save(); }
     else if (el.matches('[data-desk-input="seek"]')) { if (NY.music) NY.music.seek(+el.value / 1000); }
+    else if (el.matches('[data-desk-input="volume"]')) { if (NY.music) NY.music.setVolume(+el.value); }
   }
   function keydown(e) {
     if (e.key === "Escape" && $("#desk-picker") && !$("#desk-picker").hidden) closePicker();
     else if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.target.matches && e.target.matches('[data-desk-input="chat"]')) { e.preventDefault(); sendChat(); }
   }
+  // Arrange mode: drag a widget onto another to put it there.
+  let dragging = "";
+  document.addEventListener("dragstart", (e) => { const w = e.target.closest && e.target.closest(".desk-page.customizing .desk-widget"); if (!w) return; dragging = w.dataset.widget; w.classList.add("dragging"); try { e.dataTransfer.setData("text/plain", dragging); e.dataTransfer.effectAllowed = "move"; } catch (err) { /* old browsers */ } });
+  document.addEventListener("dragover", (e) => { if (!dragging) return; const w = e.target.closest && e.target.closest(".desk-widget"); if (!w) return; e.preventDefault(); document.querySelectorAll(".desk-widget.drop").forEach((x) => x !== w && x.classList.remove("drop")); if (w.dataset.widget !== dragging) w.classList.add("drop"); });
+  document.addEventListener("drop", (e) => {
+    if (!dragging) return; const w = e.target.closest && e.target.closest(".desk-widget"); e.preventDefault();
+    if (w && w.dataset.widget !== dragging) { const from = D.widgets.indexOf(dragging), to = D.widgets.indexOf(w.dataset.widget); if (from >= 0 && to >= 0) { D.widgets.splice(to, 0, D.widgets.splice(from, 1)[0]); save(); drawWidgets(); paintMode(); } }
+  });
+  document.addEventListener("dragend", () => { dragging = ""; document.querySelectorAll(".desk-widget.dragging,.desk-widget.drop").forEach((x) => x.classList.remove("dragging", "drop")); });
   document.addEventListener("click", click);
   document.addEventListener("submit", submit);
   document.addEventListener("change", change);
