@@ -25,7 +25,7 @@
     data: null, tab: "home", homeHistory: [], homeHistoryReady: false, homeHistoryError: false, homeSessionHeard: new Set(), homeRecs: [], homeUnheard: [],
     queue: [], idx: -1, live: false, seekable: true, shuffle: false, shuffleOrder: null, shufflePos: 0, repeat: "off", rate: 1, eq: "flat",
     scResults: [], scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
-    discoverTracks: [], discoverIndex: 0, discoverQuery: "", discoverPointerX: 0, discoverSearched: false,
+    discoverTracks: [], discoverIndex: 0, discoverSeeded: false, discoverPointerY: null, discoverWheelAt: 0,
     dj: readDJState(),
     historyId: "", historyElapsed: 0, historySince: 0, lastHistorySave: 0, lastPlaybackSave: 0, restored: false, stopping: false,
     hideDrm: (() => { try { return localStorage.getItem("ny-hidedrm") === "1"; } catch (e) { return false; } })(),
@@ -71,17 +71,19 @@
       ".sc-row{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;padding:8px 2px;border-bottom:1px solid var(--line)}" +
       ".sc-cover{position:relative;width:46px;height:46px;flex:none;border-radius:8px;overflow:hidden;display:grid;place-items:center;background:linear-gradient(135deg,rgba(255,85,0,.3),rgba(125,160,200,.16));color:var(--ink2,#b9c6dd);font-size:21px}" +
       ".sc-cover img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}" +
-      ".sc-discover{position:relative;min-height:430px;display:flex;align-items:flex-end;overflow:hidden;border-radius:18px;background-color:#151b2e;background-position:center;background-size:cover;color:white}" +
-      ".sc-discover::before{content:'';position:absolute;inset:0;background:linear-gradient(0deg,rgba(7,10,20,.94),rgba(7,10,20,.15) 78%)}" +
-      ".sc-discover-content{position:relative;width:100%;padding:clamp(20px,5vw,48px)}.sc-discover-content h2{font-size:clamp(25px,5vw,42px);margin:8px 0}.sc-discover-controls{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:14px}" +
-      ".sc-discover-controls button{min-width:46px;min-height:42px}.sc-discover-search{display:flex;gap:8px;flex-wrap:wrap}.sc-discover-search .input{flex:1;min-width:180px}" +
+      ".sc-discover-feed{width:min(100%,640px);margin:0 auto}.sc-discover-feed-head{display:flex;justify-content:space-between;align-items:center;margin:0 4px 10px;color:var(--ink2,#b9c6dd)}.sc-discover-feed-head h2{margin:0;color:var(--ink,#eaf1ff)}.sc-discover-feed-head span{font-size:12px}.sc-discover-feed-head b{font-size:12px}" +
+      ".sc-discover-card{position:relative;isolation:isolate;height:min(72dvh,800px);min-height:440px;overflow:hidden;border:1px solid rgba(255,255,255,.12);border-radius:22px;background-color:#151b2e;background-position:center;background-size:cover;color:white;touch-action:pan-x;overscroll-behavior:contain;box-shadow:0 16px 45px rgba(0,0,0,.25)}" +
+      ".sc-discover-card::before{content:'';position:absolute;inset:-14px;z-index:-1;background:inherit;background-position:center;background-size:cover;filter:blur(18px) brightness(.55);transform:scale(1.05)}.sc-discover-shade{position:absolute;inset:0;z-index:0;background:linear-gradient(180deg,rgba(7,10,20,.08),rgba(7,10,20,.1) 34%,rgba(7,10,20,.9) 100%)}" +
+      ".sc-discover-cover{position:absolute;z-index:1;top:8%;left:50%;transform:translateX(-50%);width:min(58%,330px);aspect-ratio:1;display:grid;place-items:center;overflow:hidden;border-radius:18px;background:rgba(8,12,22,.48);font-size:54px;box-shadow:0 16px 42px rgba(0,0,0,.38)}.sc-discover-cover img{width:100%;height:100%;object-fit:cover}" +
+      ".sc-discover-actions{position:absolute;z-index:2;right:16px;bottom:120px;display:grid;justify-items:center;gap:5px}.sc-discover-actions button,.sc-discover-nav button{width:44px;height:44px;border:1px solid rgba(255,255,255,.35);border-radius:50%;background:rgba(12,16,28,.52);backdrop-filter:blur(10px);color:white;font-size:20px;cursor:pointer}.sc-discover-actions button:hover,.sc-discover-nav button:hover{background:rgba(255,85,0,.84)}.sc-discover-actions small{margin:0 0 8px;font-size:11px;text-shadow:0 1px 4px #000}" +
+      ".sc-discover-meta{position:absolute;z-index:2;left:clamp(18px,4vw,40px);right:82px;bottom:58px;text-shadow:0 1px 5px rgba(0,0,0,.6)}.sc-discover-meta h2{font-size:clamp(22px,4vw,34px);line-height:1.12;margin:8px 0;overflow-wrap:anywhere}.sc-discover-meta>div{font-size:14px;color:rgba(255,255,255,.82)}.sc-discover-nav{position:absolute;z-index:3;right:18px;bottom:24px;display:flex;gap:7px}.sc-discover-nav button{width:36px;height:36px;font-size:17px}.sc-discover-nav button:disabled{opacity:.38;cursor:default}.sc-discover-hint{position:absolute;z-index:2;left:18px;bottom:20px;font-size:11px;color:rgba(255,255,255,.72);text-shadow:0 1px 4px #000}" +
       ".sc-row .meta{flex:1;min-width:0;overflow:hidden}" +
       ".sc-row .btn,.sc-row a.btn{flex:none}" +
       ".sc-row .meta div{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" +
       ".sc-pbtn{flex:none;width:38px;height:38px;border-radius:50%;background:var(--sc,#ff5500);color:#fff;border:0;cursor:pointer;font-size:15px}" +
       ".sc-pbtn.ghost{background:rgba(125,160,200,.16);color:var(--ink,#eaf1ff)}" +
       ".ny-viz-top{display:block;width:100%;height:56px;margin:2px 0 14px;border-radius:12px;background:linear-gradient(180deg,rgba(255,85,0,.05),rgba(125,160,200,.06))}" +
-      "@media (max-width:760px){#ny-player{bottom:56px}#ny-player .np{max-width:100px}#ny-player canvas{display:none}}";
+      "@media (max-width:760px){#ny-player{bottom:56px}#ny-player .np{max-width:100px}#ny-player canvas{display:none}.sc-discover-card{height:min(70dvh,720px);min-height:400px}.sc-discover-cover{top:10%;width:min(68%,300px)}.sc-discover-meta{left:18px;bottom:62px}.sc-discover-actions{right:12px;bottom:118px}}";
     document.head.appendChild(style);
     document.addEventListener("error", (e) => { if (e.target && e.target.matches && e.target.matches(".sc-cover img")) e.target.remove(); }, true);
     // SoundCloud-ish accent available as --sc (falls back to orange).
@@ -121,7 +123,11 @@
     audio.addEventListener("play", () => { startViz(); paintBtn(); savePlayback(false, false); });
     audio.addEventListener("playing", () => {
       const t = M.queue[M.idx];
-      if (t && !M.live) { $("#ny-np-sub").textContent = subOf(t); beginHistory(t); }
+      if (t && !M.live) {
+        $("#ny-np-sub").textContent = subOf(t); beginHistory(t);
+        const discoverIndex = M.discoverTracks.findIndex((item) => trackKey(item) === trackKey(t));
+        if (M.tab === "discover" && discoverIndex >= 0 && discoverIndex !== M.discoverIndex) { M.discoverIndex = discoverIndex; renderTab(); }
+      }
     });
     audio.addEventListener("pause", () => { historyProgress(true); paintBtn(); if (!M.stopping) savePlayback(false, true); });
     audio.addEventListener("error", onAudioError);
@@ -727,6 +733,13 @@
       .slice(0, 18).map((x) => x.track);
   }
 
+  function discoverRecommendations() {
+    const rows = [], seen = new Set();
+    const candidates = (M.homeHistoryReady ? homeUnheardRecommendations() : []).concat(homeRecommendations());
+    candidates.forEach((track) => { const key = trackKey(track); if (key && !seen.has(key)) { seen.add(key); rows.push(track); } });
+    return rows;
+  }
+
   function renderHome(el) {
     M.homeRecs = homeRecommendations();
     M.homeUnheard = homeUnheardRecommendations();
@@ -777,39 +790,34 @@
   }
 
   function renderDiscover(el) {
+    if (!M.discoverSeeded) { M.discoverTracks = discoverRecommendations(); M.discoverIndex = 0; M.discoverSeeded = true; }
     const tracks = M.discoverTracks || [];
     const track = tracks[M.discoverIndex];
     if (!track) {
-      setHTML(el, html`<div class="card">
-        <h2 style="margin-top:0">Discover</h2><p class="muted small">Search SoundCloud, then browse one song at a time. Use the arrows, ← / → keys, or swipe the cover.</p>
-        <div class="sc-discover-search"><input class="input" data-music="discover-query" value="${M.discoverQuery}" placeholder="Artist, track, or vibe…">
-          <button class="btn primary" data-music="discover-search">Discover songs</button></div>
-        <div class="empty mt">${M.discoverSearched ? "No songs found. Try another search." : "Enter a search to start discovering songs."}</div>
+      setHTML(el, html`<div class="card"><h2 style="margin-top:0">Discover · For you</h2>
+        <p class="muted">Your feed uses saved songs from your library, listening history and likes. It doesn’t need a search.</p>
+        <div class="empty">Add music to your library or like a song to seed your recommendations.</div>
+        <div class="row wrap mt"><button class="btn" data-music="discover-library">Open Library</button><button class="btn" data-music="discover-likes">Open Likes</button></div>
       </div>`);
       return;
     }
     const art = artworkSource(track);
-    const background = art ? "background-image:linear-gradient(0deg,rgba(7,10,20,.94),rgba(7,10,20,.15) 78%),url('" + art + "')" : "";
+    const background = art ? "background-image:url('" + art + "')" : "";
     const liked = M.scLikes.some((item) => item.url === track.url);
-    setHTML(el, html`<div class="card">
-      <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h2 style="margin:0">Discover</h2><div class="muted small mt">Browse songs with the arrows, ← / → keys, or swipe the cover.</div></div>
-        <div class="faint small">${M.discoverIndex + 1} of ${tracks.length}</div></div>
-      <div class="sc-discover mt" data-discover-stage style="${background}" tabindex="0" aria-label="Discover song: ${titleOf(track)}">
-        <div class="sc-discover-content"><span class="chip">SoundCloud discovery</span><h2>${titleOf(track)}</h2><div>${subOf(track)}${track.duration_ms ? " · " + fmtTime(track.duration_ms / 1000) : ""}</div>
-          <div class="sc-discover-controls">
-            <button class="btn" data-music="discover-prev" ${M.discoverIndex <= 0 ? "disabled" : ""} aria-label="Previous song">←</button>
-            <button class="btn primary" data-music="discover-play">▶ Play</button>
-            <button class="btn" data-music="discover-next" ${M.discoverIndex >= tracks.length - 1 ? "disabled" : ""} aria-label="Next song">→</button>
-          </div>
-          <div class="sc-discover-controls">
-            <button class="btn" data-music="discover-like">${liked ? "♥ Liked" : "♡ Like"}</button>
-            <button class="btn" data-music="discover-add">＋ Add to playlist</button>
-          </div>
-        </div>
-      </div>
-      <div class="sc-discover-search mt"><input class="input" data-music="discover-query" value="${M.discoverQuery}" placeholder="Find more by artist, track, or vibe…">
-        <button class="btn" data-music="discover-search">Search</button></div>
-    </div>`);
+    setHTML(el, html`<div class="sc-discover-feed"><header class="sc-discover-feed-head"><div><h2>Discover</h2><span>For you · from your music</span></div><b>${M.discoverIndex + 1} / ${tracks.length}</b></header>
+      <article class="sc-discover-card" data-discover-stage style="${background}" tabindex="0" aria-label="Discover song: ${titleOf(track)}. Swipe up or down to browse.">
+        <div class="sc-discover-shade"></div>
+        <div class="sc-discover-cover">${art ? html`<img src="${art}" alt="${titleOf(track)} artwork" loading="lazy">` : html`<span aria-hidden="true">♫</span>`}</div>
+        <aside class="sc-discover-actions">
+          ${track.url ? html`<button type="button" data-music="discover-like" aria-label="${liked ? "Unlike" : "Like"} song">${liked ? "♥" : "♡"}</button><small>${liked ? "Liked" : "Like"}</small>` : ""}
+          <button type="button" data-music="discover-play" aria-label="Play song">▶</button><small>Play</small>
+          <button type="button" data-music="discover-add" aria-label="Add song to playlist">＋</button><small>Save</small>
+        </aside>
+        <div class="sc-discover-meta"><span class="chip">${track.url ? "SoundCloud" : "Your library"}</span><h2>${titleOf(track)}</h2>
+          <div>${subOf(track)}${track.duration_ms ? " · " + fmtTime(track.duration_ms / 1000) : ""}</div></div>
+        <div class="sc-discover-nav"><button type="button" data-music="discover-prev" ${M.discoverIndex <= 0 ? "disabled" : ""} aria-label="Previous song">⌃</button><button type="button" data-music="discover-next" ${M.discoverIndex >= tracks.length - 1 ? "disabled" : ""} aria-label="Next song">⌄</button></div>
+        <div class="sc-discover-hint">Swipe or scroll · ↑ / ↓</div>
+      </article></div>`);
   }
   function moveDiscover(delta) {
     if (!M.discoverTracks.length) return;
@@ -1029,19 +1037,6 @@
       renderTab();
     } catch (e) { if (el) setHTML(el, html`<div class="empty">${e.message || "Search failed."}</div>`); }
   }
-  async function discoverSearch() {
-    const input = $('[data-music="discover-query"]');
-    const query = (input && input.value || M.discoverQuery || "").trim();
-    if (query.length < 2) { toast("Enter at least two characters to discover songs."); return; }
-    M.discoverQuery = query; M.discoverSearched = true;
-    const el = $("#sc-tab"); if (el) setHTML(el, html`<div class="card"><div class="empty"><div class="spin"></div>Finding songs…</div></div>`);
-    try {
-      const r = await getJSON("/api/music/search?q=" + encodeURIComponent(query) + (M.hideDrm ? "&nodrm=1" : ""));
-      if (!r.ok) { M.discoverTracks = []; toast(r.error || "Discover search failed."); }
-      else { M.discoverTracks = Array.isArray(r.tracks) ? r.tracks : []; M.discoverIndex = 0; }
-      renderTab();
-    } catch (e) { M.discoverTracks = []; renderTab(); toast(e.message || "Discover search failed."); }
-  }
   async function loadSet() {
     const input = $('[data-music="set-url"]');
     const url = (input && input.value || "").trim();
@@ -1101,8 +1096,10 @@
     if (pb) { startPlay(pb.dataset.play); return; }
     const t = e.target.closest && e.target.closest("[data-music], [data-tab]"); if (!t) return;
     if (t.dataset.tab) {
-      M.tab = t.dataset.tab; M.openPl = null; renderPage();
-      if (M.tab === "home") { const pending = refreshHomeHistory(); renderTab(); pending.then(() => { if (S.view === "music" && M.tab === "home") renderTab(); }); }
+      M.tab = t.dataset.tab; M.openPl = null;
+      if (M.tab === "discover") M.discoverSeeded = false;
+      renderPage();
+      if (M.tab === "home" || M.tab === "discover") { const requestedTab = M.tab; const pending = refreshHomeHistory(); renderTab(); pending.then(() => { if (S.view === "music" && M.tab === requestedTab) { if (requestedTab === "discover") M.discoverSeeded = false; renderTab(); } }); }
       return;
     }
     const act = t.dataset.music;
@@ -1132,12 +1129,13 @@
     else if (act === "b-cancel") closeBrowse();
     else if (act === "b-use") { closeBrowse(); await saveDir(t.dataset.path); }
     else if (act === "sc-search") await searchSc();
-    else if (act === "discover-search") await discoverSearch();
     else if (act === "discover-prev") moveDiscover(-1);
     else if (act === "discover-next") moveDiscover(1);
     else if (act === "discover-play") { if (M.discoverTracks[M.discoverIndex]) playQueue(M.discoverTracks, M.discoverIndex); }
     else if (act === "discover-like") { const tr = M.discoverTracks[M.discoverIndex]; if (tr) await toggleLike(tr.url); }
     else if (act === "discover-add") { const tr = M.discoverTracks[M.discoverIndex]; if (tr) openAddPicker(tr); }
+    else if (act === "discover-library") { M.tab = "library"; renderPage(); }
+    else if (act === "discover-likes") { M.tab = "likes"; renderPage(); }
     else if (act === "play-url") await playTrackLink();
     else if (act === "load-set") await loadSet();
     else if (act === "play-set") { if (M.scSet) playQueue(M.scSet.tracks, 0); }
@@ -1218,29 +1216,31 @@
   }
 
   document.addEventListener("input", (e) => {
-    if (e.target.matches('[data-music="discover-query"]')) M.discoverQuery = e.target.value;
-    else if (e.target.matches('[data-music="lib-filter"]')) { M._libq = e.target.value; renderTab(); const inp = $('[data-music="lib-filter"]'); if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); } }
+    if (e.target.matches('[data-music="lib-filter"]')) { M._libq = e.target.value; renderTab(); const inp = $('[data-music="lib-filter"]'); if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); } }
   });
   document.addEventListener("keydown", (e) => {
-    if (S.view === "music" && M.tab === "discover" && (e.key === "ArrowLeft" || e.key === "ArrowRight") &&
+    if (S.view === "music" && M.tab === "discover" && (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) &&
         !e.target.matches("input,textarea,select,[contenteditable=true]")) {
-      e.preventDefault(); moveDiscover(e.key === "ArrowLeft" ? -1 : 1); return;
+      e.preventDefault(); moveDiscover(e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : 1); return;
     }
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && e.target.matches('[data-music="dj-request"]')) { e.preventDefault(); $('[data-music="dj-send"]')?.click(); return; }
     if (e.key !== "Enter") return;
-    if (e.target.matches('[data-music="discover-query"]')) { e.preventDefault(); discoverSearch(); }
     if (e.target.matches('[data-music="sc-query"]')) { e.preventDefault(); searchSc(); }
     else if (e.target.matches('[data-music="track-url"]')) { e.preventDefault(); playTrackLink(); }
     else if (e.target.matches('[data-music="set-url"]')) { e.preventDefault(); loadSet(); }
   });
   document.addEventListener("pointerdown", (e) => {
-    if (M.tab === "discover" && e.target.closest("[data-discover-stage]")) M.discoverPointerX = e.clientX;
+    if (M.tab === "discover" && e.target.closest("[data-discover-stage]")) M.discoverPointerY = e.clientY;
   });
   document.addEventListener("pointerup", (e) => {
-    if (!M.discoverPointerX) return;
-    const delta = e.clientX - M.discoverPointerX; M.discoverPointerX = 0;
+    if (M.discoverPointerY === null) return;
+    const delta = e.clientY - M.discoverPointerY; M.discoverPointerY = null;
     if (Math.abs(delta) > 55 && !e.target.closest("button")) moveDiscover(delta < 0 ? 1 : -1);
   });
+  document.addEventListener("wheel", (e) => {
+    if (M.tab !== "discover" || !e.target.closest("[data-discover-stage]") || Math.abs(e.deltaY) < 25 || Date.now() - M.discoverWheelAt < 450) return;
+    e.preventDefault(); M.discoverWheelAt = Date.now(); moveDiscover(e.deltaY > 0 ? 1 : -1);
+  }, { passive: false });
   document.addEventListener("change", async (e) => {
     const t = e.target.closest && e.target.closest("[data-music]"); if (!t) return;
     if (t.dataset.music === "cache-limit") { const r = await postJSON("/api/music/config", { cache_limit: +t.value }); if (r.ok) { await load(); renderTab(); toast("Recent song cache updated."); } else toast(r.error || "Couldn't update the cache size."); }
