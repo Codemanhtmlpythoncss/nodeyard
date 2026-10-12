@@ -76,6 +76,7 @@ struct ChatRecord: Codable, Identifiable, Hashable {
     var browserUse: Bool? = nil
     var computerUse: Bool? = nil
     var agentBrowser: Bool? = nil
+    var selfHostedAPIs: Bool? = nil
     var pinned: Bool = false
     var archived: Bool = false
     var created: Date = Date()
@@ -86,7 +87,8 @@ struct ChatRecord: Codable, Identifiable, Hashable {
         ChatRecord(id: "mac-" + UUID().uuidString.lowercased(), title: "New chat", modelTarget: model?.id ?? "",
                    modelName: model?.name ?? "", systemPrompt: defaults.systemPrompt, temperature: defaults.temperature,
                    maxTokens: defaults.maxTokens, contextLength: defaults.contextLength,
-                   browserUse: defaults.browserUse, computerUse: defaults.computerUse, agentBrowser: defaults.agentBrowser)
+                   browserUse: defaults.browserUse, computerUse: defaults.computerUse, agentBrowser: defaults.agentBrowser,
+                   selfHostedAPIs: defaults.selfHostedAPIs)
     }
 }
 
@@ -102,6 +104,7 @@ struct AppDefaults: Codable, Equatable {
     var browserUse: Bool? = true
     var computerUse: Bool? = false
     var agentBrowser: Bool? = false
+    var selfHostedAPIs: Bool? = true
     var readAloud: Bool? = false
     var voiceID: String? = ""
     var speechRate: Double? = 1.0

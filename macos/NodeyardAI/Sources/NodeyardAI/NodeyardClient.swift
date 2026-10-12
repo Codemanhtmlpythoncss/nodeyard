@@ -205,6 +205,21 @@ final class NodeyardClient {
         return stats
     }
 
+    /// The self-hosted APIs the user registered, as tool specs {id, name, description, parameters} to advertise to the model.
+    func registryTools() async throws -> [[String: Any]] {
+        let (data, response) = try await session.data(for: request("GET", "/api/apis"))
+        try check(response, data)
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return (obj?["tools"] as? [[String: Any]]) ?? []
+    }
+
+    /// Call one registered API by id; the server runs it and returns the formatted result text.
+    func callRegisteredAPI(id: String, args: [String: Any]) async throws -> String {
+        struct Reply: Decodable { var text: String? }
+        let r: Reply = try await post("/api/apis/call", body: ["id": id, "args": args], as: Reply.self)
+        return r.text ?? "(the API returned nothing)"
+    }
+
     struct RunResult: Decodable { var rc: Int?; var out: String?; var seconds: Double?; var truncated: Bool? }
     /// Run a code block in the dashboard's sandbox (as the terminal user, 30 s cap). `stdin` is fed to the program.
     func runCode(language: String, code: String, stdin: String) async throws -> RunResult {

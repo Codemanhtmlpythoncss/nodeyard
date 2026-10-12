@@ -29,6 +29,11 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   up while it tours unless you hide them (H, or Tab › Panels), and the tour can be set to stay on the overview.
 - The galaxy screens say "k3s nodes" and "nodes" where the original said Proxmox's "PVE".
 - The Mac app's galaxy shows the 2D Universe page (and says why) when the cluster's dashboard is too old for the 3D one.
+- **Register your own self-hosted APIs** (new **APIs** page in the dashboard). Add search engines (SearXNG, Whoogle,
+  your own) and plain REST endpoints; the dashboard calls them for you (so a client only needs the dashboard) and the
+  AI chat gets one tool per API. You set the exact base URL, and that host is the only one ever contacted — the model
+  only supplies the query and parameters, so this is not an open web proxy. Secrets stay on the server. The Mac app
+  picks up the same APIs as chat tools (a per-chat "Self-hosted APIs" toggle, on by default).
 - **The AI can ask you a multiple-choice question (Mac app).** A new `ask_user` tool lets the model put a question
   with 2–5 options in front of you before it continues, instead of guessing. A polished card appears above the
   message box: tap an option (or tick several when it allows multiple), or pick "Something else…" to type your own

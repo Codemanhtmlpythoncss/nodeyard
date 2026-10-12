@@ -55,6 +55,8 @@ final class AppState: ObservableObject {
     private var streamStarted: Date?
     private var toolApprovalContinuation: CheckedContinuation<Bool, Never>?
     private var questionContinuation: CheckedContinuation<String, Never>?
+    /// The user's registered self-hosted API tools [{id, name, description, parameters}], refreshed with the model list.
+    private var registrySpecs: [[String: Any]] = []
 
     init() {
         defaults = store.loadDefaults()
@@ -164,8 +166,12 @@ final class AppState: ObservableObject {
                 isConnected = true; error = nil
                 if let current = currentChat, current.modelTarget.isEmpty, let target = readyTargets.first { update(current) { $0.modelTarget = target.id; $0.modelName = target.name } }
             } catch { isConnected = false; self.error = error.localizedDescription }
+            registrySpecs = (try? await client.registryTools()) ?? registrySpecs
         }
     }
+
+    /// Reload just the self-hosted API tool specs (e.g. after adding one in Settings).
+    func refreshRegistry() { Task { registrySpecs = (try? await client.registryTools()) ?? registrySpecs } }
 
     func loadModel(_ row: ModelInventoryRow) {
         Task {
@@ -401,6 +407,13 @@ final class AppState: ObservableObject {
             result.append(tool("page_console", "Read JavaScript errors and warnings the current page has logged (for debugging websites).", [:], required: []))
             result.append(tool("page_snapshot", "Take a picture of the current page and show it to the user in the Agent Browser window.", [:], required: []))
         }
+        if chat.selfHostedAPIs ?? defaults.selfHostedAPIs ?? true {
+            for spec in registrySpecs {
+                guard let name = spec["name"] as? String, let params = spec["parameters"] as? [String: Any] else { continue }
+                let desc = (spec["description"] as? String) ?? "A registered API."
+                result.append(["type": "function", "function": ["name": name, "description": desc, "parameters": params]])
+            }
+        }
         if (chat.computerUse ?? defaults.computerUse ?? false) && MacComputerUse.permissionGranted() {
             result.append(tool("computer_read_screen", "Read visible accessibility text in the frontmost Mac app. Password values are excluded.", [:], required: []))
             result.append(tool("computer_click", "Click one uniquely named button, link, or menu item in the frontmost Mac app. The user must approve each click.", ["label": stringParameter("Exact visible control label")], required: ["label"]))
@@ -434,6 +447,11 @@ final class AppState: ObservableObject {
                 let multiple = (args["allow_multiple"] as? Bool) ?? false
                 let answer = await askUser(question: question, options: Array(options.prefix(8)), allowMultiple: multiple)
                 return "The user answered: \(answer)"
+            case let name where name.hasPrefix("api_"):
+                guard let spec = registrySpecs.first(where: { ($0["name"] as? String) == name }), let id = spec["id"] as? String else {
+                    return "Tool error: that API is no longer registered."
+                }
+                return try await client.callRegisteredAPI(id: id, args: args)
             case "browser_search":
                 guard let query = args["query"] as? String, !query.isEmpty else { return "Tool error: give me a search query." }
                 return try await client.runWebTool("WebSearch", arguments: ["query": String(query.prefix(300))])
