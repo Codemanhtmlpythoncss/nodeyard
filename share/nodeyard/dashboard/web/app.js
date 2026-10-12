@@ -156,8 +156,16 @@
     if (es && esAgents === want) return;
     if (es) es.close();
     esAgents = want;
-    es = new EventSource("/api/stream" + (want ? "?agents=1" : ""));
-    es.addEventListener("state", (ev) => { esAt = Date.now(); let r; try { r = JSON.parse(ev.data); } catch (e) { return; } if (apply(r)) queueRender(); });
+    es = new EventSource("/api/stream?delta=1" + (want ? "&agents=1" : ""));
+    es.addEventListener("state", (ev) => {
+      esAt = Date.now(); let r; try { r = JSON.parse(ev.data); } catch (e) { return; }
+      // a partial update carries only the sections that changed since the last one (the rest stay as they are)
+      if (r.partial) {
+        if (!S.res || !S.res.state) { closeStream(); connectStream(); return; }
+        r.state = Object.assign({}, S.res.state, r.state); delete r.partial;
+      }
+      if (apply(r)) queueRender();
+    });
     es.addEventListener("auth", () => { location.href = "/login"; });
     es.onopen = () => { esAt = Date.now(); };
   }

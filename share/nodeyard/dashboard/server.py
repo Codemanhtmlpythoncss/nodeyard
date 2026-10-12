@@ -12,8 +12,11 @@ ever reads from it; the AI features (chat, running models) are the exception
 and need that sign-in.
 """
 import argparse
+import collections
+import hashlib
 import http.cookies
 import importlib.util
+import itertools
 import ipaddress
 import json
 import os
@@ -35,21 +38,18 @@ import auth as authmod  # noqa: E402
 import tsserve  # noqa: E402
 import kube  # noqa: E402
 from analysis import alerts, sample, totals  # noqa: E402
+from httpcache import COMPRESSIBLE, GZIP_MIN, STATIC, gzip_bytes  # noqa: E402
 
 HISTORY_POINTS = 720  # an hour at the default 5 s
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
 NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
 MAX_BODY = 1024 * 1024
 MAX_STREAMS = 24
-MIME = {
-    ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-    ".svg": "image/svg+xml", ".json": "application/json", ".png": "image/png", ".ico": "image/x-icon",
-    ".jpg": "image/jpeg", ".webp": "image/webp", ".webmanifest": "application/manifest+json",
-}
-# Text worth compressing; pictures and audio are compressed already.
-COMPRESSIBLE = ("text/", "application/json", "application/javascript", "application/manifest+json", "image/svg+xml")
-GZIP_MIN = 1400            # smaller than one packet: not worth it
 STARTED = time.time()
+# <script src>/<link href> in the two HTML pages, rewritten to file.js?v=CONTENT-HASH: browsers then keep them for a
+# year without asking again, and an update changes the hash, so the new file loads at once.
+ASSET_REF = re.compile(r'(\b(?:src|href)=")([A-Za-z0-9_.-]+\.(?:js|css|webmanifest|png))(")')
+IMMUTABLE = "private, max-age=31536000, immutable"
 # Needed to show the sign-in page; everything else waits for a session.
 PUBLIC_FILES = ("/login", "/login.html", "/login.js", "/style.css", "/theme.js", "/manifest.webmanifest", "/icon-180.png", "/icon-512.png")
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; "
@@ -58,36 +58,6 @@ CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline';
 PERMISSIONS = "camera=(), geolocation=(), payment=(), usb=(), serial=(), hid=(), bluetooth=(), microphone=(self), fullscreen=(self)"
 
 
-class StaticCache:
-    """Page files kept in memory with their gzip copy and an ETag, re-read only when the file changes on disk."""
-
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.files = {}
-
-    def get(self, full):
-        st = os.stat(full)
-        key = (st.st_mtime_ns, st.st_size)
-        with self.lock:
-            hit = self.files.get(full)
-        if hit and hit[0] == key:
-            return hit[1]
-        with open(full, "rb") as f:
-            body = f.read()
-        ctype = MIME.get(os.path.splitext(full)[1], "application/octet-stream")
-        gz = gzip_bytes(body, 9) if ctype.startswith(COMPRESSIBLE) and len(body) >= GZIP_MIN else None
-        entry = {"body": body, "gzip": gz if gz and len(gz) < len(body) else None, "ctype": ctype, "etag": '"%x-%x"' % key}
-        with self.lock:
-            self.files[full] = (key, entry)
-        return entry
-
-
-def gzip_bytes(body, level=6):
-    z = zlib.compressobj(level, zlib.DEFLATED, 31)
-    return z.compress(body) + z.flush()
-
-
-STATIC = StaticCache()
 
 
 # --------------------------------------------------------------------------- store
@@ -105,12 +75,12 @@ class Store:
         self.alerts = []
         self.error = None
         self.updated = 0.0
-        self.history = []
+        self.history = collections.deque(maxlen=HISTORY_POINTS)
         self.cond = threading.Condition()
         self.version = 0
         self.alert_hooks = []    # other features' alerts (the service monitor, disk forecasts): fn() -> [alert]
         if hasattr(source, "seed_history"):
-            self.history = source.seed_history(HISTORY_POINTS, interval)
+            self.history.extend(source.seed_history(HISTORY_POINTS, interval))
 
     def poll(self):
         if not self.poll_lock.acquire(blocking=False):
@@ -140,7 +110,6 @@ class Store:
             with self.lock:
                 self.state, self.totals, self.alerts, self.error, self.updated = state, tot, al, None, now
                 self.history.append(sample(state, now))
-                del self.history[:-HISTORY_POINTS]
             with self.cond:
                 self.version += 1
                 self.cond.notify_all()
@@ -161,7 +130,8 @@ class Store:
 
     def history_slice(self, points):
         with self.lock:
-            return self.history[-points:]
+            n = len(self.history)
+            return list(itertools.islice(self.history, max(0, n - points), n))
 
 
 # --------------------------------------------------------------------------- http
@@ -185,8 +155,81 @@ def state_response(srv, with_agents=False):
     return snap
 
 
+def _dumps(obj):
+    return json.dumps(obj, separators=(",", ":"), check_circular=False)
+
+
+_PAGES = {}
+_PAGES_LOCK = threading.Lock()
+
+
+def versioned_page(full, page):
+    """index.html / login.html with each script and stylesheet as name?v=HASH, rebuilt when the page or any of them changes."""
+    refs = ASSET_REF.findall(page["body"].decode("utf-8", "replace"))
+    tags = []
+    for _a, name, _b in refs:
+        try:
+            tags.append((name, STATIC.get(os.path.join(WEB, name))["tag"]))
+        except OSError:
+            tags.append((name, ""))
+    key = (page["etag"], tuple(tags))
+    with _PAGES_LOCK:
+        hit = _PAGES.get(full)
+    if hit and hit[0] == key:
+        return hit[1]
+    lookup = dict(tags)
+    text = ASSET_REF.sub(lambda m: m.group(1) + m.group(2) + ("?v=" + lookup[m.group(2)] if lookup.get(m.group(2)) else "") + m.group(3),
+                         page["body"].decode("utf-8", "replace"))
+    body = text.encode("utf-8")
+    tag = hashlib.blake2b(body, digest_size=8).hexdigest()
+    entry = {"body": body, "gzip": gzip_bytes(body, 9), "ctype": page["ctype"], "etag": '"%s"' % tag, "tag": tag}
+    with _PAGES_LOCK:
+        _PAGES[full] = (key, entry)
+    return entry
+
+
+def encoded_snapshot(srv, version, want_agents):
+    """The snapshot as JSON, built once per cluster read and shared by every page: each section of the state on its own
+    (so a live update can carry only the sections that changed) and the rest. Pods go without their uid (the
+    node agents' process names need it, server-side only)."""
+    key = (version, want_agents)
+    with srv.lock:
+        hit = srv.encoded.get(key)
+    if hit is not None:
+        return hit
+    snap = state_response(srv, want_agents)
+    state = snap.pop("state", None)
+    snap.pop("now", None)
+    sections = None
+    if state is not None:
+        sections = {}
+        for k, v in state.items():
+            if k == "pods":
+                v = [{f: x for f, x in p.items() if f != "uid"} for p in v]
+            sections[k] = _dumps(v)
+    hit = {"version": version, "sections": sections, "rest": _dumps(snap)}
+    with srv.lock:
+        srv.encoded = {k: v for k, v in srv.encoded.items() if k[0] >= version - 1}   # this read and the one before
+        srv.encoded[key] = hit
+    return hit
+
+
+def snapshot_json(enc, now, only=None):
+    """{"state": {...}, ...rest, "now": t} from encoded sections; only = the section names to send (a partial update)."""
+    if enc["sections"] is None:
+        state = "null"
+    else:
+        names = enc["sections"] if only is None else only
+        state = "{" + ",".join('"%s":%s' % (k, enc["sections"][k]) for k in names) + "}"
+    head = '{"state":%s,%s"now":%.3f,' % (state, '"partial":true,' if only is not None else "", now)
+    return head + enc["rest"][1:]
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "nodeyard-dashboard"
+    # Small writes (a streamed token, a terminal echo, an SSE event) go out at once instead of waiting
+    # for the previous packet's ACK (Nagle + delayed ACK can hold each one for up to 40-200 ms).
+    disable_nagle_algorithm = True
     sys_version = ""   # (don't announce the Python version to every client)
     protocol_version = "HTTP/1.1"
 
@@ -223,7 +266,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Permissions-Policy", PERMISSIONS)
         self.send_header("Content-Security-Policy", CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'") if frameable else CSP)
-        self.send_header("Cache-Control", "no-store" if ctype.startswith("application/json") else "no-cache")
+        if "Cache-Control" not in extra:   # (a caller's own caching must not be cancelled by a second, stricter header)
+            self.send_header("Cache-Control", "no-store" if ctype.startswith("application/json") else "no-cache")
         for k, v in extra.items():
             self.send_header(k, v)
         self.end_headers()
@@ -360,7 +404,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/state":
                 if q.get("fresh") and time.time() - srv.store.updated > 2:
                     srv.store.poll()
-                return self._json(state_response(srv))
+                enc = encoded_snapshot(srv, srv.store.version, False)
+                return self._send(200, snapshot_json(enc, time.time()), "application/json; charset=utf-8")
             if path == "/api/stream":
                 return self._stream(q)
             if path == "/api/history":
@@ -368,7 +413,14 @@ class Handler(BaseHTTPRequestHandler):
                     n = max(2, min(HISTORY_POINTS, int(q.get("points", ["360"])[0])))
                 except ValueError:
                     n = 360
-                return self._json({"ok": True, "interval": srv.store.interval, "points": srv.store.history_slice(n)})
+                key = (srv.store.version, n)
+                with srv.lock:
+                    body = srv.history_cache.get(key)
+                if body is None:
+                    body = _dumps({"ok": True, "interval": srv.store.interval, "points": srv.store.history_slice(n)})
+                    with srv.lock:
+                        srv.history_cache = {key: body}
+                return self._send(200, body, "application/json; charset=utf-8")
             if path == "/api/logs":
                 return self._logs(q)
             if path == "/api/export":
@@ -388,7 +440,7 @@ class Handler(BaseHTTPRequestHandler):
                 path = "/login.html"
             if srv.auth is not None and self._authed() and path == "/login.html":
                 return self._redirect("/")
-            return self._static(path)
+            return self._static(path, q)
         except (BrokenPipeError, ConnectionResetError):
             return None
         except Exception as e:  # never leak a traceback to the page
@@ -402,7 +454,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "error": "Too many dashboards are open."}, 429)
             srv.streams += 1
         want_agents = bool(q.get("agents"))
-        z = zlib.compressobj(6, zlib.DEFLATED, 31) if self._gzip_ok() else None
+        delta = bool(q.get("delta"))     # the page merges partial updates; other readers get whole snapshots
+        z = zlib.compressobj(5, zlib.DEFLATED, 31) if self._gzip_ok() else None
 
         def write(data):
             # a compressed stream is flushed at every event, so each one arrives whole and at once
@@ -417,7 +470,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Encoding", "gzip")
             self.end_headers()
             self.close_connection = True
-            store, last = srv.store, -1
+            store, last, sent = srv.store, -1, None
             write(b"retry: 2000\n\n")
             while not store.stop.is_set():
                 with store.cond:
@@ -430,7 +483,13 @@ class Handler(BaseHTTPRequestHandler):
                     break
                 if version != last:
                     last = version
-                    write(self._stream_event(version, want_agents))
+                    enc = encoded_snapshot(srv, version, want_agents)
+                    only = None
+                    if delta and sent is not None and sent["sections"] is not None and enc["sections"] is not None and \
+                            set(sent["sections"]) == set(enc["sections"]):
+                        only = [k for k, v in enc["sections"].items() if sent["sections"][k] is not v and sent["sections"][k] != v]
+                    write(("event: state\ndata: %s\n\n" % snapshot_json(enc, time.time(), only)).encode("utf-8"))
+                    sent = enc
                 else:
                     write(b": ping\n\n")
         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -438,20 +497,6 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             with srv.lock:
                 srv.streams -= 1
-
-    def _stream_event(self, version, want_agents):
-        """Every open dashboard gets the same bytes for a snapshot: build them once per version, not once per page."""
-        srv = self.ctx
-        key = (version, want_agents)
-        with srv.lock:
-            cached = srv.stream_cache.get(key)
-        if cached is not None:
-            return cached
-        body = ("event: state\ndata: %s\n\n" % json.dumps(state_response(srv, want_agents), separators=(",", ":"))).encode("utf-8")
-        with srv.lock:
-            srv.stream_cache = {k: v for k, v in srv.stream_cache.items() if k[0] == version}
-            srv.stream_cache[key] = body
-        return body
 
     def _logs(self, q):
         ns, pod = q.get("ns", [""])[0], q.get("pod", [""])[0]
@@ -468,21 +513,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error": str(e)}, 502)
         return self._json({"ok": True, "text": text})
 
-    def _static(self, path):
+    def _static(self, path, q=None):
         if path in ("", "/"):
             path = "/index.html"
         full = os.path.realpath(os.path.join(WEB, path.lstrip("/")))
         if not (full == WEB or full.startswith(WEB + os.sep)) or not os.path.isfile(full):
             return self._send(404, "Not found", "text/plain; charset=utf-8")
         f = STATIC.get(full)
+        if full.endswith(".html"):
+            f = versioned_page(full, f)
+        # a URL carrying this file's own hash never changes: the browser keeps it without asking again
+        cache = IMMUTABLE if (q or {}).get("v", [""])[0] == f["tag"] else "no-cache"
         if f["etag"] in [t.strip() for t in self.headers.get("If-None-Match", "").split(",")]:
             # unchanged since the browser's copy: no body (the files are re-checked on every load, so updates show at once)
             self.send_response(304)
-            for k, v in (("ETag", f["etag"]), ("Cache-Control", "no-cache"), ("Vary", "Accept-Encoding")):
+            for k, v in (("ETag", f["etag"]), ("Cache-Control", cache), ("Vary", "Accept-Encoding")):
                 self.send_header(k, v)
             self.end_headers()
             return None
-        self._send(200, f["body"], f["ctype"], {"ETag": f["etag"]}, gz=f["gzip"])
+        self._send(200, f["body"], f["ctype"], {"ETag": f["etag"], "Cache-Control": cache}, gz=f["gzip"])
 
     # -- POST ----------------------------------------------------------------
 
@@ -549,12 +598,16 @@ class Context:
         self.prefix_routes = {}   # path prefix -> fn(handler, path, query), for folders of files
         self.lock = threading.Lock()
         self.streams = 0
-        self.stream_cache = {}   # (store version, with agents) -> the event bytes every open page gets
+        self.encoded = {}        # (store version, with agents) -> the snapshot's JSON, shared by every page
+        self.history_cache = {}
         self.__dict__.update(kw)
 
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
+    # A page load opens 20+ connections at once; the default backlog of 5 drops some SYNs on a busy
+    # moment, and each dropped one costs a 1 s retransmit.
+    request_queue_size = 128
 
 
 def make_listener(addr, port, ctx, verbose):
@@ -702,6 +755,8 @@ def main():
         sys.exit("Cannot listen on %s:%d: %s" % (addr, port, e.strerror or e))
 
     threading.Thread(target=store.loop, daemon=True).start()
+    # read and compress the page files now, and ask Tailscale for the https address, so the first visitor doesn't wait
+    threading.Thread(target=lambda: (STATIC.warm(WEB), tsserve.https_url(port) if a.port else None), daemon=True).start()
 
     def shutdown(*_):
         store.stop.set()
