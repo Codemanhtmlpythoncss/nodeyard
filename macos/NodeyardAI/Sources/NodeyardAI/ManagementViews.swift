@@ -27,7 +27,8 @@ struct ManageSidebar: View {
             Section("Cluster") {
                 ForEach([ManageSection.overview, .nodes, .pods, .workloads, .network, .storage, .hardware]) { item($0) }
             }
-            Section("AI") { ForEach([ManageSection.models, .research, .plugins]) { item($0) } }
+            Section("AI") { ForEach([ManageSection.models, .research, .plugins, .apis]) { item($0) } }
+            Section("Media") { item(.music) }
             Section("Health") { ForEach([ManageSection.alerts, .events, .doctor, .tasks]) { item($0) } }
             Section("Help") { item(.guide) }
         }
@@ -73,6 +74,8 @@ struct ManageDetail: View {
                 case .models: ModelsManageView()
                 case .research: ResearchView()
                 case .plugins: PluginsView()
+                case .apis: EmbeddedPageView(fragment: "apis")
+                case .music: EmbeddedPageView(fragment: "music")
                 case .events: EventsView()
                 case .alerts: AlertsView()
                 case .doctor: DoctorView()

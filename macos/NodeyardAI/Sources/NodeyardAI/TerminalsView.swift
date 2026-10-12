@@ -227,3 +227,27 @@ struct GalaxyView: View {
         }
     }
 }
+
+/// A dashboard page shown inside the app without the website's sidebar (embed mode), signed in as this app's session.
+/// Used for the APIs and Music pages, which live on the dashboard. Needs a server new enough to serve that page.
+struct EmbeddedPageView: View {
+    @EnvironmentObject private var mgmt: ManagementState
+    let fragment: String
+    @State private var page: (URL, [HTTPCookie])?
+    var body: some View {
+        Group {
+            if let page { TerminalWebView(url: page.0, cookies: page.1) }
+            else if mgmt.authEnabled && !mgmt.signedIn && mgmt.termError != nil {
+                VStack(spacing: 10) {
+                    Text("Sign in to the dashboard to open this page.").foregroundStyle(.secondary)
+                    Text("Settings › Management: the dashboard password.").font(.caption).foregroundStyle(.tertiary)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            else { ProgressView("Opening…").frame(maxWidth: .infinity, maxHeight: .infinity) }
+        }
+        .task {
+            await mgmt.refreshTerminals()
+            page = mgmt.websitePage(fragment)
+        }
+    }
+}

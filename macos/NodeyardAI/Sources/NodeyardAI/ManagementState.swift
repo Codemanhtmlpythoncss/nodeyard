@@ -3,7 +3,7 @@ import SwiftUI
 
 /// The sections of the website this app mirrors (the website's own sidebar order), plus the setup guide.
 enum ManageSection: String, CaseIterable, Identifiable {
-    case overview, galaxy, nodes, pods, workloads, network, storage, hardware, models, research, plugins, events, alerts, doctor, terminals, tasks, guide
+    case overview, galaxy, nodes, pods, workloads, network, storage, hardware, models, research, plugins, apis, music, events, alerts, doctor, terminals, tasks, guide
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -18,6 +18,8 @@ enum ManageSection: String, CaseIterable, Identifiable {
         case .models: "AI models"
         case .research: "Research"
         case .plugins: "Plugins"
+        case .apis: "APIs"
+        case .music: "Music"
         case .events: "Events"
         case .alerts: "Alerts"
         case .doctor: "Doctor"
@@ -39,6 +41,8 @@ enum ManageSection: String, CaseIterable, Identifiable {
         case .models: "sparkles"
         case .research: "doc.text.magnifyingglass"
         case .plugins: "puzzlepiece.extension"
+        case .apis: "chevron.left.forwardslash.chevron.right"
+        case .music: "music.note.list"
         case .events: "list.bullet.rectangle"
         case .alerts: "exclamationmark.triangle"
         case .doctor: "stethoscope"
