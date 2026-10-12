@@ -732,6 +732,8 @@
     M.homeUnheard = homeUnheardRecommendations();
     const tracks = M.homeRecs;
     const unheard = M.homeUnheard;
+    const likes = M.scLikes.slice(0, 12);
+    const playlists = M.playlists.slice(0, 10);
     const unseenContent = !M.homeHistoryReady
       ? html`<div class="empty">${M.homeHistoryError ? "Couldn't check your listening history." : "Checking your listening history…"} ${M.homeHistoryError ? raw('<button class="btn small mt" data-music="home-history-retry">Try again</button>') : ""}</div>`
       : unheard.length
@@ -749,6 +751,22 @@
         ${tracks.length ? raw('<button class="btn primary" data-music="home-play">▶ Play recommendations</button>') : ""}</div>
       <div class="mt">${tracks.length ? tracks.map((t) => trackRow(t, "rec:" + trackKey(t), t.url ? likeBtn(t) : ""))
         : html`<div class="empty">Add songs to your library, like a few tracks, or listen to music to build your recommendations.</div>`}</div>
+    </div>
+    <div class="card mt">
+      <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h2 style="margin:0">Your likes <span class="faint small">(${M.scLikes.length})</span></h2>
+        <div class="muted small mt">Songs you’ve saved in Nodeyard.</div></div>
+        ${M.scLikes.length > likes.length ? raw('<button class="btn" data-music="home-likes">View all likes</button>') : ""}</div>
+      <div class="mt">${likes.length ? likes.map((t, i) => trackRow(t, "like:" + i, likeBtn(t))) : html`<div class="empty">Like a song in Search or Discover and it will show up here.</div>`}</div>
+    </div>
+    <div class="card mt">
+      <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h2 style="margin:0">Your playlists <span class="faint small">(${M.playlists.length})</span></h2>
+        <div class="muted small mt">Pick up a mix you’ve made.</div></div>
+        ${M.playlists.length > playlists.length ? raw('<button class="btn" data-music="home-playlists">View all playlists</button>') : ""}</div>
+      <div class="mt">${playlists.length ? playlists.map((p) => html`<div class="sc-row">
+        <button class="sc-pbtn ghost" data-music="pl-open" data-id="${p.id}" title="Open playlist">♪</button>
+        <div class="meta" data-music="pl-open" data-id="${p.id}" style="cursor:pointer"><div><b>${p.name}</b></div><div class="faint small">${p.count || 0} track${+p.count === 1 ? "" : "s"}</div></div>
+        <button class="btn small" data-music="pl-open" data-id="${p.id}">Open</button></div>`)
+        : html`<div class="empty">Create a playlist from Search, Likes, Library or the DJ.</div>`}</div>
     </div>`);
   }
 
@@ -1092,6 +1110,8 @@
     else if (act === "home-play") { if (M.homeRecs.length) playQueue(M.homeRecs, 0); }
     else if (act === "home-unheard-play") { if (M.homeUnheard.length) playQueue(M.homeUnheard, 0); }
     else if (act === "home-history-retry") { const pending = refreshHomeHistory(); renderTab(); pending.then(() => { if (S.view === "music" && M.tab === "home") renderTab(); }); }
+    else if (act === "home-likes") { M.tab = "likes"; renderPage(); }
+    else if (act === "home-playlists") { M.tab = "playlists"; renderPage(); }
     else if (act === "dj-start") startDJ();
     else if (act === "dj-stop") stopDJ();
     else if (act === "dj-send") {
