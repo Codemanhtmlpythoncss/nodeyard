@@ -113,19 +113,65 @@
     const el = $("#view"); if (!el || S.view !== "music") return;
     const d = M.data || {};
     const fw = d.forward || {};
+    const sc = d.sc || {};
+    const srcOpts = ['<option value="">Automatic (the server\'s output)</option>']
+      .concat((fw.sources || []).map((s) => '<option value="' + esc(s) + '"' + (s === fw.source ? " selected" : "") + ">" + esc(s) + "</option>")).join("");
     const fwBody = !fw.ffmpeg
-      ? html`<p class="muted small">ffmpeg isn't installed on the server, so live audio forwarding isn't available. Install ffmpeg (and PulseAudio/PipeWire) on the host to use it.</p>`
-      : html`<label class="check"><input type="checkbox" data-music="fw-toggle" ${fw.enabled ? raw("checked") : ""}> <span>Forward the server's audio output to the browser</span></label>
-        <label class="field-l" style="margin-top:8px">Capture source${raw('<select class="select" data-music="fw-source">' + ['<option value="">Default</option>'].concat((fw.sources || []).map((s) => '<option value="' + esc(s) + '"' + (s === fw.source ? " selected" : "") + ">" + esc(s) + "</option>")).join("") + "</select>")}</label>
-        <p class="faint small">Pick the <span class="mono">.monitor</span> source to capture what the server is playing. ${fw.enabled && fw.available ? raw('<button class="btn small primary" data-music="listen" style="margin-left:6px">Listen now</button>') : ""}</p>`;
+      ? html`<p class="muted small">ffmpeg isn't installed on the server, so live audio forwarding isn't available.${fw.reason ? " " + esc(fw.reason) : ""}</p>`
+      : html`<label class="check"><input type="checkbox" data-music="fw-toggle" ${fw.enabled ? raw("checked") : ""}> <span>Forward the server's audio output to the browser — captured <b>automatically</b></span></label>
+        <div class="small faint mt">Capturing: <span class="mono">${esc(fw.auto_source || "auto")}</span>${fw.source ? " (chosen)" : " (auto — whatever the server is playing)"}</div>
+        ${fw.reason ? html`<p class="err small mt">${esc(fw.reason)}</p>` : ""}
+        <div class="row mt" style="gap:8px;align-items:center">
+          <button class="btn small" data-music="fw-test">Test capture</button>
+          ${fw.enabled && fw.available ? raw('<button class="btn small primary" data-music="listen">Listen now</button>') : ""}
+        </div>
+        <details class="mt"><summary class="small faint">Choose a source instead of automatic</summary>
+          ${raw('<select class="select mt" data-music="fw-source">' + srcOpts + "</select>")}</details>
+        <div id="fw-test-out" class="small mt"></div>`;
+    const scBody = html`<p class="muted small" style="margin-top:0">Paste a SoundCloud track or set URL; the server downloads it with yt-dlp (what your <span class="mono">sc-pick</span> uses) into the music folder, then it appears below. Only download tracks you have the right to.</p>
+      <div class="row" style="gap:8px"><input class="input" data-music="sc-url" placeholder="https://soundcloud.com/artist/track" spellcheck="false" style="flex:1">
+        <button class="btn primary" data-music="sc-go" ${sc.ready ? "" : "disabled"}>Download</button></div>
+      ${!sc.yt_dlp ? html`<p class="small mt">The downloader isn't set up yet. <button class="btn small primary" data-music="sc-setup">Set it up automatically</button></p>`
+        : (!d.dir ? html`<p class="small faint mt">Set a music folder above first.</p>` : "")}
+      <div id="sc-out" class="small mt" style="white-space:pre-wrap;max-height:200px;overflow:auto"></div>`;
     NY.freshHTML(el, html`
-      ${card("Music folder", html`<p class="muted small" style="margin-top:0">The server plays audio files from one folder on the host. Set its path; everyone signed in to the dashboard can listen.</p>
-        <div class="row" style="gap:8px"><input class="input" data-music="dir" value="${esc(d.dir || "")}" placeholder="/srv/music" spellcheck="false" style="flex:1">
-        <button class="btn primary" data-music="save-dir">Save</button></div>`)}
+      ${card("Music folder", html`<p class="muted small" style="margin-top:0">The server plays audio files from one folder on the host (the control node, not your Mac). Everyone signed in can listen.</p>
+        <div class="row" style="gap:8px"><input class="input" data-music="dir" value="${esc(d.dir || "")}" placeholder="/home/barnaby/Music/soundcloud" spellcheck="false" style="flex:1">
+        <button class="btn" data-music="browse">Browse…</button><button class="btn primary" data-music="save-dir">Save</button></div>`)}
+      ${card("SoundCloud (sc-pick)", scBody)}
       ${card("Live audio forwarding", fwBody)}
       <div class="section-title">Library</div>
       <div class="card"><div id="music-lib"><div class="empty"><div class="spin"></div>Loading…</div></div></div>`);
     renderLib();
+  }
+
+  // ---- graphical folder picker -------------------------------------------
+  async function openBrowse(start) {
+    const r = await getJSON("/api/music/browse" + (start ? "?path=" + encodeURIComponent(start) : ""));
+    if (!r.ok) { toast(r.error || "Can't open that folder."); return; }
+    M.browse = r; renderBrowse();
+  }
+  function renderBrowse() {
+    let m = document.getElementById("music-browse");
+    if (!m) { m = document.createElement("div"); m.id = "music-browse"; document.body.appendChild(m); }
+    const b = M.browse || {};
+    m.style = "position:fixed;inset:0;z-index:70;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.5)";
+    const shortcuts = (b.shortcuts || []).map((p) => '<button class="btn small" data-music="b-short" data-path="' + esc(p) + '">' + esc(p) + "</button>").join(" ");
+    const dirs = (b.dirs || []).length
+      ? (b.dirs || []).map((name) => '<button class="btn small" data-music="b-open" data-path="' + esc((b.path === "/" ? "" : b.path) + "/" + name) + '" style="display:block;width:100%;text-align:left;margin:2px 0">📁 ' + esc(name) + "</button>").join("")
+      : '<div class="faint small" style="padding:8px">No sub-folders here.</div>';
+    m.innerHTML =
+      '<div class="card" style="width:min(560px,92vw);max-height:80vh;display:flex;flex-direction:column">' +
+      '<h3>Pick a music folder<span class="right"><button class="btn small" data-music="b-cancel">Close</button></span></h3>' +
+      '<div class="mono small faint" style="word-break:break-all;margin-bottom:6px">' + esc(b.path || "/") + (b.audio_here ? ' · <b>' + b.audio_here + " audio files here</b>" : " · no audio files here") + "</div>" +
+      (shortcuts ? '<div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:6px">' + shortcuts + "</div>" : "") +
+      '<div class="row" style="gap:6px;margin-bottom:6px">' + (b.parent ? '<button class="btn small" data-music="b-open" data-path="' + esc(b.parent) + '">⬆ Up</button>' : "") +
+      '<button class="btn small primary" data-music="b-use" data-path="' + esc(b.path || "") + '">Use this folder</button></div>' +
+      '<div style="overflow:auto;flex:1;border:1px solid var(--line);border-radius:8px;padding:6px">' + dirs + "</div></div>";
+  }
+  function closeBrowse() { const m = document.getElementById("music-browse"); if (m) m.remove(); }
+  async function saveDir(dir) {
+    const r = await postJSON("/api/music/config", { dir }); if (r.ok) { await load(); renderPage(); toast("Saved."); } else toast(r.error || "Not saved.");
   }
 
   async function load() { try { const r = await getJSON("/api/music"); if (r.ok) M.data = r; } catch (e) { /* signed out */ } }
@@ -135,15 +181,30 @@
     const act = t.dataset.music;
     if (act === "play") { play(+t.dataset.i); }
     else if (act === "listen") { playLive(); }
-    else if (act === "save-dir") {
-      const dir = $('[data-music="dir"]').value.trim();
-      const r = await postJSON("/api/music/config", { dir }); if (r.ok) { await load(); renderPage(); toast("Saved."); } else toast(r.error || "Not saved.");
+    else if (act === "save-dir") { await saveDir($('[data-music="dir"]').value.trim()); }
+    else if (act === "browse") { openBrowse($('[data-music="dir"]').value.trim()); }
+    else if (act === "b-open" || act === "b-short") { openBrowse(t.dataset.path); }
+    else if (act === "b-cancel") { closeBrowse(); }
+    else if (act === "b-use") { closeBrowse(); await saveDir(t.dataset.path); }
+    else if (act === "fw-test") {
+      const out = $("#fw-test-out"); if (out) out.textContent = "Testing…";
+      const r = await postJSON("/api/audio/test", {}); if (out) out.innerHTML = (r.ok ? '<span style="color:var(--ok,#3ecf8e)">✓ </span>' : '<span class="err">✕ </span>') + esc(r.message || r.error || "");
+    }
+    else if (act === "sc-setup") {
+      const out = $("#sc-out"); if (out) out.textContent = "Setting up (downloading yt-dlp)…";
+      const r = await postJSON("/api/music/sc-setup", {}); if (out) out.textContent = r.message || r.error || ""; await load(); renderPage();
+    }
+    else if (act === "sc-go") {
+      const url = ($('[data-music="sc-url"]').value || "").trim(); if (!url) return;
+      const out = $("#sc-out"); if (out) out.textContent = "Downloading… (this can take a minute)";
+      const r = await postJSON("/api/music/sc", { url }); if (out) out.textContent = r.text || r.error || "";
+      await load(); if (S.view === "music") renderLib();
     }
   });
   document.addEventListener("change", async (e) => {
     const t = e.target.closest && e.target.closest("[data-music]"); if (!t) return;
     if (t.dataset.music === "fw-toggle") { const r = await postJSON("/api/music/config", { forward_enabled: t.checked }); if (r.ok) { await load(); renderPage(); } }
-    else if (t.dataset.music === "fw-source") { await postJSON("/api/music/config", { forward_source: t.value }); await load(); }
+    else if (t.dataset.music === "fw-source") { await postJSON("/api/music/config", { forward_source: t.value }); await load(); renderPage(); }
   });
 
   V.music = {

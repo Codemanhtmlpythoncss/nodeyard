@@ -7,7 +7,15 @@
   const U = NY.ui;
   const { S, V, $, $$, card, toast, getJSON, postJSON } = U;
 
-  const A = { list: [], editing: null, result: {} };   // editing: an id, "new", or null
+  const A = { list: [], editing: null, result: {}, preset: null };   // editing: an id, "new", or null
+
+  // One-click setups: fill the fiddly fields so you only type the base URL.
+  const PRESETS = {
+    searxng: { name: "SearXNG", kind: "search", method: "GET", base: "https://searx.example.lan/search", description: "Search the web through my SearXNG",
+               query_param: "q", extra_params: { format: "json" }, result: { items: "results", title: "title", url: "url", snippet: "content" } },
+    search: { name: "", kind: "search", method: "GET", base: "", description: "", query_param: "q", extra_params: {}, result: { items: "", title: "title", url: "url", snippet: "" } },
+    rest: { name: "", kind: "rest", method: "GET", base: "", description: "" },
+  };
 
   async function load() {
     try { const r = await getJSON("/api/apis"); if (r.ok) A.list = r.apis || []; } catch (e) { /* signed out */ }
@@ -73,9 +81,14 @@
 
   function render() {
     const el = $("#view"); if (!el || S.view !== "apis") return;
-    const intro = html`<section class="card"><h3>Your self-hosted APIs<span class="right">${A.editing ? "" : raw('<button class="btn primary" data-api="new">Add an API</button>')}</span></h3>
-      <p class="muted small" style="margin-top:0">Register search engines (SearXNG, Whoogle, your own) and REST APIs. The dashboard calls them for you, and the AI chat gets one tool per API. The host you set is the only one ever contacted — the model only supplies the query and parameters.</p></section>`;
-    const body = A.editing === "new" ? form({}) : (A.editing ? form(A.list.find((x) => x.id === A.editing) || {}) : "");
+    const intro = html`<section class="card"><h3>Your self-hosted APIs</h3>
+      <p class="muted small" style="margin-top:0">Register search engines (SearXNG, your own) and REST APIs. The dashboard calls them for you, and the AI chat gets one tool per API. The host you set is the only one ever contacted — the model only supplies the query and parameters.</p>
+      ${A.editing ? "" : html`<div class="row mt" style="gap:8px;flex-wrap:wrap">
+        <span class="small faint">Quick setup:</span>
+        <button class="btn small primary" data-api="preset" data-preset="searxng">SearXNG</button>
+        <button class="btn small" data-api="preset" data-preset="search">Blank search</button>
+        <button class="btn small" data-api="preset" data-preset="rest">Blank REST API</button></div>`}</section>`;
+    const body = A.editing === "new" ? form(A.preset || {}) : (A.editing ? form(A.list.find((x) => x.id === A.editing) || {}) : "");
     const list = A.list.length ? A.list.map(apiCard) : (A.editing ? "" : html`<div class="card mt"><div class="empty">No APIs yet. Add one to use it from chat.</div></div>`);
     NY.freshHTML(el, html`${intro}${body}${list}`);
   }
@@ -102,8 +115,9 @@
     if (S.view !== "apis") return;
     const t = e.target.closest("[data-api]"); if (!t) return;
     const act = t.dataset.api, id = t.dataset.id;
-    if (act === "new") { A.editing = "new"; render(); }
-    else if (act === "cancel") { A.editing = null; render(); }
+    if (act === "new") { A.preset = null; A.editing = "new"; render(); }
+    else if (act === "preset") { A.preset = JSON.parse(JSON.stringify(PRESETS[t.dataset.preset] || {})); A.editing = "new"; render(); }
+    else if (act === "cancel") { A.preset = null; A.editing = null; render(); }
     else if (act === "edit") { A.editing = id; render(); }
     else if (act === "delete") {
       if (!confirm("Delete this API?")) return;

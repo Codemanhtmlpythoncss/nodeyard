@@ -35,6 +35,15 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   Range, and every served path is checked to be inside that folder. Live audio forwarding (opt-in) captures the host's
   own audio output with ffmpeg and streams it to the browser as live MP3 — pick the capture source; it shows why it's
   unavailable when the host has no ffmpeg or capture device.
+- **Music: a graphical folder picker** — Browse the server's folders (with an audio-file count per folder and quick
+  shortcuts like `~/Music/soundcloud`) instead of typing a path, and a clear error when a path isn't on the server (the
+  dashboard runs on the control node, not your Mac). **Audio forwarding now captures automatically** (the default
+  output's monitor, no manual pick), with a **Test capture** button that reports the real ffmpeg result and an optional
+  source selector. **SoundCloud via sc-pick:** paste a track/set URL and the server downloads it with yt-dlp (what
+  [sc-pick](https://github.com/Codemanhtmlpythoncss/sc-pick) uses, skipping already-fetched tracks) into the music
+  folder; a **Set it up automatically** button installs yt-dlp if missing. Only download tracks you have the right to.
+- **APIs: one-click setups** — SearXNG / blank-search / blank-REST presets fill the fiddly fields so you only enter the
+  base URL. The Mac app shows the **APIs** and **Music** pages too (Manage → AI → APIs, Manage → Media → Music).
 - **Register your own self-hosted APIs** (new **APIs** page in the dashboard). Add search engines (SearXNG, Whoogle,
   your own) and plain REST endpoints; the dashboard calls them for you (so a client only needs the dashboard) and the
   AI chat gets one tool per API. You set the exact base URL, and that host is the only one ever contacted — the model

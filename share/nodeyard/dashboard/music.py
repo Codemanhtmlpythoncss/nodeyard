@@ -13,9 +13,12 @@ can't be turned into a way to read the rest of the disk.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
+import urllib.error
+import urllib.request
 
 AUDIO_EXT = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".ogg": "audio/ogg", ".oga": "audio/ogg",
              ".opus": "audio/ogg", ".m4a": "audio/mp4", ".mp4": "audio/mp4", ".aac": "audio/aac",
@@ -112,14 +115,156 @@ class Music:
                 names.append(parts[1])
         return names
 
+    def forward_reason(self):
+        """Why live forwarding can't run right now ("" = it can). A headless server usually has no audio stack."""
+        if not self.ffmpeg():
+            return "ffmpeg isn't installed on the server."
+        if self.demo:
+            return ""
+        if not shutil.which("pactl"):
+            return "No PulseAudio/PipeWire (pactl) on the server — there's no audio system to capture."
+        if not self.sources():
+            return "No capture sources found. An audio server must be running for the dashboard's user (check XDG_RUNTIME_DIR / the PulseAudio socket)."
+        return ""
+
     def forward_available(self):
-        return bool(self.ffmpeg()) and (self.demo or bool(self.sources()))
+        return self.forward_reason() == ""
+
+    def default_source(self):
+        """The source to capture. Auto (no manual pick needed): the monitor of the default output sink, i.e. whatever
+        the server is playing. A source set in Settings overrides it."""
+        configured = (self.cfg().get("forward_source") or "").strip()
+        if configured:
+            return configured
+        pactl = shutil.which("pactl")
+        if pactl and not self.demo:
+            try:
+                sink = subprocess.run([pactl, "get-default-sink"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                      text=True, timeout=5).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                sink = ""
+            if sink:
+                return sink + ".monitor"
+            for s in self.sources():          # else the first monitor source we can see
+                if s.endswith(".monitor"):
+                    return s
+        return "default"
 
     def live_command(self):
-        c = self.cfg()
-        source = (c.get("forward_source") or "default").strip()
-        return [self.ffmpeg(), "-hide_banner", "-loglevel", "error", "-f", "pulse", "-i", source,
+        return [self.ffmpeg(), "-hide_banner", "-loglevel", "error", "-f", "pulse", "-i", self.default_source(),
                 "-ac", "2", "-b:a", "128k", "-f", "mp3", "-"]
+
+    def test_forward(self):
+        """Capture ~1 second and report success or the actual ffmpeg error, so 'not working' is explainable."""
+        if self.demo:
+            return True, "(demo) capture not actually run."
+        reason = self.forward_reason()
+        if reason:
+            return False, reason
+        source = self.default_source()
+        cmd = [self.ffmpeg(), "-hide_banner", "-loglevel", "error", "-f", "pulse", "-i", source, "-t", "1", "-f", "mp3", "-"]
+        try:
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            out, err = p.communicate(timeout=8)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            return False, "ffmpeg didn't produce audio within 8 s (the source may be silent or wrong)."
+        except OSError as e:
+            return False, "Couldn't start ffmpeg: %s" % e
+        if out:
+            return True, "Capturing from '%s' works (%d bytes in 1 s)." % (source, len(out))
+        return False, (err.decode("utf-8", "replace").strip() or "ffmpeg captured no audio from '%s'." % source)
+
+    def browse(self, path):
+        """List sub-folders of a path on the server, for the folder picker. Admin-only (the route is auth-gated)."""
+        start = os.path.realpath(os.path.expanduser(path)) if path else os.path.expanduser("~")
+        if not os.path.isdir(start):
+            start = "/"
+        try:
+            names = []
+            for name in sorted(os.listdir(start)):
+                if name.startswith("."):
+                    continue
+                if os.path.isdir(os.path.join(start, name)):
+                    names.append(name)
+                if len(names) >= 500:
+                    break
+        except OSError as e:
+            return {"ok": False, "error": "Can't open that folder: %s" % e, "path": start}
+        audio_here = 0
+        try:
+            for name in os.listdir(start):
+                if os.path.splitext(name)[1].lower() in AUDIO_EXT:
+                    audio_here += 1
+        except OSError:
+            pass
+        return {"ok": True, "path": start, "parent": "" if start == "/" else os.path.dirname(start),
+                "dirs": names, "audio_here": audio_here,
+                "shortcuts": [p for p in [os.path.expanduser("~/Music/soundcloud"), os.path.expanduser("~/Music"),
+                                          os.path.expanduser("~"), "/srv", "/mnt", "/media"] if os.path.isdir(p)]}
+
+    # -- SoundCloud via the user's own sc-pick / yt-dlp -----------------------
+
+    @staticmethod
+    def yt_dlp():
+        """Prefer the yt-dlp that sc-pick installed, then one on PATH."""
+        local = os.path.expanduser("~/.local/share/sc-pick/bin/yt-dlp")
+        if os.path.isfile(local) and os.access(local, os.X_OK):
+            return local
+        return shutil.which("yt-dlp")
+
+    def sc_ready(self):
+        return bool(self.yt_dlp()) and bool(self._base() and os.path.isdir(self._base()))
+
+    def soundcloud_download(self, url):
+        """Download a SoundCloud track or set into the music folder with yt-dlp (what sc-pick uses), skipping anything
+        already fetched (a yt-dlp archive, like sc-pick). The caller must have the right to download it."""
+        ytdlp = self.yt_dlp()
+        if not ytdlp:
+            return False, "yt-dlp isn't installed. Run sc-pick once on the server (it installs yt-dlp), then try again."
+        base = self._base()
+        if not base or not os.path.isdir(base):
+            return False, "Set a music folder first."
+        if not re.match(r"^https?://(www\.|m\.|on\.)?soundcloud\.com/", url.strip(), re.I):
+            return False, "Give a soundcloud.com track or set URL."
+        archive = os.path.join(base, ".sc-archive.txt")
+        out_tmpl = os.path.join(base, "%(uploader)s - %(title)s.%(ext)s")
+        if "/sets/" in url:
+            out_tmpl = os.path.join(base, "%(playlist_title)s", "%(uploader)s - %(title)s.%(ext)s")
+        cmd = [ytdlp, "-f", "bestaudio/best", "-x", "--audio-format", "mp3", "--no-overwrites",
+               "--download-archive", archive, "--no-progress", "-o", out_tmpl, url.strip()]
+        try:
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+            out, _ = p.communicate(timeout=600)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            return False, "The download took too long (over 10 minutes). Use sc-pick in the terminal for big playlists."
+        except OSError as e:
+            return False, "Couldn't start yt-dlp: %s" % e
+        tail = "\n".join((out or "").strip().splitlines()[-12:])
+        if p.returncode == 0:
+            return True, tail or "Done."
+        return False, tail or ("yt-dlp failed (exit %s)." % p.returncode)
+
+    def sc_setup(self):
+        """Set SoundCloud downloading up automatically: fetch the standalone yt-dlp binary if it isn't already there
+        (this is what sc-pick does on first run). Returns (ok, message)."""
+        if self.demo:
+            return True, "(demo) nothing installed."
+        if self.yt_dlp():
+            return True, "yt-dlp is already installed."
+        dest_dir = os.path.expanduser("~/.local/share/sc-pick/bin")
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+        except OSError as e:
+            return False, "Couldn't create %s: %s" % (dest_dir, e)
+        dest = os.path.join(dest_dir, "yt-dlp")
+        try:
+            urllib.request.urlretrieve("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp", dest)  # noqa: S310 fixed URL
+            os.chmod(dest, 0o755)
+        except (OSError, urllib.error.URLError) as e:
+            return False, "Couldn't download yt-dlp: %s" % e
+        return (True, "Installed yt-dlp — you can download from SoundCloud now.") if self.yt_dlp() else (False, "The download finished but yt-dlp still isn't runnable.")
 
 
 def register(ctx, args):
@@ -129,24 +274,49 @@ def register(ctx, args):
 
     def _status(h, q):
         c = music.cfg()
+        have_ff = bool(music.ffmpeg())
         return h._json({"ok": True, "dir": c.get("dir", ""), "tracks": music.tracks(),
-                        "forward": {"available": music.forward_available(), "enabled": bool(c.get("forward_enabled")),
-                                    "source": c.get("forward_source", ""), "sources": music.sources(),
-                                    "ffmpeg": bool(music.ffmpeg())}})
+                        "forward": {"available": music.forward_available(), "reason": music.forward_reason(),
+                                    "enabled": bool(c.get("forward_enabled")),
+                                    "source": c.get("forward_source", ""), "auto_source": music.default_source() if have_ff else "",
+                                    "sources": music.sources(), "ffmpeg": have_ff},
+                        "sc": {"ready": music.sc_ready(), "yt_dlp": bool(music.yt_dlp())}})
 
     def _config(h, body):
         c = music.cfg()
         if "dir" in body:
-            d = str(body.get("dir") or "").strip()
-            if d and not os.path.isdir(os.path.expanduser(d)):
-                return h._json({"ok": False, "error": "That folder doesn't exist on the server."}, 400)
-            c["dir"] = os.path.expanduser(d)
+            d = os.path.expanduser(str(body.get("dir") or "").strip())
+            if d:
+                if not os.path.exists(d):
+                    return h._json({"ok": False, "error": "That folder isn't on the server. The dashboard runs on the control node, not your Mac — use Browse to pick a folder that's actually there (e.g. ~/Music/soundcloud)."}, 400)
+                if not os.path.isdir(d):
+                    return h._json({"ok": False, "error": "That path is a file, not a folder."}, 400)
+                if not os.access(d, os.R_OK | os.X_OK):
+                    return h._json({"ok": False, "error": "The dashboard can't read that folder (permission). Check who the dashboard runs as."}, 400)
+            c["dir"] = d
         if "forward_enabled" in body:
             c["forward_enabled"] = bool(body.get("forward_enabled"))
         if "forward_source" in body:
             c["forward_source"] = str(body.get("forward_source") or "")[:200]
         music._save(c)
         return h._json({"ok": True})
+
+    def _browse(h, q):
+        return h._json(music.browse(q.get("path", [""])[0]))
+
+    def _test(h, body):
+        ok, msg = music.test_forward()
+        return h._json({"ok": ok, "message": msg, "source": music.default_source()})
+
+    def _sc(h, body):
+        if demo:
+            return h._json({"ok": True, "text": "(demo) would download from SoundCloud into the music folder."})
+        ok, msg = music.soundcloud_download(str(body.get("url") or ""))
+        return h._json({"ok": ok, "text": msg} if ok else {"ok": False, "error": msg}, 200 if ok else 400)
+
+    def _sc_setup(h, body):
+        ok, msg = music.sc_setup()
+        return h._json({"ok": ok, "message": msg} if ok else {"ok": False, "error": msg}, 200 if ok else 500)
 
     def _track(h, q):
         rel = (q.get("path", [""])[0])
@@ -189,8 +359,10 @@ def register(ctx, args):
                     pass
             _live_slots.release()
 
-    ctx.get_routes.update({"/api/music": _status, "/api/music/track": _track, "/api/audio/live": _live})
-    ctx.post_routes["/api/music/config"] = _config
+    ctx.get_routes.update({"/api/music": _status, "/api/music/track": _track, "/api/audio/live": _live,
+                           "/api/music/browse": _browse})
+    ctx.post_routes.update({"/api/music/config": _config, "/api/audio/test": _test,
+                            "/api/music/sc": _sc, "/api/music/sc-setup": _sc_setup})
 
 
 def _stream_file(h, full, ctype):
