@@ -353,6 +353,9 @@ class Homelab:
         self.cleared = {}         # alert key -> when it cleared (for flap quiet)
         self.notify_log = []      # the last deliveries, newest first
         self.first_round = True
+        self._services_cache = None
+        self._services_rev = 0
+        self._forecast = (0.0, [])
 
     # -- persistence ----------------------------------------------------------
 
@@ -375,6 +378,7 @@ class Homelab:
 
     def save(self):
         with self.lock:
+            self._services_rev += 1
             self._write(self.path, self.cfg)
 
     def save_history(self, force=False):
@@ -431,6 +435,18 @@ class Homelab:
         return svc
 
     def services(self):
+        """Every service with its 24 h bars and numbers. Built at most every 2 s: the Services page, the Desk widget,
+        Prometheus and the CLI can all ask at once."""
+        with self.lock:
+            hit = self._services_cache
+            if hit and time.time() - hit[0] < 2 and hit[1] == self._services_rev:
+                return [dict(x) for x in hit[2]]
+        out = self._services_full()
+        with self.lock:
+            self._services_cache = (time.time(), self._services_rev, out)
+        return [dict(x) for x in out]
+
+    def _services_full(self):
         now = time.time()
         out = []
         with self.lock:
@@ -552,6 +568,7 @@ class Homelab:
             live["next"] = now + svc["interval"]
             h = self.hist.setdefault(svc["id"], [])
             h.append([round(now, 1), 1 if res["ok"] else 0, res.get("ms"), (res.get("error") or "")[:120]])
+            self._services_rev += 1
             cut = now - HISTORY_SECONDS
             while h and (h[0][0] < cut or len(h) > HISTORY_MAX):
                 h.pop(0)
@@ -585,9 +602,17 @@ class Homelab:
             return out
 
     def alerts(self):
-        """Alerts for the Alerts page: services that are down, and certificates near expiry."""
+        """Alerts for the Alerts page: services that are down, and certificates near expiry. Runs on every read of the
+        cluster, so it looks only at each service's last result (no history, bars or sparklines)."""
         out = []
-        for s in self.services():
+        with self.lock:
+            rows = []
+            for svc in self.cfg["services"]:
+                live = self.live.get(svc["id"], {})
+                last = live.get("last")
+                rows.append(dict(svc, status=self._status(svc, live, last), last=last, down_since=live.get("down_since"),
+                                 cert_days=(last or {}).get("cert_days")))
+        for s in rows:
             ref = s["id"]
             if s["status"] == "down":
                 mins = int((time.time() - (s.get("down_since") or time.time())) // 60)
@@ -599,7 +624,10 @@ class Homelab:
                 out.append({"level": "critical" if cd < 3 else "warning",
                             "title": "%s's certificate %s" % (s["name"], "has expired" if cd < 0 else "expires in %d day%s" % (int(cd), "" if int(cd) == 1 else "s")),
                             "detail": "%s: renew it before browsers refuse the site." % s["target"], "kind": "monitor", "ref": ref})
-        out += self.forecast_alerts()
+        now = time.time()
+        if now - self._forecast[0] >= 60:     # the disk trend moves slowly: work it out once a minute
+            self._forecast = (now, self.forecast_alerts())
+        out += self._forecast[1]
         return out
 
     def forecast_alerts(self):
