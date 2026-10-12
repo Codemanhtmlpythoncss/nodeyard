@@ -140,7 +140,7 @@
     $("#ny-next").onclick = () => { if (!M.live) next(); };
     $("#ny-close").onclick = stop;
     $("#ny-shuffle").onclick = () => { M.shuffle = !M.shuffle; resetShuffle(M.idx); paintBtn(); savePlayback(false, true); };
-    $("#ny-repeat").onclick = () => { M.repeat = M.repeat === "off" ? "one" : M.repeat === "one" ? "all" : "off"; paintBtn(); savePlayback(false, true); };
+    $("#ny-repeat").onclick = cycleRepeat;
     $("#ny-copy").onclick = copyCurrentLink;
     $("#ny-rate").onchange = (e) => setPlaybackRate(e.target.value, true);
     $("#ny-eq").onchange = (e) => setEqualizer(e.target.value, true);
@@ -161,6 +161,8 @@
     i.title = quiet ? "Unmute" : "Mute"; i.setAttribute("aria-label", i.title);
     const v = $("#ny-vol"); if (v && Math.abs(+v.value - audio.volume) > 0.001) v.value = audio.volume;
   }
+  // Loop: Off → Song → Playlist → Off (the same order everywhere the player shows it)
+  function cycleRepeat() { ensureBar(); M.repeat = M.repeat === "off" ? "one" : M.repeat === "one" ? "all" : "off"; paintBtn(); savePlayback(false, true); }
   function toggleMute() { if (!audio) return; audio.muted = !audio.muted; if (!audio.muted && audio.volume === 0) audio.volume = 0.5; paintVolume(); }
   function setVolume(v) { ensureBar(); audio.volume = Math.max(0, Math.min(1, +v || 0)); if (audio.volume > 0) audio.muted = false; paintVolume(); savePlayback(false, false); }
   const SLEEP_STEPS = [null, 15, 30, 60, "end"];
@@ -398,15 +400,16 @@
         headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify(body) }).catch(() => {});
     } else postJSON("/api/music/playback", body).catch(() => {});
   }
-  async function restorePlayback() {
-    if (M.restored) return;
+  // force: "press play" with nothing loaded: pick up the last saved queue however old it is, and play it.
+  async function restorePlayback(force) {
+    if (M.restored && !force) return false;
     M.restored = true;
     try {
       const r = await getJSON("/api/music/playback");
       const state = r.playback || {};
       // The native app replaces the Music WKWebView when the user selects AI Galaxy, so pagehide is not guaranteed.
       // Restore any recent player state; the `playing` flag still keeps paused tracks paused.
-      if (!r.ok || !Array.isArray(state.queue) || !state.queue.length || Date.now() / 1000 - (+state.updated || 0) > 180) return;
+      if (!r.ok || !Array.isArray(state.queue) || !state.queue.length || (!force && Date.now() / 1000 - (+state.updated || 0) > 180)) return false;
       ensureBar();
       M.queue = state.queue; M.idx = Math.max(0, Math.min(+state.index || 0, M.queue.length - 1));
       M.shuffle = !!state.shuffle; M.repeat = ["off", "all", "one"].includes(state.repeat) ? state.repeat : "off";
@@ -421,9 +424,11 @@
       audio.addEventListener("loadedmetadata", () => { if (resumeAt < audio.duration) audio.currentTime = resumeAt; }, { once: true });
       $("#ny-np-title").textContent = titleOf(track); $("#ny-np-sub").textContent = subOf(track) + " · resuming…";
       $("#ny-vol").value = audio.volume; bar.classList.add("on"); paintBtn();
-      if (state.playing) audio.play().catch(() => { $("#ny-np-sub").textContent = subOf(track) + " · press play to resume"; });
+      if (state.playing || force) audio.play().catch(() => { $("#ny-np-sub").textContent = subOf(track) + " · press play to resume"; });
       savePlayback(false, true);
+      return true;
     } catch (e) { /* music state is optional */ }
+    return false;
   }
   window.addEventListener("pagehide", () => {
     historyProgress(true, true);
@@ -1460,6 +1465,8 @@
     setVolume, toggleMute: () => { ensureBar(); toggleMute(); }, cycleSleep: () => { ensureBar(); cycleSleep(); },
     skip(seconds) { if (audio && !M.live && M.seekable && audio.duration) audio.currentTime = Math.max(0, Math.min(audio.duration - 0.5, audio.currentTime + seconds)); },
     restore() { return restorePlayback(); },
+    resume() { ensureBar(); return restorePlayback(true); },
+    cycleRepeat,
   };
 
   V.music = {

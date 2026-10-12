@@ -12,7 +12,7 @@
     ["calendar", "Calendar", "A month at a glance"], ["notes", "Notes", "A saved scratchpad"],
     ["focus", "Focus timer", "A simple focus and break timer"], ["countdown", "Countdown", "Count down to a date"],
     ["quote", "Daily quote", "A quote picked locally each day"], ["clocks", "World clocks", "Jersey, New York, Tokyo and Sydney"],
-    ["cluster", "Cluster status", "Ready nodes and running pods"], ["music", "Music", "Jump back into your music"],
+    ["cluster", "Cluster status", "Ready nodes and running pods"], ["music", "Music", "Now playing, with play/pause, previous, next and loop"],
     ["links", "Quick links", "Shortcuts to dashboard pages"], ["mascot", "Little mascot", "A small companion for your desk"],
   ];
   const KNOWN = new Set(CATALOG.map((x) => x[0]));
@@ -63,7 +63,7 @@
     if (id === "player") return widget(id, html`<div class="desk-player">
       <div class="desk-np"><div class="desk-np-art" data-player="art" aria-hidden="true">♫</div><div class="desk-np-meta"><b data-player="title">Nothing playing</b><span data-player="sub">Pick a list below to start</span></div></div>
       <div class="desk-seek"><span data-player="cur">0:00</span><input type="range" min="0" max="1000" step="1" value="0" data-desk-input="seek" aria-label="Seek"><span data-player="dur">0:00</span></div>
-      <div class="desk-transport"><button type="button" data-desk="player-prev" aria-label="Previous song">⏮</button><button type="button" class="play" data-desk="player-toggle" aria-label="Play">▶</button><button type="button" data-desk="player-next" aria-label="Next song">⏭</button><button type="button" data-desk="player-shuffle" aria-pressed="false" aria-label="Shuffle">🔀</button><button type="button" data-desk="player-sleep" aria-label="Sleep timer">⏾</button></div>
+      <div class="desk-transport"><button type="button" data-desk="player-prev" aria-label="Previous song">⏮</button><button type="button" class="play" data-desk="player-toggle" aria-label="Play">▶</button><button type="button" data-desk="player-next" aria-label="Next song">⏭</button><button type="button" data-desk="player-shuffle" aria-pressed="false" aria-label="Shuffle">🔀</button><button type="button" data-desk="player-repeat" aria-label="Loop: off">🔁</button><button type="button" data-desk="player-sleep" aria-label="Sleep timer">⏾</button></div>
       <div class="desk-volume"><button type="button" data-desk="player-mute" aria-label="Mute">🔊</button><input type="range" min="0" max="1" step="0.05" value="1" data-desk-input="volume" aria-label="Volume"><span data-player="sleep"></span></div>
       <div class="desk-form"><select class="input" data-desk-input="player-source" aria-label="Play from"></select><button type="button" class="btn" data-desk="player-play-all">Play</button></div>
       <ul class="desk-player-list" data-player="list"></ul></div>`);
@@ -83,7 +83,10 @@
     if (id === "quote") { const q = quoteToday(); return widget(id, html`<blockquote class="desk-quote">“${q[0]}”<cite>${q[1]}</cite></blockquote><span class="desk-muted">A different quote each day · picked on this device</span>`); }
     if (id === "clocks") return widget(id, html`<div class="desk-clocks">${[["Jersey", "Europe/Jersey"], ["New York", "America/New_York"], ["Tokyo", "Asia/Tokyo"], ["Sydney", "Australia/Sydney"]].map(([name, zone]) => html`<div><span>${name}</span><b data-zone="${zone}">--:--</b></div>`)}</div>`);
     if (id === "cluster") return widget(id, html`<div class="desk-cluster"><div><b data-cluster="nodes">—</b><span>ready nodes</span></div><div><b data-cluster="pods">—</b><span>running pods</span></div><div><b data-cluster="workloads">—</b><span>workloads</span></div></div><p class="desk-muted" data-cluster-note>${S.d ? "Live dashboard data" : "Waiting for cluster data"}</p>`);
-    if (id === "music") return widget(id, html`<div class="desk-music-art">♫</div><p>Pick up where you left off in your library, Discover or DJ.</p><button type="button" class="btn primary" data-desk="music">Open Music</button>`);
+    if (id === "music") return widget(id, html`<div class="desk-player desk-mini">
+      <div class="desk-np"><div class="desk-np-art" data-mini="art" aria-hidden="true">♫</div><div class="desk-np-meta"><b data-mini="title">Nothing playing</b><span data-mini="sub">Press play to pick up where you left off</span></div></div>
+      <div class="desk-transport"><button type="button" data-desk="player-prev" data-mini="prev" aria-label="Previous song">⏮</button><button type="button" class="play" data-desk="player-toggle" data-mini="toggle" aria-label="Play">▶</button><button type="button" data-desk="player-next" data-mini="next" aria-label="Next song">⏭</button><button type="button" data-desk="player-repeat" data-mini="repeat" aria-label="Loop: off">🔁</button></div>
+      <div class="desk-mini-foot"><span data-mini="loop">Loop off</span><button type="button" class="btn small" data-desk="music">Open Music</button></div></div>`);
     if (id === "links") return widget(id, html`<div class="desk-links"><button type="button" class="btn" data-desk="overview">Overview</button><button type="button" class="btn" data-desk="music">Music</button><button type="button" class="btn" data-desk="ai">AI</button><button type="button" class="btn" data-desk="galaxy">AI galaxy</button><button type="button" class="btn" data-desk="settings">Settings</button></div>`);
     if (id === "mascot") { const n = ((D.mascot % mascotLines.length) + mascotLines.length) % mascotLines.length; return widget(id, html`<button type="button" class="desk-mascot" data-desk="mascot" aria-label="Say something encouraging"><span aria-hidden="true">${["🪴", "🦊", "🐸", "🐧", "🐱"][n]}</span><b>${mascotLines[n]}</b><small>Tap me</small></button>`); }
     return "";
@@ -94,6 +97,7 @@
     const host = $("#desk-widgets"); if (!host) return;
     host.innerHTML = D.widgets.map(renderWidget).join("") || '<div class="desk-no-widgets">Add a widget to make this desk yours.</div>';
     if (D.widgets.includes("player")) { if (!P.data || Date.now() - P.loadedAt > 60000) loadMusic(); drawPlayerList(); paintPlayer(); }
+    if (D.widgets.includes("music")) paintMini();
     if (D.widgets.includes("chat")) { if (CH.targets === null) loadTargets(); paintChatTargets(); CH.stick = true; paintChat(); }
     if (D.widgets.includes("services")) { paintServices(); if (Date.now() - SV.at > 25000) loadServices(); }
     if (D.widgets.includes("system")) paintSystem();
@@ -215,9 +219,10 @@
     seek.disabled = !st.seekable || !st.duration;
     if (!seek.matches(":active")) seek.value = st.duration ? Math.round((1000 * st.current) / st.duration) : 0;
     const toggle = w.querySelector('[data-desk="player-toggle"]');
-    toggle.textContent = st.playing ? "⏸" : "▶"; toggle.setAttribute("aria-label", st.playing ? "Pause" : "Play"); toggle.disabled = !t && !st.live;
+    toggle.textContent = st.playing ? "⏸" : "▶"; toggle.setAttribute("aria-label", st.playing ? "Pause" : "Play");
     w.querySelector('[data-desk="player-prev"]').disabled = !st.hasPrev;
     w.querySelector('[data-desk="player-next"]').disabled = !st.hasNext;
+    paintRepeat(w.querySelector('[data-desk="player-repeat"]'), st);
     const shuffle = w.querySelector('[data-desk="player-shuffle"]');
     shuffle.classList.toggle("on", st.shuffle); shuffle.setAttribute("aria-pressed", st.shuffle ? "true" : "false"); shuffle.title = st.shuffle ? "Shuffle on" : "Shuffle off";
     w.querySelectorAll(".desk-player-list li[data-key]").forEach((li) => li.classList.toggle("on", !!t && li.dataset.key === t.key));
@@ -228,12 +233,48 @@
     sleep.classList.toggle("on", !!st.sleep); sleep.title = "Sleep timer: " + (st.sleep || "off");
     q("sleep").textContent = st.sleep ? "Sleep · " + st.sleep : "";
   }
+  const LOOP_TEXT = { off: "Loop off", one: "Looping this song", all: "Looping the playlist" };
+  function paintRepeat(btn, st) {
+    if (!btn) return;
+    btn.textContent = st.repeat === "one" ? "🔂" : "🔁";
+    btn.classList.toggle("on", st.repeat !== "off");
+    const label = "Loop: " + (st.repeat === "one" ? "song" : st.repeat === "all" ? "playlist" : "off") + " (click to change)";
+    btn.title = label; btn.setAttribute("aria-label", label); btn.setAttribute("aria-pressed", st.repeat === "off" ? "false" : "true");
+  }
+  // The small Music widget: what's playing and the basic controls (the Music player widget has the lists).
+  function paintMini() {
+    const w = $('[data-widget="music"]'); if (!w || !NY.music) return;
+    const q = (name) => w.querySelector('[data-mini="' + name + '"]');
+    const st = NY.music.state(), t = st.track;
+    q("title").textContent = st.live ? "Server audio" : t ? t.title : "Nothing playing";
+    q("sub").textContent = st.live ? "Live from the host" : t ? t.sub + (st.duration ? " · " + fmtTime(st.current) + " / " + fmtTime(st.duration) : "") : "Press play to pick up where you left off";
+    const art = q("art"), want = (t && t.art) || "";
+    if (art.dataset.src !== want) { art.dataset.src = want; art.innerHTML = "♫" + (want ? '<img alt="" src="' + esc(want) + '">' : ""); }
+    const toggle = q("toggle");
+    toggle.textContent = st.playing ? "⏸" : "▶"; toggle.setAttribute("aria-label", st.playing ? "Pause" : "Play");
+    q("prev").disabled = !st.hasPrev; q("next").disabled = !st.hasNext;
+    paintRepeat(q("repeat"), st);
+    q("loop").textContent = LOOP_TEXT[st.repeat] || "";
+  }
+  // Play with nothing loaded: the last saved queue, else liked songs, else the library.
+  async function startOrToggle(btn) {
+    if (!NY.music) return;
+    if (NY.music.toggle()) return;
+    if (btn) btn.disabled = true;
+    try {
+      if (await NY.music.resume()) return;
+      if (!P.data) await loadMusic();
+      const d = P.data || {}, likes = (d.sc && d.sc.likes) || [], list = likes.length ? likes : d.tracks || [];
+      if (list.length) NY.music.playQueue(list, NY.music.state().shuffle ? Math.floor(Math.random() * list.length) : 0);
+      else toast(P.error || "There's nothing to play yet. Add music or like songs in Music.");
+    } finally { if (btn) btn.disabled = false; paintMini(); paintPlayer(); }
+  }
   function playFromList(i) {
     if (!NY.music || !P.tracks || !P.tracks.length) return;
     const start = i == null ? (NY.music.state().shuffle ? Math.floor(Math.random() * P.tracks.length) : 0) : i;
     NY.music.playQueue(P.tracks, start);
   }
-  document.addEventListener("ny-music", () => { if (S.view === "desk") paintPlayer(); });
+  document.addEventListener("ny-music", () => { if (S.view === "desk") { paintPlayer(); paintMini(); } });
   document.addEventListener("error", (e) => { if (e.target && e.target.matches && e.target.matches(".desk-np-art img")) e.target.remove(); }, true);
 
   // ---- services (the Services page's monitor) and system load ----
@@ -388,7 +429,8 @@
     else if (action === "focus-toggle") { if (D.focus.running) { D.focus.remaining = Math.max(0, Math.ceil((D.focus.until - Date.now()) / 1000)); D.focus.running = false; } else { D.focus.until = Date.now() + Math.max(1, D.focus.remaining) * 1000; D.focus.running = true; } save(); drawWidgets(); paintMode(); }
     else if (action === "focus-reset") { D.focus = { mode: "focus", remaining: 1500, running: false, until: 0 }; save(); drawWidgets(); paintMode(); }
     else if (action === "mascot") { D.mascot++; save(); drawWidgets(); paintMode(); }
-    else if (action === "player-toggle") { if (NY.music) NY.music.toggle(); }
+    else if (action === "player-toggle") startOrToggle(b);
+    else if (action === "player-repeat") { if (NY.music) NY.music.cycleRepeat(); }
     else if (action === "player-prev") { if (NY.music) NY.music.prev(); }
     else if (action === "player-next") { if (NY.music) NY.music.next(); }
     else if (action === "player-shuffle") { if (NY.music) NY.music.setShuffle(!NY.music.state().shuffle); }
@@ -449,7 +491,7 @@
       NY.freshHTML($("#view"), html`<main class="desk-page"><header class="desk-top"><a class="desk-brand" href="#overview">nodeyard <span>desk</span></a><div class="desk-actions"><button type="button" class="btn" data-desk="customize" aria-pressed="${D.customizing}">Arrange</button><button type="button" class="btn primary" data-desk="add-widget">＋ Add widgets</button><button type="button" class="btn" data-desk="overview">Dashboard</button></div></header><section class="desk-hero"><div class="desk-greeting" data-desk-greeting></div><time class="desk-clock" data-desk-time></time><div class="desk-date" data-desk-date></div></section><section class="desk-widgets" id="desk-widgets" aria-label="Desk widgets"></section><div class="desk-foot">Your selected dashboard wallpaper · widgets save in this browser</div><button id="desk-picker-backdrop" class="desk-picker-backdrop" type="button" data-desk="picker-close" aria-label="Close widget picker" hidden></button><section class="desk-picker" id="desk-picker" role="dialog" aria-modal="true" aria-label="Add a widget" hidden></section></main>`);
       CH.targets = (CH.targets || []).some((x) => x.ready) ? CH.targets : null;   // look again if no model was ready last time
       drawWidgets(); paintMode(); tick();
-      if (NY.music && D.widgets.includes("player")) NY.music.restore();
+      if (NY.music && (D.widgets.includes("player") || D.widgets.includes("music"))) NY.music.restore();
     },
     update() { tick(); },
   };

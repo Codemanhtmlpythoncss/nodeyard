@@ -903,6 +903,8 @@ body.desk-mode #view { min-height: 100%; }
 .desk-chat-form textarea { flex: 1; width: 0; min-height: 42px; max-height: 140px; resize: vertical; font: inherit; font-size: 13px; line-height: 1.4; }
 .desk-page .btn.danger { background: #d1485fd9; border-color: #ffffff48; }
 body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
+.desk-mini .desk-transport { margin-top: 2px; }
+.desk-mini-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #ffffffa0; font-size: 11.5px; }
 .desk-move { display: none; gap: 4px; margin-left: auto; }
 .desk-page.customizing .desk-move { display: inline-flex; }
 .desk-move button { width: 26px; height: 26px; padding: 0; border: 1px solid #ffffff50; border-radius: 50%; color: #fff; background: #ffffff1c; font-size: 16px; line-height: 1; cursor: pointer; }
