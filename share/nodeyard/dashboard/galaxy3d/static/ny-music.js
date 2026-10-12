@@ -112,7 +112,9 @@
   }
   fetch("/api/music/playback", { cache: "no-store", credentials: "same-origin" }).then(function (r) { return r.json(); }).then(function (data) {
     var p = data.playback || {}, age = Date.now() / 1000 - (+p.updated || 0);
-    if (data.ok && age >= 0 && age < 180 && p.handoff) restore(p);
+    // A SwiftUI section change can destroy the Music WKWebView without firing pagehide.
+    // Recent saved state is enough; `playing` decides whether the Galaxy player should resume.
+    if (data.ok && age >= 0 && age < 180) restore(p);
   }).catch(function () {});
   window.addEventListener("pagehide", function () { syncHistory(true); save(true, true); });
 })();

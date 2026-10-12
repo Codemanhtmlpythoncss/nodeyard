@@ -240,7 +240,9 @@
     try {
       const r = await getJSON("/api/music/playback");
       const state = r.playback || {};
-      if (!r.ok || !state.handoff || !Array.isArray(state.queue) || !state.queue.length || Date.now() / 1000 - (+state.updated || 0) > 180) return;
+      // The native app replaces the Music WKWebView when the user selects AI Galaxy, so pagehide is not guaranteed.
+      // Restore any recent player state; the `playing` flag still keeps paused tracks paused.
+      if (!r.ok || !Array.isArray(state.queue) || !state.queue.length || Date.now() / 1000 - (+state.updated || 0) > 180) return;
       ensureBar();
       M.queue = state.queue; M.idx = Math.max(0, Math.min(+state.index || 0, M.queue.length - 1));
       M.shuffle = !!state.shuffle; M.repeat = ["off", "all", "one"].includes(state.repeat) ? state.repeat : "off";
