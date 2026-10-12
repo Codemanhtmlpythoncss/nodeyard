@@ -29,6 +29,10 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   up while it tours unless you hide them (H, or Tab › Panels), and the tour can be set to stay on the overview.
 - The galaxy screens say "k3s nodes" and "nodes" where the original said Proxmox's "PVE".
 - The Mac app's galaxy shows the 2D Universe page (and says why) when the cluster's dashboard is too old for the 3D one.
+- **Run code from the Mac app.** Python, Bash and JavaScript blocks in an answer now have a **Run** button that runs
+  the code in the dashboard's sandbox (as the terminal user, 30-second cap) and shows the output and exit code inline.
+  When the code reads input, an **Input** box appears to type the stdin first. (The website chat already had Run; the
+  server's runner now also accepts stdin.)
 - **Web search works in the Mac app again.** Every successful search failed with "Tool error: The data couldn't be
   read because it isn't in the correct format": the server marks a successful result with an `error` boolean flag, but
   the app decoded that field as a text message, so decoding threw on every good result. The app now reads that field

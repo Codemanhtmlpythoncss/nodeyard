@@ -205,6 +205,14 @@ final class NodeyardClient {
         return stats
     }
 
+    struct RunResult: Decodable { var rc: Int?; var out: String?; var seconds: Double?; var truncated: Bool? }
+    /// Run a code block in the dashboard's sandbox (as the terminal user, 30 s cap). `stdin` is fed to the program.
+    func runCode(language: String, code: String, stdin: String) async throws -> RunResult {
+        var body: [String: Any] = ["lang": language, "code": code]
+        if !stdin.isEmpty { body["stdin"] = stdin }
+        return try await post("/api/ai/run-code", body: body, as: RunResult.self)
+    }
+
     func runWebTool(_ name: String, arguments: [String: Any]) async throws -> String {
         // `error` is a human message on the failure path but a bool "did this result carry an error" flag on the
         // success path, so it is decoded leniently (a string when it is one, otherwise ignored) — decoding it as a

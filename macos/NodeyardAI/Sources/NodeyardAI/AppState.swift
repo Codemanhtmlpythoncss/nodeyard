@@ -485,6 +485,17 @@ final class AppState: ObservableObject {
         beginSend(retry: true)
     }
 
+    /// Run a code block (Run button) in the dashboard's sandbox. Returns the exit code (nil if it couldn't start) and
+    /// the combined output. `stdin` is fed to the program for code that reads input.
+    func runSnippet(language: String, code: String, stdin: String) async -> (rc: Int?, out: String) {
+        do {
+            let r = try await client.runCode(language: language, code: code, stdin: stdin)
+            return (r.rc, r.out ?? "")
+        } catch {
+            return (nil, "Couldn't run it: \(error.localizedDescription)")
+        }
+    }
+
     /// Carry on from a cut-off answer: keep the partial text and ask the model to continue it in a new turn.
     func continueAnswer() {
         guard !isSending, let chat = currentChat, chat.messages.last?.role == "assistant",

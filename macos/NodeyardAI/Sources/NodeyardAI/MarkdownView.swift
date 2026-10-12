@@ -87,17 +87,47 @@ enum MarkdownBlock {
     }
 }
 
-/// A code block from an answer: its language, a Copy button and Save…, and the code in a box that scrolls sideways.
+/// A code block from an answer: its language, Copy, Save… and (for Python/Bash/JavaScript) Run, plus the code in a box
+/// that scrolls sideways. Run sends the code to the dashboard's sandbox and shows its output; if the code reads input,
+/// a stdin box appears to fill first.
 struct CodeBlockView: View {
     let language: String
     let code: String
+    @EnvironmentObject private var state: AppState
     @State private var copied = false
+    @State private var running = false
+    @State private var output: (rc: Int?, text: String)?
+    @State private var showStdin = false
+    @State private var stdin = ""
+
+    /// The sandbox runs these three; anything else has no Run button. Maps the block's label to the runner's name.
+    private var runner: String? {
+        switch language.lowercased() {
+        case "python", "py", "python3": return "python"
+        case "bash", "sh", "shell", "zsh": return "bash"
+        case "javascript", "js", "node", "nodejs": return "node"
+        default: return nil
+        }
+    }
+    /// Code that reads standard input, so the stdin box is offered up front.
+    private var readsInput: Bool {
+        let c = code.lowercased()
+        return c.contains("input(") || c.contains("sys.stdin") || c.contains("readline") || c.range(of: #"(^|\n)\s*read\s"#, options: .regularExpression) != nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 Text(language.isEmpty ? "code" : language).font(.caption.monospaced()).foregroundStyle(.secondary)
                 Spacer()
+                if runner != nil {
+                    if readsInput || showStdin {
+                        Button { withAnimation { showStdin.toggle() } } label: { Label("Input", systemImage: showStdin ? "chevron.down" : "keyboard") }
+                            .help("Type the input the program will read")
+                    }
+                    Button(action: run) { Label(running ? "Running…" : "Run", systemImage: running ? "hourglass" : "play.fill") }
+                        .disabled(running).help("Run this in the dashboard sandbox and show the output")
+                }
                 Button(action: save) { Label("Save…", systemImage: "square.and.arrow.down") }.help("Save this code as a file")
                 Button(action: copy) { Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc") }
                     .help("Copy this code")
@@ -109,10 +139,46 @@ struct CodeBlockView: View {
                 Text(code.isEmpty ? " " : code).monospaced().textSelection(.enabled).fixedSize(horizontal: true, vertical: true)
                     .padding(10).frame(maxWidth: .infinity, alignment: .leading)
             }
+            if showStdin {
+                Divider()
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Input (stdin) — one line per prompt").font(.caption2).foregroundStyle(.secondary)
+                    TextEditor(text: $stdin).font(.callout.monospaced()).frame(height: 56)
+                        .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.primary.opacity(0.15)))
+                        .scrollContentBackground(.hidden)
+                }.padding(10)
+            }
+            if let output {
+                Divider()
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 8) {
+                        Image(systemName: output.rc == 0 ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                            .foregroundStyle(output.rc == 0 ? .green : .orange)
+                        Text(output.rc == nil ? "Couldn't run" : output.rc == 0 ? "Output" : "Exited with code \(output.rc!)")
+                            .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                        Spacer()
+                        Button { self.output = nil } label: { Image(systemName: "xmark") }.buttonStyle(.borderless).help("Clear output")
+                    }
+                    ScrollView(.horizontal) {
+                        Text(output.text.isEmpty ? "(no output)" : output.text).font(.callout.monospaced()).textSelection(.enabled)
+                            .fixedSize(horizontal: true, vertical: true)
+                    }
+                }.padding(10).background(Color.primary.opacity(0.04))
+            }
         }
         .background(Color.primary.opacity(0.035))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.12)))
+    }
+
+    private func run() {
+        guard let lang = runner else { return }
+        running = true
+        Task {
+            let result = await state.runSnippet(language: lang, code: code, stdin: stdin)
+            output = (result.rc, result.out)
+            running = false
+        }
     }
 
     private func copy() {

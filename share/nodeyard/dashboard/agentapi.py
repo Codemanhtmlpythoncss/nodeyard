@@ -277,10 +277,13 @@ class Agents:
 
     def run_code(self, h, body):
         lang, code = str(body.get("lang") or ""), str(body.get("code") or "")
+        stdin = str(body.get("stdin") or "")
         if lang not in self.RUNNERS:
             return h._json({"ok": False, "error": "I can run python, bash and javascript."}, 400)
         if not code.strip() or len(code) > 60000:
             return h._json({"ok": False, "error": "Send between 1 and 60,000 characters of code."}, 400)
+        if len(stdin) > 100000:
+            return h._json({"ok": False, "error": "Keep the input under 100,000 characters."}, 400)
         ok, why = self.code_ok(h)
         if not ok:
             return h._json({"ok": False, "error": "Running code is off: %s." % why}, 403)
@@ -290,13 +293,16 @@ class Agents:
         try:
             if self.demo:   # nothing runs in the demo
                 time.sleep(0.3)
-                return h._json({"ok": True, "rc": 0, "out": "(demo) the %s code was not run.\n42" % lang, "seconds": 0.3, "truncated": False})
+                shown = ("\n[it was given input]" if stdin else "")
+                return h._json({"ok": True, "rc": 0, "out": "(demo) the %s code was not run.%s\n42" % (lang, shown), "seconds": 0.3, "truncated": False})
             cmd = ["systemd-run", "--quiet", "--collect", "--pipe", "--wait", "--uid=" + self.user, "-p", "WorkingDirectory=~", "-p", "RuntimeMaxSec=30",
                    "--setenv=PYTHONUNBUFFERED=1", "--setenv=NO_COLOR=1", "--setenv=LANG=C.UTF-8", "--description=nodeyard dashboard: code from the chat"] + self.RUNNERS[lang] + [code]
             try:
-                p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", start_new_session=True)
+                # stdin is fed to the program when the code block asked for input; without it the program sees EOF.
+                p = subprocess.Popen(cmd, stdin=(subprocess.PIPE if stdin else subprocess.DEVNULL),
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", start_new_session=True)
                 try:
-                    out, _ = p.communicate(timeout=40)
+                    out, _ = p.communicate(input=(stdin if stdin else None), timeout=40)
                 except subprocess.TimeoutExpired:
                     p.kill()
                     out, _ = p.communicate()
