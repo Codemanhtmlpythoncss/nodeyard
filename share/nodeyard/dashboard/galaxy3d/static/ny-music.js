@@ -1,7 +1,7 @@
 /* Keep the Nodeyard Music player available when the full-page AI Galaxy is open. */
 (function () {
   "use strict";
-  var state = null, audio = null, bar = null, title = null, playButton = null, repeatButton = null;
+  var state = null, audio = null, bar = null, title = null, playButton = null, repeatButton = null, repeatIcon = null, repeatMode = null;
   var historySince = 0, historyElapsed = 0, lastHistorySaved = 0, lastPlaybackSaved = 0, saving = false;
   function api(path, body, keepalive) {
     var opts = { method: body ? "POST" : "GET", credentials: "same-origin", cache: "no-store" };
@@ -51,9 +51,13 @@
     var t = state.queue[state.index];
     title.textContent = t ? ((t.title || t.name || "Untitled") + (t.artist ? " · " + t.artist : "")) : "Music";
     playButton.textContent = audio.paused ? "▶" : "⏸";
-    repeatButton.textContent = state.repeat === "one" ? "🔂" : "🔁";
+    var label = state.repeat === "one" ? "Song" : state.repeat === "all" ? "Playlist" : "Off";
+    repeatIcon.textContent = state.repeat === "one" ? "🔂" : "🔁";
+    repeatMode.textContent = label;
     repeatButton.classList.toggle("on", state.repeat !== "off");
-    repeatButton.title = state.repeat === "one" ? "Repeat one" : state.repeat === "all" ? "Repeat all" : "Repeat off";
+    repeatButton.title = "Loop: " + label + " (click to change)";
+    repeatButton.setAttribute("aria-label", repeatButton.title);
+    repeatButton.setAttribute("aria-pressed", state.repeat === "off" ? "false" : "true");
   }
   function makeBar() {
     var css = document.createElement("style");
@@ -61,16 +65,18 @@
       "#ny-music[hidden]{display:none}#ny-music .nt{max-width:min(34vw,360px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#afc7ef}" +
       "#ny-music button,#ny-music a{font:inherit;color:inherit;background:rgba(120,170,255,.1);border:1px solid rgba(120,170,255,.22);border-radius:7px;padding:5px 7px;text-decoration:none;cursor:pointer}" +
       "#ny-music button:hover,#ny-music a:hover,#ny-music button.on{background:rgba(90,215,255,.24);color:white}" +
+      "#ny-music .loop-mode{font-size:10px;font-weight:700;opacity:.85;margin-left:3px}" +
       "@media(max-width:560px){#ny-music{left:8px;right:8px;bottom:8px;justify-content:center}#ny-music .nt{max-width:36vw}}";
     document.head.appendChild(css);
     bar = document.createElement("div"); bar.id = "ny-music"; bar.hidden = true;
-    bar.innerHTML = '<button data-music="prev" title="Previous">⏮</button><button data-music="play" title="Play or pause">▶</button><button data-music="next" title="Next">⏭</button><button data-music="repeat" title="Repeat">🔁</button><span class="nt"></span><a href="/">Music</a>';
+    bar.innerHTML = '<button data-music="prev" title="Previous">⏮</button><button data-music="play" title="Play or pause">▶</button><button data-music="next" title="Next">⏭</button><button data-music="repeat" title="Loop: Off (click to change)" aria-label="Loop: Off (click to change)" aria-pressed="false"><span class="loop-icon">🔁</span><span class="loop-mode">Off</span></button><span class="nt"></span><a href="/">Music</a>';
     document.body.appendChild(bar);
     title = bar.querySelector(".nt"); playButton = bar.querySelector('[data-music="play"]'); repeatButton = bar.querySelector('[data-music="repeat"]');
+    repeatIcon = repeatButton.querySelector(".loop-icon"); repeatMode = repeatButton.querySelector(".loop-mode");
     bar.addEventListener("click", function (e) {
       var b = e.target.closest("[data-music]"); if (!b || !state) return;
       if (b.dataset.music === "play") { if (audio.paused) audio.play().catch(function () {}); else audio.pause(); }
-      else if (b.dataset.music === "repeat") { state.repeat = state.repeat === "off" ? "all" : state.repeat === "all" ? "one" : "off"; save(false, true); paint(); }
+      else if (b.dataset.music === "repeat") { state.repeat = state.repeat === "off" ? "one" : state.repeat === "one" ? "all" : "off"; save(false, true); paint(); }
       else if (b.dataset.music === "prev") select(Math.max(0, state.index - 1));
       else if (b.dataset.music === "next") advance();
     });
