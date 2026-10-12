@@ -7,7 +7,7 @@
   const U = NY.ui;
   const { S, V, $, card, toast, getJSON, postJSON } = U;
 
-  const M = { data: null, queue: [], idx: -1, live: false };
+  const M = { data: null, queue: [], idx: -1, live: false, scMode: "search", scResults: [], scLikes: [] };
   let audio = null, bar = null;
 
   // ---- the persistent player bar ------------------------------------------
@@ -109,6 +109,25 @@
       <div class="faint small">${(t.size / 1048576).toFixed(1)} MB</div></div>`)}`);
   }
 
+  function scTrackRow(t) {
+    const liked = M.scLikes.some((x) => x.url === t.url);
+    return html`<div class="row" style="justify-content:space-between;gap:10px;padding:9px 2px;border-bottom:1px solid var(--line)">
+      <div style="flex:1;min-width:0;overflow:hidden"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><b>${esc(t.title)}</b></div>
+        <div class="faint small">${esc(t.artist)}${t.duration_ms ? " · " + fmtTime(t.duration_ms / 1000) : ""}</div></div>
+      <button class="btn small" data-music="sc-like" data-url="${esc(t.url)}" title="${liked ? "Remove local like" : "Save to local likes"}">${liked ? "♥ Liked" : "♡ Like"}</button>
+      <a class="btn small" href="${esc(t.url)}" target="_blank" rel="noopener noreferrer">Open</a>
+      <button class="btn small" data-music="sc-copy" data-url="${esc(t.url)}" title="Copy the SoundCloud link for sc-pick">Copy link</button>
+    </div>`;
+  }
+
+  function renderSc() {
+    if (S.view !== "music") return;
+    const el = $("#sc-results"); if (!el) return;
+    const tracks = M.scMode === "likes" ? M.scLikes : M.scResults;
+    if (tracks.length) { setHTML(el, html`${tracks.map(scTrackRow)}`); return; }
+    setHTML(el, html`<div class="empty">${M.scMode === "likes" ? "No local likes yet. Search for a song and choose Like." : "Search for a song to see SoundCloud results."}</div>`);
+  }
+
   function renderPage() {
     const el = $("#view"); if (!el || S.view !== "music") return;
     const d = M.data || {};
@@ -128,21 +147,23 @@
         <details class="mt"><summary class="small faint">Choose a source instead of automatic</summary>
           ${raw('<select class="select mt" data-music="fw-source">' + srcOpts + "</select>")}</details>
         <div id="fw-test-out" class="small mt"></div>`;
-    const scBody = html`<p class="muted small" style="margin-top:0">Paste a SoundCloud track or set URL; the server downloads it with yt-dlp (what your <span class="mono">sc-pick</span> uses) into the music folder, then it appears below. Only download tracks you have the right to.</p>
-      <div class="row" style="gap:8px"><input class="input" data-music="sc-url" placeholder="https://soundcloud.com/artist/track" spellcheck="false" style="flex:1">
-        <button class="btn primary" data-music="sc-go" ${sc.ready ? "" : "disabled"}>Download</button></div>
-      ${!sc.yt_dlp ? html`<p class="small mt">The downloader isn't set up yet. <button class="btn small primary" data-music="sc-setup">Set it up automatically</button></p>`
-        : (!d.dir ? html`<p class="small faint mt">Set a music folder above first.</p>` : "")}
-      <div id="sc-out" class="small mt" style="white-space:pre-wrap;max-height:200px;overflow:auto"></div>`;
+    M.scLikes = Array.isArray(sc.likes) ? sc.likes : [];
+    const scBody = html`<p class="muted small" style="margin-top:0">Search SoundCloud with sc-pick's public search helper. Likes here are saved in this dashboard; they don't change your SoundCloud account. To download your own tracks on your Mac, open one in SoundCloud or copy its link, then use <span class="mono">sc-pick</span> (which downloads with <span class="mono">sdownload</span>).</p>
+      <div class="row" style="gap:8px"><input class="input" data-music="sc-query" placeholder="Search songs" spellcheck="false" style="flex:1">
+        <button class="btn primary" data-music="sc-search" ${sc.search_ready ? "" : "disabled"}>Search</button>
+        <button class="btn" data-music="sc-likes">♥ Likes (${M.scLikes.length})</button></div>
+      ${!sc.search_ready ? html`<p class="small mt">The sc-pick search helper isn't installed for the server's terminal user. Run <span class="mono">sc-pick</span> once from the server's Terminal page to set it up.</p>` : ""}
+      <div id="sc-results" class="mt"><div class="empty">Search for a song to see SoundCloud results.</div></div>`;
     NY.freshHTML(el, html`
       ${card("Music folder", html`<p class="muted small" style="margin-top:0">The server plays audio files from one folder on the host (the control node, not your Mac). Everyone signed in can listen.</p>
-        <div class="row" style="gap:8px"><input class="input" data-music="dir" value="${esc(d.dir || "")}" placeholder="/home/barnaby/Music/soundcloud" spellcheck="false" style="flex:1">
+      <div class="row" style="gap:8px"><input class="input" data-music="dir" value="${esc(d.dir || "")}" placeholder="/home/your-user/Music/soundcloud" spellcheck="false" style="flex:1">
         <button class="btn" data-music="browse">Browse…</button><button class="btn primary" data-music="save-dir">Save</button></div>`)}
-      ${card("SoundCloud (sc-pick)", scBody)}
+      ${card("SoundCloud search and likes", scBody)}
       ${card("Live audio forwarding", fwBody)}
       <div class="section-title">Library</div>
       <div class="card"><div id="music-lib"><div class="empty"><div class="spin"></div>Loading…</div></div></div>`);
     renderLib();
+    renderSc();
   }
 
   // ---- graphical folder picker -------------------------------------------
@@ -176,6 +197,20 @@
 
   async function load() { try { const r = await getJSON("/api/music"); if (r.ok) M.data = r; } catch (e) { /* signed out */ } }
 
+  async function searchSc() {
+    const input = $('[data-music="sc-query"]');
+    const query = (input && input.value || "").trim();
+    if (query.length < 2) { toast("Enter at least two characters to search."); return; }
+    M.scMode = "search";
+    const el = $("#sc-results"); if (el) setHTML(el, html`<div class="empty"><div class="spin"></div>Searching…</div>`);
+    try {
+      const r = await getJSON("/api/music/search?q=" + encodeURIComponent(query));
+      if (!r.ok) { if (el) setHTML(el, html`<div class="empty">${esc(r.error || "Search failed.")}</div>`); return; }
+      M.scResults = Array.isArray(r.tracks) ? r.tracks : [];
+      renderSc();
+    } catch (e) { if (el) setHTML(el, html`<div class="empty">${esc(e.message || "Search failed.")}</div>`); }
+  }
+
   document.addEventListener("click", async (e) => {
     const t = e.target.closest && e.target.closest("[data-music]"); if (!t) return;
     const act = t.dataset.music;
@@ -186,20 +221,29 @@
     else if (act === "b-open" || act === "b-short") { openBrowse(t.dataset.path); }
     else if (act === "b-cancel") { closeBrowse(); }
     else if (act === "b-use") { closeBrowse(); await saveDir(t.dataset.path); }
+    else if (act === "sc-search") { await searchSc(); }
+    else if (act === "sc-likes") { M.scMode = "likes"; renderSc(); }
+    else if (act === "sc-like") {
+      const track = [...M.scResults, ...M.scLikes].find((x) => x.url === t.dataset.url);
+      if (!track) return;
+      const r = await postJSON("/api/music/like", { track, liked: !M.scLikes.some((x) => x.url === track.url) });
+      if (!r.ok) { toast(r.error || "Couldn't save that like."); return; }
+      M.scLikes = Array.isArray(r.likes) ? r.likes : [];
+      const likesButton = $('[data-music="sc-likes"]');
+      if (likesButton) likesButton.textContent = "♥ Likes (" + M.scLikes.length + ")";
+      renderSc();
+    }
+    else if (act === "sc-copy") {
+      try { await navigator.clipboard.writeText(t.dataset.url); toast("Link copied. Use it with sc-pick on your Mac."); }
+      catch (_) { toast("Couldn't copy the link. Open the track and copy its address."); }
+    }
     else if (act === "fw-test") {
       const out = $("#fw-test-out"); if (out) out.textContent = "Testing…";
       const r = await postJSON("/api/audio/test", {}); if (out) out.innerHTML = (r.ok ? '<span style="color:var(--ok,#3ecf8e)">✓ </span>' : '<span class="err">✕ </span>') + esc(r.message || r.error || "");
     }
-    else if (act === "sc-setup") {
-      const out = $("#sc-out"); if (out) out.textContent = "Setting up (downloading yt-dlp)…";
-      const r = await postJSON("/api/music/sc-setup", {}); if (out) out.textContent = r.message || r.error || ""; await load(); renderPage();
-    }
-    else if (act === "sc-go") {
-      const url = ($('[data-music="sc-url"]').value || "").trim(); if (!url) return;
-      const out = $("#sc-out"); if (out) out.textContent = "Downloading… (this can take a minute)";
-      const r = await postJSON("/api/music/sc", { url }); if (out) out.textContent = r.text || r.error || "";
-      await load(); if (S.view === "music") renderLib();
-    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target.matches('[data-music="sc-query"]')) { e.preventDefault(); searchSc(); }
   });
   document.addEventListener("change", async (e) => {
     const t = e.target.closest && e.target.closest("[data-music]"); if (!t) return;

@@ -1,24 +1,24 @@
-"""music.py — an optional, self-hosted audio feature, all server-side so a browser that can reach only the dashboard
-can listen:
+"""music.py — an optional, self-hosted audio feature:
 
   library   the server plays the audio files in a folder the admin points it at. Tracks are listed and streamed
             (with HTTP Range, so seeking works) straight from that folder; nothing leaves the server but the audio.
   forward   the host's own audio output is captured with ffmpeg and streamed to the browser as live MP3, so whatever
             the server is playing comes out in the browser. Opt-in, and it degrades clearly when the host has no
             capture source (a headless server usually won't).
+  SoundCloud search uses the public sc-pick CLI installed for the terminal user; likes are saved locally here and
+  never sent to a SoundCloud account.
 
-Config at <state_dir>/music.json: {"dir": "...", "forward_enabled": bool, "forward_source": "..."}. The folder is the
-only place tracks are served from — every streamed path is resolved and checked to be inside it, so the folder picker
-can't be turned into a way to read the rest of the disk.
+Config at <state_dir>/music.json: {"dir": "...", "forward_enabled": bool, "forward_source": "...", "sc_likes": []}.
+The folder is the only place tracks are served from — every streamed path is resolved and checked to be inside it, so
+the folder picker can't be turned into a way to read the rest of the disk.
 """
 import json
 import os
+import pwd
 import re
 import shutil
 import subprocess
 import threading
-import urllib.error
-import urllib.request
 
 AUDIO_EXT = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".ogg": "audio/ogg", ".oga": "audio/ogg",
              ".opus": "audio/ogg", ".m4a": "audio/mp4", ".mp4": "audio/mp4", ".aac": "audio/aac",
@@ -28,9 +28,21 @@ _live_slots = threading.BoundedSemaphore(2)
 
 
 class Music:
-    def __init__(self, state_dir, demo=False):
+    def __init__(self, state_dir, demo=False, terminal_user=""):
         self.path = os.path.join(state_dir or "/var/lib/nodeyard/dashboard", "music.json")
         self.demo = demo
+        self.lock = threading.RLock()
+        self.home = ""
+        if terminal_user:
+            try:
+                self.home = pwd.getpwnam(terminal_user).pw_dir
+            except KeyError:
+                pass
+        if not self.home:
+            try:
+                self.home = pwd.getpwuid(os.getuid()).pw_dir
+            except (KeyError, OSError):
+                self.home = "/root"
 
     def cfg(self):
         try:
@@ -47,11 +59,19 @@ class Music:
             json.dump(c, f)
         os.replace(tmp, self.path)
 
+    def _expand(self, path):
+        path = str(path or "").strip()
+        if path == "~":
+            return self.home
+        if path.startswith("~/"):
+            return os.path.join(self.home, path[2:])
+        return os.path.expanduser(path)
+
     # -- library -------------------------------------------------------------
 
     def _base(self):
         d = (self.cfg().get("dir") or "").strip()
-        return os.path.realpath(d) if d else ""
+        return os.path.realpath(self._expand(d)) if d else ""
 
     def tracks(self):
         base = self._base()
@@ -177,7 +197,7 @@ class Music:
 
     def browse(self, path):
         """List sub-folders of a path on the server, for the folder picker. Admin-only (the route is auth-gated)."""
-        start = os.path.realpath(os.path.expanduser(path)) if path else os.path.expanduser("~")
+        start = os.path.realpath(self._expand(path)) if path else self.home
         if not os.path.isdir(start):
             start = "/"
         try:
@@ -198,78 +218,114 @@ class Music:
                     audio_here += 1
         except OSError:
             pass
+        shortcuts = []
+        homes = [self.home]
+        try:
+            homes.extend(os.path.join("/home", n) for n in sorted(os.listdir("/home")))
+        except OSError:
+            pass
+        seen = set()
+        for home in homes:
+            for candidate in (os.path.join(home, "Music", "soundcloud"), os.path.join(home, "Music"), home):
+                candidate = os.path.realpath(candidate)
+                if candidate not in seen and os.path.isdir(candidate):
+                    seen.add(candidate)
+                    shortcuts.append(candidate)
+        for candidate in ("/srv", "/mnt", "/media"):
+            if os.path.isdir(candidate) and candidate not in seen:
+                seen.add(candidate)
+                shortcuts.append(candidate)
         return {"ok": True, "path": start, "parent": "" if start == "/" else os.path.dirname(start),
-                "dirs": names, "audio_here": audio_here,
-                "shortcuts": [p for p in [os.path.expanduser("~/Music/soundcloud"), os.path.expanduser("~/Music"),
-                                          os.path.expanduser("~"), "/srv", "/mnt", "/media"] if os.path.isdir(p)]}
+                "dirs": names, "audio_here": audio_here, "shortcuts": shortcuts}
 
-    # -- SoundCloud via the user's own sc-pick / yt-dlp -----------------------
+    # -- SoundCloud search and local likes via sc-pick ------------------------
 
     @staticmethod
-    def yt_dlp():
-        """Prefer the yt-dlp that sc-pick installed, then one on PATH."""
-        local = os.path.expanduser("~/.local/share/sc-pick/bin/yt-dlp")
-        if os.path.isfile(local) and os.access(local, os.X_OK):
-            return local
-        return shutil.which("yt-dlp")
+    def _valid_sc_url(url):
+        return bool(re.match(r"^https?://(www\.|m\.)?soundcloud\.com/[^\s]+$", str(url or "").strip(), re.I))
 
-    def sc_ready(self):
-        return bool(self.yt_dlp()) and bool(self._base() and os.path.isdir(self._base()))
+    def soundcloud_cli(self):
+        """Find the public-search CLI installed by sc-pick for the dashboard's terminal user."""
+        candidates = [os.path.join(self.home, ".local", "share", "sc-pick", "bin", "soundcloud"),
+                      shutil.which("soundcloud")]
+        for candidate in candidates:
+            if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        return ""
 
-    def soundcloud_download(self, url):
-        """Download a SoundCloud track or set into the music folder with yt-dlp (what sc-pick uses), skipping anything
-        already fetched (a yt-dlp archive, like sc-pick). The caller must have the right to download it."""
-        ytdlp = self.yt_dlp()
-        if not ytdlp:
-            return False, "yt-dlp isn't installed. Run sc-pick once on the server (it installs yt-dlp), then try again."
-        base = self._base()
-        if not base or not os.path.isdir(base):
-            return False, "Set a music folder first."
-        if not re.match(r"^https?://(www\.|m\.|on\.)?soundcloud\.com/", url.strip(), re.I):
-            return False, "Give a soundcloud.com track or set URL."
-        archive = os.path.join(base, ".sc-archive.txt")
-        out_tmpl = os.path.join(base, "%(uploader)s - %(title)s.%(ext)s")
-        if "/sets/" in url:
-            out_tmpl = os.path.join(base, "%(playlist_title)s", "%(uploader)s - %(title)s.%(ext)s")
-        cmd = [ytdlp, "-f", "bestaudio/best", "-x", "--audio-format", "mp3", "--no-overwrites",
-               "--download-archive", archive, "--no-progress", "-o", out_tmpl, url.strip()]
-        try:
-            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
-            out, _ = p.communicate(timeout=600)
-        except subprocess.TimeoutExpired:
-            p.kill()
-            return False, "The download took too long (over 10 minutes). Use sc-pick in the terminal for big playlists."
-        except OSError as e:
-            return False, "Couldn't start yt-dlp: %s" % e
-        tail = "\n".join((out or "").strip().splitlines()[-12:])
-        if p.returncode == 0:
-            return True, tail or "Done."
-        return False, tail or ("yt-dlp failed (exit %s)." % p.returncode)
-
-    def sc_setup(self):
-        """Set SoundCloud downloading up automatically: fetch the standalone yt-dlp binary if it isn't already there
-        (this is what sc-pick does on first run). Returns (ok, message)."""
+    def sc_search(self, query):
+        query = str(query or "").strip()[:200]
+        if len(query) < 2:
+            return False, "Enter at least two characters to search.", []
         if self.demo:
-            return True, "(demo) nothing installed."
-        if self.yt_dlp():
-            return True, "yt-dlp is already installed."
-        dest_dir = os.path.expanduser("~/.local/share/sc-pick/bin")
+            return True, "", [{"title": "Demo track", "artist": "Demo artist", "duration_ms": 185000,
+                                "url": "https://soundcloud.com/demo/demo-track"}]
+        cli = self.soundcloud_cli()
+        if not cli:
+            return False, "sc-pick's search helper is not installed on the server. Run sc-pick once from the server's Terminal page, then search again.", []
+        fields = "title,artist,duration_ms,url"
         try:
-            os.makedirs(dest_dir, exist_ok=True)
+            result = subprocess.run([cli, "search", query, "--kind", "tracks", "-n", "25", "-o", "tsv",
+                                     "--no-header", "--fields", fields], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, errors="replace", timeout=35, check=False)
+        except subprocess.TimeoutExpired:
+            return False, "SoundCloud search took too long. Try a shorter search.", []
         except OSError as e:
-            return False, "Couldn't create %s: %s" % (dest_dir, e)
-        dest = os.path.join(dest_dir, "yt-dlp")
+            return False, "Couldn't start sc-pick search: %s" % e, []
+        if result.returncode:
+            message = (result.stderr or result.stdout or "Search failed.").strip().splitlines()
+            return False, "\n".join(message[-5:])[:600], []
+        rows = []
+        for line in result.stdout.splitlines():
+            parts = line.split("\t", 3)
+            if len(parts) != 4:
+                continue
+            title, artist, duration, url = (p.strip() for p in parts)
+            if not self._valid_sc_url(url):
+                continue
+            try:
+                duration_ms = max(0, int(duration))
+            except ValueError:
+                duration_ms = 0
+            rows.append({"title": title[:300] or "Untitled", "artist": artist[:200] or "Unknown artist",
+                         "duration_ms": duration_ms, "url": url[:1000]})
+        return True, "", rows
+
+    def sc_likes(self):
+        rows = self.cfg().get("sc_likes")
+        if not isinstance(rows, list):
+            return []
+        return [row for row in rows[:500] if isinstance(row, dict) and self._valid_sc_url(row.get("url"))]
+
+    def sc_like(self, track, liked):
+        if not isinstance(track, dict) or not self._valid_sc_url(track.get("url")):
+            return False, "Choose a SoundCloud track from the search results.", []
         try:
-            urllib.request.urlretrieve("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp", dest)  # noqa: S310 fixed URL
-            os.chmod(dest, 0o755)
-        except (OSError, urllib.error.URLError) as e:
-            return False, "Couldn't download yt-dlp: %s" % e
-        return (True, "Installed yt-dlp — you can download from SoundCloud now.") if self.yt_dlp() else (False, "The download finished but yt-dlp still isn't runnable.")
+            duration_ms = int(track.get("duration_ms") or 0)
+        except (TypeError, ValueError):
+            duration_ms = 0
+        row = {"title": str(track.get("title") or "Untitled")[:300],
+               "artist": str(track.get("artist") or "Unknown artist")[:200],
+               "duration_ms": max(0, min(86_400_000, duration_ms)),
+               "url": str(track["url"])[:1000]}
+        with self.lock:
+            cfg = self.cfg()
+            saved = cfg.get("sc_likes")
+            if not isinstance(saved, list):
+                saved = []
+            current = [x for x in saved if isinstance(x, dict) and self._valid_sc_url(x.get("url"))]
+            current = [x for x in current if x.get("url") != row["url"]]
+            if liked:
+                current.insert(0, row)
+            cfg["sc_likes"] = current[:500]
+            self._save(cfg)
+        return True, "", current[:500]
 
 
 def register(ctx, args):
     demo = bool(getattr(args, "demo", False))
-    music = Music(getattr(args, "state_dir", "") or "/var/lib/nodeyard/dashboard", demo=demo)
+    music = Music(getattr(args, "state_dir", "") or "/var/lib/nodeyard/dashboard", demo=demo,
+                  terminal_user=getattr(args, "terminal_user", ""))
     ctx.music = music
 
     def _status(h, q):
@@ -280,12 +336,12 @@ def register(ctx, args):
                                     "enabled": bool(c.get("forward_enabled")),
                                     "source": c.get("forward_source", ""), "auto_source": music.default_source() if have_ff else "",
                                     "sources": music.sources(), "ffmpeg": have_ff},
-                        "sc": {"ready": music.sc_ready(), "yt_dlp": bool(music.yt_dlp())}})
+                        "sc": {"search_ready": demo or bool(music.soundcloud_cli()), "likes": music.sc_likes()}})
 
     def _config(h, body):
         c = music.cfg()
         if "dir" in body:
-            d = os.path.expanduser(str(body.get("dir") or "").strip())
+            d = music._expand(body.get("dir") or "")
             if d:
                 if not os.path.exists(d):
                     return h._json({"ok": False, "error": "That folder isn't on the server. The dashboard runs on the control node, not your Mac — use Browse to pick a folder that's actually there (e.g. ~/Music/soundcloud)."}, 400)
@@ -304,19 +360,18 @@ def register(ctx, args):
     def _browse(h, q):
         return h._json(music.browse(q.get("path", [""])[0]))
 
+    def _sc_search(h, q):
+        ok, error, tracks = music.sc_search(q.get("q", [""])[0])
+        return h._json({"ok": ok, "error": error, "tracks": tracks}, 200 if ok else 400)
+
+    def _sc_like(h, body):
+        liked = body.get("liked") is True
+        ok, error, likes = music.sc_like(body.get("track"), liked)
+        return h._json({"ok": ok, "error": error, "likes": likes}, 200 if ok else 400)
+
     def _test(h, body):
         ok, msg = music.test_forward()
         return h._json({"ok": ok, "message": msg, "source": music.default_source()})
-
-    def _sc(h, body):
-        if demo:
-            return h._json({"ok": True, "text": "(demo) would download from SoundCloud into the music folder."})
-        ok, msg = music.soundcloud_download(str(body.get("url") or ""))
-        return h._json({"ok": ok, "text": msg} if ok else {"ok": False, "error": msg}, 200 if ok else 400)
-
-    def _sc_setup(h, body):
-        ok, msg = music.sc_setup()
-        return h._json({"ok": ok, "message": msg} if ok else {"ok": False, "error": msg}, 200 if ok else 500)
 
     def _track(h, q):
         rel = (q.get("path", [""])[0])
@@ -360,9 +415,9 @@ def register(ctx, args):
             _live_slots.release()
 
     ctx.get_routes.update({"/api/music": _status, "/api/music/track": _track, "/api/audio/live": _live,
-                           "/api/music/browse": _browse})
+                           "/api/music/browse": _browse, "/api/music/search": _sc_search})
     ctx.post_routes.update({"/api/music/config": _config, "/api/audio/test": _test,
-                            "/api/music/sc": _sc, "/api/music/sc-setup": _sc_setup})
+                            "/api/music/like": _sc_like})
 
 
 def _stream_file(h, full, ctype):

@@ -35,13 +35,13 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   Range, and every served path is checked to be inside that folder. Live audio forwarding (opt-in) captures the host's
   own audio output with ffmpeg and streams it to the browser as live MP3 — pick the capture source; it shows why it's
   unavailable when the host has no ffmpeg or capture device.
-- **Music: a graphical folder picker** — Browse the server's folders (with an audio-file count per folder and quick
-  shortcuts like `~/Music/soundcloud`) instead of typing a path, and a clear error when a path isn't on the server (the
-  dashboard runs on the control node, not your Mac). **Audio forwarding now captures automatically** (the default
-  output's monitor, no manual pick), with a **Test capture** button that reports the real ffmpeg result and an optional
-  source selector. **SoundCloud via sc-pick:** paste a track/set URL and the server downloads it with yt-dlp (what
-  [sc-pick](https://github.com/Codemanhtmlpythoncss/sc-pick) uses, skipping already-fetched tracks) into the music
-  folder; a **Set it up automatically** button installs yt-dlp if missing. Only download tracks you have the right to.
+- **Music: a graphical folder picker** — Browse the server's folders (with an audio-file count and direct shortcuts to
+  `/home/*/Music/soundcloud`) instead of typing a path; `~` resolves against the dashboard's terminal user, even though
+  the service runs with `HOME=/tmp`. **Audio forwarding captures automatically** (the default output's monitor), with a
+  **Test capture** button and optional source selector. SoundCloud search now uses the public `soundcloud-cli` helper
+  installed by [sc-pick](https://github.com/Codemanhtmlpythoncss/sc-pick); Music-page likes stay in the dashboard and
+  do not touch a SoundCloud account. To download tracks on the Mac, use sc-pick, which now calls the local `sdownload`
+  command instead of invoking yt-dlp directly.
 - **APIs: one-click setups** — SearXNG / blank-search / blank-REST presets fill the fiddly fields so you only enter the
   base URL. The Mac app shows the **APIs** and **Music** pages too (Manage → AI → APIs, Manage → Media → Music).
 - **Register your own self-hosted APIs** (new **APIs** page in the dashboard). Add search engines (SearXNG, Whoogle,
