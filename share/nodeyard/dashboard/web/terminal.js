@@ -217,13 +217,28 @@
     }
     if (!t.dirty) return;
     t.dirty = false;
-    $("#tscreen").innerHTML = t.scr.map((r, y) => "<div>" + (rowHTML(r, y === t.y && t.cursorOn && s.alive ? t.x : -1) || " ") + "</div>").join("");
+    // only the rows that changed are redrawn: a keystroke changes one line, not the whole screen
+    const screen = $("#tscreen");
+    const rows = t.scr.map((r, y) => rowHTML(r, y === t.y && t.cursorOn && s.alive ? t.x : -1) || " ");
+    const last = screen._rows;
+    if (!last || screen._sess !== s || last.length !== rows.length || screen.childElementCount !== rows.length) {
+      screen.innerHTML = rows.map((h) => "<div>" + h + "</div>").join("");
+    } else {
+      const kids = screen.children;
+      for (let y = 0; y < rows.length; y++) if (rows[y] !== last[y]) kids[y].innerHTML = rows[y];
+    }
+    screen._rows = rows; screen._sess = s;
     $("#tback").style.display = t.alt ? "none" : "";
     // nothing has scrolled off yet: stay at the top (Chrome can report a little phantom overflow here)
     if (s.stick) { const box = $("#tbox"); box.scrollTop = t.back.length && !t.alt ? box.scrollHeight : 0; }
   }
-  let raf = 0;
-  const schedule = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; render(); }); setTimeout(() => { if (raf) { cancelAnimationFrame(raf); raf = 0; render(); } }, 60); };
+  let raf = 0, rafTimer = 0;
+  // one frame per burst of output (and one fallback timer for it, for when frames pause), not one per chunk
+  const schedule = () => {
+    if (raf) return;
+    raf = requestAnimationFrame(() => { raf = 0; clearTimeout(rafTimer); render(); });
+    rafTimer = setTimeout(() => { if (raf) { cancelAnimationFrame(raf); raf = 0; render(); } }, 60);
+  };
 
   function send(data, s) {
     s = s || T.sess; if (!s || !s.alive) return;

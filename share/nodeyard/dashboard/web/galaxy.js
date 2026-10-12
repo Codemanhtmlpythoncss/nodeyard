@@ -461,11 +461,13 @@
         ", network down " + speed(n.rx) + " up " + speed(n.tx) + (n.gpus[0] ? ", GPU " + (n.gpus[0].name || "") + " " + pct(n.gpus[0].use) : "") + ", " + n.pods + " pods" : ""));
     const bad = (d.pods || []).filter((p) => p.status !== "Running" && !/Succeeded|Completed/.test(p.status)).slice(0, 8).map((p) => p.namespace + "/" + p.name + " " + p.status + " on " + (p.node || "no node"));
     const alerts = ((S.res && S.res.alerts) || []).slice(0, 6).map((x) => x.level + ": " + x.title);
-    return "You are the AI helper on the AI galaxy display of the user's home Kubernetes (k3s) cluster, run with nodeyard. Answer in 1 to 4 short, plain sentences. Use the live state below; if the answer isn't in it, say so.\n" +
-      "Now: " + new Date().toLocaleString() + ". Cluster " + ((d.cluster && d.cluster.name) || "") + ".\nNodes:\n" + lines.join("\n") +
+    return "Now: " + new Date().toLocaleString() + ". Cluster " + ((d.cluster && d.cluster.name) || "") + ".\nNodes:\n" + lines.join("\n") +
       "\nModel: " + (sp ? (sp.alias || sp.model) + (sp.loaded === false ? " (unloaded)" : sp.ready ? " (ready)" : " (loading)") + " split over " + Array.from(new Set((sp.shares || []).map((s) => s.node))).join(", ") : "none") +
       (bad.length ? "\nPods not running: " + bad.join("; ") : "") + (alerts.length ? "\nAlerts: " + alerts.join("; ") : "");
   }
+  // The instructions never change, so the model keeps them read (its prompt cache); the live numbers go with each question.
+  const ASK_SYSTEM = "You are the AI helper on the AI galaxy display of the user's home Kubernetes (k3s) cluster, run with nodeyard. " +
+    "Answer in 1 to 4 short, plain sentences. Each question comes with the cluster's live state; use it, and if the answer isn't in it, say so.";
   async function pickTarget() {
     if (G.target) return G.target;
     try { const r = await getJSON("/api/ai/targets"); const ts = (r.targets || []).filter((t) => t.ready); const t = ts.find((x) => x.id === "split") || ts[0]; G.target = t ? t.id : ""; } catch (e) { G.target = ""; }
@@ -485,7 +487,9 @@
     const target = await pickTarget();
     A.q = q; A.text = ""; A.wait = "Thinking…"; A.busy = true; A.ctrl = new AbortController(); paintAnswer();
     if (!target) { A.busy = false; A.text = "No model is ready to answer. Start one in AI › Models."; paintAnswer(); return; }
-    const messages = [{ role: "system", content: brief() }].concat(A.history.slice(-4), [{ role: "user", content: q }]);
+    // history moves in steps of two exchanges (not one), so the start of the prompt stays the same between questions
+    const keep = A.history.length <= 6 ? A.history : A.history.slice(-4 - (A.history.length % 4));
+    const messages = [{ role: "system", content: ASK_SYSTEM }].concat(keep, [{ role: "user", content: "Live cluster state:\n" + brief() + "\n\nQuestion: " + q }]);
     try {
       const r = await fetch("/api/ai/chat", { method: "POST", signal: A.ctrl.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ target, messages, temperature: 0.3, max_tokens: 400 }) });
       if (!r.ok) { let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ } throw new Error(j.error || "The model didn't answer (HTTP " + r.status + ")."); }
@@ -503,7 +507,7 @@
           if (dl && dl.content) { A.text += dl.content.replace(/<\/?think>/g, ""); paintAnswer(); }
         }
       }
-      A.history.push({ role: "user", content: q }, { role: "assistant", content: A.text }); A.history = A.history.slice(-6);
+      A.history.push({ role: "user", content: q }, { role: "assistant", content: A.text }); if (A.history.length > 10) A.history = A.history.slice(-4);
     } catch (e) {
       if (e.name !== "AbortError") A.text = (A.text ? A.text + "\n\n" : "") + "⚠ " + (e.message || "Something went wrong.");
     } finally { A.busy = false; paintAnswer(); }

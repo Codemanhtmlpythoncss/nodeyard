@@ -771,11 +771,15 @@
     M.dj.busy = true; M.dj.error = "";
     const controller = new AbortController(); M.dj.controller = controller; saveDJ(); renderTab();
     try {
-      const catalog = await djCatalog();
+      // one catalogue per DJ session (30 min): the same system prompt every turn lets the model keep it read
+      const fresh = M.dj.catalog && Date.now() - M.dj.catalog.at < 30 * 60000;
+      const catalog = fresh ? M.dj.catalog.rows : await djCatalog();
+      if (!fresh) M.dj.catalog = { at: Date.now(), rows: catalog };
       if (!catalog.length) throw new Error("There are no songs for the DJ yet. Set a Music folder, like some SoundCloud songs, or listen to a few tracks first.");
       const catalogText = catalog.map((x) => x.info);
       const system = "You are Nodeyard DJ, a warm, confident, conversational music host. Sound like a natural radio presenter: short, personal, lightly playful, never overdo catchphrases. Use listening history and likes to personalize, but never claim you listened to audio or know lyrics unless given. Recommend only catalogue tracks. The user request may be a vibe, activity, artist/style preference, or follow-up. If you need one key detail, ask one concise question and return no tracks. Otherwise create a useful mix. IMPORTANT: for ordinary vibe/activity requests, use unliked tracks from the user's library and listening history first; likes are taste context, not the default source. Never make a mix only from liked tracks when unliked catalogue tracks are available. Include at least half unliked tracks where possible. Only focus on liked tracks when the user explicitly asks for their likes/favourites. Catalogue fields `liked`, `from_library`, and `in_listening_history` tell you which tracks are liked or unliked. Tracks with `new_to_you: true` are songs the user has never heard, picked for their taste (`why` says why): put about a quarter of them into ordinary mixes so the user discovers music, and lead with them (at least half) when the user asks for something new, fresh, different or to discover; skip them only when the user asks for songs they know. Reply with exactly one JSON object and no markdown: {\"speech\":\"spoken response, 1-3 short sentences\",\"playlist_name\":\"short name or empty string\",\"track_ids\":[\"t001\"]}. For a playlist, include 5-20 catalogue IDs in a deliberate order. If there are fewer suitable songs, use fewer. If this is only a greeting or clarifying question, playlist_name must be empty and track_ids must be []. Never invent IDs.\nCATALOGUE:\n" + JSON.stringify(catalogText);
-      const history = (M.dj.messages || []).slice(-8).filter((m) => !m.hidden);
+      const all = (M.dj.messages || []).filter((m) => !m.hidden);
+      const history = all.slice(all.length <= 12 ? 0 : all.length - 6 - ((all.length - 6) % 6));   // moves in steps, not every turn
       if (!hidden && history.length && history[history.length - 1].role === "user" && history[history.length - 1].content === userText) history.pop();
       const messages = [{ role: "system", content: system }].concat(history.map((m) => ({ role: m.role, content: m.content })), [{ role: "user", content: userText }]);
       const response = await fetch("/api/v1/chat/completions", { method: "POST", cache: "no-store", credentials: "same-origin",
@@ -839,7 +843,7 @@
   }
   function startDJ() {
     if (!M.dj.target) { toast("No ready AI model. Start one under AI → Models."); return; }
-    M.dj.active = true; M.dj.messages = []; M.dj.draft = null; M.dj.speak = M.dj.speak !== false; saveDJ(); renderTab();
+    M.dj.active = true; M.dj.messages = []; M.dj.draft = null; M.dj.catalog = null; M.dj.speak = M.dj.speak !== false; saveDJ(); renderTab();
     sendDJRequest("Start my DJ session. Welcome me in one short, warm line, then ask what vibe or activity I want. Do not make a playlist yet.", true);
   }
   function stopDJ() {

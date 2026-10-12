@@ -36,7 +36,7 @@
       if (!saved || typeof saved !== "object") return freshState();
       const widgets = Array.isArray(saved.widgets) ? [...new Set(saved.widgets.filter((x) => KNOWN.has(x)))] : initial.widgets.slice();
       if (!(saved.v >= 2)) ADDED_V2.forEach((id) => { if (!widgets.includes(id)) widgets.push(id); });
-      const chat = Array.isArray(saved.chat) ? saved.chat.filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string").slice(-30)
+      const chat = Array.isArray(saved.chat) ? saved.chat.filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string").slice(-60)
         .map((m) => (m.pending ? { role: m.role, content: m.content || "(Interrupted before an answer arrived.)", error: !m.content } : { role: m.role, content: m.content, error: !!m.error })) : [];
       return { ...structuredClone(initial), ...saved, v: 2, widgets: widgets.slice(0, CATALOG.length), chat,
         playerSource: typeof saved.playerSource === "string" ? saved.playerSource : "",
@@ -388,9 +388,13 @@
     if (!text) { if (box) box.focus(); return; }
     if (!D.chatTarget) { toast("No AI model is ready. Start one in AI › Models."); loadTargets(); return; }
     const reply = { role: "assistant", content: "", pending: true };
-    D.chat.push({ role: "user", content: text.slice(0, 4000) }, reply); D.chat = D.chat.slice(-30);
+    D.chat.push({ role: "user", content: text.slice(0, 4000) }, reply); if (D.chat.length > 60) D.chat = D.chat.slice(-30);   // (trimmed in one step, not one a turn)
     D.chatDraft = ""; if (box) box.value = ""; save();
-    const history = D.chat.filter((m) => m !== reply && !m.error && visibleText(m.content)).slice(-8).map((m) => ({ role: m.role, content: visibleText(m.content) }));
+    // The earliest messages sent change only every 8 messages (not every turn), so the model's prompt cache keeps the
+    // conversation it has already read and only reads the new question.
+    const usable = D.chat.filter((m) => m !== reply && !m.error && visibleText(m.content));
+    const from = usable.length <= 16 ? 0 : usable.length - 8 - ((usable.length - 8) % 8);
+    const history = usable.slice(from).map((m) => ({ role: m.role, content: visibleText(m.content) }));
     CH.busy = true; CH.ctrl = new AbortController(); CH.sid = Date.now().toString(36) + Math.random().toString(36).slice(2);
     CH.wait = "Sending…"; CH.started = Date.now(); CH.stick = true; paintChat();
     let finished = false, reason = "";

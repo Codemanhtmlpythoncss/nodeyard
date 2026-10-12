@@ -168,11 +168,15 @@ def relay_stream(h, conn, resp, why_cut):
     silent before the answer is finished (no [DONE], no finish_reason), the client gets an error event that says
     so, instead of a shortened answer that looks complete. Returns "done", "cut", "stopped" or "client-gone"."""
     finished = writing = False
+    carry = None
     while True:
-        try:
-            line = resp.readline()
-        except (OSError, http.client.HTTPException, ValueError):
-            line = b""
+        if carry is not None:
+            line, carry = carry, None
+        else:
+            try:
+                line = resp.readline()
+            except (OSError, http.client.HTTPException, ValueError):
+                line = b""
         if not line:
             break
         data = line.strip()
@@ -188,6 +192,16 @@ def relay_stream(h, conn, resp, why_cut):
                         sock.settimeout(STALL_SECONDS)
                 except (OSError, AttributeError):
                     pass
+            # an event is "data: ..." and a blank line, sent together by the model: pass them on in one write,
+            # so each token is one packet instead of two
+            try:
+                nxt = resp.readline()
+            except (OSError, http.client.HTTPException, ValueError):
+                nxt = b""
+            if nxt and not nxt.strip():
+                line += nxt
+            else:
+                carry = nxt          # (b"" ends the loop next time round)
         try:
             h.wfile.write(line)
             h.wfile.flush()
@@ -910,12 +924,19 @@ class Live:
                         "ready": bool(sp.get("ready"))})
         pods = [p for p in st["pods"] if p["namespace"] == OLLAMA_NS and p["name"].startswith("ollama") and p["status"] == "Running" and p["ip"]]
         # Ask every Ollama at once: one that doesn't answer must not hold up the whole list (each waits up to 4 s).
-        asked = {p["name"]: self.ollama_pool.submit(self._ollama_models, p) for p in pods}
+        # A list from the last 5 s is reused: the Desk, Music DJ, Galaxy and AI pages each ask when they open.
+        cache, now = self.__dict__.setdefault("_ollama_lists", {}), time.time()
+        asked = {p["name"]: self.ollama_pool.submit(self._ollama_models, p) for p in pods
+                 if not (cache.get((p["name"], p["ip"])) and now - cache[(p["name"], p["ip"])][0] < 5)}
         for p in pods:
-            try:
-                found = asked[p["name"]].result(timeout=8)
-            except Exception:  # noqa: BLE001 -- a slow pod just shows no models this time
-                found = []
+            if p["name"] not in asked:
+                found = cache[(p["name"], p["ip"])][1]
+            else:
+                try:
+                    found = asked[p["name"]].result(timeout=8)
+                    cache[(p["name"], p["ip"])] = (time.time(), found)
+                except Exception:  # noqa: BLE001 -- a slow pod just shows no models this time
+                    found = []
             for m in found:
                 out.append({"id": "ollama:%s:%s" % (p["name"], m["name"]), "kind": "ollama", "name": m["name"], "model": m["name"],
                             "detail": "Ollama on %s" % (p["node"] or p["name"]), "ready": True, "size": m["size"]})
@@ -1374,6 +1395,9 @@ def register(ctx, args):
                 payload = dict({"messages": clean, "temperature": temp}, **({"max_tokens": max_tokens} if max_tokens else {}))
                 if target == "split":
                     payload["return_progress"] = True   # llama.cpp says how far it has read the prompt (the page shows it)
+                    # reuse the KV cache for the part of the prompt it has already read (the system prompt and earlier
+                    # turns): on this cluster reading is ~15-19 tokens/s, so a repeated prefix is minutes saved
+                    payload["cache_prompt"] = True
                 conn, resp = backend.open_chat(target, payload, on_conn=on_conn)
             except AIError as e:
                 return fail(h, e)

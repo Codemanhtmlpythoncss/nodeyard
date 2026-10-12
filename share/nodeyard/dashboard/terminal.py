@@ -594,13 +594,19 @@ class Terminals:
         handler.close_connection = True
         try:
             handler.wfile.write(b"retry: 1000\n\n")
+            last_sent = 0.0
             while True:
                 with s.cond:
                     s.cond.wait_for(lambda: s.base + len(s.buf) > offset or not s.alive, timeout=15)
+                    # a flood of output (the last event went out moments ago): gather a few ms more into one event
+                    # instead of hundreds of tiny ones; a typed character's echo is never held up by this
+                    if time.monotonic() - last_sent < 0.012 and s.alive:
+                        s.cond.wait_for(lambda: s.base + len(s.buf) - offset > 32768 or not s.alive, timeout=0.005)
                 data, offset, alive = s.read_from(offset)
                 if data:
                     msg = json.dumps({"d": base64.b64encode(data).decode(), "o": offset})
                     handler.wfile.write(("event: out\ndata: %s\n\n" % msg).encode())
+                    last_sent = time.monotonic()
                 elif alive:
                     handler.wfile.write(b": ping\n\n")
                 if not alive and not data:
