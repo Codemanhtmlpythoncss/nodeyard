@@ -22,7 +22,7 @@
   }
 
   const M = {
-    data: null, tab: "search",
+    data: null, tab: "home", homeHistory: [], homeRecs: [],
     queue: [], idx: -1, live: false, seekable: true, shuffle: false, shuffleOrder: null, shufflePos: 0, repeat: "off", rate: 1,
     scResults: [], scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
     dj: readDJState(),
@@ -619,7 +619,7 @@
     const d = M.data || {};
     M.scLikes = Array.isArray((d.sc || {}).likes) ? d.sc.likes : [];
     M.playlists = Array.isArray(d.playlists) ? d.playlists : [];
-    const tabs = [["search", "Search"], ["dj", "DJ"], ["playlists", "Playlists"], ["likes", "Likes"], ["library", "Library"], ["settings", "Settings"]];
+    const tabs = [["home", "Home"], ["search", "Search"], ["dj", "DJ"], ["playlists", "Playlists"], ["likes", "Likes"], ["library", "Library"], ["settings", "Settings"]];
     NY.freshHTML(el, html`
       <div class="row" style="align-items:center;gap:10px;margin-bottom:6px">
         <div style="font-size:22px;font-weight:800;letter-spacing:.3px">nodecloud <span style="color:var(--sc,#ff5500)">♪</span></div>
@@ -635,12 +635,47 @@
   function renderTab() {
     if (S.view !== "music") return;
     const el = $("#sc-tab"); if (!el || !M.data) return;
-    if (M.tab === "search") renderSearch(el);
+    if (M.tab === "home") renderHome(el);
+    else if (M.tab === "search") renderSearch(el);
     else if (M.tab === "dj") renderDJ(el);
     else if (M.tab === "playlists") renderPlaylists(el);
     else if (M.tab === "likes") renderLikes(el);
     else if (M.tab === "library") renderLibrary(el);
     else if (M.tab === "settings") renderSettings(el);
+  }
+
+  function homeRecommendations() {
+    const tracks = new Map();
+    function add(track, source) {
+      const key = trackKey(track); if (!key) return;
+      let item = tracks.get(key);
+      if (!item) { item = { track: { ...track, kind: track.url ? "sc" : "local" }, sources: new Set(), plays: 0, last: 0, completed: false }; tracks.set(key, item); }
+      item.sources.add(source);
+      if (source === "history") { item.plays++; item.last = Math.max(item.last, +track.played_at || 0); item.completed = item.completed || !!track.completed; }
+    }
+    M.scLikes.forEach((t) => add(t, "liked"));
+    (M.homeHistory || []).forEach((t) => add(t, "history"));
+    (((M.data || {}).tracks) || []).forEach((t) => add(t, "library"));
+    const day = Math.floor(Date.now() / 86400000);
+    function stable(key) { let h = 2166136261; for (const c of key + day) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967295; }
+    return Array.from(tracks.entries()).map(([key, item]) => {
+      const ageDays = item.last ? Math.max(0, (Date.now() / 1000 - item.last) / 86400) : 30;
+      const score = (item.sources.has("liked") ? 8 : 0) + Math.min(item.plays, 5) * 1.5 + (item.completed ? 1 : 0) +
+        (item.sources.has("library") && !item.sources.has("history") ? 3 : 0) + Math.max(0, 5 - Math.log2(ageDays + 1)) + stable(key);
+      return { track: item.track, score };
+    }).sort((a, b) => b.score - a.score).slice(0, 18).map((x) => x.track);
+  }
+
+  function renderHome(el) {
+    M.homeRecs = homeRecommendations();
+    const tracks = M.homeRecs;
+    setHTML(el, html`<div class="card">
+      <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h2 style="margin:0">Made for you</h2>
+        <div class="muted small mt">Ranked by a local algorithm using your library, likes and listening history. No AI.</div></div>
+        ${tracks.length ? raw('<button class="btn primary" data-music="home-play">▶ Play recommendations</button>') : ""}</div>
+      <div class="mt">${tracks.length ? tracks.map((t) => trackRow(t, "rec:" + trackKey(t), t.url ? likeBtn(t) : ""))
+        : html`<div class="empty">Add songs to your library, like a few tracks, or listen to music to build your recommendations.</div>`}</div>
+    </div>`);
   }
 
   function renderSearch(el) {
@@ -820,7 +855,10 @@
     const r = await postJSON("/api/music/config", { dir }); if (r.ok) { await load(); renderPage(); toast("Saved."); } else toast(r.error || "Not saved.");
   }
 
-  async function load() { try { const r = await getJSON("/api/music"); if (r.ok) M.data = r; } catch (e) { /* signed out */ } }
+  async function load() {
+    try { const r = await getJSON("/api/music"); if (r.ok) M.data = r; } catch (e) { /* signed out */ }
+    try { const r = await getJSON("/api/music/ai?action=history&offset=0&limit=50"); M.homeHistory = r.ok && Array.isArray(r.tracks) ? r.tracks : []; } catch (e) { M.homeHistory = []; }
+  }
 
   async function searchSc() {
     const input = $('[data-music="sc-query"]');
@@ -893,9 +931,14 @@
     const pb = e.target.closest && e.target.closest("[data-play]");
     if (pb) { startPlay(pb.dataset.play); return; }
     const t = e.target.closest && e.target.closest("[data-music], [data-tab]"); if (!t) return;
-    if (t.dataset.tab) { M.tab = t.dataset.tab; M.openPl = null; renderPage(); return; }
+    if (t.dataset.tab) {
+      M.tab = t.dataset.tab; M.openPl = null; renderPage();
+      if (M.tab === "home") getJSON("/api/music/ai?action=history&offset=0&limit=50").then((r) => { if (r.ok) { M.homeHistory = Array.isArray(r.tracks) ? r.tracks : []; renderTab(); } }).catch(() => {});
+      return;
+    }
     const act = t.dataset.music;
     if (act === "listen") playLive();
+    else if (act === "home-play") { if (M.homeRecs.length) playQueue(M.homeRecs, 0); }
     else if (act === "dj-start") startDJ();
     else if (act === "dj-stop") stopDJ();
     else if (act === "dj-send") {
@@ -978,6 +1021,7 @@
     else if (kind === "pl") { if (M.openPl) playQueue(M.openPl.tracks, +rest); }
     else if (kind === "dj") { if (M.dj.draft) playQueue(M.dj.draft.tracks, +rest); }
     else if (kind === "lib") { const lib = filteredLib(); const i = lib.findIndex((x) => trackKey(x) === rest); if (i >= 0) playQueue(lib, i); }
+    else if (kind === "rec") { const i = M.homeRecs.findIndex((x) => trackKey(x) === rest); if (i >= 0) playQueue(M.homeRecs, i); }
   }
   async function toggleLike(url) {
     const track = findTrack(url); if (!track) return;
