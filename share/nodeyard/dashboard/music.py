@@ -12,6 +12,7 @@ Config at <state_dir>/music.json: {"dir": "...", "forward_enabled": bool, "forwa
 The folder is the only place tracks are served from — every streamed path is resolved and checked to be inside it, so
 the folder picker can't be turned into a way to read the rest of the disk.
 """
+import collections
 import glob
 import json
 import os
@@ -20,6 +21,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -29,6 +31,30 @@ AUDIO_EXT = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".ogg": "audio/ogg", "
 MAX_TRACKS = 3000
 _live_slots = threading.BoundedSemaphore(2)
 _sc_slots = threading.BoundedSemaphore(3)
+
+# In-RAM cache of fetched SoundCloud audio (url -> (bytes, content_type)), so a played track loads once, plays
+# seekably, and replays instantly. Nothing is written to the music folder unless the user explicitly downloads.
+_SC_CACHE_MAX = 200 * 1024 * 1024
+_sc_cache = collections.OrderedDict()
+_sc_cache_lock = threading.Lock()
+
+
+def _sc_cache_get(url):
+    with _sc_cache_lock:
+        if url in _sc_cache:
+            _sc_cache.move_to_end(url)
+            return _sc_cache[url]
+    return None
+
+
+def _sc_cache_put(url, data, ctype):
+    with _sc_cache_lock:
+        _sc_cache[url] = (data, ctype)
+        _sc_cache.move_to_end(url)
+        total = sum(len(v[0]) for v in _sc_cache.values())
+        while total > _SC_CACHE_MAX and len(_sc_cache) > 1:
+            _, (old, _c) = _sc_cache.popitem(last=False)
+            total -= len(old)
 
 # Best-effort one-click to give a headless control node an audio stack, so live forwarding has something to capture:
 # install PulseAudio, run it in system mode with a null sink (default) whose .monitor the dashboard can capture, and
@@ -282,7 +308,7 @@ class Music:
 
     @staticmethod
     def _valid_sc_url(url):
-        return bool(re.match(r"^https?://(www\.|m\.)?soundcloud\.com/[^\s]+$", str(url or "").strip(), re.I))
+        return bool(re.match(r"^https?://(www\.|m\.|on\.|api\.)?soundcloud\.com/[^\s]+$", str(url or "").strip(), re.I))
 
     def _tool(self, name):
         """Find a helper sc-pick installed, wherever it was run from. The dashboard runs as a different user (often
@@ -380,20 +406,92 @@ class Music:
         return self._tool("yt-dlp")
 
     def stream_ready(self):
-        return self.demo or bool(self.yt_dlp() and self.ffmpeg())
+        return self.demo or bool(self.yt_dlp())
 
-    def sc_stream_url(self, url):
-        """The direct audio URL for a SoundCloud track (yt-dlp -g). ffmpeg then transcodes it to MP3 for the browser."""
+    def sc_fetch(self, url):
+        """Download a SoundCloud track's audio into memory (transcoding to MP3 only when the source format isn't
+        browser-playable), caching it so playback is seekable, pause/resume works, and replays are instant. Returns
+        (bytes, content_type) or (None, error). Never writes to the music folder — that's only the explicit download."""
+        if not self._valid_sc_url(url):
+            return None, "not a SoundCloud URL"
+        hit = _sc_cache_get(url)
+        if hit:
+            return hit[0], hit[1]
         yt = self.yt_dlp()
-        if not yt or not self._valid_sc_url(url):
-            return None
+        if not yt:
+            return None, "yt-dlp isn't installed"
+        tmpdir = tempfile.mkdtemp(prefix="nysc.")
         try:
-            r = subprocess.run([yt, "-q", "--no-warnings", "-f", "bestaudio/best", "-g", url],
-                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
-        except (OSError, subprocess.SubprocessError):
-            return None
-        lines = [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
-        return lines[0].strip() if lines else None
+            tmpl = os.path.join(tmpdir, "a.%(ext)s")
+            try:
+                r = subprocess.run([yt, "-q", "--no-warnings", "--no-playlist", "-f", "bestaudio/best", "-o", tmpl, url],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", timeout=180)
+            except subprocess.TimeoutExpired:
+                return None, "the download timed out"
+            except OSError as e:
+                return None, "couldn't run yt-dlp: %s" % e
+            files = [f for f in os.listdir(tmpdir) if os.path.isfile(os.path.join(tmpdir, f))]
+            if r.returncode or not files:
+                err = r.stderr or ""
+                if "DRM" in err:
+                    return None, "it's DRM-protected (SoundCloud Go+), so it can't be played"
+                last = err.strip().splitlines()[-1:] or ["it may be private or geo-blocked"]
+                return None, last[0].replace("ERROR:", "").strip()[:200]
+            path = os.path.join(tmpdir, files[0])
+            ext = os.path.splitext(path)[1].lower()
+            direct = {".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".mp4": "audio/mp4", ".aac": "audio/aac",
+                      ".ogg": "audio/ogg", ".opus": "audio/ogg", ".wav": "audio/wav"}
+            if ext in direct:
+                with open(path, "rb") as f:
+                    data = f.read()
+                ctype = direct[ext]
+            elif self.ffmpeg():
+                try:
+                    p = subprocess.run([self.ffmpeg(), "-hide_banner", "-loglevel", "error", "-i", path, "-c:a",
+                                        "libmp3lame", "-b:a", "192k", "-f", "mp3", "pipe:1"], stdout=subprocess.PIPE,
+                                       stderr=subprocess.DEVNULL, timeout=180)
+                    data, ctype = p.stdout, "audio/mpeg"
+                except (OSError, subprocess.SubprocessError):
+                    return None, "couldn't transcode the audio"
+            else:
+                with open(path, "rb") as f:
+                    data = f.read()
+                ctype = "application/octet-stream"
+            if not data:
+                return None, "the track came back empty"
+            _sc_cache_put(url, data, ctype)
+            return data, ctype
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def sc_download(self, url):
+        """The explicit 'download' action: save a SoundCloud track into the music folder (disk), mirroring sdownload
+        (best audio, metadata + artwork embedded, 'Artist - Title [id]' naming, archive-deduped)."""
+        if not self._valid_sc_url(url):
+            return False, "Not a SoundCloud URL."
+        yt = self.yt_dlp()
+        if not yt:
+            return False, "yt-dlp isn't installed (Settings → Update everything)."
+        base = self._base()
+        if not base or not os.path.isdir(base):
+            return False, "Set a music folder first (in Settings)."
+        archive = os.path.join(base, ".sc-archive.txt")
+        out = os.path.join(base, "%(uploader|Unknown Artist)s - %(title).200B [%(id)s].%(ext)s")
+        cmd = [yt, "-q", "--no-warnings", "--no-playlist", "-f", "bestaudio/best", "--no-overwrites",
+               "--embed-metadata", "--download-archive", archive, "-o", out]
+        if self.ffmpeg():
+            cmd += ["--write-thumbnail", "--embed-thumbnail"]
+        cmd.append(url)
+        try:
+            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", timeout=300)
+        except subprocess.TimeoutExpired:
+            return False, "The download took too long."
+        except OSError as e:
+            return False, "Couldn't run yt-dlp: %s" % e
+        tail = "\n".join((p.stdout or "").strip().splitlines()[-6:])
+        if p.returncode == 0:
+            return True, tail or "Saved to the music folder."
+        return False, tail or "Download failed."
 
     def sc_playlist(self, url):
         """List the tracks of a SoundCloud playlist/set (or a user's tracks), so they can be played or saved."""
@@ -597,41 +695,24 @@ def register(ctx, args):
         url = q.get("url", [""])[0]
         if not music._valid_sc_url(url):
             return h._send(404, "Not found", "text/plain; charset=utf-8")
-        yt, ff = music.yt_dlp(), music.ffmpeg()
-        if demo or not yt or not ff:
-            return h._send(503, "SoundCloud streaming needs yt-dlp and ffmpeg on the server (Settings → Update everything).",
+        if demo or not music.yt_dlp():
+            return h._send(503, "SoundCloud playback needs yt-dlp on the server (Settings → Update everything).",
                            "text/plain; charset=utf-8")
         if not _sc_slots.acquire(blocking=False):
-            return h._send(429, "Too many streams at once. Try again in a moment.", "text/plain; charset=utf-8")
-        proc = None
+            return h._send(429, "Too many at once. Try again in a moment.", "text/plain; charset=utf-8")
         try:
-            media = music.sc_stream_url(url)
-            if not media:
-                return h._send(502, "Couldn't play that track (it may be private or download-only).", "text/plain; charset=utf-8")
-            proc = subprocess.Popen([ff, "-hide_banner", "-loglevel", "error", "-i", media, "-vn", "-b:a", "192k",
-                                     "-f", "mp3", "pipe:1"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            h.send_response(200)
-            h.send_header("Content-Type", "audio/mpeg")
-            h.send_header("Cache-Control", "no-store")
-            h.send_header("Connection", "close")
-            h.end_headers()
-            if h.command == "HEAD":
-                return
-            while True:
-                chunk = proc.stdout.read(16384)
-                if not chunk:
-                    break
-                h.wfile.write(chunk)
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
+            data, info = music.sc_fetch(url)      # buffered into RAM, cached, so it's seekable and resumes correctly
+            if data is None:
+                return h._send(502, "Couldn't load that track (%s)." % info, "text/plain; charset=utf-8")
+            _stream_bytes(h, data, info)
         finally:
-            if proc is not None:
-                proc.kill()
-                try:
-                    proc.wait(timeout=2)
-                except subprocess.SubprocessError:
-                    pass
             _sc_slots.release()
+
+    def _sc_download(h, body):
+        if demo:
+            return h._json({"ok": True, "text": "(demo) would save the track to the music folder."})
+        ok, msg = music.sc_download(str(body.get("url") or ""))
+        return h._json({"ok": ok, "text": msg} if ok else {"ok": False, "error": msg}, 200 if ok else 400)
 
     def _track(h, q):
         rel = (q.get("path", [""])[0])
@@ -679,8 +760,47 @@ def register(ctx, args):
                            "/api/music/sc-stream": _sc_stream, "/api/music/sc-playlist": _sc_playlist,
                            "/api/music/playlists": _playlists})
     ctx.post_routes.update({"/api/music/config": _config, "/api/audio/test": _test,
-                            "/api/audio/setup-server": _setup_audio,
+                            "/api/audio/setup-server": _setup_audio, "/api/music/sc-download": _sc_download,
                             "/api/music/like": _sc_like, "/api/music/playlist": _playlist})
+
+
+def _stream_bytes(h, data, ctype):
+    """Serve an in-memory audio blob with HTTP Range support, so the browser can seek and pause/resume works."""
+    size = len(data)
+    start, end, status = 0, size - 1, 200
+    rng = h.headers.get("Range", "")
+    if rng.startswith("bytes="):
+        try:
+            s, _, e = rng[6:].partition("-")
+            if s:
+                start = int(s)
+            if e:
+                end = int(e)
+            if start > end or start >= size:
+                h.send_response(416)
+                h.send_header("Content-Range", "bytes */%d" % size)
+                h.end_headers()
+                return
+            end = min(end, size - 1)
+            status = 206
+        except ValueError:
+            start, end, status = 0, size - 1, 200
+    length = end - start + 1
+    h.send_response(status)
+    h.send_header("Content-Type", ctype)
+    h.send_header("Accept-Ranges", "bytes")
+    h.send_header("Content-Length", str(length))
+    if status == 206:
+        h.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+    h.send_header("Cache-Control", "no-store")
+    h.send_header("X-Content-Type-Options", "nosniff")
+    h.end_headers()
+    if h.command == "HEAD":
+        return
+    try:
+        h.wfile.write(data[start:end + 1])
+    except (BrokenPipeError, ConnectionResetError):
+        pass
 
 
 def _stream_file(h, full, ctype):

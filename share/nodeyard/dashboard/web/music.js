@@ -46,6 +46,7 @@
       ".sc-row .meta div{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" +
       ".sc-pbtn{flex:none;width:38px;height:38px;border-radius:50%;background:var(--sc,#ff5500);color:#fff;border:0;cursor:pointer;font-size:15px}" +
       ".sc-pbtn.ghost{background:rgba(125,160,200,.16);color:var(--ink,#eaf1ff)}" +
+      ".ny-viz-top{display:block;width:100%;height:56px;margin:2px 0 14px;border-radius:12px;background:linear-gradient(180deg,rgba(255,85,0,.05),rgba(125,160,200,.06))}" +
       "@media (max-width:760px){#ny-player{bottom:56px}#ny-player .np{max-width:100px}#ny-player canvas{display:none}}";
     document.head.appendChild(style);
     // SoundCloud-ish accent available as --sc (falls back to orange).
@@ -72,8 +73,9 @@
     audio.addEventListener("durationchange", tick);
     audio.addEventListener("ended", onEnded);
     audio.addEventListener("play", () => { startViz(); paintBtn(); });
+    audio.addEventListener("playing", () => { const t = M.queue[M.idx]; if (t && !M.live) $("#ny-np-sub").textContent = subOf(t); });
     audio.addEventListener("pause", paintBtn);
-    audio.addEventListener("error", () => { if (!M.live) toast("Couldn't play that track."); });
+    audio.addEventListener("error", onAudioError);
     $("#ny-play").onclick = () => { if (audio.paused) audio.play(); else audio.pause(); };
     $("#ny-prev").onclick = () => { if (!M.live) play(M.idx - 1); };
     $("#ny-next").onclick = () => { if (!M.live) next(); };
@@ -91,33 +93,48 @@
         actx = new (window.AudioContext || window.webkitAudioContext)();
         vizSource = actx.createMediaElementSource(audio);
         analyser = actx.createAnalyser();
-        analyser.fftSize = 128;
-        analyser.smoothingTimeConstant = 0.78;
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.8;
         vizSource.connect(analyser);
         analyser.connect(actx.destination);
         vizData = new Uint8Array(analyser.frequencyBinCount);
+        // A routed element goes silent if the context suspends (tab switch, heavy WebGL like the 3D galaxy, browser
+        // throttling), which stopped the music when moving around the dashboard. Resume whenever that happens.
+        const keep = () => { if (actx.state === "suspended" && audio && !audio.paused) actx.resume().catch(() => {}); };
+        actx.addEventListener("statechange", keep);
+        document.addEventListener("visibilitychange", keep);
+        window.addEventListener("focus", keep);
+        setInterval(keep, 4000);
       }
       if (actx.state === "suspended") actx.resume();
-      if (!vizRAF) drawViz();
+      if (!vizRAF && !audio.paused) drawViz();
     } catch (e) { /* Web Audio unavailable — fine, sound still plays */ }
   }
-  function drawViz() {
-    vizRAF = requestAnimationFrame(drawViz);
-    const cv = $("#ny-viz"); if (!cv || !analyser) return;
+  function drawBars(cv, bars) {
     const ctx = cv.getContext("2d"); const w = cv.width, h = cv.height;
     ctx.clearRect(0, 0, w, h);
-    if (audio.paused) { cancelAnimationFrame(vizRAF); vizRAF = 0; return; }
-    analyser.getByteFrequencyData(vizData);
-    const bars = 28, step = Math.floor(vizData.length / bars) || 1, bw = w / bars;
+    const step = Math.floor(vizData.length / bars) || 1, bw = w / bars;
     const col = (getComputedStyle(document.documentElement).getPropertyValue("--sc") || "#ff5500").trim();
     for (let i = 0; i < bars; i++) {
       let v = 0; for (let j = 0; j < step; j++) v += vizData[i * step + j] || 0; v /= step;
       const bh = Math.max(2, (v / 255) * h);
       ctx.fillStyle = col;
-      ctx.globalAlpha = 0.35 + 0.65 * (v / 255);
-      ctx.fillRect(i * bw + 1, h - bh, bw - 2, bh);
+      ctx.globalAlpha = 0.3 + 0.7 * (v / 255);
+      ctx.fillRect(i * bw + 1, h - bh, Math.max(1, bw - 2), bh);
     }
     ctx.globalAlpha = 1;
+  }
+  function drawViz() {
+    vizRAF = requestAnimationFrame(drawViz);
+    if (!analyser) return;
+    const small = document.getElementById("ny-viz"), top = document.getElementById("sc-viz-top");
+    if (audio.paused) {
+      [small, top].forEach((cv) => { if (cv) cv.getContext("2d").clearRect(0, 0, cv.width, cv.height); });
+      cancelAnimationFrame(vizRAF); vizRAF = 0; return;
+    }
+    analyser.getByteFrequencyData(vizData);
+    if (small) drawBars(small, 28);
+    if (top) drawBars(top, 56);
   }
 
   const fmtTime = (s) => (isFinite(s) && s >= 0 ? Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0") : "0:00");
@@ -155,14 +172,26 @@
     if (i < 0 || i >= M.queue.length) return;
     M.idx = i; M.live = false;
     const t = M.queue[i];
-    M.seekable = !(t.kind === "sc" || t.url);     // SoundCloud streams aren't seekable
+    const sc = (t.kind === "sc" || t.url);
+    M.seekable = true;     // the server buffers both local files and SoundCloud, so seeking & resume work
     audio.src = srcFor(t);
     audio.play().catch(() => {});
     $("#ny-np-title").textContent = titleOf(t);
-    $("#ny-np-sub").textContent = subOf(t);
+    $("#ny-np-sub").textContent = sc ? subOf(t) + " · loading…" : subOf(t);
     $("#ny-live-pill").hidden = true;
     bar.classList.add("on");
     paintBtn();
+  }
+  async function onAudioError() {
+    if (M.live) return;
+    const t = M.queue[M.idx]; if (!t) return;
+    if (t.kind === "sc" || t.url) {      // get the server's reason (DRM-protected, private, …)
+      try {
+        const r = await fetch(srcFor(t), { headers: { Range: "bytes=0-1" } });
+        if (!r.ok) { toast((await r.text()) || "Couldn't play that track."); return; }
+      } catch (e) { /* fall through */ }
+    }
+    toast("Couldn't play that track.");
   }
   function onEnded() {
     if (M.live) return;
@@ -217,9 +246,11 @@
         <div style="font-size:22px;font-weight:800;letter-spacing:.3px">nodecloud <span style="color:var(--sc,#ff5500)">♪</span></div>
         <div class="faint small">your own SoundCloud, served by the cluster</div>
       </div>
+      <canvas id="sc-viz-top" class="ny-viz-top" width="1000" height="56" aria-hidden="true"></canvas>
       <div class="sc-tabs">${raw(tabs.map(([k, n]) => '<button data-tab="' + k + '" class="' + (M.tab === k ? "on" : "") + '">' + n + "</button>").join(""))}</div>
       <div id="sc-tab"></div>`);
     renderTab();
+    if (audio && !audio.paused) startViz();     // paint the top-bar visualizer if something's already playing
   }
 
   function renderTab() {
@@ -262,7 +293,7 @@
   function likeBtn(t) {
     const liked = M.scLikes.some((x) => x.url === t.url);
     return html`<button class="btn small" data-music="sc-like" data-key="${t.url}" title="${liked ? "Unlike" : "Like"}">${liked ? "♥" : "♡"}</button>
-      <a class="btn small" href="${t.url}" target="_blank" rel="noopener noreferrer" title="Open on SoundCloud">↗</a>`;
+      <button class="btn small" data-music="sc-dl" data-key="${t.url}" title="Download to the music folder">⬇</button>`;
   }
 
   function renderPlaylists(el) {
@@ -440,6 +471,11 @@
     else if (act === "likes-play") playQueue(M.scLikes, 0);
     else if (act === "lib-play") playQueue(filteredLib(), 0);
     else if (act === "sc-like") await toggleLike(t.dataset.key);
+    else if (act === "sc-dl") {
+      toast("Downloading to the music folder…");
+      const r = await postJSON("/api/music/sc-download", { url: t.dataset.key });
+      toast(r.ok ? "Saved to the music folder." : (r.error || "Download failed."));
+    }
     else if (act === "add") { const tr = findTrack(t.dataset.key); if (tr) openAddPicker(tr); }
     else if (act === "pk-cancel") closeAddPicker();
     else if (act === "pk-add") { await addToPlaylist(t.dataset.id, M.addTrack); closeAddPicker(); renderTab(); }
@@ -496,7 +532,9 @@
     const liked = !M.scLikes.some((x) => x.url === url);
     const r = await postJSON("/api/music/like", { track, liked });
     if (!r.ok) { toast(r.error || "Couldn't save that like."); return; }
-    M.scLikes = Array.isArray(r.likes) ? r.likes : []; renderTab();
+    M.scLikes = Array.isArray(r.likes) ? r.likes : [];
+    if (M.data && M.data.sc) M.data.sc.likes = M.scLikes;   // keep it through a renderPage() (tab switch)
+    renderTab();
   }
   async function openPlaylist(id) {
     const r = await getJSON("/api/music/playlists?id=" + encodeURIComponent(id));
