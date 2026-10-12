@@ -84,7 +84,7 @@
       ".sc-pbtn{flex:none;width:38px;height:38px;border-radius:50%;background:var(--sc,#ff5500);color:#fff;border:0;cursor:pointer;font-size:15px}" +
       ".sc-pbtn.ghost{background:rgba(125,160,200,.16);color:var(--ink,#eaf1ff)}" +
       ".ny-viz-top{display:block;width:100%;height:56px;margin:2px 0 14px;border-radius:12px;background:linear-gradient(180deg,rgba(255,85,0,.05),rgba(125,160,200,.06))}" +
-      "@media (max-width:760px){#ny-player{bottom:56px}#ny-player .np{max-width:100px}#ny-player canvas{display:none}.sc-discover-card{height:min(70dvh,720px);min-height:400px}.sc-discover-cover{top:10%;width:min(68%,300px)}.sc-discover-meta{left:18px;bottom:62px}.sc-discover-actions{right:12px;bottom:118px}}";
+      "@media (max-width:760px){#ny-player{bottom:56px;gap:3px;padding-left:10px;padding-right:10px}body.desk-mode #ny-player{bottom:0}#ny-player .np{max-width:88px}#ny-player canvas,#ny-player label,#ny-player #ny-copy,#ny-player #ny-repeat-state,#ny-player #ny-vol,#ny-player #ny-vol-i,#ny-player .t{display:none}#ny-player .seek{min-width:40px}.sc-discover-card{height:min(70dvh,720px);min-height:400px}.sc-discover-cover{top:10%;width:min(68%,300px)}.sc-discover-meta{left:18px;bottom:62px}.sc-discover-actions{right:12px;bottom:118px}}";
     document.head.appendChild(style);
     document.addEventListener("error", (e) => { if (e.target && e.target.matches && e.target.matches(".sc-cover img")) e.target.remove(); }, true);
     // SoundCloud-ish accent available as --sc (falls back to orange).
@@ -234,6 +234,7 @@
     const sk = $("#ny-seek");
     sk.disabled = M.live || !M.seekable;
     if (M.seekable && !M.live && audio.duration) sk.value = (audio.currentTime / audio.duration) * 100;
+    notify();
   }
   function paintBtn() {
     if (!bar) return;
@@ -254,6 +255,7 @@
     copy.disabled = !(current && current.url);
     copy.title = copy.disabled ? "No SoundCloud link for this track" : "Copy SoundCloud link";
     if (S.view === "music") renderTab();
+    notify();
   }
 
   // ---- playback -----------------------------------------------------------
@@ -425,6 +427,7 @@
     M.live = false; M.idx = -1; M.historyId = "";
     postJSON("/api/music/playback", { clear: true }).catch(() => {});
     if (S.view === "music") renderTab();
+    notify();
   }
   function playLive() {
     ensureBar();
@@ -1340,6 +1343,33 @@
     else if (t.dataset.music === "fw-source") { await postJSON("/api/music/config", { forward_source: t.value }); await load(); renderTab(); }
     else if (t.dataset.music === "nodrm") { M.hideDrm = t.checked; try { localStorage.setItem("ny-hidedrm", t.checked ? "1" : "0"); } catch (e) { /* ignore */ } }
   });
+
+  // ---- the same player, for other pages (the Desk) ------------------------
+  // Pages listen for the "ny-music" document event and read NY.music.state(); they never get their own <audio>.
+  function notify() { document.dispatchEvent(new CustomEvent("ny-music")); }
+  const describe = (t) => ({ key: trackKey(t), title: titleOf(t), sub: subOf(t), art: artworkSource(t) });
+  NY.music = {
+    describe,
+    state() {
+      const t = M.live ? null : M.queue[M.idx];
+      const known = t && t.duration_ms ? t.duration_ms / 1000 : 0;
+      return { live: M.live, track: t ? describe(t) : null, playing: !!(audio && !audio.paused && audio.src),
+        current: audio ? audio.currentTime || 0 : 0, duration: known || (audio && isFinite(audio.duration) ? audio.duration : 0),
+        seekable: !!(t && M.seekable), hasPrev: !!t && M.idx > 0, hasNext: !!t && M.queue.length > 0, shuffle: M.shuffle, repeat: M.repeat };
+    },
+    toggle() {
+      if (!audio || (!M.live && !M.queue[M.idx])) return false;
+      if (audio.paused) audio.play().catch(() => toast("Playback was blocked. Press Play again."));
+      else audio.pause();
+      return true;
+    },
+    next() { if (audio && !M.live && M.queue[M.idx]) next(); },
+    prev() { if (audio && !M.live && M.idx > 0) play(M.idx - 1); },
+    seek(fraction) { if (audio && !M.live && M.seekable && audio.duration) audio.currentTime = Math.max(0, Math.min(1, +fraction || 0)) * audio.duration; },
+    setShuffle(on) { ensureBar(); M.shuffle = !!on; resetShuffle(M.idx); paintBtn(); savePlayback(false, true); },
+    playQueue(tracks, i) { ensureBar(); playQueue(tracks, i); },
+    restore() { return restorePlayback(); },
+  };
 
   V.music = {
     build() { ensureBar(); NY.freshHTML($("#view"), html`<div class="card"><div class="empty"><div class="spin"></div>Loading…</div></div>`); load().then(renderPage); restorePlayback(); },

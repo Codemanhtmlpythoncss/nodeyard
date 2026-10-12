@@ -3,9 +3,10 @@
   "use strict";
   const { esc, html, raw } = NY;
   const U = NY.ui;
-  const { S, V, $, go, postJSON, toast, store } = U;
+  const { S, V, $, go, getJSON, postJSON, toast, store } = U;
 
   const CATALOG = [
+    ["player", "Music player", "Play and pick songs without leaving the desk"], ["chat", "AI chat", "Ask your Nodeyard AI from the desk"],
     ["todo", "To-do list", "A small list for today"], ["weather", "Weather", "Conditions for a place you choose"],
     ["calendar", "Calendar", "A month at a glance"], ["notes", "Notes", "A saved scratchpad"],
     ["focus", "Focus timer", "A simple focus and break timer"], ["countdown", "Countdown", "Count down to a date"],
@@ -24,15 +25,21 @@
     ["Nothing will work unless you do.", "Maya Angelou"],
   ];
   const mascotLines = ["You’ve got this. One thing at a time.", "Tiny break? Your shoulders called.", "I’m keeping an eye on the clock.", "Nice work showing up today.", "A little progress still counts."];
-  const initial = { widgets: ["todo", "mascot", "links"], customizing: false, tasks: [], notes: "", location: "", weather: "", weatherError: "", countdown: null, calendarOffset: 0,
+  const ADDED_V2 = ["player", "chat"];   // shown once to desks saved before these widgets existed
+  const initial = { v: 2, widgets: ["player", "chat", "todo", "mascot", "links"], customizing: false, playerSource: "", chat: [], chatTarget: "", chatDraft: "", tasks: [], notes: "", location: "", weather: "", weatherError: "", countdown: null, calendarOffset: 0,
     focus: { mode: "focus", remaining: 1500, running: false, until: 0 }, mascot: 0 };
-  const freshState = () => ({ ...initial, widgets: initial.widgets.slice(), tasks: [], focus: { ...initial.focus } });
+  const freshState = () => ({ ...initial, widgets: initial.widgets.slice(), tasks: [], chat: [], focus: { ...initial.focus } });
   function readState() {
     try {
       const saved = JSON.parse(store.get("desk.v1", "null"));
       if (!saved || typeof saved !== "object") return freshState();
-      return { ...structuredClone(initial), ...saved,
-        widgets: Array.isArray(saved.widgets) ? [...new Set(saved.widgets.filter((x) => KNOWN.has(x)))].slice(0, CATALOG.length) : initial.widgets.slice(),
+      const widgets = Array.isArray(saved.widgets) ? [...new Set(saved.widgets.filter((x) => KNOWN.has(x)))] : initial.widgets.slice();
+      if (!(saved.v >= 2)) ADDED_V2.forEach((id) => { if (!widgets.includes(id)) widgets.push(id); });
+      const chat = Array.isArray(saved.chat) ? saved.chat.filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string").slice(-30)
+        .map((m) => (m.pending ? { role: m.role, content: m.content || "(Interrupted before an answer arrived.)", error: !m.content } : { role: m.role, content: m.content, error: !!m.error })) : [];
+      return { ...structuredClone(initial), ...saved, v: 2, widgets: widgets.slice(0, CATALOG.length), chat,
+        playerSource: typeof saved.playerSource === "string" ? saved.playerSource : "",
+        chatTarget: typeof saved.chatTarget === "string" ? saved.chatTarget : "", chatDraft: typeof saved.chatDraft === "string" ? saved.chatDraft : "",
         tasks: Array.isArray(saved.tasks) ? saved.tasks.filter((x) => x && typeof x.text === "string").slice(0, 100) : [],
         focus: { ...initial.focus, ...(saved.focus || {}) } };
     } catch (e) { return freshState(); }
@@ -52,6 +59,17 @@
     return html`<div class="desk-cal-head"><button type="button" class="btn small" data-desk="cal-prev" aria-label="Previous month">‹</button><b>${new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }).format(first)}</b><button type="button" class="btn small" data-desk="cal-next" aria-label="Next month">›</button></div><div class="desk-calendar"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span>${cells}</div>`;
   }
   function renderWidget(id) {
+    if (id === "player") return widget(id, html`<div class="desk-player">
+      <div class="desk-np"><div class="desk-np-art" data-player="art" aria-hidden="true">♫</div><div class="desk-np-meta"><b data-player="title">Nothing playing</b><span data-player="sub">Pick a list below to start</span></div></div>
+      <div class="desk-seek"><span data-player="cur">0:00</span><input type="range" min="0" max="1000" step="1" value="0" data-desk-input="seek" aria-label="Seek"><span data-player="dur">0:00</span></div>
+      <div class="desk-transport"><button type="button" data-desk="player-prev" aria-label="Previous song">⏮</button><button type="button" class="play" data-desk="player-toggle" aria-label="Play">▶</button><button type="button" data-desk="player-next" aria-label="Next song">⏭</button><button type="button" data-desk="player-shuffle" aria-pressed="false" aria-label="Shuffle">🔀</button></div>
+      <div class="desk-form"><select class="input" data-desk-input="player-source" aria-label="Play from"></select><button type="button" class="btn" data-desk="player-play-all">Play</button></div>
+      <ul class="desk-player-list" data-player="list"></ul></div>`);
+    if (id === "chat") return widget(id, html`<div class="desk-chat">
+      <div class="desk-form"><select class="input" data-desk-input="chat-target" aria-label="AI model"></select><button type="button" class="btn small" data-desk="chat-clear">Clear</button><button type="button" class="btn small" data-desk="ai">Open AI</button></div>
+      <div class="desk-chat-log" data-chat="log" aria-live="polite"></div>
+      <div class="desk-chat-status" data-chat="status"></div>
+      <form class="desk-chat-form" data-desk-form="chat"><textarea class="input" data-desk-input="chat" rows="2" maxlength="4000" placeholder="Ask anything…" title="Enter sends · Shift+Enter adds a line" aria-label="Message for the AI">${D.chatDraft}</textarea><button class="btn primary" type="submit" data-chat="send">Send</button></form></div>`);
     if (id === "todo") return widget(id, html`<form class="desk-form" data-desk-form="todo"><input class="input" name="task" maxlength="120" placeholder="Add a task…" aria-label="New task"><button class="btn primary" type="submit">Add</button></form><ul class="desk-tasks">${D.tasks.length ? raw(D.tasks.map((t, i) => '<li class="' + (t.done ? 'done' : '') + '"><label><input type="checkbox" data-desk="task-toggle" data-index="' + i + '" ' + (t.done ? 'checked' : '') + '><span>' + esc(t.text) + '</span></label><button type="button" data-desk="task-delete" data-index="' + i + '" aria-label="Delete task">×</button></li>').join("")) : html`<li class="desk-empty">Nothing on the list yet.</li>`}</ul>`);
     if (id === "weather") return widget(id, html`<div class="desk-form"><input class="input" data-desk-input="location" maxlength="100" value="${D.location}" placeholder="Town or city" aria-label="Weather location"><button class="btn" type="button" data-desk="weather">Get weather</button></div><div class="desk-weather">${D.weatherError ? html`<p class="desk-error">${D.weatherError}</p>` : D.weather ? html`<pre>${D.weather}</pre>` : html`<p class="desk-empty">Choose a location to load the forecast.</p>`}</div>`);
     if (id === "calendar") return widget(id, calendar());
@@ -68,10 +86,15 @@
   }
   function timerText() { const left = D.focus.running ? Math.max(0, Math.ceil((D.focus.until - Date.now()) / 1000)) : Math.max(0, +D.focus.remaining || 0); return String(Math.floor(left / 60)).padStart(2, "0") + ":" + String(left % 60).padStart(2, "0"); }
   function countdownText() { const diff = Math.ceil((new Date(D.countdown.date + "T00:00:00") - new Date(new Date().toDateString())) / 86400000); return diff < 0 ? "That date has passed." : diff === 0 ? "Today! 🎉" : diff + " day" + (diff === 1 ? "" : "s") + " to go"; }
-  function drawWidgets() { const host = $("#desk-widgets"); if (host) host.innerHTML = D.widgets.map(renderWidget).join("") || '<div class="desk-no-widgets">Add a widget to make this desk yours.</div>'; }
+  function drawWidgets() {
+    const host = $("#desk-widgets"); if (!host) return;
+    host.innerHTML = D.widgets.map(renderWidget).join("") || '<div class="desk-no-widgets">Add a widget to make this desk yours.</div>';
+    if (D.widgets.includes("player")) { if (!P.data || Date.now() - P.loadedAt > 60000) loadMusic(); drawPlayerList(); paintPlayer(); }
+    if (D.widgets.includes("chat")) { if (CH.targets === null) loadTargets(); paintChatTargets(); CH.stick = true; paintChat(); }
+  }
   function drawPicker() {
     const picker = $("#desk-picker"); if (!picker) return;
-    picker.innerHTML = '<div class="desk-picker-head"><div><b>Add a widget</b><p>Choose any of the 12 desk widgets.</p></div><button class="btn icon-only" type="button" data-desk="picker-close" aria-label="Close">×</button></div><div class="desk-picker-grid">' + CATALOG.map(([id, name, sub]) => '<button type="button" class="desk-picker-item" data-desk="add" data-id="' + id + '" ' + (D.widgets.includes(id) ? 'disabled' : '') + '><b>' + esc(name) + '</b><span>' + esc(D.widgets.includes(id) ? "Already on your desk" : sub) + '</span></button>').join("") + '</div>';
+    picker.innerHTML = '<div class="desk-picker-head"><div><b>Add a widget</b><p>Choose any of the ' + CATALOG.length + ' desk widgets.</p></div><button class="btn icon-only" type="button" data-desk="picker-close" aria-label="Close">×</button></div><div class="desk-picker-grid">' + CATALOG.map(([id, name, sub]) => '<button type="button" class="desk-picker-item" data-desk="add" data-id="' + id + '" ' + (D.widgets.includes(id) ? 'disabled' : '') + '><b>' + esc(name) + '</b><span>' + esc(D.widgets.includes(id) ? "Already on your desk" : sub) + '</span></button>').join("") + '</div>';
   }
   function paintMode() { const page = $(".desk-page"); if (!page) return; page.classList.toggle("customizing", D.customizing); const b = $("[data-desk=customize]"); if (b) { b.setAttribute("aria-pressed", D.customizing ? "true" : "false"); b.textContent = D.customizing ? "Done" : "Arrange"; } }
   function tick() {
@@ -87,6 +110,7 @@
       if (D.focus.running && Date.now() >= D.focus.until) { D.focus.running = false; D.focus.mode = D.focus.mode === "focus" ? "break" : "focus"; D.focus.remaining = D.focus.mode === "focus" ? 1500 : 300; save(); const mode = focus.querySelector("[data-focus-mode]"), button = focus.querySelector("[data-desk=focus-toggle]"); if (mode) mode.textContent = D.focus.mode === "focus" ? "Focus" : "Break"; if (button) button.textContent = "Start"; toast(D.focus.mode === "break" ? "Focus block complete. Time for a break." : "Break complete. Ready for another focus block?"); }
     }
     updateCluster();
+    if (CH.busy) paintChatStatus();
   }
   function updateCluster() {
     const el = $('[data-widget="cluster"]'); if (!el) return;
@@ -109,6 +133,200 @@
     } catch (e) { D.weatherError = e.message || "Couldn't load weather."; }
     save(); drawWidgets(); paintMode();
   }
+  // ---- music player: drives the dashboard's one shared player (music.js), so playback carries on across pages ----
+  const P = { data: null, loading: false, error: "", loadedAt: 0, tracks: null, tracksFor: "" };
+  const fmtTime = (s) => (isFinite(s) && s > 0 ? Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0") : "0:00");
+  async function loadMusic() {
+    if (P.loading) return;
+    P.loading = true; P.error = "";
+    try {
+      const r = await getJSON("/api/music");
+      if (!r.ok) throw new Error(r.error || "Music is unavailable.");
+      P.data = r; P.loadedAt = Date.now(); P.tracks = null; P.tracksFor = "";
+    } catch (e) { P.error = e.message || "Couldn't load your music."; }
+    P.loading = false; drawPlayerList();
+  }
+  function playerSources() {
+    const d = P.data || {}, likes = (d.sc && d.sc.likes) || [], lib = d.tracks || [];
+    return [["likes", "Liked songs", likes.length], ["library", "Library", lib.length]]
+      .concat((d.playlists || []).map((p) => ["pl:" + p.id, p.name || "Playlist", p.count || 0]));
+  }
+  function currentSource() {
+    const sources = playerSources();
+    if (sources.some((x) => x[0] === D.playerSource)) return D.playerSource;
+    return sources[0][2] || !sources[1][2] ? "likes" : "library";
+  }
+  async function loadPlayerTracks() {
+    const id = currentSource(), d = P.data; if (!d) return;
+    if (P.tracksFor === id && P.tracks) return;
+    P.tracksFor = id; P.tracks = null;
+    let tracks = [];
+    if (id === "likes") tracks = (d.sc && d.sc.likes) || [];
+    else if (id === "library") tracks = d.tracks || [];
+    else {
+      drawPlayerList();
+      try { const r = await getJSON("/api/music/playlists?id=" + encodeURIComponent(id.slice(3))); tracks = r.ok && r.playlist && Array.isArray(r.playlist.tracks) ? r.playlist.tracks : []; }
+      catch (e) { tracks = []; }
+    }
+    if (P.tracksFor !== id) return;
+    P.tracks = tracks; drawPlayerList();
+  }
+  function drawPlayerList() {
+    const w = $('[data-widget="player"]'); if (!w) return;
+    const select = w.querySelector('[data-desk-input="player-source"]'), list = w.querySelector('[data-player="list"]'), play = w.querySelector('[data-desk="player-play-all"]');
+    if (!P.data) {
+      select.innerHTML = '<option value="">' + (P.error ? "Music unavailable" : "Loading…") + "</option>"; select.disabled = true; play.disabled = true;
+      list.innerHTML = P.error ? '<li class="desk-error">' + esc(P.error) + ' <button type="button" class="btn small" data-desk="player-retry">Retry</button></li>' : '<li class="desk-empty">Loading your music…</li>';
+      return;
+    }
+    const id = currentSource();
+    select.disabled = false;
+    select.innerHTML = playerSources().map(([value, name, count]) => '<option value="' + esc(value) + '"' + (value === id ? " selected" : "") + ">" + esc(name + " (" + count + ")") + "</option>").join("");
+    if (P.tracksFor !== id || !P.tracks) { play.disabled = true; list.innerHTML = '<li class="desk-empty">Loading songs…</li>'; loadPlayerTracks(); return; }
+    play.disabled = !P.tracks.length;
+    const shown = P.tracks.slice(0, 200);
+    list.innerHTML = shown.length ? shown.map((t, i) => {
+      const d = NY.music ? NY.music.describe(t) : { key: "", title: t.title || t.name || "Untitled", sub: "" };
+      return '<li data-key="' + esc(d.key) + '"><button type="button" data-desk="player-track" data-index="' + i + '"><b>' + esc(d.title) + "</b><span>" + esc(d.sub) + "</span></button></li>";
+    }).join("") + (P.tracks.length > shown.length ? '<li class="desk-empty">Showing the first 200 of ' + P.tracks.length + " songs. Play starts the whole list.</li>" : "")
+      : '<li class="desk-empty">' + (id === "likes" ? "No liked songs yet. Like songs in Music to see them here." : id === "library" ? "Your library is empty. Choose a music folder in Music › Settings." : "This playlist is empty.") + "</li>";
+    paintPlayer();
+  }
+  function paintPlayer() {
+    const w = $('[data-widget="player"]'); if (!w) return;
+    const q = (name) => w.querySelector('[data-player="' + name + '"]');
+    if (!NY.music) { q("sub").textContent = "The music player isn't loaded."; return; }
+    const st = NY.music.state(), t = st.track;
+    q("title").textContent = st.live ? "Server audio" : t ? t.title : "Nothing playing";
+    q("sub").textContent = st.live ? "Live from the host" : t ? t.sub : "Pick a list below to start";
+    const art = q("art"), want = (t && t.art) || "";
+    if (art.dataset.src !== want) { art.dataset.src = want; art.innerHTML = "♫" + (want ? '<img alt="" src="' + esc(want) + '">' : ""); }
+    q("cur").textContent = st.live ? "" : fmtTime(st.current);
+    q("dur").textContent = st.live ? "live" : fmtTime(st.duration);
+    const seek = w.querySelector('[data-desk-input="seek"]');
+    seek.disabled = !st.seekable || !st.duration;
+    if (!seek.matches(":active")) seek.value = st.duration ? Math.round((1000 * st.current) / st.duration) : 0;
+    const toggle = w.querySelector('[data-desk="player-toggle"]');
+    toggle.textContent = st.playing ? "⏸" : "▶"; toggle.setAttribute("aria-label", st.playing ? "Pause" : "Play"); toggle.disabled = !t && !st.live;
+    w.querySelector('[data-desk="player-prev"]').disabled = !st.hasPrev;
+    w.querySelector('[data-desk="player-next"]').disabled = !st.hasNext;
+    const shuffle = w.querySelector('[data-desk="player-shuffle"]');
+    shuffle.classList.toggle("on", st.shuffle); shuffle.setAttribute("aria-pressed", st.shuffle ? "true" : "false"); shuffle.title = st.shuffle ? "Shuffle on" : "Shuffle off";
+    w.querySelectorAll(".desk-player-list li[data-key]").forEach((li) => li.classList.toggle("on", !!t && li.dataset.key === t.key));
+  }
+  function playFromList(i) {
+    if (!NY.music || !P.tracks || !P.tracks.length) return;
+    const start = i == null ? (NY.music.state().shuffle ? Math.floor(Math.random() * P.tracks.length) : 0) : i;
+    NY.music.playQueue(P.tracks, start);
+  }
+  document.addEventListener("ny-music", () => { if (S.view === "desk") paintPlayer(); });
+  document.addEventListener("error", (e) => { if (e.target && e.target.matches && e.target.matches(".desk-np-art img")) e.target.remove(); }, true);
+
+  // ---- AI chat: streams from the same /api/ai/chat the AI page uses; the conversation is kept in this browser ----
+  const CH = { busy: false, ctrl: null, sid: "", wait: "", started: 0, targets: null, targetError: "", loadingTargets: false, stick: false, raf: 0 };
+  const CHAT_SYSTEM = "You are Nodeyard AI, answering in a small chat panel on the user's dashboard desk. Be brief, friendly and clear. " +
+    "Use plain text, short paragraphs and short lists. Put any code in fenced code blocks.";
+  async function loadTargets() {
+    if (CH.loadingTargets) return;
+    CH.loadingTargets = true;
+    try {
+      const r = await getJSON("/api/ai/targets");
+      CH.targets = r.ok !== false && Array.isArray(r.targets) ? r.targets : []; CH.targetError = r.ok === false ? r.error || "Couldn't load the AI models." : "";
+    } catch (e) { CH.targets = []; CH.targetError = e.message || "Couldn't load the AI models."; }
+    CH.loadingTargets = false;
+    const ready = CH.targets.filter((x) => x.ready);
+    if (!ready.some((x) => x.id === D.chatTarget)) { const pick = ready.find((x) => x.id === "split") || ready[0]; D.chatTarget = pick ? pick.id : ""; save(); }
+    paintChatTargets(); paintChatStatus();
+  }
+  function paintChatTargets() {
+    const select = $('[data-widget="chat"] [data-desk-input="chat-target"]'); if (!select) return;
+    const ready = (CH.targets || []).filter((x) => x.ready);
+    select.disabled = !ready.length;
+    select.innerHTML = ready.length
+      ? ready.map((x) => '<option value="' + esc(x.id) + '"' + (x.id === D.chatTarget ? " selected" : "") + ">" + esc((x.name || x.id) + (x.kind === "ollama" ? " · " + (x.detail || "Ollama") : " · split model")) + "</option>").join("")
+      : '<option value="">' + (CH.targets === null ? "Loading models…" : "No model is ready") + "</option>";
+  }
+  const visibleText = (text) => String(text || "").replace(/<think>[\s\S]*?(<\/think>|$)/g, "").replace(/<\/?think>/g, "").trim();
+  function chatHTML(text) {
+    return visibleText(text).split("```").map((part, i) => (i % 2 ? "<pre><code>" + esc(part.replace(/^[\w+#.-]*\n/, "")) + "</code></pre>" : esc(part).replace(/\n/g, "<br>"))).join("");
+  }
+  function paintChat() {
+    CH.raf = 0;
+    const log = $('[data-widget="chat"] [data-chat="log"]'); if (!log) return;
+    const near = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+    log.innerHTML = D.chat.length
+      ? D.chat.map((m) => '<div class="desk-msg ' + m.role + (m.error ? " error" : "") + '">' + (visibleText(m.content) ? chatHTML(m.content) : '<span class="desk-typing" aria-label="Waiting for the answer"><i></i><i></i><i></i></span>') + "</div>").join("")
+      : '<p class="desk-empty">Ask a question. Answers stream in here, and your music keeps playing.</p>';
+    if (near || CH.stick) log.scrollTop = log.scrollHeight;
+    CH.stick = false;
+    paintChatStatus();
+  }
+  function paintChatSoon() { if (!CH.raf) CH.raf = requestAnimationFrame(paintChat); }
+  function paintChatStatus() {
+    const w = $('[data-widget="chat"]'); if (!w) return;
+    const status = w.querySelector('[data-chat="status"]'), send = w.querySelector('[data-chat="send"]');
+    const ready = (CH.targets || []).some((x) => x.ready);
+    if (CH.busy) status.textContent = (CH.wait || "Writing…") + " · " + Math.floor((Date.now() - CH.started) / 1000) + "s";
+    else if (CH.targets !== null && !ready) status.textContent = CH.targetError || "No AI model is ready. Start one in AI › Models.";
+    else status.textContent = "";
+    status.classList.toggle("desk-error", !CH.busy && CH.targets !== null && !ready);
+    send.textContent = CH.busy ? "Stop" : "Send"; send.classList.toggle("danger", CH.busy); send.classList.toggle("primary", !CH.busy);
+  }
+  function stopChat() {
+    if (CH.sid) postJSON("/api/ai/stop", { id: CH.sid }).catch(() => {});
+    if (CH.ctrl) CH.ctrl.abort();
+  }
+  async function sendChat() {
+    if (CH.busy) { stopChat(); return; }
+    const box = $('[data-desk-input="chat"]'), text = String(box ? box.value : D.chatDraft || "").trim();
+    if (!text) { if (box) box.focus(); return; }
+    if (!D.chatTarget) { toast("No AI model is ready. Start one in AI › Models."); loadTargets(); return; }
+    const reply = { role: "assistant", content: "", pending: true };
+    D.chat.push({ role: "user", content: text.slice(0, 4000) }, reply); D.chat = D.chat.slice(-30);
+    D.chatDraft = ""; if (box) box.value = ""; save();
+    const history = D.chat.filter((m) => m !== reply && !m.error && visibleText(m.content)).slice(-8).map((m) => ({ role: m.role, content: visibleText(m.content) }));
+    CH.busy = true; CH.ctrl = new AbortController(); CH.sid = Date.now().toString(36) + Math.random().toString(36).slice(2);
+    CH.wait = "Sending…"; CH.started = Date.now(); CH.stick = true; paintChat();
+    let finished = false, reason = "";
+    try {
+      const r = await fetch("/api/ai/chat", { method: "POST", cache: "no-store", signal: CH.ctrl.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" },
+        body: JSON.stringify({ target: D.chatTarget, messages: [{ role: "system", content: CHAT_SYSTEM }].concat(history), temperature: 0.3, max_tokens: 900, stream_id: CH.sid }) });
+      if (r.status === 401) { location.href = "/login"; return; }
+      if (!r.ok) { let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ } throw new Error(j.error || "The model didn't answer (HTTP " + r.status + ")."); }
+      CH.wait = "Thinking…"; paintChatStatus();
+      const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read(); if (done) break;
+        buf += dec.decode(value, { stream: true }); let i;
+        while ((i = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+          if (!line.startsWith("data:")) continue;
+          const data = line.slice(5).trim();
+          if (data === "[DONE]") { finished = true; continue; }
+          let j; try { j = JSON.parse(data); } catch (e) { continue; }
+          if (j.error) throw new Error(j.error.message || j.error);
+          if (j.prompt_progress && !reply.content) { const pp = j.prompt_progress; CH.wait = "Reading your message… " + Math.round((100 * (pp.processed || 0)) / Math.max(1, pp.total || 1)) + "%"; paintChatStatus(); }
+          const choice = j.choices && j.choices[0];
+          if (!choice) continue;
+          if (choice.finish_reason) { finished = true; reason = choice.finish_reason; }
+          const delta = choice.delta || {};
+          if (delta.content) { reply.content += delta.content; CH.wait = "Writing…"; paintChatSoon(); }
+          else if (delta.reasoning_content && !reply.content) { CH.wait = "Thinking…"; paintChatStatus(); }
+        }
+      }
+      if (!finished && !visibleText(reply.content)) throw new Error("The model closed the connection without answering. Try again.");
+      if (!finished) reply.content += "\n\n⚠ The answer was cut off.";
+      else if (reason === "length") reply.content += "\n\n(That's the longest answer this panel asks for. Open AI for longer replies.)";
+      reply.content = visibleText(reply.content);
+    } catch (e) {
+      if (e.name === "AbortError") reply.content = visibleText(reply.content) ? visibleText(reply.content) + "\n\n(Stopped.)" : "(Stopped.)";
+      else { reply.error = true; reply.content = (visibleText(reply.content) ? visibleText(reply.content) + "\n\n" : "") + "⚠ " + (e.message || "Something went wrong."); }
+    } finally {
+      delete reply.pending; CH.busy = false; CH.ctrl = null; CH.sid = ""; CH.wait = "";
+      save(); paintChat();
+    }
+  }
+
   function click(e) {
     const b = e.target.closest("[data-desk]"); if (!b) return;
     const action = b.dataset.desk;
@@ -123,6 +341,14 @@
     else if (action === "focus-toggle") { if (D.focus.running) { D.focus.remaining = Math.max(0, Math.ceil((D.focus.until - Date.now()) / 1000)); D.focus.running = false; } else { D.focus.until = Date.now() + Math.max(1, D.focus.remaining) * 1000; D.focus.running = true; } save(); drawWidgets(); paintMode(); }
     else if (action === "focus-reset") { D.focus = { mode: "focus", remaining: 1500, running: false, until: 0 }; save(); drawWidgets(); paintMode(); }
     else if (action === "mascot") { D.mascot++; save(); drawWidgets(); paintMode(); }
+    else if (action === "player-toggle") { if (NY.music) NY.music.toggle(); }
+    else if (action === "player-prev") { if (NY.music) NY.music.prev(); }
+    else if (action === "player-next") { if (NY.music) NY.music.next(); }
+    else if (action === "player-shuffle") { if (NY.music) NY.music.setShuffle(!NY.music.state().shuffle); }
+    else if (action === "player-play-all") playFromList(null);
+    else if (action === "player-track") playFromList(+b.dataset.index);
+    else if (action === "player-retry") loadMusic();
+    else if (action === "chat-clear") { if (CH.busy) stopChat(); D.chat = []; save(); paintChat(); $('[data-desk-input="chat"]')?.focus(); }
     else if (action === "music") go("music");
     else if (["overview", "ai", "settings", "galaxy"].includes(action)) go(action);
   }
@@ -130,18 +356,26 @@
     const form = e.target.closest("form[data-desk-form]"); if (!form) return;
     e.preventDefault(); const data = new FormData(form);
     if (form.dataset.deskForm === "todo") { const text = String(data.get("task") || "").trim(); if (!text) return; D.tasks.push({ text, done: false }); D.tasks = D.tasks.slice(-100); save(); drawWidgets(); paintMode(); $("[data-widget=todo] input[name=task]")?.focus(); }
+    else if (form.dataset.deskForm === "chat") sendChat();
     else if (form.dataset.deskForm === "countdown") { const date = String(data.get("date") || ""), titleText = String(data.get("title") || "").trim(); D.countdown = date ? { date, title: titleText || "Countdown" } : null; save(); drawWidgets(); paintMode(); }
   }
   function change(e) {
     const el = e.target;
     if (el.matches('[data-desk="task-toggle"]')) { const item = D.tasks[+el.dataset.index]; if (item) { item.done = el.checked; save(); el.closest("li").classList.toggle("done", el.checked); } }
+    else if (el.matches('[data-desk-input="player-source"]')) { D.playerSource = el.value; save(); drawPlayerList(); }
+    else if (el.matches('[data-desk-input="chat-target"]')) { D.chatTarget = el.value; save(); }
   }
   function input(e) {
     const el = e.target;
     if (el.matches('[data-desk-input="notes"]')) { D.notes = el.value; save(); }
     else if (el.matches('[data-desk-input="location"]')) { D.location = el.value; save(); }
+    else if (el.matches('[data-desk-input="chat"]')) { D.chatDraft = el.value; save(); }
+    else if (el.matches('[data-desk-input="seek"]')) { if (NY.music) NY.music.seek(+el.value / 1000); }
   }
-  function keydown(e) { if (e.key === "Escape" && $("#desk-picker") && !$("#desk-picker").hidden) closePicker(); }
+  function keydown(e) {
+    if (e.key === "Escape" && $("#desk-picker") && !$("#desk-picker").hidden) closePicker();
+    else if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.target.matches && e.target.matches('[data-desk-input="chat"]')) { e.preventDefault(); sendChat(); }
+  }
   document.addEventListener("click", click);
   document.addEventListener("submit", submit);
   document.addEventListener("change", change);
@@ -151,7 +385,9 @@
   V.desk = {
     build() {
       NY.freshHTML($("#view"), html`<main class="desk-page"><header class="desk-top"><a class="desk-brand" href="#overview">nodeyard <span>desk</span></a><div class="desk-actions"><button type="button" class="btn" data-desk="customize" aria-pressed="${D.customizing}">Arrange</button><button type="button" class="btn primary" data-desk="add-widget">＋ Add widgets</button><button type="button" class="btn" data-desk="overview">Dashboard</button></div></header><section class="desk-hero"><div class="desk-greeting" data-desk-greeting></div><time class="desk-clock" data-desk-time></time><div class="desk-date" data-desk-date></div></section><section class="desk-widgets" id="desk-widgets" aria-label="Desk widgets"></section><div class="desk-foot">Your selected dashboard wallpaper · widgets save in this browser</div><button id="desk-picker-backdrop" class="desk-picker-backdrop" type="button" data-desk="picker-close" aria-label="Close widget picker" hidden></button><section class="desk-picker" id="desk-picker" role="dialog" aria-modal="true" aria-label="Add a widget" hidden></section></main>`);
+      CH.targets = (CH.targets || []).some((x) => x.ready) ? CH.targets : null;   // look again if no model was ready last time
       drawWidgets(); paintMode(); tick();
+      if (NY.music && D.widgets.includes("player")) NY.music.restore();
     },
     update() { tick(); },
   };
