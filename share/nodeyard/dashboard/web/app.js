@@ -23,6 +23,8 @@
     { id: "events", label: "Events", icon: "events", sub: "What Kubernetes has been doing" },
     { id: "alerts", label: "Alerts", icon: "alerts", sub: "Things that need your attention" },
     { id: "doctor", label: "Doctor", icon: "doctor", sub: "Checks for common problems, with one-click fixes" },
+    { id: "services", label: "Services", icon: "services", sub: "Uptime, latency and certificates for your apps and machines" },
+    { id: "tools", label: "Tools", icon: "tools", sub: "Network checks, Wake-on-LAN and metrics" },
     { id: "commands", label: "Commands", icon: "commands", sub: "Every nodeyard command, runnable from here" },
     { id: "terminal", label: "Terminal", icon: "terminal", sub: "Shells on every device" },
     { id: "apis", label: "APIs", icon: "commands", sub: "Your own self-hosted APIs, for the dashboard and the AI" },
@@ -228,8 +230,9 @@
   const legend = (items) => html`<div class="legend">${items.map((i) => html`<span><i style="background:${i.color}"></i>${i.name}</span>`)}</div>`;
 
   function alertCard(a) {
-    const open = a.kind === "node" || a.kind === "pod" ? a.kind + ":" + a.ref : a.kind === "workload" ? "wl:" + a.ref : "";
-    return html`<div class="alert ${a.level} ${open ? "click" : ""}" ${open ? raw('data-open="' + esc(open) + '"') : ""}><span class="sev"></span><div><b>${a.title}</b><span>${a.detail}</span></div></div>`;
+    const open = a.kind === "node" || a.kind === "pod" ? a.kind + ":" + a.ref : a.kind === "workload" ? "wl:" + a.ref : a.kind === "service" ? "svc:" + a.ref : "";
+    const monitor = a.kind === "monitor";   // the service monitor's own alerts open its page
+    return html`<div class="alert ${a.level} ${open || monitor ? "click" : ""}" ${open ? raw('data-open="' + esc(open) + '"') : monitor ? raw('data-goto="services"') : ""}><span class="sev"></span><div><b>${a.title}</b><span>${a.detail}</span></div></div>`;
   }
   function eventRow(e) {
     return html`<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line);align-items:flex-start"><i class="dot ${e.type === "Warning" ? "warn" : ""}" style="margin-top:6px"></i>
@@ -1145,7 +1148,7 @@
     else if (e.key === "?") { closeModals(); $("#scrim").classList.add("on"); $("#helpm").classList.add("on"); }
     else if (/^[0-9]$/.test(e.key) && VIEWS[(+e.key + 9) % 10]) go(VIEWS[(+e.key + 9) % 10].id);
     else if (e.key === "r") load(true);
-    else if (e.key === " ") { e.preventDefault(); setLive(!S.live); }
+    else if (e.key === " ") { e.preventDefault(); if ((S.view === "music" || S.view === "desk") && NY.music && NY.music.toggle()) return; setLive(!S.live); }
     else if (e.key === "t") cycleTheme();
   });
   window.addEventListener("hashchange", applyRoute);

@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -43,12 +44,50 @@ MAX_STREAMS = 24
 MIME = {
     ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
     ".svg": "image/svg+xml", ".json": "application/json", ".png": "image/png", ".ico": "image/x-icon",
-    ".jpg": "image/jpeg", ".webp": "image/webp",
+    ".jpg": "image/jpeg", ".webp": "image/webp", ".webmanifest": "application/manifest+json",
 }
+# Text worth compressing; pictures and audio are compressed already.
+COMPRESSIBLE = ("text/", "application/json", "application/javascript", "application/manifest+json", "image/svg+xml")
+GZIP_MIN = 1400            # smaller than one packet: not worth it
+STARTED = time.time()
 # Needed to show the sign-in page; everything else waits for a session.
-PUBLIC_FILES = ("/login", "/login.html", "/login.js", "/style.css", "/theme.js")
+PUBLIC_FILES = ("/login", "/login.html", "/login.js", "/style.css", "/theme.js", "/manifest.webmanifest", "/icon-180.png", "/icon-512.png")
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; "
-       "connect-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+       "connect-src 'self'; frame-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+# Voice chat needs the microphone; nothing here needs the rest.
+PERMISSIONS = "camera=(), geolocation=(), payment=(), usb=(), serial=(), hid=(), bluetooth=(), microphone=(self), fullscreen=(self)"
+
+
+class StaticCache:
+    """Page files kept in memory with their gzip copy and an ETag, re-read only when the file changes on disk."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.files = {}
+
+    def get(self, full):
+        st = os.stat(full)
+        key = (st.st_mtime_ns, st.st_size)
+        with self.lock:
+            hit = self.files.get(full)
+        if hit and hit[0] == key:
+            return hit[1]
+        with open(full, "rb") as f:
+            body = f.read()
+        ctype = MIME.get(os.path.splitext(full)[1], "application/octet-stream")
+        gz = gzip_bytes(body, 9) if ctype.startswith(COMPRESSIBLE) and len(body) >= GZIP_MIN else None
+        entry = {"body": body, "gzip": gz if gz and len(gz) < len(body) else None, "ctype": ctype, "etag": '"%x-%x"' % key}
+        with self.lock:
+            self.files[full] = (key, entry)
+        return entry
+
+
+def gzip_bytes(body, level=6):
+    z = zlib.compressobj(level, zlib.DEFLATED, 31)
+    return z.compress(body) + z.flush()
+
+
+STATIC = StaticCache()
 
 
 # --------------------------------------------------------------------------- store
@@ -69,6 +108,7 @@ class Store:
         self.history = []
         self.cond = threading.Condition()
         self.version = 0
+        self.alert_hooks = []    # other features' alerts (the service monitor, disk forecasts): fn() -> [alert]
         if hasattr(source, "seed_history"):
             self.history = source.seed_history(HISTORY_POINTS, interval)
 
@@ -85,6 +125,13 @@ class Store:
                 if hasattr(self.source, "load_eta"):
                     self.source.load_eta(state)
                 tot, al = totals(state), alerts(state)
+                for hook in self.alert_hooks:
+                    try:
+                        al.extend(hook())
+                    except Exception:  # one feature's alerts never block the cluster's
+                        pass
+                order = {"critical": 0, "warning": 1, "info": 2}
+                al.sort(key=lambda a: order.get(a.get("level"), 3))
             except Exception as e:  # keep serving the last good snapshot
                 with self.lock:
                     self.error = str(e)
@@ -137,6 +184,7 @@ def state_response(srv, with_agents=False):
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "nodeyard-dashboard"
+    sys_version = ""   # (don't announce the Python version to every client)
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
@@ -149,19 +197,31 @@ class Handler(BaseHTTPRequestHandler):
     def ctx(self):
         return self.server.ctx
 
-    def _send(self, code, body, ctype, extra=None):
+    def _gzip_ok(self):
+        return "gzip" in self.headers.get("Accept-Encoding", "").lower()
+
+    def _send(self, code, body, ctype, extra=None, gz=None):
         if isinstance(body, str):
             body = body.encode("utf-8")
         frameable = self.path.split("?", 1)[0] == "/g3/embed"
+        extra = dict(extra or {})
+        if ctype.startswith(COMPRESSIBLE) and "Content-Encoding" not in extra:
+            extra["Vary"] = "Accept-Encoding"
+            if self._gzip_ok():
+                if gz is None and len(body) >= GZIP_MIN:
+                    gz = gzip_bytes(body, 5)
+                if gz is not None and len(gz) < len(body):
+                    body, extra["Content-Encoding"] = gz, "gzip"
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "SAMEORIGIN" if frameable else "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", PERMISSIONS)
         self.send_header("Content-Security-Policy", CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'") if frameable else CSP)
         self.send_header("Cache-Control", "no-store" if ctype.startswith("application/json") else "no-cache")
-        for k, v in (extra or {}).items():
+        for k, v in extra.items():
             self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
@@ -288,7 +348,10 @@ class Handler(BaseHTTPRequestHandler):
         srv = self.ctx
         try:
             if path == "/api/health":
-                return self._json({"ok": True})
+                # (public: for uptime monitors, so it says how fresh the data is but nothing about the cluster)
+                age = time.time() - srv.store.updated if srv.store.updated else None
+                return self._json({"ok": True, "uptime": int(time.time() - STARTED), "data_age": round(age, 1) if age is not None else None,
+                                   "fresh": age is not None and age < max(30, srv.store.interval * 6)})
             if path == "/api/auth":
                 return self._json({"ok": True, "enabled": srv.auth is not None, "authenticated": self._authed()})
             if path == "/api/state":
@@ -336,16 +399,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "error": "Too many dashboards are open."}, 429)
             srv.streams += 1
         want_agents = bool(q.get("agents"))
+        z = zlib.compressobj(6, zlib.DEFLATED, 31) if self._gzip_ok() else None
+
+        def write(data):
+            # a compressed stream is flushed at every event, so each one arrives whole and at once
+            self.wfile.write(z.compress(data) + z.flush(zlib.Z_SYNC_FLUSH) if z is not None else data)
+            self.wfile.flush()
         try:
             self.send_response(200)
             for k, v in (("Content-Type", "text/event-stream; charset=utf-8"), ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff"),
-                         ("X-Accel-Buffering", "no"), ("Connection", "close"), ("Content-Security-Policy", CSP)):
+                         ("X-Accel-Buffering", "no"), ("Connection", "close"), ("Content-Security-Policy", CSP), ("Vary", "Accept-Encoding")):
                 self.send_header(k, v)
+            if z is not None:
+                self.send_header("Content-Encoding", "gzip")
             self.end_headers()
             self.close_connection = True
             store, last = srv.store, -1
-            self.wfile.write(b"retry: 2000\n\n")
-            self.wfile.flush()
+            write(b"retry: 2000\n\n")
             while not store.stop.is_set():
                 with store.cond:
                     store.cond.wait_for(lambda: store.version != last or store.stop.is_set(), timeout=15)
@@ -353,21 +423,32 @@ class Handler(BaseHTTPRequestHandler):
                 if store.stop.is_set():
                     break
                 if not self._authed():
-                    self.wfile.write(b"event: auth\ndata: {}\n\n")
-                    self.wfile.flush()
+                    write(b"event: auth\ndata: {}\n\n")
                     break
                 if version != last:
                     last = version
-                    body = json.dumps(state_response(srv, want_agents), separators=(",", ":"))
-                    self.wfile.write(("event: state\ndata: %s\n\n" % body).encode("utf-8"))
+                    write(self._stream_event(version, want_agents))
                 else:
-                    self.wfile.write(b": ping\n\n")
-                self.wfile.flush()
+                    write(b": ping\n\n")
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
             with srv.lock:
                 srv.streams -= 1
+
+    def _stream_event(self, version, want_agents):
+        """Every open dashboard gets the same bytes for a snapshot: build them once per version, not once per page."""
+        srv = self.ctx
+        key = (version, want_agents)
+        with srv.lock:
+            cached = srv.stream_cache.get(key)
+        if cached is not None:
+            return cached
+        body = ("event: state\ndata: %s\n\n" % json.dumps(state_response(srv, want_agents), separators=(",", ":"))).encode("utf-8")
+        with srv.lock:
+            srv.stream_cache = {k: v for k, v in srv.stream_cache.items() if k[0] == version}
+            srv.stream_cache[key] = body
+        return body
 
     def _logs(self, q):
         ns, pod = q.get("ns", [""])[0], q.get("pod", [""])[0]
@@ -390,9 +471,15 @@ class Handler(BaseHTTPRequestHandler):
         full = os.path.realpath(os.path.join(WEB, path.lstrip("/")))
         if not (full == WEB or full.startswith(WEB + os.sep)) or not os.path.isfile(full):
             return self._send(404, "Not found", "text/plain; charset=utf-8")
-        with open(full, "rb") as f:
-            body = f.read()
-        self._send(200, body, MIME.get(os.path.splitext(full)[1], "application/octet-stream"))
+        f = STATIC.get(full)
+        if f["etag"] in [t.strip() for t in self.headers.get("If-None-Match", "").split(",")]:
+            # unchanged since the browser's copy: no body (the files are re-checked on every load, so updates show at once)
+            self.send_response(304)
+            for k, v in (("ETag", f["etag"]), ("Cache-Control", "no-cache"), ("Vary", "Accept-Encoding")):
+                self.send_header(k, v)
+            self.end_headers()
+            return None
+        self._send(200, f["body"], f["ctype"], {"ETag": f["etag"]}, gz=f["gzip"])
 
     # -- POST ----------------------------------------------------------------
 
@@ -459,6 +546,7 @@ class Context:
         self.prefix_routes = {}   # path prefix -> fn(handler, path, query), for folders of files
         self.lock = threading.Lock()
         self.streams = 0
+        self.stream_cache = {}   # (store version, with agents) -> the event bytes every open page gets
         self.__dict__.update(kw)
 
 
@@ -590,6 +678,8 @@ def main():
     apiregistry.register(ctx, a)
     import music         # optional: a folder music player and host-audio forwarding, both streamed server-side
     music.register(ctx, a)
+    import homelab       # service monitor, notifications, Wake-on-LAN, network tools, Prometheus metrics
+    homelab.register(ctx, a)
     import galaxy3d      # the 3D galaxy screens (/g3/), fed from k3s
     galaxy3d.register(ctx, a)
     import selfupdate    # restarts on the new program after an update (the page files are already new)

@@ -145,6 +145,12 @@ def alerts(state):
                 "In namespace %s." % w["namespace"], "workload", ref)
         if w["kind"] == "Job" and w.get("failed"):
             add("warning", "Job %s has failed %d time(s)" % (w["name"], w["failed"]), "In namespace %s." % w["namespace"], "workload", ref)
+    for svc in state.get("services") or []:
+        # a Service that selects pods but has no ready ones: anything using its address gets "connection refused"
+        if svc.get("selector") and svc.get("type") != "ExternalName" and not svc.get("endpoints") and svc.get("created") and now - svc["created"] > 300:
+            add("warning", "Service %s has no ready pods behind it" % svc["name"],
+                "In namespace %s. Nothing answers on its address until a matching pod is Ready; check the pods its selector picks." % svc["namespace"],
+                "service", "%s/%s" % (svc["namespace"], svc["name"]))
     for v in state["volumes"]:
         if v["kind"] == "PVC" and v["status"] not in ("Bound", ""):
             add("warning", "Volume claim %s is %s" % (v["name"], v["status"]), "In namespace %s." % v["namespace"], "volume", v["name"])
@@ -170,6 +176,6 @@ def sample(state, t):
         "t": t, "pods": sum(1 for p in state["pods"] if p["status"] == "Running"),
         "nodes": {n["name"]: [n["cpu_used"], n["mem_used"], n["net_rx_rate"], n["net_tx_rate"],
                               (n.get("hw") or {}).get("temp_c"), (n.get("hw") or {}).get("freq_mhz"), ((n.get("hw") or {}).get("load") or [None])[0],
-                              _gpu_use(n), _gpu_mem(n)]
+                              _gpu_use(n), _gpu_mem(n), n.get("disk_used")]
                   for n in state["nodes"]},
     }

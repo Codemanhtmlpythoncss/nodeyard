@@ -563,7 +563,7 @@ class KubeSource:
                     paths.append("%s -> %s" % (p.get("path", "/"), be.get("name", "")))
             addr = [i.get("ip") or i.get("hostname", "") for i in (it.get("status", {}).get("loadBalancer", {}).get("ingress") or [])]
             out.append({"namespace": meta["namespace"], "name": meta["name"], "class": sp.get("ingressClassName", ""),
-                        "hosts": hosts, "paths": paths, "addresses": addr, "created": parse_time(meta.get("creationTimestamp"))})
+                        "hosts": hosts, "paths": paths, "addresses": addr, "tls": bool(sp.get("tls")), "created": parse_time(meta.get("creationTimestamp"))})
         return out
 
     @staticmethod
