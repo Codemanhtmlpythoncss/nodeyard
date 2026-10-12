@@ -1,7 +1,7 @@
-"""Automatic model unloading: give memory back from models nobody has used for a while.
+"""Model lifecycle: give back idle memory and refresh the split model while it is unused.
 
-Off by default. The setting lives in the dashboard's prefs.json (one place for the page, the control API and
-the Mac app). When it is on:
+Automatic unloading is off by default; hourly split-model refresh is on by default. Settings live in the dashboard's
+prefs.json (one place for the page, the control API and the Mac app). When each feature is on:
 
   - The split model is unloaded (every server it runs on stops; the files stay on disk) once it has been idle for
     the chosen time. "Idle" comes from llama.cpp's own /slots endpoint, so requests that reach the model directly
@@ -9,11 +9,13 @@ the Mac app). When it is on:
     dashboard can't read /slots it doesn't know whether the model is busy, so it never unloads it.
   - Ollama models get the chosen time as their keep-alive after every request that goes through Nodeyard and when
     they are loaded from the page. Ollama itself counts down and unloads them; any request resets its timer.
+  - The split model is fully unloaded and loaded again once an hour, but only when its own /slots endpoint confirms
+    that no request is active. If busy, the refresh waits until the next safe moment.
 
-Whether on or off: a model that is answering, or has queued work, is never unloaded; a model that was unloaded is
-never loaded again by this feature; and an Ollama model loaded from the page stays loaded (keep-alive -1) when the
-feature is off, even after chats through Ollama's OpenAI endpoint (which on its own resets the timer to Ollama's
-5-minute default and made models reload mid-task).
+Whether on or off: a model that is answering, or has queued work, is never unloaded; a model unloaded by the idle
+policy is never loaded again by that policy; and an Ollama model loaded from the page stays loaded (keep-alive -1)
+when automatic unloading is off, even after chats through Ollama's OpenAI endpoint (which on its own resets the
+timer to Ollama's 5-minute default and made models reload mid-task).
 """
 import collections
 import threading
@@ -21,7 +23,8 @@ import time
 
 PRESETS = (300, 600, 900, 1800, 2700, 3600, 7200)
 MIN_IDLE, MAX_IDLE = 60, 7 * 24 * 3600
-DEFAULTS = {"enabled": False, "idle_seconds": 1800}
+RELOAD_SECONDS = 3600
+DEFAULTS = {"enabled": False, "idle_seconds": 1800, "auto_reload": True}
 PREF_KEY = "model_lifecycle"
 POLL_SECONDS = 15
 SLOTS_STALE = 3 * POLL_SECONDS       # a /slots answer older than this doesn't prove the model is idle
@@ -44,6 +47,10 @@ def clean_settings(value, current=None):
         if not isinstance(value["enabled"], bool):
             raise LifecycleError("Automatic unloading must be on or off.")
         out["enabled"] = value["enabled"]
+    if "auto_reload" in value:
+        if not isinstance(value["auto_reload"], bool):
+            raise LifecycleError("Automatic reloading must be on or off.")
+        out["auto_reload"] = value["auto_reload"]
     if "idle_seconds" in value:
         raw = value["idle_seconds"]
         if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw != int(raw):
@@ -68,7 +75,7 @@ def keep_alive_value(seconds):
 
 
 class Lifecycle:
-    """Tracks model use and unloads idle models. `tick()` does one round and is what the tests drive."""
+    """Tracks model use, unloads idle models, and refreshes the split model hourly."""
 
     def __init__(self, backend, load_prefs, save_prefs, clock=time.time, log=None):
         self.backend = backend
@@ -104,12 +111,22 @@ class Lifecycle:
             prefs[PREF_KEY] = after
             self.save_prefs(prefs)
         if after != before:
-            self._event("settings", "Automatic unloading %s%s." % ("on" if after["enabled"] else "off",
-                        (", after %s idle" % describe_seconds(after["idle_seconds"])) if after["enabled"] else ""), ok=True)
+            changes = []
+            if after["enabled"] != before["enabled"]:
+                changes.append("automatic unloading %s%s" % ("on" if after["enabled"] else "off",
+                               (" after %s idle" % describe_seconds(after["idle_seconds"])) if after["enabled"] else ""))
+            if after["auto_reload"] != before["auto_reload"]:
+                changes.append("hourly model reload %s" % ("on" if after["auto_reload"] else "off"))
+            if after["idle_seconds"] != before["idle_seconds"] and after["enabled"] == before["enabled"] and after["enabled"]:
+                changes.append("unload time set to %s" % describe_seconds(after["idle_seconds"]))
+            if changes:
+                self._event("settings", "; ".join(changes).capitalize() + ".", ok=True)
             # The idle time starts over from the change; nothing already idle is unloaded at once.
             with self.lock:
                 if after["enabled"] and not before["enabled"] and self.split["last_used"] is not None:
                     self.split["last_used"] = max(self.split["last_used"], self.clock())
+                if after["auto_reload"] != before["auto_reload"] and self.split["reload_phase"] is None:
+                    self.split["reload_due_at"] = self.clock() + RELOAD_SECONDS if after["auto_reload"] and self.split["observed_at"] is not None else None
             self._apply_ollama_policy(after)
         return after
 
@@ -206,7 +223,8 @@ class Lifecycle:
     def _fresh_split(model):
         return {"model": model, "last_used": None, "task": None, "processing": False, "observed_at": None, "observe_error": "",
                 "unload_job": None, "unloading_since": None, "failures": 0, "retry_at": 0.0, "error": "", "auto_unloaded_at": None,
-                "loaded_seen": False}
+                "loaded_seen": False, "reload_due_at": None, "reload_last_at": None, "reload_phase": None, "reload_job": None,
+                "reload_started_at": None, "reload_retry_at": 0.0, "reload_error": ""}
 
     def _split_state(self):
         st = (self.backend.store.snapshot().get("state") or {})
@@ -225,6 +243,8 @@ class Lifecycle:
                 s["loaded_seen"] = False
                 s["processing"] = False
                 s["task"] = None
+                if s["reload_phase"] is None:
+                    s["reload_due_at"] = None
                 return
             settling = s["auto_unloaded_at"] is not None and now - s["auto_unloaded_at"] < UNLOADED_SETTLE
             if not s["loaded_seen"] and not settling and s["unload_job"] is None:
@@ -245,6 +265,8 @@ class Lifecycle:
             s["observe_error"] = ""
             s["observed_at"] = now
             task, processing = slots.get("task"), bool(slots.get("processing"))
+            if sp.get("ready") and s["reload_phase"] is None and s["reload_due_at"] is None:
+                s["reload_due_at"] = now + RELOAD_SECONDS
             if processing or (task is not None and s["task"] is not None and task != s["task"]):
                 s["last_used"] = now
             s["task"], s["processing"] = task, processing
@@ -254,11 +276,15 @@ class Lifecycle:
         now = self.clock() if now is None else now
         self._check_job(now)
         self.observe(now)
+        if self._check_reload(now):
+            return None
         settings = self.settings()
         sp = self._split_state()
+        if settings["auto_reload"] and self._start_reload(now, sp):
+            return None
         with self.lock:
             s = self.split
-            if not settings["enabled"] or not sp or not sp.get("loaded") or not sp.get("ready") or s["unload_job"]:
+            if not settings["enabled"] or not sp or not sp.get("loaded") or not sp.get("ready") or s["unload_job"] or s["reload_phase"]:
                 return None
             if s["last_used"] is None or now < s["retry_at"] or not s["loaded_seen"]:
                 return None      # (not seen loaded since the last unload: the cluster view may lag behind it)
@@ -300,6 +326,124 @@ class Lifecycle:
         self._event("unload", "Unloading %s after %s idle." % (sp.get("alias") or sp.get("model") or "the split model", describe_seconds(idle)),
                     ok=None, model=sp.get("model", ""), node=", ".join(x.get("node", "") for x in sp.get("shares", [])), idle=int(idle))
         return job
+
+    def _start_reload(self, now, sp):
+        """Begin a full unload/load cycle only when the split model is safe to interrupt."""
+        if not sp or not sp.get("loaded") or not sp.get("ready"):
+            return None
+        with self.lock:
+            s = self.split
+            if (s["reload_phase"] or s["unload_job"] or not s["loaded_seen"] or s["reload_due_at"] is None
+                    or now < s["reload_due_at"] or self.inflight.get("split") or s["processing"]
+                    or s["observed_at"] is None or now - s["observed_at"] > SLOTS_STALE or s["observe_error"]):
+                return None
+            model = s["model"]
+            last_task = s["task"]
+        try:
+            if self.backend.jobs_running():
+                return None
+            slots = self.backend.split_slots()
+        except Exception:  # noqa: BLE001 -- if activity or job state is unknown, defer the refresh
+            return None
+        if slots.get("processing") or (slots.get("task") is not None and slots.get("task") != last_task):
+            with self.lock:
+                self.split["last_used"] = now
+                self.split["task"], self.split["processing"] = slots.get("task"), bool(slots.get("processing"))
+            return None
+        try:
+            with self.lock:
+                s = self.split
+                if (s["model"] != model or s["reload_phase"] or s["unload_job"] or self.inflight.get("split")
+                        or not self.settings()["auto_reload"] or not s["reload_due_at"] or now < s["reload_due_at"]):
+                    return None
+                # Keep begin() from admitting a new dashboard request between the final busy check and job start.
+                job = self.backend.run("split-unload", {})
+                s["reload_phase"], s["reload_job"] = "unloading", job
+                s["reload_started_at"], s["reload_error"] = now, ""
+        except Exception as e:  # noqa: BLE001 -- a model lifecycle race or unavailable control command
+            with self.lock:
+                self.split["reload_due_at"] = now + RETRY_BASE
+                self.split["reload_error"] = str(e)[:300]
+            self._event("reload", "Hourly reload could not start: %s. Trying again in %s." % (e, describe_seconds(RETRY_BASE)), ok=False, model=model)
+            return None
+        self._event("reload", "Refreshing %s after one hour; waiting for it to finish any active work first." % (model or "the split model"),
+                    ok=None, model=model)
+        return job
+
+    def _check_reload(self, now):
+        """Advance an hourly refresh. Returns true while one is active, preventing an idle-unload race."""
+        with self.lock:
+            s = self.split
+            phase, jid, model = s["reload_phase"], s["reload_job"], s["model"]
+            retry_at = s["reload_retry_at"]
+        if not phase:
+            return False
+        sp = self._split_state()
+        if not sp or (model and sp.get("model") != model):
+            with self.lock:
+                self.split["reload_phase"], self.split["reload_job"] = None, None
+                self.split["reload_due_at"], self.split["reload_started_at"] = None, None
+            self._event("reload", "Stopped the hourly refresh because the split model changed or was removed.", ok=False, model=model)
+            return False
+
+        if phase in ("unloading", "loading"):
+            view = self.backend.job(jid, 0) if jid else None
+            status = (view or {}).get("status", "failed")
+            # The cluster can report ready before the CLI job record is refreshed.
+            if phase == "loading" and sp.get("ready"):
+                with self.lock:
+                    s = self.split
+                    s["reload_phase"], s["reload_job"] = None, None
+                    s["reload_started_at"], s["reload_retry_at"], s["reload_error"] = None, 0.0, ""
+                    s["reload_last_at"], s["reload_due_at"] = now, now + RELOAD_SECONDS
+                    s["loaded_seen"], s["last_used"], s["auto_unloaded_at"] = True, now, None
+                self._event("reload", "Reloaded %s; its next refresh is in one hour." % (model or "the split model"), ok=True, model=model)
+                return False
+            if status == "running":
+                return True
+            if status != "ok":
+                lines = (view or {}).get("lines") or []
+                error = (lines[-1] if lines else "the refresh task %s" % status)[:300]
+                with self.lock:
+                    s = self.split
+                    s["reload_error"] = error
+                    s["reload_retry_at"] = now + RETRY_BASE
+                    if phase == "unloading":
+                        s["reload_phase"], s["reload_job"] = None, None
+                        s["reload_due_at"] = now + RETRY_BASE
+                    else:
+                        # The model is normally still unloaded if starting it failed; keep retrying the load.
+                        s["reload_phase"], s["reload_job"] = "waiting_unload", None
+                self._event("reload", "Hourly model refresh failed: %s. Retrying in %s." % (error, describe_seconds(RETRY_BASE)), ok=False, model=model)
+                return phase == "loading"
+            if phase == "unloading":
+                with self.lock:
+                    self.split["reload_phase"], self.split["reload_job"] = "waiting_unload", None
+                    self.split["reload_retry_at"] = 0.0
+                self._event("reload", "The model stopped; waiting for its servers to exit before loading it again.", ok=None, model=model)
+                return True
+            # A successful load command can finish before the model becomes ready.
+            return True
+
+        if phase == "waiting_unload":
+            if sp.get("loaded") or now < retry_at:
+                return True
+            try:
+                if self.backend.jobs_running():
+                    return True
+                job = self.backend.run("split-load", {})
+            except Exception as e:  # noqa: BLE001
+                with self.lock:
+                    self.split["reload_error"] = str(e)[:300]
+                    self.split["reload_retry_at"] = now + RETRY_BASE
+                self._event("reload", "Couldn't start the model after its refresh: %s. Retrying in %s." % (e, describe_seconds(RETRY_BASE)), ok=False, model=model)
+                return True
+            with self.lock:
+                self.split["reload_phase"], self.split["reload_job"] = "loading", job
+                self.split["reload_retry_at"], self.split["reload_error"] = 0.0, ""
+            self._event("reload", "Loading %s again after its hourly refresh." % (model or "the split model"), ok=None, model=model)
+            return True
+        return True
 
     def _settings_still(self, settings):
         current = self.settings()
@@ -373,11 +517,27 @@ class Lifecycle:
             else:
                 state = "idle"
             eligible = bool(settings["enabled"] and state in ("idle", "unload_pending"))
+            if not settings["auto_reload"]:
+                reload_state = "off"
+            elif s["reload_phase"] == "unloading":
+                reload_state = "unloading"
+            elif s["reload_phase"] == "waiting_unload":
+                reload_state = "waiting_unload"
+            elif s["reload_phase"] == "loading":
+                reload_state = "loading"
+            elif not loaded or not ready:
+                reload_state = "waiting_for_model"
+            elif s["reload_due_at"] is not None and now >= s["reload_due_at"]:
+                reload_state = "waiting_for_idle"
+            else:
+                reload_state = "scheduled"
             split = {"model": sp.get("model", ""), "alias": sp.get("alias", ""), "state": state, "loaded": loaded, "ready": ready,
                      "idle_for": int(idle) if idle is not None else None, "last_used": s["last_used"],
                      "unload_in": max(0, int(settings["idle_seconds"] - idle)) if eligible and idle is not None else None,
                      "eligible": eligible, "error": s["error"], "retry_at": s["retry_at"] or None, "activity_error": s["observe_error"],
                      "activity_source": "llama.cpp /slots" if s["observed_at"] else "", "unload_job": s["unload_job"],
+                     "reload_state": reload_state, "reload_in": max(0, int(s["reload_due_at"] - now)) if settings["auto_reload"] and s["reload_due_at"] is not None else None,
+                     "reload_last_at": s["reload_last_at"], "reload_error": s["reload_error"],
                      "machines": [x.get("node", "") for x in sp.get("shares", [])]}
         ollama = []
         try:
