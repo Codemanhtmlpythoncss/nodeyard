@@ -387,7 +387,23 @@ class Music:
         return os.path.realpath(self._expand(d)) if d else ""
 
     def tracks(self):
+        """The library's audio files. Walking a big folder tree takes a while, and the Music page, the DJ, the AI and the
+        recommender all ask: the list is kept for 30 s, or until the folder (or the downloads folder) changes."""
         base = self._base()
+        roots = [x for x in (base, self.download_dir()) if x]
+        try:
+            key = (base, tuple(os.stat(x).st_mtime_ns if os.path.isdir(x) else 0 for x in roots))
+        except OSError:
+            key = None
+        hit = getattr(self, "_tracks_cache", None)
+        if key is not None and hit and hit[0] == key and time.time() - hit[1] < 30:
+            return list(hit[2])
+        out = self._scan_tracks(base)
+        if key is not None:
+            self._tracks_cache = (key, time.time(), out)
+        return list(out)
+
+    def _scan_tracks(self, base):
         out = []
         roots = [(base, "")] if base and os.path.isdir(base) else []
         downloaded = self.download_dir()
@@ -1347,9 +1363,11 @@ def register(ctx, args):
 
     def _art(h, q):
         data, ctype = music.artwork(q.get("path", [""])[0], q.get("url", [""])[0])
+        # a song's cover doesn't change: the browser keeps it (and keeps "there is none" for an hour) instead of asking
+        # again every time a list is drawn
         if not data:
-            return h._send(404, "Artwork not found", "text/plain; charset=utf-8")
-        return h._send(200, data, ctype)
+            return h._send(404, "Artwork not found", "text/plain; charset=utf-8", {"Cache-Control": "private, max-age=3600"})
+        return h._send(200, data, ctype, {"Cache-Control": "private, max-age=86400"})
 
     def _playlists(h, q):
         pid = q.get("id", [""])[0]
@@ -1373,6 +1391,9 @@ def register(ctx, args):
         if not music.ffmpeg():
             return h._send(503, "SoundCloud playback needs ffmpeg on the server (Settings → Update everything).",
                            "text/plain; charset=utf-8")
+        hit = _sc_cache_get(url)
+        if hit:   # already in memory: no download slot needed (seeking asks for many ranges at once)
+            return _stream_bytes(h, hit[0], hit[1])
         if not _sc_slots.acquire(blocking=False):
             return h._send(429, "Too many at once. Try again in a moment.", "text/plain; charset=utf-8")
         try:
@@ -1471,13 +1492,13 @@ def _stream_bytes(h, data, ctype):
     h.send_header("Content-Length", str(length))
     if status == 206:
         h.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
-    h.send_header("Cache-Control", "no-store")
+    h.send_header("Cache-Control", "private, max-age=86400")   # (a track's audio never changes: replays come from the browser)
     h.send_header("X-Content-Type-Options", "nosniff")
     h.end_headers()
     if h.command == "HEAD":
         return
     try:
-        h.wfile.write(data[start:end + 1])
+        h.wfile.write(memoryview(data)[start:end + 1])   # (no copy of the whole track for each range)
     except (BrokenPipeError, ConnectionResetError):
         pass
 
@@ -1511,12 +1532,21 @@ def _stream_file(h, full, ctype):
     h.send_header("Content-Length", str(length))
     if status == 206:
         h.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
-    h.send_header("Cache-Control", "no-store")
+    # replays and loops come from the browser's cache for an hour (a file replaced under the same name shows after that)
+    h.send_header("Cache-Control", "private, max-age=3600")
     h.send_header("X-Content-Type-Options", "nosniff")
     h.end_headers()
     if h.command == "HEAD":
         return
     with open(full, "rb") as f:
+        try:
+            # the kernel copies file to socket directly (no reading into Python and writing back out)
+            h.connection.sendfile(f, start, length)
+            return
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except (OSError, AttributeError, ValueError):
+            pass   # no sendfile here: copy it the plain way
         f.seek(start)
         remaining = length
         while remaining > 0:

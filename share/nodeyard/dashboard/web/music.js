@@ -122,7 +122,7 @@
       const rate = Math.max(0.5, Math.min(2, +audio.playbackRate || 1));
       if (Math.abs(rate - M.rate) > 0.001) { M.rate = rate; $("#ny-rate").value = String(rate); savePlayback(false, true); }
     });
-    audio.addEventListener("timeupdate", () => { tick(); historyProgress(false); savePlayback(false, false); });
+    audio.addEventListener("timeupdate", () => { tick(); historyProgress(false); savePlayback(false, false); prefetchNext(); });
     audio.addEventListener("durationchange", tick);
     audio.addEventListener("ended", onEnded);
     audio.addEventListener("play", () => { startViz(); paintBtn(); savePlayback(false, false); });
@@ -258,11 +258,18 @@
       if (!vizRAF && !audio.paused) drawViz();
     } catch (e) { /* Web Audio unavailable — fine, sound still plays */ }
   }
+  // the accent colour, read every couple of seconds instead of every frame (reading it forces a style recalculation)
+  let vizColor = "#ff5500", vizColorAt = 0, vizLast = 0;
+  function accent() {
+    const now = performance.now();
+    if (now - vizColorAt > 2000) { vizColorAt = now; vizColor = (getComputedStyle(document.documentElement).getPropertyValue("--sc") || "#ff5500").trim() || "#ff5500"; }
+    return vizColor;
+  }
   function drawBars(cv, bars) {
     const ctx = cv.getContext("2d"); const w = cv.width, h = cv.height;
     ctx.clearRect(0, 0, w, h);
     const step = Math.floor(vizData.length / bars) || 1, bw = w / bars;
-    const col = (getComputedStyle(document.documentElement).getPropertyValue("--sc") || "#ff5500").trim();
+    const col = accent();
     for (let i = 0; i < bars; i++) {
       let v = 0; for (let j = 0; j < step; j++) v += vizData[i * step + j] || 0; v /= step;
       const bh = Math.max(2, (v / 255) * h);
@@ -272,9 +279,11 @@
     }
     ctx.globalAlpha = 1;
   }
-  function drawViz() {
+  function drawViz(now) {
     vizRAF = requestAnimationFrame(drawViz);
     if (!analyser) return;
+    if (now && now - vizLast < 32) return;   // ~30 frames a second is plenty for bars, and half the work
+    vizLast = now || 0;
     const small = document.getElementById("ny-viz"), top = document.getElementById("sc-viz-top");
     if (audio.paused) {
       [small, top].forEach((cv) => { if (cv) cv.getContext("2d").clearRect(0, 0, cv.width, cv.height); });
@@ -481,6 +490,21 @@
       } catch (e) { /* fall through */ }
     }
     toast("Couldn't play that track.");
+  }
+  // What plays after this one, without moving anything (null when nothing follows).
+  function peekNext() {
+    if (M.live || !M.queue.length || M.repeat === "one") return null;
+    if (M.shuffle && M.queue.length > 1) return M.shuffleOrder && M.shufflePos < M.shuffleOrder.length ? M.queue[M.shuffleOrder[M.shufflePos]] : null;
+    return M.queue[M.idx + 1] || (M.repeat === "all" ? M.queue[0] : null);
+  }
+  // A SoundCloud song takes the server several seconds to fetch and convert: near the end of this one, ask for the next,
+  // so it starts at once (the server keeps it in memory; this only reads its first two bytes).
+  function prefetchNext() {
+    if (!audio || !audio.duration || audio.duration - audio.currentTime > 30) return;
+    const t = peekNext(); if (!t || !(t.kind === "sc" || t.url)) return;
+    const key = trackKey(t); if (M.prefetched === key) return;
+    M.prefetched = key;
+    fetch(srcFor(t), { headers: { Range: "bytes=0-1" }, cache: "no-store", credentials: "same-origin" }).catch(() => { M.prefetched = ""; });
   }
   function onEnded() {
     if (M.live) return;
