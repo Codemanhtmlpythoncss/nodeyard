@@ -42,6 +42,11 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   installed by [sc-pick](https://github.com/Codemanhtmlpythoncss/sc-pick); Music-page likes stay in the dashboard and
   do not touch a SoundCloud account. To download tracks on the Mac, use sc-pick, which now calls the local `sdownload`
   command instead of invoking yt-dlp directly.
+- **Settings → Update everything**: one button updates nodeyard (dashboard + its dependencies), sc-pick, and the
+  audio/download tools (ffmpeg, PulseAudio, yt-dlp), then restarts the dashboard — run on the server via a detached
+  unit (watch with `journalctl -u nodeyard-update -f`).
+- **More API presets**: Jellyfin, Ollama, Home Assistant, Grafana and Immich join SearXNG — each fills the fields so
+  you only add the URL and key.
 - **APIs: one-click setups** — SearXNG / blank-search / blank-REST presets fill the fiddly fields so you only enter the
   base URL. The Mac app shows the **APIs** and **Music** pages too (Manage → AI → APIs, Manage → Media → Music).
 - **Register your own self-hosted APIs** (new **APIs** page in the dashboard). Add search engines (SearXNG, Whoogle,

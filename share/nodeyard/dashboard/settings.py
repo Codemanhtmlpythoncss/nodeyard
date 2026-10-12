@@ -714,6 +714,28 @@ def register(ctx, args):
                     break
                 h.wfile.write(piece)
 
+    def update_all(h, body):
+        """Update nodeyard (dashboard + its deps), sc-pick, and the audio/download tools, then restart the dashboard.
+        Runs outside the dashboard's sandbox via a detached systemd unit, like the other system-changing actions."""
+        if getattr(args, "demo", False):
+            return h._json({"ok": True, "message": "(demo) nothing was updated."})
+        script = (
+            "echo '== nodeyard =='; curl -fsSL https://raw.githubusercontent.com/Codemanhtmlpythoncss/nodeyard/main/install.sh | bash -s -- --yes --force; "
+            "echo '== sc-pick =='; curl -fsSL https://raw.githubusercontent.com/Codemanhtmlpythoncss/sc-pick/main/sc-pick -o /usr/local/bin/sc-pick && chmod +x /usr/local/bin/sc-pick; "
+            "echo '== audio/download deps =='; "
+            "if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y ffmpeg pulseaudio-utils; "
+            "elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm ffmpeg libpulse; "
+            "elif command -v dnf >/dev/null 2>&1; then dnf install -y ffmpeg pulseaudio-utils; fi; "
+            "python3 -m pip install --upgrade --quiet yt-dlp 2>/dev/null || true; "
+            "echo '== restart =='; nodeyard dashboard start --yes; echo '== done =='"
+        )
+        try:
+            subprocess.Popen(["systemd-run", "--unit", "nodeyard-update", "--collect", "--setenv=HOME=/root", "/bin/sh", "-c", script],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError as e:
+            return h._json({"ok": False, "error": "Couldn't start the update: %s" % e}, 500)
+        return h._json({"ok": True, "message": "Update started — nodeyard, sc-pick and the audio/download tools. The dashboard will restart on the new version. Watch it in Terminal: journalctl -u nodeyard-update -f"})
+
     ctx.get_routes.update({
         "/api/settings": wrap(lambda h, q: s.view(h._token())),
         "/api/doctor": wrap(lambda h, q: {"doctor": s.doctor(bool(q.get("fresh")))}),
@@ -721,6 +743,7 @@ def register(ctx, args):
         "/api/commands": wrap(lambda h, q: {"commands": s.commands(), "public": h._forwarded() is not None}),
     })
     ctx.post_routes.update({
+        "/api/update/run": update_all,
         "/api/settings/password": wrap(lambda h, b: s.set_password(b, h._token())),
         "/api/settings/chat-defaults": wrap(lambda h, b: s.set_chat_defaults(b)),
         "/api/settings/signout-all": wrap(lambda h, b: s.signout_all()),

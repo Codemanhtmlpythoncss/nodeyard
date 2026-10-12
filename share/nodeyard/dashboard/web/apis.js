@@ -11,8 +11,17 @@
 
   // One-click setups: fill the fiddly fields so you only type the base URL.
   const PRESETS = {
-    searxng: { name: "SearXNG", kind: "search", method: "GET", base: "https://searx.example.lan/search", description: "Search the web through my SearXNG",
+    searxng: { name: "SearXNG", kind: "search", method: "GET", base: "http://searxng.nodeyard-apps.svc:8080/search", description: "Search the web through my SearXNG",
                query_param: "q", extra_params: { format: "json" }, result: { items: "results", title: "title", url: "url", snippet: "content" } },
+    jellyfin: { name: "Jellyfin", kind: "rest", method: "GET", base: "http://jellyfin.lan:8096", description: "My Jellyfin media server (try path /Items or /Users)",
+                auth: { type: "header", name: "X-Emby-Token", value: "" } },
+    ollama: { name: "Ollama", kind: "rest", method: "GET", base: "http://ollama.lan:11434", description: "My Ollama server (try path /api/tags)", auth: { type: "none" } },
+    homeassistant: { name: "Home Assistant", kind: "rest", method: "GET", base: "http://homeassistant.lan:8123/api", description: "My Home Assistant (try path /states)",
+                     auth: { type: "bearer", value: "" } },
+    grafana: { name: "Grafana", kind: "rest", method: "GET", base: "http://grafana.lan:3000/api", description: "My Grafana (try path /search or /dashboards)",
+               auth: { type: "bearer", value: "" } },
+    immich: { name: "Immich", kind: "rest", method: "GET", base: "http://immich.lan:2283/api", description: "My Immich photos (try path /server-info)",
+              auth: { type: "header", name: "x-api-key", value: "" } },
     search: { name: "", kind: "search", method: "GET", base: "", description: "", query_param: "q", extra_params: {}, result: { items: "", title: "title", url: "url", snippet: "" } },
     rest: { name: "", kind: "rest", method: "GET", base: "", description: "" },
   };
@@ -83,11 +92,16 @@
     const el = $("#view"); if (!el || S.view !== "apis") return;
     const intro = html`<section class="card"><h3>Your self-hosted APIs</h3>
       <p class="muted small" style="margin-top:0">Register search engines (SearXNG, your own) and REST APIs. The dashboard calls them for you, and the AI chat gets one tool per API. The host you set is the only one ever contacted — the model only supplies the query and parameters.</p>
-      ${A.editing ? "" : html`<div class="row mt" style="gap:8px;flex-wrap:wrap">
-        <span class="small faint">Quick setup:</span>
+      ${A.editing ? "" : html`<div class="row mt" style="gap:8px;flex-wrap:wrap;align-items:center">
+        <span class="small faint">Quick setup — fills everything but the URL and key:</span>
         <button class="btn small primary" data-api="preset" data-preset="searxng">SearXNG</button>
+        <button class="btn small" data-api="preset" data-preset="jellyfin">Jellyfin</button>
+        <button class="btn small" data-api="preset" data-preset="ollama">Ollama</button>
+        <button class="btn small" data-api="preset" data-preset="homeassistant">Home Assistant</button>
+        <button class="btn small" data-api="preset" data-preset="grafana">Grafana</button>
+        <button class="btn small" data-api="preset" data-preset="immich">Immich</button>
         <button class="btn small" data-api="preset" data-preset="search">Blank search</button>
-        <button class="btn small" data-api="preset" data-preset="rest">Blank REST API</button></div>`}</section>`;
+        <button class="btn small" data-api="preset" data-preset="rest">Blank REST</button></div>`}</section>`;
     const body = A.editing === "new" ? form(A.preset || {}) : (A.editing ? form(A.list.find((x) => x.id === A.editing) || {}) : "");
     const list = A.list.length ? A.list.map(apiCard) : (A.editing ? "" : html`<div class="card mt"><div class="empty">No APIs yet. Add one to use it from chat.</div></div>`);
     NY.freshHTML(el, html`${intro}${body}${list}`);

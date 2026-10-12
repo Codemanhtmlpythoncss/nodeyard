@@ -123,6 +123,9 @@
     const gateNets = s.gate ? s.gate.trusted.join("\n") : "127.0.0.0/8\n10.0.0.0/8\n172.16.0.0/12\n192.168.0.0/16\n100.64.0.0/10\n::1/128\nfc00::/7\nfd7a:115c:a1e0::/48";
     NY.freshHTML(el, html`${s.demo ? html`<div class="banner">Demo: changes here aren't saved anywhere.</div>` : ""}
       ${themeCard(theme)}
+      ${card("Update", html`<p class="muted small" style="margin-top:0">Update nodeyard (the dashboard and its dependencies), <span class="mono">sc-pick</span>, and the audio/download tools (ffmpeg, PulseAudio, yt-dlp), then restart the dashboard on the new version. Runs on the server.</p>
+        <button class="btn primary" data-st="update-all">Update everything</button>
+        <span id="st-update-msg" class="small faint" style="margin-left:10px"></span>`)}
       ${card("AI chat defaults", html`
         <p class="muted small" style="margin-top:0">Saved on this server. New chats inherit these choices; each chat keeps its own settings after that.</p>
         ${field("System prompt", html`<textarea class="input" id="st-chat-system" rows="3" maxlength="12000" placeholder="e.g. You are a concise assistant.">${d.system || ""}</textarea>`)}
@@ -242,7 +245,12 @@
   document.addEventListener("click", async (e) => {
     const el = e.target.closest("[data-st]"); if (!el) return;
     const a = el.dataset.st, s = T.settings;
-    if (a === "doc-run") loadDoctor(true);
+    if (a === "update-all") {
+      if (!confirm("Update nodeyard, sc-pick and the audio/download tools, then restart the dashboard?")) return;
+      const msg = $("#st-update-msg"); if (msg) msg.textContent = "Starting…";
+      const r = await post("/api/update/run", {}); if (msg) msg.textContent = r.ok ? (r.message || "Update started.") : (r.error || "Couldn't start.");
+    }
+    else if (a === "doc-run") loadDoctor(true);
     else if (a === "doc-fix") startJob("doctor-fix", { only: el.dataset.id }, () => loadDoctor(true));
     else if (a === "doc-fix-all") startJob("doctor-fix", {}, () => loadDoctor(true));
     else if (a === "theme") { setTheme(el.dataset.theme); renderSettings(); }
