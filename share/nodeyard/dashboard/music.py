@@ -15,6 +15,7 @@ the folder picker can't be turned into a way to read the rest of the disk.
 import collections
 import concurrent.futures
 import glob
+import hashlib
 import json
 import os
 import pwd
@@ -99,6 +100,7 @@ class Music:
         self.path = os.path.join(state_dir or "/var/lib/nodeyard/dashboard", "music.json")
         self.demo = demo
         self.lock = threading.RLock()
+        self.cache_lock = threading.RLock()
         self.home = ""
         if terminal_user:
             try:
@@ -110,6 +112,55 @@ class Music:
                 self.home = pwd.getpwuid(os.getuid()).pw_dir
             except (KeyError, OSError):
                 self.home = "/root"
+
+    def cache_dir(self):
+        return os.path.join(os.path.dirname(self.path), "music-cache")
+
+    def cache_limit(self):
+        try:
+            return max(1, min(200, int(self.cfg().get("cache_limit", 20))))
+        except (TypeError, ValueError):
+            return 20
+
+    def cache_info(self):
+        folder = self.cache_dir()
+        try:
+            count = sum(1 for name in os.listdir(folder) if name.endswith(".mp3") and os.path.isfile(os.path.join(folder, name)))
+        except OSError:
+            count = 0
+        return {"limit": self.cache_limit(), "count": count, "folder": folder}
+
+    def _cache_path(self, url):
+        return os.path.join(self.cache_dir(), hashlib.sha256(url.encode("utf-8")).hexdigest() + ".mp3")
+
+    def _prune_cache(self, limit=None):
+        folder = self.cache_dir()
+        try:
+            rows = [(os.path.getmtime(os.path.join(folder, name)), os.path.join(folder, name))
+                    for name in os.listdir(folder) if name.endswith(".mp3")]
+        except OSError:
+            return
+        maximum = self.cache_limit() if limit is None else max(1, min(200, int(limit)))
+        for _mtime, path in sorted(rows, reverse=True)[maximum:]:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def set_cache_limit(self, limit):
+        try:
+            amount = int(limit)
+        except (TypeError, ValueError):
+            return False
+        if amount < 1 or amount > 200:
+            return False
+        with self.lock:
+            cfg = self.cfg()
+            cfg["cache_limit"] = amount
+            self._save(cfg)
+        with self.cache_lock:
+            self._prune_cache(amount)
+        return True
 
     def cfg(self):
         try:
@@ -615,7 +666,22 @@ class Music:
             return None, "not a SoundCloud URL"
         hit = _sc_cache_get(url)
         if hit:
+            try:
+                os.utime(self._cache_path(url), None)
+            except OSError:
+                pass
             return hit[0], hit[1]
+        with self.cache_lock:
+            cached_path = self._cache_path(url)
+            try:
+                with open(cached_path, "rb") as f:
+                    data = f.read()
+                if data:
+                    os.utime(cached_path, None)
+                    _sc_cache_put(url, data, "audio/mpeg")
+                    return data, "audio/mpeg"
+            except OSError:
+                pass
         yt = self.yt_dlp()
         if not yt:
             return None, "yt-dlp isn't installed"
@@ -652,6 +718,24 @@ class Music:
                 return None, (reason[-1][:200] if reason else "couldn't normalize the audio")
             data, ctype = p.stdout, "audio/mpeg"
             _sc_cache_put(url, data, ctype)
+            with self.cache_lock:
+                try:
+                    folder = self.cache_dir()
+                    os.makedirs(folder, mode=0o700, exist_ok=True)
+                    os.chmod(folder, 0o700)
+                    target = self._cache_path(url)
+                    tmp = target + ".%s.tmp" % secrets.token_hex(6)
+                    with open(tmp, "wb") as f:
+                        os.chmod(tmp, 0o600)
+                        f.write(data)
+                    os.replace(tmp, target)
+                    self._prune_cache()
+                except OSError:
+                    try:
+                        if "tmp" in locals() and os.path.exists(tmp):
+                            os.unlink(tmp)
+                    except OSError:
+                        pass
             return data, ctype
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -811,6 +895,7 @@ def register(ctx, args):
         c = music.cfg()
         have_ff = bool(music.ffmpeg())
         return h._json({"ok": True, "dir": c.get("dir", ""), "tracks": music.tracks(),
+                        "recent_cache": music.cache_info(),
                         "forward": {"available": music.forward_available(), "reason": music.forward_reason(),
                                     "enabled": bool(c.get("forward_enabled")),
                                     "source": c.get("forward_source", ""), "auto_source": music.default_source() if have_ff else "",
@@ -835,6 +920,10 @@ def register(ctx, args):
             c["forward_enabled"] = bool(body.get("forward_enabled"))
         if "forward_source" in body:
             c["forward_source"] = str(body.get("forward_source") or "")[:200]
+        if "cache_limit" in body:
+            if not music.set_cache_limit(body.get("cache_limit")):
+                return h._json({"ok": False, "error": "Choose a cache size from 1 to 200 songs."}, 400)
+            c = music.cfg()
         music._save(c)
         return h._json({"ok": True})
 

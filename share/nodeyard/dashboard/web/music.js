@@ -721,6 +721,8 @@
 
   function renderSettings(el) {
     const d = M.data || {}; const fw = d.forward || {};
+    const cache = d.recent_cache || { limit: 20, count: 0, folder: "" };
+    const cacheOptions = [10, 20, 30, 50, 100, 200].map((n) => '<option value="' + n + '"' + (+cache.limit === n ? " selected" : "") + '>' + n + ' songs</option>').join("");
     const srcOpts = ['<option value="">Automatic (the server\'s output)</option>']
       .concat((fw.sources || []).map((s) => '<option value="' + esc(s) + '"' + (s === fw.source ? " selected" : "") + ">" + esc(s) + "</option>")).join("");
     const fwBody = !fw.ffmpeg
@@ -739,6 +741,9 @@
       ${card("Music folder", html`<p class="muted small" style="margin-top:0">The server plays audio files from one folder on the host (the control node, not your Mac). Everyone signed in can listen.</p>
         <div class="row" style="gap:8px"><input class="input" data-music="dir" value="${d.dir || ""}" placeholder="/home/your-user/Music/soundcloud" spellcheck="false" style="flex:1">
           <button class="btn" data-music="browse">Browse…</button><button class="btn primary" data-music="save-dir">Save</button></div>`)}
+      ${card("Recently played cache", html`<p class="muted small" style="margin-top:0">Played SoundCloud songs stay in a private cache folder so they load faster next time. When full, the oldest song is removed.</p>
+        <div class="row wrap" style="gap:10px;align-items:center"><label class="small">Keep up to <select class="select" data-music="cache-limit">${raw(cacheOptions)}</select></label>
+          <span class="faint small">${cache.count} cached · ${cache.folder || "music cache"}</span></div>`)}
       ${card("Live audio forwarding", fwBody)}`);
   }
 
@@ -982,7 +987,8 @@
   });
   document.addEventListener("change", async (e) => {
     const t = e.target.closest && e.target.closest("[data-music]"); if (!t) return;
-    if (t.dataset.music === "dj-target") { M.dj.target = t.value; saveDJ(); }
+    if (t.dataset.music === "cache-limit") { const r = await postJSON("/api/music/config", { cache_limit: +t.value }); if (r.ok) { await load(); renderTab(); toast("Recent song cache updated."); } else toast(r.error || "Couldn't update the cache size."); }
+    else if (t.dataset.music === "dj-target") { M.dj.target = t.value; saveDJ(); }
     else if (t.dataset.music === "dj-voice") { M.dj.voice = t.value; saveDJ(); }
     else if (t.dataset.music === "dj-speak") { M.dj.speak = t.checked; saveDJ(); if (!t.checked && typeof speechSynthesis !== "undefined") speechSynthesis.cancel(); }
     else if (t.dataset.music === "fw-toggle") { const r = await postJSON("/api/music/config", { forward_enabled: t.checked }); if (r.ok) { await load(); renderTab(); } }
