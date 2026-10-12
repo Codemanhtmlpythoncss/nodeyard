@@ -16,15 +16,18 @@ import json
 import os
 import pwd
 import re
+import secrets
 import shutil
 import subprocess
 import threading
+import time
 
 AUDIO_EXT = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".ogg": "audio/ogg", ".oga": "audio/ogg",
              ".opus": "audio/ogg", ".m4a": "audio/mp4", ".mp4": "audio/mp4", ".aac": "audio/aac",
              ".wav": "audio/wav", ".aiff": "audio/aiff", ".wma": "audio/x-ms-wma"}
 MAX_TRACKS = 3000
 _live_slots = threading.BoundedSemaphore(2)
+_sc_slots = threading.BoundedSemaphore(3)
 
 
 class Music:
@@ -321,6 +324,146 @@ class Music:
             self._save(cfg)
         return True, "", current[:500]
 
+    # -- SoundCloud streaming & playlists (so tracks play in the browser) -----
+
+    def yt_dlp(self):
+        """yt-dlp, used to resolve a SoundCloud track's audio URL and list a set's tracks. Prefer sc-pick's copy."""
+        for c in [os.path.join(self.home, ".local", "share", "sc-pick", "bin", "yt-dlp"), shutil.which("yt-dlp")]:
+            if c and os.path.isfile(c) and os.access(c, os.X_OK):
+                return c
+        return ""
+
+    def stream_ready(self):
+        return self.demo or bool(self.yt_dlp() and self.ffmpeg())
+
+    def sc_stream_url(self, url):
+        """The direct audio URL for a SoundCloud track (yt-dlp -g). ffmpeg then transcodes it to MP3 for the browser."""
+        yt = self.yt_dlp()
+        if not yt or not self._valid_sc_url(url):
+            return None
+        try:
+            r = subprocess.run([yt, "-q", "--no-warnings", "-f", "bestaudio/best", "-g", url],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        lines = [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
+        return lines[0].strip() if lines else None
+
+    def sc_playlist(self, url):
+        """List the tracks of a SoundCloud playlist/set (or a user's tracks), so they can be played or saved."""
+        if not self._valid_sc_url(url):
+            return False, "Give a soundcloud.com playlist, set or user URL.", []
+        if self.demo:
+            return True, "Demo set", [{"title": "Demo track %d" % i, "artist": "Demo artist", "duration_ms": 180000,
+                                       "url": "https://soundcloud.com/demo/track-%d" % i} for i in range(1, 6)]
+        yt = self.yt_dlp()
+        if not yt:
+            return False, "yt-dlp isn't installed on the server. Use Settings → Update everything, then try again.", []
+        try:
+            r = subprocess.run([yt, "-q", "--no-warnings", "--flat-playlist", "-J", url],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", timeout=60)
+        except subprocess.TimeoutExpired:
+            return False, "Reading that playlist took too long.", []
+        except OSError as e:
+            return False, "Couldn't start yt-dlp: %s" % e, []
+        if r.returncode:
+            return False, ("\n".join((r.stderr or "").strip().splitlines()[-4:])[:400] or "Couldn't read that playlist."), []
+        try:
+            data = json.loads(r.stdout or "{}")
+        except ValueError:
+            return False, "Couldn't parse that playlist.", []
+        entries = data.get("entries") if isinstance(data, dict) else None
+        if entries is None:
+            entries = [data] if isinstance(data, dict) else []
+        rows = []
+        for e in entries[:300]:
+            if not isinstance(e, dict):
+                continue
+            u = e.get("webpage_url") or e.get("url") or ""
+            if not self._valid_sc_url(u):
+                continue
+            dur = e.get("duration")
+            try:
+                duration_ms = int(float(dur) * 1000) if dur else 0
+            except (TypeError, ValueError):
+                duration_ms = 0
+            rows.append({"title": str(e.get("title") or "Untitled")[:300],
+                         "artist": str(e.get("uploader") or e.get("channel") or e.get("uploader_id") or "")[:200],
+                         "duration_ms": max(0, duration_ms), "url": u[:1000]})
+        title = str((data.get("title") if isinstance(data, dict) else "") or "Playlist")[:200]
+        if not rows:
+            return False, "No playable tracks found at that URL.", []
+        return True, title, rows
+
+    # -- local playlists (your own, saved in music.json) ---------------------
+
+    @staticmethod
+    def _playlists(cfg):
+        pls = cfg.get("playlists")
+        return [p for p in pls if isinstance(p, dict) and p.get("id")] if isinstance(pls, list) else []
+
+    def playlists(self):
+        return [{"id": p["id"], "name": p.get("name", "Playlist"), "count": len(p.get("tracks") or []),
+                 "created": p.get("created")} for p in self._playlists(self.cfg())]
+
+    def playlist_get(self, pid):
+        return next((p for p in self._playlists(self.cfg()) if p["id"] == pid), None)
+
+    def _norm_track(self, t):
+        if not isinstance(t, dict):
+            return None
+        if t.get("kind") == "sc" and self._valid_sc_url(t.get("url")):
+            try:
+                dur = max(0, min(86_400_000, int(t.get("duration_ms") or 0)))
+            except (TypeError, ValueError):
+                dur = 0
+            return {"kind": "sc", "url": str(t["url"])[:1000], "title": str(t.get("title") or "Untitled")[:300],
+                    "artist": str(t.get("artist") or "")[:200], "duration_ms": dur}
+        if t.get("kind") == "local" and t.get("path") and self.resolve(t.get("path")):
+            return {"kind": "local", "path": str(t["path"])[:1000], "name": str(t.get("name") or t["path"])[:300],
+                    "folder": str(t.get("folder") or "")[:300]}
+        return None
+
+    def playlist_op(self, action, pid=None, name=None, track=None, index=None):
+        with self.lock:
+            cfg = self.cfg()
+            pls = self._playlists(cfg)
+            if action == "create":
+                pid = secrets.token_hex(6)
+                pls.insert(0, {"id": pid, "name": (str(name or "").strip()[:120] or "New playlist"),
+                               "created": int(time.time()), "tracks": []})
+            else:
+                p = next((x for x in pls if x["id"] == pid), None)
+                if not p:
+                    return False, "Playlist not found.", None
+                if action == "rename":
+                    p["name"] = str(name or p.get("name") or "Playlist").strip()[:120] or "Playlist"
+                elif action == "delete":
+                    pls = [x for x in pls if x["id"] != pid]
+                elif action == "add":
+                    tr = self._norm_track(track)
+                    if not tr:
+                        return False, "Can't add that track (is the music folder set, or the SoundCloud link valid?).", None
+                    tracks = p.get("tracks") or []
+                    key = tr.get("url") or tr.get("path")
+                    if not any((x.get("url") or x.get("path")) == key for x in tracks):
+                        tracks.append(tr)
+                    p["tracks"] = tracks[:1000]
+                elif action == "remove":
+                    tracks = p.get("tracks") or []
+                    try:
+                        i = int(index)
+                    except (TypeError, ValueError):
+                        i = -1
+                    if 0 <= i < len(tracks):
+                        tracks.pop(i)
+                    p["tracks"] = tracks
+                else:
+                    return False, "Unknown action.", None
+            cfg["playlists"] = pls[:200]
+            self._save(cfg)
+        return True, "", pid
+
 
 def register(ctx, args):
     demo = bool(getattr(args, "demo", False))
@@ -336,7 +479,9 @@ def register(ctx, args):
                                     "enabled": bool(c.get("forward_enabled")),
                                     "source": c.get("forward_source", ""), "auto_source": music.default_source() if have_ff else "",
                                     "sources": music.sources(), "ffmpeg": have_ff},
-                        "sc": {"search_ready": demo or bool(music.soundcloud_cli()), "likes": music.sc_likes()}})
+                        "sc": {"search_ready": demo or bool(music.soundcloud_cli()), "stream_ready": music.stream_ready(),
+                               "likes": music.sc_likes()},
+                        "playlists": music.playlists()})
 
     def _config(h, body):
         c = music.cfg()
@@ -372,6 +517,62 @@ def register(ctx, args):
     def _test(h, body):
         ok, msg = music.test_forward()
         return h._json({"ok": ok, "message": msg, "source": music.default_source()})
+
+    def _sc_playlist(h, q):
+        ok, msg, tracks = music.sc_playlist(q.get("url", [""])[0])
+        return h._json({"ok": ok, "title": msg if ok else "", "error": "" if ok else msg, "tracks": tracks}, 200 if ok else 400)
+
+    def _playlists(h, q):
+        pid = q.get("id", [""])[0]
+        if pid:
+            p = music.playlist_get(pid)
+            return h._json({"ok": bool(p), "playlist": p}, 200 if p else 404)
+        return h._json({"ok": True, "playlists": music.playlists()})
+
+    def _playlist(h, body):
+        ok, msg, pid = music.playlist_op(str(body.get("action") or ""), pid=body.get("id"), name=body.get("name"),
+                                         track=body.get("track"), index=body.get("index"))
+        return h._json({"ok": ok, "error": msg, "id": pid, "playlists": music.playlists()}, 200 if ok else 400)
+
+    def _sc_stream(h, q):
+        url = q.get("url", [""])[0]
+        if not music._valid_sc_url(url):
+            return h._send(404, "Not found", "text/plain; charset=utf-8")
+        yt, ff = music.yt_dlp(), music.ffmpeg()
+        if demo or not yt or not ff:
+            return h._send(503, "SoundCloud streaming needs yt-dlp and ffmpeg on the server (Settings → Update everything).",
+                           "text/plain; charset=utf-8")
+        if not _sc_slots.acquire(blocking=False):
+            return h._send(429, "Too many streams at once. Try again in a moment.", "text/plain; charset=utf-8")
+        proc = None
+        try:
+            media = music.sc_stream_url(url)
+            if not media:
+                return h._send(502, "Couldn't play that track (it may be private or download-only).", "text/plain; charset=utf-8")
+            proc = subprocess.Popen([ff, "-hide_banner", "-loglevel", "error", "-i", media, "-vn", "-b:a", "192k",
+                                     "-f", "mp3", "pipe:1"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            h.send_response(200)
+            h.send_header("Content-Type", "audio/mpeg")
+            h.send_header("Cache-Control", "no-store")
+            h.send_header("Connection", "close")
+            h.end_headers()
+            if h.command == "HEAD":
+                return
+            while True:
+                chunk = proc.stdout.read(16384)
+                if not chunk:
+                    break
+                h.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            if proc is not None:
+                proc.kill()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.SubprocessError:
+                    pass
+            _sc_slots.release()
 
     def _track(h, q):
         rel = (q.get("path", [""])[0])
@@ -415,9 +616,11 @@ def register(ctx, args):
             _live_slots.release()
 
     ctx.get_routes.update({"/api/music": _status, "/api/music/track": _track, "/api/audio/live": _live,
-                           "/api/music/browse": _browse, "/api/music/search": _sc_search})
+                           "/api/music/browse": _browse, "/api/music/search": _sc_search,
+                           "/api/music/sc-stream": _sc_stream, "/api/music/sc-playlist": _sc_playlist,
+                           "/api/music/playlists": _playlists})
     ctx.post_routes.update({"/api/music/config": _config, "/api/audio/test": _test,
-                            "/api/music/like": _sc_like})
+                            "/api/music/like": _sc_like, "/api/music/playlist": _playlist})
 
 
 def _stream_file(h, full, ctype):
