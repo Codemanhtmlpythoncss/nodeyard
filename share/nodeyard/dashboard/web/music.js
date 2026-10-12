@@ -22,7 +22,7 @@
   }
 
   const M = {
-    data: null, tab: "home", homeHistory: [], homeRecs: [],
+    data: null, tab: "home", homeHistory: [], homeHistoryReady: false, homeHistoryError: false, homeSessionHeard: new Set(), homeRecs: [], homeUnheard: [],
     queue: [], idx: -1, live: false, seekable: true, shuffle: false, shuffleOrder: null, shufflePos: 0, repeat: "off", rate: 1, eq: "flat",
     scResults: [], scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
     discoverTracks: [], discoverIndex: 0, discoverQuery: "", discoverPointerX: 0, discoverSearched: false,
@@ -268,6 +268,11 @@
     return { action, id: M.historyId, seconds: Math.floor(seconds), track: trackForApi(t) };
   }
   function beginHistory(track) {
+    const key = trackKey(track);
+    if (key) {
+      M.homeSessionHeard.add(key);
+      if (M.tab === "home") renderTab();
+    }
     if (!M.historyId) {
       M.historyId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2);
       M.historyElapsed = 0;
@@ -703,10 +708,42 @@
     }).sort((a, b) => b.score - a.score).slice(0, 18).map((x) => x.track);
   }
 
+  function homeUnheardRecommendations() {
+    if (!M.homeHistoryReady) return [];
+    const heard = new Set([...(M.homeHistory || []).map(trackKey), ...M.homeSessionHeard]);
+    const candidates = new Map();
+    function add(track, liked) {
+      const key = trackKey(track);
+      if (!key || heard.has(key)) return;
+      const found = candidates.get(key);
+      if (found) { found.liked = found.liked || liked; return; }
+      candidates.set(key, { key, liked, track: { ...track, kind: track.url ? "sc" : "local" } });
+    }
+    M.scLikes.forEach((t) => add(t, true));
+    (((M.data || {}).tracks) || []).forEach((t) => add(t, false));
+    const day = Math.floor(Date.now() / 86400000);
+    function stable(key) { let h = 2166136261; for (const c of key + day) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967295; }
+    return Array.from(candidates.values()).sort((a, b) => (Number(b.liked) * 2 + stable(b.key)) - (Number(a.liked) * 2 + stable(a.key)))
+      .slice(0, 18).map((x) => x.track);
+  }
+
   function renderHome(el) {
     M.homeRecs = homeRecommendations();
+    M.homeUnheard = homeUnheardRecommendations();
     const tracks = M.homeRecs;
+    const unheard = M.homeUnheard;
+    const unseenContent = !M.homeHistoryReady
+      ? html`<div class="empty">${M.homeHistoryError ? "Couldn't check your listening history." : "Checking your listening history…"} ${M.homeHistoryError ? raw('<button class="btn small mt" data-music="home-history-retry">Try again</button>') : ""}</div>`
+      : unheard.length
+        ? unheard.map((t) => trackRow(t, "new:" + trackKey(t), t.url ? likeBtn(t) : ""))
+        : html`<div class="empty">You’ve heard every song we can see in your library and likes. Add more songs to find new ones.</div>`;
     setHTML(el, html`<div class="card">
+      <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h2 style="margin:0">New to you</h2>
+        <div class="muted small mt">Songs from your library and likes that aren’t in your saved listening history.</div></div>
+        ${unheard.length ? raw('<button class="btn primary" data-music="home-unheard-play">▶ Play new songs</button>') : ""}</div>
+      <div class="mt">${unseenContent}</div>
+    </div>
+    <div class="card mt">
       <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h2 style="margin:0">Made for you</h2>
         <div class="muted small mt">Ranked by a local algorithm using your library, likes and listening history. No AI.</div></div>
         ${tracks.length ? raw('<button class="btn primary" data-music="home-play">▶ Play recommendations</button>') : ""}</div>
@@ -939,9 +976,26 @@
     const r = await postJSON("/api/music/config", { dir }); if (r.ok) { await load(); renderPage(); toast("Saved."); } else toast(r.error || "Not saved.");
   }
 
+  async function refreshHomeHistory() {
+    M.homeHistoryReady = false; M.homeHistoryError = false;
+    try {
+      const first = await getJSON("/api/music/ai?action=history&offset=0&limit=50");
+      if (!first.ok || !Array.isArray(first.tracks)) throw new Error(first.error || "History is unavailable.");
+      const total = Math.max(first.tracks.length, Math.min(500, +first.total || 0));
+      const offsets = [];
+      for (let offset = 50; offset < total; offset += 50) offsets.push(offset);
+      const pages = await Promise.all(offsets.map((offset) => getJSON("/api/music/ai?action=history&offset=" + offset + "&limit=50")));
+      if (pages.some((page) => !page.ok || !Array.isArray(page.tracks))) throw new Error("Some listening history pages could not be loaded.");
+      M.homeHistory = first.tracks.concat(...pages.map((page) => page.tracks));
+      M.homeHistoryReady = true;
+    } catch (e) {
+      M.homeHistory = []; M.homeHistoryError = true;
+    }
+  }
+
   async function load() {
     try { const r = await getJSON("/api/music"); if (r.ok) M.data = r; } catch (e) { /* signed out */ }
-    try { const r = await getJSON("/api/music/ai?action=history&offset=0&limit=50"); M.homeHistory = r.ok && Array.isArray(r.tracks) ? r.tracks : []; } catch (e) { M.homeHistory = []; }
+    await refreshHomeHistory();
   }
 
   async function searchSc() {
@@ -1030,12 +1084,14 @@
     const t = e.target.closest && e.target.closest("[data-music], [data-tab]"); if (!t) return;
     if (t.dataset.tab) {
       M.tab = t.dataset.tab; M.openPl = null; renderPage();
-      if (M.tab === "home") getJSON("/api/music/ai?action=history&offset=0&limit=50").then((r) => { if (r.ok) { M.homeHistory = Array.isArray(r.tracks) ? r.tracks : []; renderTab(); } }).catch(() => {});
+      if (M.tab === "home") { const pending = refreshHomeHistory(); renderTab(); pending.then(() => { if (S.view === "music" && M.tab === "home") renderTab(); }); }
       return;
     }
     const act = t.dataset.music;
     if (act === "listen") playLive();
     else if (act === "home-play") { if (M.homeRecs.length) playQueue(M.homeRecs, 0); }
+    else if (act === "home-unheard-play") { if (M.homeUnheard.length) playQueue(M.homeUnheard, 0); }
+    else if (act === "home-history-retry") { const pending = refreshHomeHistory(); renderTab(); pending.then(() => { if (S.view === "music" && M.tab === "home") renderTab(); }); }
     else if (act === "dj-start") startDJ();
     else if (act === "dj-stop") stopDJ();
     else if (act === "dj-send") {
@@ -1125,6 +1181,7 @@
     else if (kind === "dj") { if (M.dj.draft) playQueue(M.dj.draft.tracks, +rest); }
     else if (kind === "lib") { const lib = filteredLib(); const i = lib.findIndex((x) => trackKey(x) === rest); if (i >= 0) playQueue(lib, i); }
     else if (kind === "rec") { const i = M.homeRecs.findIndex((x) => trackKey(x) === rest); if (i >= 0) playQueue(M.homeRecs, i); }
+    else if (kind === "new") { const i = M.homeUnheard.findIndex((x) => trackKey(x) === rest); if (i >= 0) playQueue(M.homeUnheard, i); }
   }
   async function toggleLike(url) {
     const track = findTrack(url); if (!track) return;
