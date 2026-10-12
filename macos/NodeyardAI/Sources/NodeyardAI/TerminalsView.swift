@@ -174,21 +174,13 @@ struct TerminalWindowView: View {
 struct TerminalWebView: NSViewRepresentable {
     let url: URL
     let cookies: [HTTPCookie]
-    let allowAutoplay: Bool
 
-    init(url: URL, cookies: [HTTPCookie], allowAutoplay: Bool = false) {
-        self.url = url
-        self.cookies = cookies
-        self.allowAutoplay = allowAutoplay
-    }
-
-    func makeNSView(context: Context) -> WKWebView { Self.make(url: url, cookies: cookies, allowAutoplay: allowAutoplay) }
+    func makeNSView(context: Context) -> WKWebView { Self.make(url: url, cookies: cookies) }
 
     /// A web view with its own, memory-only cookie store holding just this app's dashboard session.
-    static func make(url: URL, cookies: [HTTPCookie], allowAutoplay: Bool = false) -> WKWebView {
+    static func make(url: URL, cookies: [HTTPCookie]) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
-        if allowAutoplay { config.mediaTypesRequiringUserActionForPlayback = [] }
         let view = WKWebView(frame: .zero, configuration: config)
         view.setValue(false, forKey: "drawsBackground")
         let store = config.websiteDataStore.httpCookieStore
@@ -217,7 +209,7 @@ struct GalaxyView: View {
                         Text("The cluster's dashboard is older than the 3D galaxy, so this is its 2D Universe. Update nodeyard on the server to get the 3D one.")
                             .font(.caption).foregroundStyle(.secondary).padding(6).frame(maxWidth: .infinity).background(.bar)
                     }
-                    TerminalWebView(url: page.0, cookies: page.1, allowAutoplay: true)
+                    TerminalWebView(url: page.0, cookies: page.1)
                 }
             }
             else if mgmt.authEnabled && !mgmt.signedIn && mgmt.termError != nil {
@@ -244,7 +236,7 @@ struct EmbeddedPageView: View {
     @State private var page: (URL, [HTTPCookie])?
     var body: some View {
         Group {
-            if let page { TerminalWebView(url: page.0, cookies: page.1, allowAutoplay: fragment == "music") }
+            if let page { TerminalWebView(url: page.0, cookies: page.1) }
             else if mgmt.authEnabled && !mgmt.signedIn && mgmt.termError != nil {
                 VStack(spacing: 10) {
                     Text("Sign in to the dashboard to open this page.").foregroundStyle(.secondary)
