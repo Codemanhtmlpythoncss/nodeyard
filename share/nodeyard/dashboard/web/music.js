@@ -23,7 +23,7 @@
 
   const M = {
     data: null, tab: "search",
-    queue: [], idx: -1, live: false, seekable: true, shuffle: false, shuffleOrder: null, shufflePos: 0, repeat: "off",
+    queue: [], idx: -1, live: false, seekable: true, shuffle: false, shuffleOrder: null, shufflePos: 0, repeat: "off", rate: 1,
     scResults: [], scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
     dj: readDJState(),
     historyId: "", historyElapsed: 0, historySince: 0, lastHistorySave: 0, lastPlaybackSave: 0, restored: false, stopping: false,
@@ -47,6 +47,7 @@
       "#ny-player canvas{width:120px;height:30px;flex:none;opacity:.95}" +
       "#ny-player button{background:none;border:0;color:inherit;cursor:pointer;font-size:16px;padding:4px;border-radius:6px}" +
       "#ny-player button:hover{background:rgba(125,160,200,.14)}" +
+      "#ny-player select{background:rgba(125,160,200,.10);border:1px solid var(--line,rgba(125,160,200,.18));color:inherit;border-radius:6px;padding:4px;font-size:12px}" +
       "#ny-player button:disabled{opacity:.4;cursor:default}" +
       "#ny-player button.act{color:var(--sc,#ff5500)}" +
       "#ny-player button.act::after{content:'';position:absolute;left:50%;bottom:1px;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--sc,#ff5500)}" +
@@ -85,6 +86,7 @@
       '<button id="ny-shuffle" title="Shuffle">🔀</button>' +
       '<button id="ny-repeat" title="Loop: Off (click to change)" aria-label="Loop: Off (click to change)" aria-pressed="false">🔁</button><span id="ny-repeat-state" class="loop-state">Off</span>' +
       '<button id="ny-copy" title="Copy SoundCloud link" aria-label="Copy SoundCloud link">⧉</button>' +
+      '<label class="faint small" title="Playback speed">Speed <select id="ny-rate" aria-label="Playback speed"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="1.75">1.75×</option><option value="2">2×</option></select></label>' +
       '<button id="ny-vol-i" title="Volume">🔊</button><input type="range" id="ny-vol" min="0" max="1" value="1" step="0.05" style="width:70px" aria-label="Volume">' +
       '<button id="ny-close" title="Close player">✕</button>';
     document.body.appendChild(bar);
@@ -93,9 +95,11 @@
     audio.crossOrigin = "anonymous";
     audio.defaultPlaybackRate = 1;
     audio.playbackRate = 1;
+    audio.preservesPitch = true;
+    audio.webkitPreservesPitch = true;
     audio.addEventListener("ratechange", () => {
-      // There is no speed control in this player; keep unexpected browser rate changes from altering playback.
-      if (audio.playbackRate !== 1) audio.playbackRate = 1;
+      const rate = Math.max(0.5, Math.min(2, +audio.playbackRate || 1));
+      if (Math.abs(rate - M.rate) > 0.001) { M.rate = rate; $("#ny-rate").value = String(rate); savePlayback(false, true); }
     });
     audio.addEventListener("timeupdate", () => { tick(); historyProgress(false); savePlayback(false, false); });
     audio.addEventListener("durationchange", tick);
@@ -114,6 +118,7 @@
     $("#ny-shuffle").onclick = () => { M.shuffle = !M.shuffle; resetShuffle(M.idx); paintBtn(); savePlayback(false, true); };
     $("#ny-repeat").onclick = () => { M.repeat = M.repeat === "off" ? "one" : M.repeat === "one" ? "all" : "off"; paintBtn(); savePlayback(false, true); };
     $("#ny-copy").onclick = copyCurrentLink;
+    $("#ny-rate").onchange = (e) => setPlaybackRate(e.target.value, true);
     $("#ny-seek").oninput = (e) => { if (audio.duration && M.seekable && !M.live) audio.currentTime = (e.target.value / 100) * audio.duration; };
     $("#ny-vol").oninput = (e) => { audio.volume = +e.target.value; savePlayback(false, false); };
   }
@@ -170,6 +175,18 @@
   }
 
   const fmtTime = (s) => (isFinite(s) && s >= 0 ? Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0") : "0:00");
+  function setPlaybackRate(value, persist) {
+    const rate = Math.max(0.5, Math.min(2, Number(value) || 1));
+    M.rate = rate;
+    if (audio) {
+      audio.defaultPlaybackRate = rate;
+      audio.playbackRate = rate;
+      audio.preservesPitch = true;
+      audio.webkitPreservesPitch = true;
+    }
+    const select = $("#ny-rate"); if (select) select.value = String(rate);
+    if (persist) savePlayback(false, true);
+  }
   function tick() {
     if (!bar) return;
     $("#ny-cur").textContent = fmtTime(audio.currentTime);
@@ -247,6 +264,7 @@
     const history = historyBody("progress");
     const body = { queue: M.queue.map(trackForApi), index: M.idx, position: audio.currentTime || 0,
       volume: audio.volume, playing: !audio.paused, shuffle: M.shuffle, repeat: M.repeat,
+      rate: audio.playbackRate || M.rate,
       history_id: M.historyId, history_seconds: history ? history.seconds : M.historyElapsed, handoff: !!handoff };
     if (!keepalive && Date.now() - M.lastPlaybackSave < 15000) return;
     M.lastPlaybackSave = Date.now();
@@ -267,6 +285,7 @@
       ensureBar();
       M.queue = state.queue; M.idx = Math.max(0, Math.min(+state.index || 0, M.queue.length - 1));
       M.shuffle = !!state.shuffle; M.repeat = ["off", "all", "one"].includes(state.repeat) ? state.repeat : "off";
+      setPlaybackRate(state.rate, false);
       M.historyId = state.history_id || ""; M.historyElapsed = Math.max(0, +state.history_seconds || 0); M.historySince = 0;
       const track = M.queue[M.idx]; if (!track) return;
       if (M.shuffle) resetShuffle(M.idx);
@@ -307,8 +326,7 @@
     M.idx = i; M.live = false;
     if (M.shuffle && !shuffled) resetShuffle(i);
     const t = M.queue[i];
-    audio.defaultPlaybackRate = 1;
-    audio.playbackRate = 1;
+    setPlaybackRate(M.rate, false);
     const sc = (t.kind === "sc" || t.url);
     M.seekable = true;     // the server buffers both local files and SoundCloud, so seeking & resume work
     audio.src = srcFor(t);

@@ -36,6 +36,7 @@
   }
   function playbackPayload(handoff) {
     return { queue: state.queue, index: state.index, position: audio.currentTime || 0, volume: audio.volume,
+      rate: audio.playbackRate || state.rate || 1,
       playing: !audio.paused, shuffle: !!state.shuffle, repeat: state.repeat || "off", history_id: state.history_id || "",
       history_seconds: Math.floor(historyElapsed + (historySince && !audio.paused ? (performance.now() - historySince) / 1000 : 0)), handoff: !!handoff };
   }
@@ -127,6 +128,13 @@
     resetShuffle(state.index);
     historyElapsed = Math.max(0, +saved.history_seconds || 0); historySince = 0; audio = new Audio(); audio.preload = "auto";
     audio.volume = Math.max(0, Math.min(1, Number.isFinite(+saved.volume) ? +saved.volume : 1));
+    state.rate = Math.max(0.5, Math.min(2, Number.isFinite(+saved.rate) ? +saved.rate : 1));
+    audio.defaultPlaybackRate = state.rate; audio.playbackRate = state.rate;
+    audio.preservesPitch = true; audio.webkitPreservesPitch = true;
+    audio.addEventListener("ratechange", function () {
+      var rate = Math.max(0.5, Math.min(2, Number.isFinite(+audio.playbackRate) ? +audio.playbackRate : 1));
+      if (Math.abs(rate - state.rate) > 0.001) { state.rate = rate; save(false, true); }
+    });
     audio.src = src(state.queue[state.index]);
     var position = Math.max(0, +saved.position || 0);
     audio.addEventListener("loadedmetadata", function () { if (position < audio.duration) audio.currentTime = position; }, { once: true });

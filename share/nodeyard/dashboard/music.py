@@ -215,15 +215,16 @@ class Music:
             index = int(body.get("index", 0))
             position = max(0.0, min(86_400.0, float(body.get("position", 0))))
             volume = max(0.0, min(1.0, float(body.get("volume", 1))))
+            rate = max(0.5, min(2.0, float(body.get("rate", 1))))
         except (TypeError, ValueError):
-            return False, "Invalid playback position or volume.", {}
+            return False, "Invalid playback position, volume or speed.", {}
         index = max(0, min(index, len(queue) - 1))
         repeat = body.get("repeat") if body.get("repeat") in ("off", "all", "one") else "off"
         try:
             history_seconds = max(0, min(86_400, int(float(body.get("history_seconds") or 0))))
         except (TypeError, ValueError):
             history_seconds = 0
-        state = {"queue": queue, "index": index, "position": position, "volume": volume,
+        state = {"queue": queue, "index": index, "position": position, "volume": volume, "rate": rate,
                  "playing": body.get("playing") is True, "shuffle": body.get("shuffle") is True,
                  "repeat": repeat, "history_id": str(body.get("history_id") or "")[:80], "history_seconds": history_seconds,
                  "handoff": body.get("handoff") is True, "updated": time.time()}
