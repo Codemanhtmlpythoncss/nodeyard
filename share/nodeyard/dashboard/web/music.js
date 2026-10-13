@@ -9,7 +9,7 @@
   const { S, V, $, card, toast, getJSON, postJSON } = U;
 
   function readDJState() {
-    const initial = { active: false, target: "", voice: "", speak: true, messages: [], draft: null, targets: null, busy: false };
+    const initial = { active: false, target: "", voice: "", speak: true, between: true, messages: [], draft: null, targets: null, busy: false, piper: null };
     try {
       const saved = JSON.parse(localStorage.getItem("ny-music-dj") || "{}");
       if (!saved || typeof saved !== "object") return initial;
@@ -17,7 +17,7 @@
         messages: Array.isArray(saved.messages) ? saved.messages.slice(-16).filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
           .map((m) => Object.assign({}, m, { content: m.role === "assistant" ? readableDJMessage(m.content) : m.content })) : [],
         draft: saved.draft && Array.isArray(saved.draft.tracks) ? saved.draft : null,
-        targets: null, busy: false,
+        targets: null, busy: false, piper: null,
       });
     } catch (e) { return initial; }
   }
@@ -130,6 +130,7 @@
       const t = M.queue[M.idx];
       if (t && !M.live) {
         $("#ny-np-sub").textContent = subOf(t); beginHistory(t);
+        djBetween(t);
         const discoverIndex = M.discoverTracks.findIndex((item) => trackKey(item) === trackKey(t));
         if (M.tab === "discover" && discoverIndex >= 0 && discoverIndex !== M.discoverIndex) { M.discoverIndex = discoverIndex; renderTab(); }
       }
@@ -572,7 +573,7 @@
   function saveDJ() {
     try {
       localStorage.setItem("ny-music-dj", JSON.stringify({ active: !!M.dj.active, target: M.dj.target || "", voice: M.dj.voice || "",
-        speak: M.dj.speak !== false, messages: (M.dj.messages || []).slice(-16), draft: M.dj.draft || null }));
+        speak: M.dj.speak !== false, between: M.dj.between !== false, messages: (M.dj.messages || []).slice(-16), draft: M.dj.draft || null }));
     } catch (e) { /* private browser storage may be disabled */ }
   }
   const DJ_ROBOTIC = /\b(albert|bad news|bahh|bells|boing|bubbles|cellos|eddy|flo|fred|good news|grandma|grandpa|jester|junior|kathy|organ|ralph|reed|rocko|sandy|shelley|superstar|trinoids|whisper|wobble|zarvox|compact|eloquence)\b/i;
@@ -589,31 +590,129 @@
     return score;
   }
   function djBestVoice() { return djVoices().slice().sort((a, b) => djVoiceScore(b) - djVoiceScore(a))[0] || null; }
+  // Natural voices: Piper on the server (djvoice.py). Picking one that isn't downloaded yet offers to get it.
+  // (it redraws the DJ tab itself once the answer is in: a redraw must never ask for another one, or they'd loop)
+  async function loadPiper(force) {
+    if (M.dj.piperLoading || (!force && (M.dj.piper || Date.now() < (M.dj.piperRetry || 0)))) return;
+    M.dj.piperLoading = true;
+    try { const r = await getJSON("/api/music/dj-voice"); if (r.ok) M.dj.piper = r; else M.dj.piperRetry = Date.now() + 60000; }
+    catch (e) { M.dj.piperRetry = Date.now() + 60000; }
+    M.dj.piperLoading = false;
+    if (S.view === "music" && M.tab === "dj") renderTab();
+    if (M.dj.piper && M.dj.piper.busy) setTimeout(() => loadPiper(true), 2000);
+  }
+  const piperVoice = () => (String(M.dj.voice || "").startsWith("piper:") ? M.dj.voice.slice(6) : "");
   function djVoiceOptions() {
     const voices = djVoices().slice().sort((a, b) => djVoiceScore(b) - djVoiceScore(a)), best = djBestVoice();
-    return '<option value=""' + (M.dj.voice ? "" : " selected") + ">Automatic" + (best ? ": " + esc(best.name) : " (browser default)") + "</option>" +
-      voices.map((v) => '<option value="' + esc(v.name) + '"' + (v.name === M.dj.voice ? " selected" : "") + ">" + esc(v.name + " (" + v.lang + ")" + (djVoiceScore(v) >= 135 ? " · natural" : "")) + "</option>").join("");
+    const piper = (M.dj.piper && M.dj.piper.voices) || [];
+    const natural = piper.length ? '<optgroup label="Natural voices (on the server)">' + piper.map((v) => '<option value="piper:' + esc(v.id) + '"' +
+      ("piper:" + v.id === M.dj.voice ? " selected" : "") + ">" + esc(v.name + (v.ready ? "" : " · download (63 MB)")) + "</option>").join("") + "</optgroup>" : "";
+    return natural + '<optgroup label="This browser\'s voices"><option value=""' + (M.dj.voice ? "" : " selected") + ">Automatic" + (best ? ": " + esc(best.name) : " (browser default)") + "</option>" +
+      voices.map((v) => '<option value="' + esc(v.name) + '"' + (v.name === M.dj.voice ? " selected" : "") + ">" + esc(v.name + " (" + v.lang + ")" + (djVoiceScore(v) >= 135 ? " · natural" : "")) + "</option>").join("") + "</optgroup>";
   }
-  function speakDJ(text) {
-    if (M.dj.speak === false || typeof speechSynthesis === "undefined" || typeof SpeechSynthesisUtterance === "undefined") return;
-    const clean = String(text || "").replace(/https?:\/\/\S+/g, "a link").replace(/[*_`#]/g, "").replace(/\s+/g, " ").trim();
+  function piperNote() {
+    const P = M.dj.piper, id = piperVoice();
+    if (!P) return "";
+    if (P.busy) return html`<div class="small mt"><span class="spin small"></span> Setting up the natural voice: ${P.busy}…</div>`;
+    if (P.error) return html`<div class="small mt bad-t">${P.error}</div>`;
+    const v = id && (P.voices || []).find((x) => x.id === id);
+    if (v && !v.ready) return html`<div class="row wrap mt" style="gap:8px;align-items:center"><span class="small">${v.name} isn't on the server yet.</span><button class="btn small primary" data-music="dj-get-voice">Download it (about ${P.installed ? "63" : "90"} MB)</button></div>`;
+    if (!id && !P.demo) return html`<div class="faint small mt">For a voice that sounds like a person, pick one of the natural voices: it's made on your server by Piper, not by the browser.</div>`;
+    return "";
+  }
+
+  // what the DJ says, made speakable: no emoji, links or markdown, and song titles without their clutter
+  function speechTitle(t) {
+    return String(t || "").replace(/\[[^\]]*\]/g, " ").replace(/\((?:prod|feat|ft|free|official|video|audio|lyric|out now|preview|clip)[^)]*\)/gi, " ")
+      .replace(/\*[^*]*\*/g, " ").replace(/\b(?:free download|out now|preview|official (?:video|audio))\b/gi, " ").replace(/[|#@]+/g, " ")
+      .replace(/\p{Extended_Pictographic}|\uFE0F/gu, " ").replace(/\s+[-–—]\s+/g, ", ")
+      // (voices spell out words in capitals: HAVA NAGILA -> Hava Nagila; short ones like DJ or UK stay)
+      .replace(/\b\p{Lu}{4,}\b/gu, (w) => w[0] + w.slice(1).toLowerCase())
+      .replace(/\s+/g, " ").replace(/^[\s\-–—:,]+|[\s\-–—:,]+$/g, "").trim() || String(t || "");
+  }
+  function speechText(text) {
+    let t = String(text || "").replace(/https?:\/\/\S+/g, "a link").replace(/[*_`#>~]/g, "").replace(/\p{Extended_Pictographic}|\uFE0F/gu, "")
+      .replace(/\s+&\s+/g, " and ").replace(/\bfeat\.?\s/gi, "featuring ").replace(/\bft\.?\s/gi, "featuring ").replace(/\bw\/\s?/gi, "with ")
+      .replace(/\s*[—–]\s*/g, ", ").replace(/\.{3,}|…/g, "... ").replace(/\s+/g, " ").trim();
+    if (t && !/[.!?]$/.test(t)) t += ".";
+    return t;
+  }
+  // the music drops while the DJ talks, and comes back up after, like on the radio
+  function duck(on) {
+    if (!audio) return;
+    clearInterval(M.dj.duckTimer);
+    if (on) { if (M.dj.ducked == null) M.dj.ducked = audio.volume; }
+    else if (M.dj.ducked == null) return;
+    const target = on ? Math.min(M.dj.ducked, 0.22) : M.dj.ducked, start = audio.volume, t0 = performance.now(), ms = on ? 350 : 900;
+    M.dj.duckTimer = setInterval(() => {
+      const k = Math.min(1, (performance.now() - t0) / ms);
+      audio.volume = start + (target - start) * k;
+      if (k >= 1) { clearInterval(M.dj.duckTimer); if (!on) M.dj.ducked = null; }
+    }, 30);
+  }
+  async function speakDJ(text) {
+    if (M.dj.speak === false) return;
+    const clean = speechText(text);
     if (!clean) return;
-    speechSynthesis.cancel();
-    const voice = djVoices().find((v) => v.name === M.dj.voice) || djBestVoice();
-    let rest = clean;
-    while (rest) {
-      let end = Math.min(rest.length, 220);
-      if (end < rest.length) { const cut = rest.lastIndexOf(" ", end); if (cut > 100) end = cut; }
-      const utterance = new SpeechSynthesisUtterance(rest.slice(0, end));
-      if (voice) { utterance.voice = voice; utterance.lang = voice.lang; }
-      utterance.rate = 0.96; utterance.pitch = 1.02;
-      speechSynthesis.speak(utterance);
-      rest = rest.slice(end).trimStart();
+    stopDJVoice();
+    const seq = M.dj.sayingSeq = (M.dj.sayingSeq || 0) + 1;
+    const pv = piperVoice(), P = M.dj.piper;
+    if (pv && P && (P.voices || []).some((v) => v.id === pv && v.ready)) {
+      try {
+        const r = await fetch("/api/music/dj-say", { method: "POST", cache: "no-store", credentials: "same-origin",
+          headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ text: clean, voice: pv }) });
+        if (r.ok && seq === M.dj.sayingSeq) {
+          const url = URL.createObjectURL(await r.blob());
+          const a = M.dj.voiceAudio = new Audio(url);
+          const done = () => { URL.revokeObjectURL(url); if (M.dj.voiceAudio === a) { M.dj.voiceAudio = null; duck(false); } };
+          a.onended = done; a.onerror = done;
+          duck(true);
+          await a.play();
+          return;
+        }
+      } catch (e) { /* the browser's voice below */ }
+      if (seq !== M.dj.sayingSeq) return;
     }
+    if (typeof speechSynthesis === "undefined" || typeof SpeechSynthesisUtterance === "undefined") return;
+    const voice = djVoices().find((v) => v.name === M.dj.voice) || djBestVoice();
+    // a sentence per utterance: the browser then pauses between them as a speaker would (and long ones don't get cut off)
+    const parts = clean.match(/[^.!?]+[.!?]+["”']?|\S[^.!?]*$/g) || [clean];
+    parts.forEach((part, i) => {
+      const u = new SpeechSynthesisUtterance(part.trim());
+      if (voice) { u.voice = voice; u.lang = voice.lang; }
+      u.rate = 1.0 + (i % 2 ? 0.03 : -0.02); u.pitch = 1.0 + (i === 0 ? 0.04 : 0);   // (a little variation sounds less read-out)
+      if (i === 0) u.onstart = () => duck(true);
+      if (i === parts.length - 1) { u.onend = () => duck(false); u.onerror = () => duck(false); }
+      speechSynthesis.speak(u);
+    });
+  }
+  function stopDJVoice() {
+    if (M.dj.voiceAudio) { M.dj.voiceAudio.pause(); M.dj.voiceAudio = null; }
+    if (typeof speechSynthesis !== "undefined") speechSynthesis.cancel();
+    duck(false);
+  }
+  // between songs of a DJ set, now and then, like a radio host: a line made here, so it's instant (no AI wait)
+  function djBetween(t) {
+    if (M.dj.speak === false || M.dj.between === false || !M.dj.active || !M.dj.draft || !t) return;
+    const set = M.dj.draft.tracks || [], i = set.findIndex((x) => trackKey(x) === trackKey(t));
+    if (i <= 0 || M.dj.lastIntro === trackKey(t)) return;
+    M.dj.lastIntro = trackKey(t);
+    const fresh = !!t.why, n = M.dj.talkCount = (M.dj.talkCount || 0) + 1;
+    if (!fresh && n % 3 !== 1) return;                    // (not after every song: new finds always, others every third)
+    const prev = set[i - 1], title = speechTitle(titleOf(t)), who = speechTitle(t.artist || ""), ptitle = speechTitle(titleOf(prev)), pwho = speechTitle(prev.artist || "");
+    const pick = (list) => list[Math.floor(Math.random() * list.length)];
+    const by = who ? " by " + who : "", from = who ? " from " + who : "";
+    const line = fresh ? pick(["Here's one you haven't heard yet: " + title + by + ".", "Something new for you now. This is " + title + by + ".",
+      "Fresh one coming up, " + title + by + ". Tell me if it's a keeper.", "You've never heard this one. " + title + from + "."])
+      : pick(["That was " + ptitle + (pwho ? " from " + pwho : "") + ". Now, " + title + by + ".", title + by + ", right here.",
+        "Keeping it going with " + title + by + ".", "Love that one. Up next, " + title + by + "."]);
+    speakDJ(line);
   }
   function previewDJVoice() {
-    if (typeof speechSynthesis === "undefined" || typeof SpeechSynthesisUtterance === "undefined") { toast("Voice preview isn't available in this browser."); return; }
+    if (piperVoice()) { const v = ((M.dj.piper || {}).voices || []).find((x) => x.id === piperVoice()); if (v && !v.ready) { toast("Download that voice first."); return; } }
+    if (!piperVoice() && (typeof speechSynthesis === "undefined" || typeof SpeechSynthesisUtterance === "undefined")) { toast("Voice preview isn't available in this browser."); return; }
     speechSynthesis.cancel();
+    if (piperVoice()) { speakDJ("Hey, it's your Nodeyard DJ. Tell me what you're in the mood for, and I'll line up the songs."); return; }
     const utterance = new SpeechSynthesisUtterance("Hey, it’s your Nodeyard DJ. Tell me what you’re in the mood for, and I’ll line up the songs.");
     const voice = djVoices().find((v) => v.name === M.dj.voice) || djBestVoice();
     if (voice) { utterance.voice = voice; utterance.lang = voice.lang; }
@@ -629,17 +728,26 @@
       ? ready.map((x) => '<option value="' + esc(x.id) + '"' + (x.id === keep ? " selected" : "") + ">" + esc(x.name + (x.kind === "ollama" ? " · " + (x.detail || "Ollama") : " · split model")) + "</option>").join("")
       : '<option value="">' + (M.dj.targets ? "No model is ready" : "Loading models…") + "</option>";
   }
-  async function loadDJTargets() {
-    if (M.dj.targets !== null || M.dj.loadingTargets) return;
+  // Which models can answer: asked again every 30 s, and every 5 s while none can (a model that finishes loading
+  // while the page is open shows up by itself; asking only once left the DJ saying "No model is ready" for good).
+  // It redraws the tab itself; a redraw never asks again (that would loop).
+  async function loadDJTargets(force) {
+    if (M.dj.loadingTargets || (!force && M.dj.targets !== null && Date.now() - (M.dj.targetsAt || 0) < 30000)) return;
     M.dj.loadingTargets = true;
+    let ready = [];
     try {
       const r = await getJSON("/api/ai/targets");
       M.dj.targets = r.ok ? r : { targets: [], error: r.error || "Couldn't load the AI models." };
-      const ready = (r.targets || []).filter((x) => x.ready);
+      ready = (r.targets || []).filter((x) => x.ready);
       if (!ready.some((x) => x.id === M.dj.target)) M.dj.target = ready.length ? ready[0].id : "";
     } catch (e) { M.dj.targets = { targets: [], error: e.message || "Couldn't load the AI models." }; }
     M.dj.loadingTargets = false;
-    if (S.view === "music" && M.tab === "dj") renderTab();
+    M.dj.targetsAt = Date.now();
+    clearTimeout(M.dj.targetsTimer);
+    if (S.view === "music" && M.tab === "dj") {
+      renderTab();
+      if (!ready.length) M.dj.targetsTimer = setTimeout(() => loadDJTargets(true), 5000);
+    }
   }
   function renderDJ(el) {
     const ready = ((M.dj.targets || {}).targets || []).some((x) => x.ready);
@@ -652,24 +760,27 @@
         <p class="small mt">Likes help set the mood. For normal requests, the DJ also picks unliked songs from your library and listening history; ask for your liked songs when you want a likes-only mix.</p>
         <div class="row wrap mt" style="gap:10px;align-items:flex-end">
           <label class="small">AI model<select class="select mt" data-music="dj-target" ${ready ? "" : "disabled"}>${raw(djTargets())}</select></label>
-          ${typeof speechSynthesis !== "undefined" ? html`<label class="small">Voice<select class="select mt" data-music="dj-voice">${raw(djVoiceOptions())}</select></label><button class="btn" data-music="dj-preview-voice">▶ Preview voice</button>` : ""}
+          <label class="small">Voice<select class="select mt" data-music="dj-voice">${raw(djVoiceOptions())}</select></label><button class="btn" data-music="dj-preview-voice">▶ Preview voice</button>
           <button class="btn primary" data-music="dj-start" ${ready ? "" : "disabled"}>▶ Start DJ</button>
-        </div>
+        </div>${piperNote()}
         <div class="faint small mt">${voiceNote}</div>
         ${M.dj.targets && !ready ? html`<p class="note warn small mt">${M.dj.targets.error || "No AI model is ready. Start one under AI → Models, then come back here."}</p>` : ""}
       </div>`);
       if (M.dj.targets === null) loadDJTargets();
+      if (!M.dj.piper) loadPiper();
       return;
     }
+    if (!M.dj.piper) loadPiper();
     const messages = (M.dj.messages || []).filter((m) => !m.hidden);
     setHTML(el, html`<div class="card">
       <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h3 style="margin:0">Nodeyard DJ <span class="chip good">${M.dj.busy ? "thinking" : "on air"}</span></h3><div class="faint small mt">Ask for a mood, moment, or playlist. The DJ knows your likes and recent plays.</div></div>
         <button class="btn small" data-music="dj-stop">Stop DJ</button></div>
       <div class="row wrap mt" style="gap:8px;align-items:flex-end">
         <label class="small">AI model<select class="select mt" data-music="dj-target">${raw(djTargets())}</select></label>
-        ${typeof speechSynthesis !== "undefined" ? html`<label class="small">Voice<select class="select mt" data-music="dj-voice">${raw(djVoiceOptions())}</select></label><button class="btn" data-music="dj-preview-voice">▶ Preview voice</button>
-          <label class="check small"><input type="checkbox" data-music="dj-speak" ${M.dj.speak !== false ? raw("checked") : ""}> <span>Speak replies</span></label>` : ""}
-      </div>
+        <label class="small">Voice<select class="select mt" data-music="dj-voice">${raw(djVoiceOptions())}</select></label><button class="btn" data-music="dj-preview-voice">▶ Preview voice</button>
+          <label class="check small"><input type="checkbox" data-music="dj-speak" ${M.dj.speak !== false ? raw("checked") : ""}> <span>Speak replies</span></label>
+          <label class="check small"><input type="checkbox" data-music="dj-between" ${M.dj.between !== false ? raw("checked") : ""}> <span>Talk between songs</span></label>
+      </div>${piperNote()}
       <div id="dj-chat" style="max-height:380px;overflow:auto;display:flex;flex-direction:column;gap:10px;margin-top:14px">
         ${messages.map((m) => html`<div style="align-self:${m.role === "user" ? "flex-end" : "flex-start"};max-width:min(88%,720px);padding:10px 13px;border-radius:14px;background:${m.role === "user" ? "rgba(255,85,0,.16)" : "var(--panel2,rgba(125,160,200,.09))"}"><div class="small">${m.role === "assistant" ? "🎙 DJ" : "You"}</div><div style="white-space:pre-wrap;margin-top:3px">${m.content}</div></div>`)}
         ${M.dj.busy ? html`<div class="empty"><div class="spin"></div>${M.dj.status || "DJ is thinking…"}</div>` : ""}
@@ -835,7 +946,7 @@
         } catch (e) { /* the catalogue alone still makes a mix */ }
         M.dj.status = ""; renderTab();
       }
-      const system = "You are Nodeyard DJ, a warm, confident, conversational music host. Sound like a natural radio presenter: short, personal, lightly playful, never overdo catchphrases. Use listening history and likes to personalize, but never claim you listened to audio or know lyrics unless given. Recommend only catalogue tracks. The user request may be a vibe, activity, artist/style preference, or follow-up. If you need one key detail, ask one concise question and return no tracks. Otherwise create a useful mix. IMPORTANT: for ordinary vibe/activity requests, use unliked tracks from the user's library and listening history first; likes are taste context, not the default source. Never make a mix only from liked tracks when unliked catalogue tracks are available. Include at least half unliked tracks where possible. Only focus on liked tracks when the user explicitly asks for their likes/favourites. Catalogue fields `liked`, `from_library`, and `in_listening_history` tell you which tracks are liked or unliked. Tracks with `new_to_you: true` are songs the user has never heard, picked for their taste (`why` says why): put about a quarter of them into ordinary mixes so the user discovers music, and lead with them (at least half) when the user asks for something new, fresh, different or to discover; skip them only when the user asks for songs they know. A request may come with NEW SONGS FOR THIS REQUEST (ids n001...): songs matching what the user asked for that they have never heard. Unless the user asks for their likes or songs they know, build at least half of the mix from those and the new_to_you catalogue tracks, with a few of their own songs mixed in. Reply with exactly one JSON object and no markdown: {\"speech\":\"spoken response, 1-3 short sentences\",\"playlist_name\":\"short name or empty string\",\"track_ids\":[\"t001\"]}. For a playlist, include 5-20 catalogue IDs in a deliberate order. If there are fewer suitable songs, use fewer. If this is only a greeting or clarifying question, playlist_name must be empty and track_ids must be []. Never invent IDs.\nCATALOGUE:\n" + JSON.stringify(catalogText);
+      const system = "You are Nodeyard DJ, a warm, confident, conversational music host. Sound like a natural radio presenter: short, personal, lightly playful, never overdo catchphrases. Your speech is read aloud by a voice, so write it the way people talk: contractions, everyday words, a mix of short and longer sentences, at most one exclamation, no emoji, hashtags, lists, brackets or stage directions, and don't introduce yourself again after the first time. When you make a mix, name one or two of its songs or artists the way a host would (\"opening with Night Run from Kollapse\"), and don't read out track counts. Use listening history and likes to personalize, but never claim you listened to audio or know lyrics unless given. Recommend only catalogue tracks. The user request may be a vibe, activity, artist/style preference, or follow-up. If you need one key detail, ask one concise question and return no tracks. Otherwise create a useful mix. IMPORTANT: for ordinary vibe/activity requests, use unliked tracks from the user's library and listening history first; likes are taste context, not the default source. Never make a mix only from liked tracks when unliked catalogue tracks are available. Include at least half unliked tracks where possible. Only focus on liked tracks when the user explicitly asks for their likes/favourites. Catalogue fields `liked`, `from_library`, and `in_listening_history` tell you which tracks are liked or unliked. Tracks with `new_to_you: true` are songs the user has never heard, picked for their taste (`why` says why): put about a quarter of them into ordinary mixes so the user discovers music, and lead with them (at least half) when the user asks for something new, fresh, different or to discover; skip them only when the user asks for songs they know. A request may come with NEW SONGS FOR THIS REQUEST (ids n001...): songs matching what the user asked for that they have never heard. Unless the user asks for their likes or songs they know, build at least half of the mix from those and the new_to_you catalogue tracks, with a few of their own songs mixed in. Reply with exactly one JSON object and no markdown: {\"speech\":\"spoken response, 1-3 short sentences\",\"playlist_name\":\"short name or empty string\",\"track_ids\":[\"t001\"]}. For a playlist, include 5-20 catalogue IDs in a deliberate order. If there are fewer suitable songs, use fewer. If this is only a greeting or clarifying question, playlist_name must be empty and track_ids must be []. Never invent IDs.\nCATALOGUE:\n" + JSON.stringify(catalogText);
       const all = (M.dj.messages || []).filter((m) => !m.hidden);
       const history = all.slice(all.length <= 12 ? 0 : all.length - 6 - ((all.length - 6) % 6));   // moves in steps, not every turn
       if (!hidden && history.length && history[history.length - 1].role === "user" && history[history.length - 1].content === userText) history.pop();
@@ -911,7 +1022,7 @@
   function stopDJ() {
     if (M.dj.controller) M.dj.controller.abort();
     M.dj.controller = null;
-    if (typeof speechSynthesis !== "undefined") speechSynthesis.cancel();
+    stopDJVoice();
     M.dj.active = false; M.dj.busy = false; saveDJ(); renderTab();
   }
 
@@ -1450,6 +1561,7 @@
     const t = e.target.closest && e.target.closest("[data-music], [data-tab]"); if (!t) return;
     if (t.dataset.tab) {
       M.tab = t.dataset.tab; M.openPl = null;
+      if (M.tab === "dj") loadDJTargets(!((M.dj.targets || {}).targets || []).some((x) => x.ready));
       if (M.tab === "discover") M.discoverSeeded = false;
       renderPage();
       if (M.tab === "home" || M.tab === "discover") { const requestedTab = M.tab; const pending = refreshHomeHistory(); renderTab(); pending.then(() => { if (S.view === "music" && M.tab === requestedTab) { if (requestedTab === "discover") M.discoverSeeded = false; renderTab(); } }); }
@@ -1472,6 +1584,10 @@
     else if (act === "dj-start") startDJ();
     else if (act === "dj-stop") stopDJ();
     else if (act === "dj-preview-voice") previewDJVoice();
+    else if (act === "dj-get-voice") {
+      try { const r = await postJSON("/api/music/dj-voice/setup", { voice: piperVoice() }); if (r.ok) { M.dj.piper = r; renderTab(); setTimeout(() => loadPiper(true), 1500); } else toast(r.error || "Couldn't start the download."); }
+      catch (e) { toast("Couldn't reach the dashboard server."); }
+    }
     else if (act === "dj-send") {
       const input = $('[data-music="dj-request"]'), request = (input && input.value || "").trim();
       if (input) input.value = "";
@@ -1615,8 +1731,9 @@
     const t = e.target.closest && e.target.closest("[data-music]"); if (!t) return;
     if (t.dataset.music === "cache-limit") { const r = await postJSON("/api/music/config", { cache_limit: +t.value }); if (r.ok) { await load(); renderTab(); toast("Recent song cache updated."); } else toast(r.error || "Couldn't update the cache size."); }
     else if (t.dataset.music === "dj-target") { M.dj.target = t.value; saveDJ(); }
-    else if (t.dataset.music === "dj-voice") { M.dj.voice = t.value; saveDJ(); }
-    else if (t.dataset.music === "dj-speak") { M.dj.speak = t.checked; saveDJ(); if (!t.checked && typeof speechSynthesis !== "undefined") speechSynthesis.cancel(); }
+    else if (t.dataset.music === "dj-voice") { M.dj.voice = t.value; saveDJ(); renderTab(); }
+    else if (t.dataset.music === "dj-between") { M.dj.between = t.checked; saveDJ(); }
+    else if (t.dataset.music === "dj-speak") { M.dj.speak = t.checked; saveDJ(); if (!t.checked) stopDJVoice(); }
     else if (t.dataset.music === "fw-toggle") { const r = await postJSON("/api/music/config", { forward_enabled: t.checked }); if (r.ok) { await load(); renderTab(); } }
     else if (t.dataset.music === "fw-source") { await postJSON("/api/music/config", { forward_source: t.value }); await load(); renderTab(); }
     else if (t.dataset.music === "nodrm") { M.hideDrm = t.checked; try { localStorage.setItem("ny-hidedrm", t.checked ? "1" : "0"); } catch (e) { /* ignore */ } }
