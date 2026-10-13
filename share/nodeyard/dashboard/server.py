@@ -726,6 +726,8 @@ def main():
     if getattr(ctx, "ai", None) is not None:
         import lifecycle
         lifecycle.register(ctx, a)
+        import modelrecs     # AI > Recommended: the model for each kind of work, for these machines and overall
+        modelrecs.register(ctx, a)
         import research
         research.register(ctx, a)
     import terminal
