@@ -443,7 +443,7 @@
   V.ai = {
     build() {
       A.built = null;
-      NY.freshHTML($("#view"), html`<div class="toolbar"><span class="seg" id="ai-tabs" role="tablist">${[["chat", "Chat"], ["research", "Research"], ["models", "Models"], ["search", "Find models"], ["api", "API"]].map(([id, l]) => raw('<button data-ai-tab="' + id + '">' + l + "</button>"))}</span>
+      NY.freshHTML($("#view"), html`<div class="toolbar"><span class="seg" id="ai-tabs" role="tablist">${[["chat", "Chat"], ["research", "Research"], ["models", "Models"], ["recommended", "Recommended"], ["search", "Find models"], ["api", "API"]].map(([id, l]) => raw('<button data-ai-tab="' + id + '">' + l + "</button>"))}</span>
         <label class="model-pick"><span>AI model</span><select class="select" id="ai-model" aria-label="AI model: pick the one that runs on your cluster"><option>Loading…</option></select></label><span class="grow"></span><span id="ai-status"></span></div><div id="ai-pane"></div>`);
       loadTargets(true);
       loadDisk();
@@ -459,6 +459,7 @@
     if (t === "models") { loadOllama(true); loadDisk(true); loadLifecycle(true); }
     else if (t === "search") { loadDisk(); loadOllama(); }
     else if (t === "research") loadResearchList();
+    else if (t === "recommended") { loadRecommended(); loadOllama(); }
   }
   function refreshTab() {
     if (S.view !== "ai" || !$("#ai-pane")) return;
@@ -467,6 +468,7 @@
     else if (A.tab === "models") renderModels();
     else if (A.tab === "search") (first ? buildSearch : refreshSearch)();
     else if (A.tab === "research") (first ? buildResearch : refreshResearch)();
+    else if (A.tab === "recommended") renderRecommended();
     else renderApi();
     A.built = A.tab;
     refreshModelPick();
@@ -1684,6 +1686,56 @@
       (job) => { loadTargets(true); if (job.status === "ok" && old && vals.purge) forgetSavedModel(old); loadDisk(true, true); });
   }
 
+  // ------------------------------------------------------------------ recommended
+  // The model to run for each kind of work, picked for these machines by modelrecs.py (best that still answers at a
+  // decent speed here) next to the best one overall. Run, Run on Ollama and Check speed are Find models' own buttons.
+  A.rec = { data: null, loading: false, error: "", at: 0 };
+  async function loadRecommended(force) {
+    if (A.rec.loading || (!force && A.rec.data && Date.now() - A.rec.at < 120000)) return;
+    A.rec.loading = true; if (A.tab === "recommended") renderRecommended();
+    try { const r = await getJSON("/api/ai/recommended"); if (r.ok) { A.rec.data = r; A.rec.error = ""; A.rec.at = Date.now(); } else A.rec.error = r.error || "Couldn't work out recommendations."; }
+    catch (e) { A.rec.error = "Couldn't reach the dashboard server."; }
+    A.rec.loading = false;
+    if (S.view === "ai" && A.tab === "recommended") renderRecommended();
+  }
+  const recSpeed = (c) => (c.fits ? c.tps + " tokens/s" + (c.runner === "split" && c.machines > 1 ? " on " + c.machines + " machines" : c.runner === "ollama" ? " with Ollama" : "") : "");
+  function recButtons(c) {
+    const out = [];
+    if (c.fits && c.runner === "split" && c.file && c.repo) {
+      out.push('<button class="btn small primary" data-ai="s-run" data-repo="' + esc(c.repo) + '" data-file="' + esc(c.file) + '" data-size="' + c.size + '">Run it</button>');
+      out.push('<button class="btn small" data-ai="s-plan" data-repo="' + esc(c.repo) + '" data-file="' + esc(c.file) + '" title="Which machines it would use, and its speed">Check speed</button>');
+    }
+    if (c.ollama && (c.runner === "ollama" || c.fits)) out.push('<button class="btn small' + (c.runner === "ollama" ? " primary" : "") + '" data-ai="s-ollama" data-name="' + esc(c.ollama) + '">Run on Ollama</button>');
+    if (c.repo && (!c.file || !c.fits)) out.push('<button class="btn small" data-ai="rec-files" data-repo="' + esc(c.repo) + '">See its files</button>');
+    return raw(out.join(" "));
+  }
+  function recCard(c, kind) {
+    if (!c) return html`<div class="rec-card empty-ish"><div class="faint small">${kind}</div><div class="muted">Nothing fits your machines right now.</div></div>`;
+    return html`<div class="rec-card ${kind === "Best overall" ? "overall" : "mine"}">
+      <div class="faint small">${kind}</div>
+      <div class="row wrap" style="gap:6px;align-items:baseline;margin-top:2px"><b style="font-size:15px">${c.name}</b>
+        ${chip(c.quant, "violet")}${chip(fmt.bytes(c.size, 1) + (c.estimated ? " (about)" : ""))}${c.fits ? chip(recSpeed(c), c.tps >= 5 ? "good" : c.tps >= 3 ? "warn" : "bad") : chip("too big here", "bad")}</div>
+      <div class="muted small" style="margin-top:4px">${c.note}${c.params ? html` · ${c.active < c.params ? c.params + "B, " + c.active + "B active" : c.params + "B"}` : ""}</div>
+      ${c.why ? html`<div class="small" style="margin-top:4px">${c.why}</div>` : ""}
+      ${c.multi_part ? html`<div class="faint small">Comes in several files, so it runs on Ollama rather than split.</div>` : ""}
+      <div class="row wrap" style="gap:6px;margin-top:8px">${recButtons(c)}</div></div>`;
+  }
+  function renderRecommended() {
+    const pane = $("#ai-pane"); if (!pane) return;
+    const R = A.rec, d = R.data;
+    if (!d) { setHTML(pane, R.error ? card("Recommended models", html`<div class="empty"><b>Couldn't work them out</b>${R.error}<div class="mt"><button class="btn" data-ai="rec-refresh">Try again</button></div></div>`)
+      : card("Recommended models", html`<div class="empty"><div class="spin"></div>Checking your machines and the models' sizes…</div>`)); if (!R.loading) loadRecommended(); return; }
+    const h = d.hardware;
+    setHTML(pane, html`<div class="card"><div class="row wrap" style="justify-content:space-between;gap:10px;align-items:flex-start"><div><h3 style="margin:0">Recommended models</h3>
+        <div class="muted small mt">For each kind of work: the best model that still answers at a decent speed on <b>your ${plural(h.machines, "machine")}</b> (${fmt.bytes(h.free, 0)} of free memory${h.gpus ? ", " + plural(h.gpus, "GPU") : ""}), and the best one overall. Speeds are estimates, like Check speed's: generating text reads the model's active weights for every word, so fewer, faster machines and "active" (mixture-of-experts) models win.</div></div>
+        <button class="btn small" data-ai="rec-refresh" ${R.loading ? "disabled" : ""}>${R.loading ? "Checking…" : "Check again"}</button></div>
+      ${!d.ollama ? html`<p class="faint small" style="margin:8px 0 0">Vision models run on Ollama (split models take no images): set up Ollama on the Models tab to use them.</p>` : ""}</div>
+      ${d.categories.map((c) => html`<div class="card mt"><h3 style="margin:0">${c.label}</h3><div class="muted small">${c.sub}</div>
+        <div class="rec-grid mt">${recCard(c.pick, "Best for your machines")}${recCard(c.best, "Best overall")}</div>
+        ${c.others.length ? html`<details class="mt"><summary class="small">Other good fits</summary>${c.others.map((o) => html`<div class="row wrap" style="gap:8px;align-items:center;padding:6px 0;border-top:1px solid var(--line)">
+          <b class="small">${o.name}</b><span class="faint small">${o.quant} · ${fmt.bytes(o.size, 1)} · ${recSpeed(o)}</span><span class="grow"></span>${recButtons(o)}</div>`)}</details>` : ""}</div>`)}`);
+  }
+
   // ------------------------------------------------------------------ research
   // Research Mode (research.py): plan searches, read pages, write a report that cites only what was read.
   // Runs on the server, so it carries on if this page is closed; sessions are listed and can be reopened.
@@ -1927,6 +1979,8 @@
     else if (a === "s-run") runModel(el.dataset.repo, el.dataset.file, +el.dataset.size);
     else if (a === "s-ollama") { if (!S.d.pods.some((p) => p.namespace === "ai-inference" && p.name.startsWith("ollama"))) { toast("Set up Ollama first (Models tab)."); selectTab("models"); return; } const v = await dialog("Download into Ollama?", html`<span class="mono">${el.dataset.name}</span> is downloaded onto every machine that runs Ollama. Large models can take a while.`, "Download"); if (v) startAIJob(el, "pull", { name: el.dataset.name }, () => loadOllama(true)); }
     else if (a === "s-copy") copyText("sudo nodeyard ai split deploy --model " + el.dataset.repo + ":" + el.dataset.file);
+    else if (a === "rec-refresh") loadRecommended(true);
+    else if (a === "rec-files") { A.search.q = el.dataset.repo; A.search.results = null; A.search.open = ""; selectTab("search"); runSearch().then(() => showFiles(el.dataset.repo)); }
     else if (a === "reveal-key") { try { const r = await postJSON("/api/ai/reveal-key", {}); if (r.ok) { A.key = r.key; A.useKey = true; renderApi(); } else toast(r.error || "Couldn't read the key."); } catch (err) { /* signed out */ } }
     else if (a === "use-key") { A.useKey = el.checked; renderApi(); }
   });
