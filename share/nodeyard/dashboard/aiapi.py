@@ -685,6 +685,66 @@ class Live:
     def jobs_running(self):
         return self.jobs.running() is not None
 
+    def reset(self):
+        """Full refresh: forget every remembered model list and the disk inventory, so they are read again."""
+        with self.tags_lock:
+            self.tags_cache.clear()
+        self.__dict__.get("_ollama_lists", {}).clear()
+        with self.models_lock:
+            self.models_dirty = True
+        with self.downloads_lock:
+            self.downloads_at = 0
+        with self.hf.lock:
+            self.hf.cache.clear()
+        self.disk_models(force=True)
+
+    def check_split(self):
+        """Does the split model really answer? Its health check only says the main server is up, so ask it for one token.
+        Returns {"state": "none"|"unloaded"|"loading"|"stale"|"busy"|"ok"|"broken", "detail": ...}."""
+        st = self._state()
+        sp = (st.get("ai") or {}).get("split")
+        if not sp:
+            return {"state": "none", "detail": "No split model is deployed."}
+        if not sp.get("loaded"):
+            return {"state": "unloaded", "detail": "The model is unloaded."}
+        if not sp.get("ready"):
+            return {"state": "loading", "detail": "The model is still loading."}
+        if sp.get("stale"):
+            return {"state": "stale", "detail": "It needs reloading: %s." % sp["stale"]["why"]}
+        try:
+            if self.split_slots().get("processing"):
+                return {"state": "busy", "detail": "It's answering a request right now, so it works."}
+        except AIError:
+            pass
+        t0 = time.time()
+        try:
+            host, port, headers, model = self._resolve("split")
+            conn = http.client.HTTPConnection(host, port, timeout=10)
+            try:
+                conn.connect()
+                conn.sock.settimeout(90)
+                body = {"model": model, "messages": [{"role": "user", "content": "Reply with OK."}], "max_tokens": 1, "temperature": 0,
+                        "stream": False, "cache_prompt": True}
+                conn.request("POST", "/v1/chat/completions", body=json.dumps(body),
+                             headers=dict(headers, **{"Content-Type": "application/json", "User-Agent": UA}))
+                resp = conn.getresponse()
+                raw = resp.read(65536)
+            finally:
+                conn.close()
+        except AIError as e:
+            return {"state": "broken", "detail": str(e)}
+        except (OSError, http.client.HTTPException) as e:
+            return {"state": "broken", "detail": "It didn't answer a one-word test (%s)." % (getattr(e, "strerror", None) or e)}
+        if resp.status != 200:
+            return {"state": "broken", "detail": "It answered a one-word test with HTTP %d." % resp.status}
+        try:
+            ok = bool((json.loads(raw).get("choices") or [None])[0])
+        except (ValueError, AttributeError):
+            ok = False
+        if not ok:
+            return {"state": "broken", "detail": "Its answer to a one-word test was unreadable."}
+        return {"state": "ok", "detail": "It answered a one-word test in %.1f s." % (time.time() - t0)}
+
     def split_slots(self):
         """llama.cpp's /slots: is a request being worked on, and the newest task number (it grows with every request)."""
         host, port, headers, _ = self._resolve("split")
@@ -919,9 +979,11 @@ class Live:
         out = []
         sp = (st.get("ai") or {}).get("split")
         if sp:
+            stale = sp.get("stale")
             out.append({"id": "split", "kind": "split", "name": sp.get("alias") or "split model", "model": sp.get("model", ""),
-                        "detail": "split across %d machine%s" % (len(sp.get("shares", [])), "" if len(sp.get("shares", [])) == 1 else "s"),
-                        "ready": bool(sp.get("ready"))})
+                        "detail": ("needs reloading: %s" % stale["why"]) if stale else
+                                  "split across %d machine%s" % (len(sp.get("shares", [])), "" if len(sp.get("shares", [])) == 1 else "s"),
+                        "ready": bool(sp.get("ready")) and not stale, "stale": bool(stale)})
         pods = [p for p in st["pods"] if p["namespace"] == OLLAMA_NS and p["name"].startswith("ollama") and p["status"] == "Running" and p["ip"]]
         # Ask every Ollama at once: one that doesn't answer must not hold up the whole list (each waits up to 4 s).
         # A list from the last 5 s is reused: the Desk, Music DJ, Galaxy and AI pages each ask when they open.
@@ -953,6 +1015,9 @@ class Live:
                 raise AIError("No split model is deployed.", 404)
             if not sp.get("ready"):
                 raise AIError("The model isn't loaded yet. Check its progress on the Models tab.", 503)
+            if sp.get("stale"):
+                raise AIError("The model needs reloading: %s, so the parts of the model kept there are gone. The dashboard reloads it "
+                              "as soon as it's idle (or press Full refresh); answers work again when it's back." % sp["stale"]["why"], 503)
             headers = {}
             key = self.api_key()
             if sp.get("auth"):

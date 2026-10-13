@@ -426,6 +426,12 @@ class Settings:
         return {"name": data.get("name"), "dashboard": data.get("dashboard"), "api": data.get("api"), "available": True} if isinstance(data, dict) \
             else {"name": None, "dashboard": None, "api": None, "available": False}
 
+    def reset(self):
+        """Full refresh: forget the answers of the slow `nodeyard` commands and the parsed preferences."""
+        with self.lock:
+            self.weak_cache = self.public_cache = self.doctor_cache = self.commands_cache = None
+            self._prefs_cache = None
+
     def forget_public(self):
         with self.lock:
             self.public_cache = None

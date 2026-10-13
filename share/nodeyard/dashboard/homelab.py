@@ -485,6 +485,16 @@ class Homelab:
                 good[i] += 1 if x[1] else 0
         return [round(good[i] / total[i], 3) if total[i] else None for i in range(n)]
 
+    def reset(self):
+        """Full refresh: forget the built service list and check every service again now."""
+        with self.lock:
+            self._services_cache = None
+            self._forecast = (0.0, [])
+            for s in self.cfg["services"]:
+                live = self.live.setdefault(s["id"], {})
+                if not live.get("running"):
+                    live["next"] = 0
+
     def summary(self):
         """Counts for the live page state (cheap: no history is read)."""
         with self.lock:

@@ -128,6 +128,7 @@ class KubeClient:
                         pass
         self.ctx = ctx
         self._local = threading.local()
+        self.gen = 0          # bumped by reset(): every thread then opens a fresh connection
 
     def get(self, path, timeout=None, raw=False):
         """One GET over this thread's kept-alive connection: every read of the cluster makes ~20 requests, and a new
@@ -136,6 +137,11 @@ class KubeClient:
         headers = {"Accept": "application/json", "User-Agent": "nodeyard-dashboard"}
         if self.token:
             headers["Authorization"] = "Bearer " + self.token
+        if getattr(self._local, "gen", None) != self.gen:
+            old = getattr(self._local, "conn", None)
+            if old is not None:
+                old.close()
+            self._local.conn, self._local.gen = None, self.gen
         for attempt in (0, 1):
             conn = getattr(self._local, "conn", None)
             reused = conn is not None
@@ -300,6 +306,15 @@ def gpu_progress(state):
         ld["phase"] = "warming up" if ld["pct"] >= 99.5 else "loading"
 
 
+def _started(item, container):
+    """When a pod's container last started running (0 if it isn't running)."""
+    for cs in (item.get("status") or {}).get("containerStatuses") or []:
+        if cs.get("name") == container:
+            run = (cs.get("state") or {}).get("running")
+            return parse_time(run.get("startedAt")) if run else 0.0
+    return 0.0
+
+
 def parse_bench(cm):
     """The ConfigMap `nodeyard hw bench` fills: {node: results}."""
     out = {}
@@ -324,6 +339,12 @@ class KubeSource:
         self.net_prev = {}  # node -> (time, rx, tx)
         self.lock = threading.Lock()
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+
+    def reset(self):
+        """Full refresh: forget every kept list, kubelet reading and connection, so the next read asks for all of it."""
+        self.__dict__.get("raw_cache", {}).clear()
+        self.summary_cache.clear()
+        self.client.gen += 1
 
     def _try(self, path, timeout=None):
         try:
@@ -678,7 +699,23 @@ class KubeSource:
                 genv = {e.get("name"): e.get("value", "") for e in gcs[0].get("env", []) or []}
                 gate = {"port": int(genv["PORT"]) if genv.get("PORT", "").isdigit() else None, "trusted": [x for x in genv.get("TRUSTED", "").split(",") if x],
                         "ready": gate_ds.get("status", {}).get("numberReady", 0), "desired": gate_ds.get("status", {}).get("desiredNumberScheduled", 0)}
+            # The main server keeps the model's layers in the RPC servers' memory. One that restarted after the main
+            # server started (its node lost power, or its pod was replaced) is empty, but the main server neither
+            # notices nor fails its health check: the model looks ready and isn't.
+            lost = []
+            ready = bool(main and main.get("status", {}).get("readyReplicas"))
+            if ready:
+                items = [i for i in raw["pods"].get("items", []) if i["metadata"].get("namespace") == "ai-split" and not i["metadata"].get("deletionTimestamp")]
+                main_started = max([_started(i, "server") for i in items if i["metadata"]["name"].startswith("llama-main-")] or [0])
+                for name in rpc:
+                    runs = [_started(i, "rpc") for i in items if i["metadata"]["name"].startswith("rpc-%s-" % name)]
+                    runs = [t for t in runs if t]
+                    if not runs:
+                        lost.append({"node": name, "why": "%s's RPC server isn't running" % name})
+                    elif main_started and max(runs) > main_started + 2:
+                        lost.append({"node": name, "why": "%s restarted after the model loaded" % name})
             ai["split"] = {
+                "stale": ({"nodes": [x["node"] for x in lost], "why": "; ".join(x["why"] for x in lost)} if lost else None),
                 "load": load_progress(main, split_pods, shares, rpc, gpu_node),
                 "gate": gate,
                 "model": os.path.basename(opt("-m")), "alias": opt("--alias"), "ctx": opt("-c"),

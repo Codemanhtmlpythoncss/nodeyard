@@ -106,6 +106,14 @@ class AgentPoller:
         except OSError:
             return ""
 
+    def reset(self):
+        """Full refresh: drop the kept-alive connections to the agents (a rebooted node's agent is a new process)."""
+        with self.lock:
+            conns, self.conns = self.conns, {}
+        for slot in conns.values():
+            if slot.get("conn") is not None:
+                slot["conn"].close()
+
     def _fetch(self, ip, token):
         """The agent's numbers over a kept-alive connection to it (one per address), compressed when the agent can."""
         with self.lock:

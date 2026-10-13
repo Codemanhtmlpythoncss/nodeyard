@@ -30,6 +30,7 @@ POLL_SECONDS = 15
 SLOTS_STALE = 3 * POLL_SECONDS       # a /slots answer older than this doesn't prove the model is idle
 UNLOADED_SETTLE = 60                 # the cluster view may still say "loaded" this long after an unload
 RETRY_BASE, RETRY_MAX = 300, 3600    # a failed unload is retried after 5, 10, 20... minutes, at most hourly
+REPAIR_COOLDOWN = 600                # a model found broken is reloaded by itself at most every 10 minutes (a flapping node can't loop it)
 
 
 class LifecycleError(Exception):
@@ -280,6 +281,9 @@ class Lifecycle:
             return None
         settings = self.settings()
         sp = self._split_state()
+        if sp and sp.get("loaded") and sp.get("stale"):
+            self._auto_repair(now, sp)     # (broken models are mended whatever the hourly setting says)
+            return None
         if settings["auto_reload"] and self._start_reload(now, sp):
             return None
         with self.lock:
@@ -369,6 +373,38 @@ class Lifecycle:
         self._event("reload", "Refreshing %s after one hour; waiting for it to finish any active work first." % (model or "the split model"),
                     ok=None, model=model)
         return job
+
+    def force_reload(self, reason):
+        """Unload and load the split model now, because it's broken (a node holding part of it restarted, say): it isn't
+        answering anyway, so this doesn't wait for idle time. Returns the job id, or None if one is already under way."""
+        sp = self._split_state()
+        if not sp or not sp.get("loaded"):
+            raise LifecycleError("There's no loaded split model to reload.", 409)
+        with self.lock:
+            s = self.split
+            if s["reload_phase"] or s["unload_job"]:
+                return None
+        if self.backend.jobs_running():
+            raise LifecycleError("Another model task is running. Try again when it has finished.", 409)
+        now = self.clock()
+        with self.lock:
+            s = self.split
+            job = self.backend.run("split-unload", {})
+            s["reload_phase"], s["reload_job"] = "unloading", job
+            s["reload_started_at"], s["reload_error"] = now, ""
+            self.repaired_at = now
+            model = s["model"]
+        self._event("reload", "Reloading %s because %s." % (model or "the split model", reason), ok=None, model=model)
+        return job
+
+    def _auto_repair(self, now, sp):
+        if now - getattr(self, "repaired_at", 0.0) < REPAIR_COOLDOWN:
+            return
+        try:
+            self.force_reload("%s, so the layers kept there are gone" % sp["stale"]["why"])
+        except Exception as e:  # noqa: BLE001 -- try again after the cooldown
+            self.repaired_at = now
+            self._event("reload", "The model needs reloading (%s) but that couldn't start: %s." % (sp["stale"]["why"], e), ok=False)
 
     def _check_reload(self, now):
         """Advance an hourly refresh. Returns true while one is active, preventing an idle-unload race."""
@@ -612,7 +648,15 @@ def register(ctx, args):
         except OSError as e:
             h._json({"ok": False, "error": "Couldn't save the setting: %s" % (e.strerror or e)}, 500)
 
+    def reload_now(h, body):
+        try:
+            job = lc.force_reload("you asked for it")
+            h._json({"ok": True, "job": job, "view": lc.view()})
+        except LifecycleError as e:
+            h._json({"ok": False, "error": str(e)}, e.code)
+
     ctx.get_routes.update({"/api/ai/lifecycle": view, "/api/v1/lifecycle": view})
+    ctx.post_routes["/api/ai/reload-model"] = reload_now
     ctx.post_routes.update({"/api/ai/lifecycle": update, "/api/v1/lifecycle": update})
     lc.start()
     return lc

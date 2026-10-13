@@ -386,6 +386,10 @@ class Music:
         d = (self.cfg().get("dir") or "").strip()
         return os.path.realpath(self._expand(d)) if d else ""
 
+    def reset(self):
+        """Full refresh: walk the music folder again next time it's asked for."""
+        self._tracks_cache = None
+
     def tracks(self):
         """The library's audio files. Walking a big folder tree takes a while, and the Music page, the DJ, the AI and the
         recommender all ask: the list is kept for 30 s, or until the folder (or the downloads folder) changes."""
@@ -1451,6 +1455,7 @@ def register(ctx, args):
                     pass
             _live_slots.release()
 
+    ctx.music = music
     ctx.get_routes.update({"/api/music": _status, "/api/music/track": _track, "/api/audio/live": _live,
                            "/api/music/browse": _browse, "/api/music/search": _sc_search,
                            "/api/music/playback": _playback_get,

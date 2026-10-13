@@ -246,8 +246,8 @@
 
   function alertCard(a) {
     const open = a.kind === "node" || a.kind === "pod" ? a.kind + ":" + a.ref : a.kind === "workload" ? "wl:" + a.ref : a.kind === "service" ? "svc:" + a.ref : "";
-    const monitor = a.kind === "monitor";   // the service monitor's own alerts open its page
-    return html`<div class="alert ${a.level} ${open || monitor ? "click" : ""}" ${open ? raw('data-open="' + esc(open) + '"') : monitor ? raw('data-goto="services"') : ""}><span class="sev"></span><div><b>${a.title}</b><span>${a.detail}</span></div></div>`;
+    const goto = a.kind === "monitor" ? "services" : a.kind === "ai" ? "ai" : "";   // the monitor's and the model's alerts open their pages
+    return html`<div class="alert ${a.level} ${open || goto ? "click" : ""}" ${open ? raw('data-open="' + esc(open) + '"') : goto ? raw('data-goto="' + goto + '"') : ""}><span class="sev"></span><div><b>${a.title}</b><span>${a.detail}</span></div></div>`;
   }
   function eventRow(e) {
     return html`<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line);align-items:flex-start"><i class="dot ${e.type === "Warning" ? "warn" : ""}" style="margin-top:6px"></i>
@@ -969,7 +969,8 @@
       S.d.services.forEach((s) => items.push({ label: s.name, sub: s.cluster_ip + " · " + s.namespace, kind: "service", run: () => openDrawer("svc:" + s.namespace + "/" + s.name), hay: (s.name + " " + s.namespace + " " + s.cluster_ip + " " + s.external_ips.join(" ") + " " + s.node_ports.join(" ")).toLowerCase() }));
       S.d.pods.forEach((p) => items.push({ label: p.name, sub: p.namespace + " · " + (p.ip || p.status), kind: "pod", run: () => openDrawer("pod:" + p.namespace + "/" + p.name), hay: (p.name + " " + p.namespace + " " + p.ip + " " + p.node).toLowerCase() }));
     }
-    items.push({ label: "Switch theme", sub: "Dark, light or automatic", kind: "action", run: cycleTheme, hay: "switch theme dark light" }, { label: "Refresh now", sub: "Read the cluster again", kind: "action", run: () => load(true), hay: "refresh reload now" });
+    items.push({ label: "Switch theme", sub: "Dark, light or automatic", kind: "action", run: cycleTheme, hay: "switch theme dark light" }, { label: "Refresh now", sub: "Read the cluster again", kind: "action", run: () => load(true), hay: "refresh reload now" },
+      { label: "Full refresh", sub: "Clear every cache, re-check the nodes and the AI model, reload the page", kind: "action", run: fullRefresh, hay: "full refresh reset cache model reload power" });
     const ql = q.trim().toLowerCase();
     return (ql ? items.filter((i) => ql.split(/\s+/).every((w) => i.hay.includes(w))) : items.filter((i) => i.kind === "page" || i.kind === "node" || i.kind === "action")).slice(0, 40);
   }
@@ -980,7 +981,39 @@
     const sel = $(".item.sel", $("#presults")); if (sel) sel.scrollIntoView({ block: "nearest" });
   }
   function openPalette() { closeModals(); $("#scrim").classList.add("on"); $("#palette").classList.add("on"); const i = $("#pq"); i.value = ""; pSel = 0; renderPalette(); i.focus(); }
-  function closeModals() { $("#palette").classList.remove("on"); $("#helpm").classList.remove("on"); $("#jobm").classList.remove("on"); clearInterval(jobTimer); if (!S.drawer) $("#scrim").classList.remove("on"); }
+  // ---- Full refresh: the server forgets what it remembered, reads the cluster again and makes the model prove it works
+  let fullBusy = false;
+  async function fullRefresh() {
+    if (fullBusy) return;
+    fullBusy = true;
+    closeModals(); $("#scrim").classList.add("on"); $("#fullm").classList.add("on");
+    const body = $("#fullbody"), started = Date.now();
+    const step = (text) => setHTML(body, html`<div class="full-wait"><div class="spin"></div><div><b>${text}</b><div class="muted small" id="full-time"></div></div></div>
+      <p class="muted small">Clearing the dashboard's caches, reading every node again and asking the AI model for a one-word answer (on this cluster that can take up to a minute).</p>`);
+    step("Refreshing everything…");
+    const timer = setInterval(() => { const el = $("#full-time"); if (el) el.textContent = Math.round((Date.now() - started) / 1000) + " s"; }, 500);
+    let r;
+    try { r = await postJSON("/api/refresh-all", {}); } catch (e) { r = { ok: false, error: e.message || "The dashboard didn't answer." }; }
+    clearInterval(timer);
+    fullBusy = false;
+    if (!r.ok) { setHTML(body, html`<p class="bad-t">${r.error || "The full refresh didn't work."}</p><button class="btn" data-act="full-retry">Try again</button>`); return; }
+    const m = r.model, c = r.cluster || {};
+    const modelLine = !m ? "" : ({ ok: ["good", "The AI model answers"], busy: ["good", "The AI model is busy answering"], none: ["", "No split model is deployed"],
+      unloaded: ["", "The AI model is unloaded"], loading: ["warn", "The AI model is still loading"], stale: ["bad", "The AI model needed reloading"],
+      broken: ["bad", "The AI model wasn't answering"] })[m.state] || ["", m.state];
+    setHTML(body, html`<ul class="full-list">
+        <li><i class="dot ${c.read ? "good" : "warn"}"></i><div><b>${c.read ? "Read the cluster again" : "The cluster read is still running"}</b><span>${c.ready}/${c.nodes} nodes ready${c.error ? " · " + c.error : ""}</span></div></li>
+        ${m ? html`<li><i class="dot ${modelLine[0]}"></i><div><b>${modelLine[1]}</b><span>${m.detail}${m.action ? " · " + (m.action === "reloading" ? "Reloading it now: it's back in a few minutes (the AI page shows the progress)." : m.action) : ""}</span></div></li>` : ""}
+        <li><i class="dot good"></i><div><b>Cleared</b><span>${(r.cleared || []).join(", ")}</span></div></li>
+      </ul><p class="muted small" id="full-reload">Reloading the page in 4 s…</p>
+      <div class="row"><button class="btn primary" data-act="full-reload">Reload now</button><button class="btn" data-act="full-stay">Stay on this page</button></div>`);
+    let left = 4;
+    S.fullTimer = setInterval(() => {
+      left--; const el = $("#full-reload"); if (el) el.textContent = "Reloading the page in " + left + " s…";
+      if (left <= 0) { clearInterval(S.fullTimer); location.reload(); }
+    }, 1000);
+  }
+  function closeModals() { $("#palette").classList.remove("on"); $("#helpm").classList.remove("on"); $("#jobm").classList.remove("on"); $("#fullm").classList.remove("on"); clearInterval(S.fullTimer); clearInterval(jobTimer); if (!S.drawer) $("#scrim").classList.remove("on"); }
   function runPalette(i) { const it = pItems[i]; if (!it) return; closeModals(); it.run(); }
 
   // ---- misc actions
@@ -1115,6 +1148,15 @@
     if (t.closest("[data-mobile-live]")) { setLive(!S.live); return; }
     if (t.closest("[data-mobile-help]")) { setMobileMenu(false, false); closeModals(); $("#scrim").classList.add("on"); $("#helpm").classList.add("on"); $("#helpm").focus(); return; }
     if (t.closest("[data-mobile-refresh]")) { setMobileMenu(false, false); load(true); return; }
+    if (t.closest("[data-mobile-fullrefresh]")) { setMobileMenu(false, false); fullRefresh(); return; }
+    const fa = t.closest("[data-act^=full-]");
+    if (fa) {
+      const act = fa.dataset.act;
+      if (act === "full-reload") location.reload();
+      else if (act === "full-retry") fullRefresh();
+      else { clearInterval(S.fullTimer); if (act === "full-close" || act === "full-stay") { closeModals(); load(true); } }
+      return;
+    }
     if (t.closest("[data-mobile-signout]")) { $("#signout").click(); return; }
     if ((el = t.closest("[data-copy]"))) { e.preventDefault(); e.stopPropagation(); copyText(el.dataset.copy); return; }
     if ((el = t.closest("[data-act]"))) { e.preventDefault(); act(el.dataset.act, el); return; }
@@ -1163,6 +1205,7 @@
     if (e.key === "/") { e.preventDefault(); openPalette(); }
     else if (e.key === "?") { closeModals(); $("#scrim").classList.add("on"); $("#helpm").classList.add("on"); }
     else if (/^[0-9]$/.test(e.key) && VIEWS[(+e.key + 9) % 10]) go(VIEWS[(+e.key + 9) % 10].id);
+    else if (e.key === "R") fullRefresh();
     else if (e.key === "r") load(true);
     else if (e.key === " ") { e.preventDefault(); if ((S.view === "music" || S.view === "desk") && NY.music && NY.music.toggle()) return; setLive(!S.live); }
     else if (e.key === "t") cycleTheme();
@@ -1180,6 +1223,7 @@
   });
   $("#searchbtn").addEventListener("click", openPalette);
   $("#refresh").addEventListener("click", () => load(true));
+  $("#fullrefresh").addEventListener("click", fullRefresh);
   $("#theme").addEventListener("click", cycleTheme);
   $("#helpbtn").addEventListener("click", () => { closeModals(); $("#scrim").classList.add("on"); $("#helpm").classList.add("on"); $("#helpm").focus(); });
   $("#live").addEventListener("click", () => setLive(!S.live));

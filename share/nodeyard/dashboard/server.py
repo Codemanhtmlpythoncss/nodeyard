@@ -740,6 +740,52 @@ def main():
     galaxy3d.register(ctx, a)
     import selfupdate    # restarts on the new program after an update (the page files are already new)
     selfupdate.register(ctx, a)
+    def refresh_all(h, body):
+        """Full refresh: every module forgets what it remembered (cluster lists, connections, model lists, the disk
+        inventory, Tailscale and CLI answers, page files, the music library, services), the cluster is read again, and
+        the model is really asked to answer (repaired when it can't). The page reloads itself afterwards."""
+        t0 = time.time()
+        cleared = []
+        for name, obj in (("cluster", source), ("node agents", agents), ("models", getattr(ctx, "ai", None)), ("settings", getattr(ctx, "settings", None)),
+                          ("music library", getattr(ctx, "music", None)), ("services", getattr(ctx, "homelab", None))):
+            fn = getattr(obj, "reset", None)
+            if fn is None:
+                continue
+            try:
+                fn()
+                cleared.append(name)
+            except Exception as e:  # noqa: BLE001 -- one module's cache never stops the rest
+                cleared.append("%s (failed: %s)" % (name, str(e)[:80]))
+        tsserve.forget()
+        with STATIC.lock:
+            STATIC.files.clear()
+        with _PAGES_LOCK:
+            _PAGES.clear()
+        with ctx.lock:
+            ctx.encoded, ctx.history_cache = {}, {}
+        cleared += ["Tailscale address", "page files", "live-update encodings"]
+        before = store.version
+        store.poll()
+        with store.cond:     # (a read already under way counts: wait for the next one to land)
+            store.cond.wait_for(lambda: store.version > before or store.stop.is_set(), timeout=25)
+        snap = store.snapshot()
+        st = snap["state"] or {}
+        report = {"ok": True, "cleared": cleared, "cluster": {"read": store.version > before, "error": snap["error"],
+                  "nodes": len(st.get("nodes", [])), "ready": sum(1 for n in st.get("nodes", []) if n.get("ready"))}}
+        backend, lc = getattr(ctx, "ai", None), getattr(ctx, "lifecycle", None)
+        if backend is not None and hasattr(backend, "check_split"):
+            model = backend.check_split()
+            if model["state"] in ("stale", "broken") and lc is not None:
+                try:
+                    job = lc.force_reload("Full refresh found it not answering (%s)" % model["detail"].rstrip("."))
+                    model["action"] = "reloading" if job else "already reloading"
+                except Exception as e:  # noqa: BLE001
+                    model["action"] = "couldn't reload: %s" % e
+            report["model"] = model
+        report["seconds"] = round(time.time() - t0, 1)
+        return h._json(report)
+
+    ctx.post_routes["/api/refresh-all"] = refresh_all
     import plugins       # last: it wraps every route above with on/off switches and the audit log
     plugins.register(ctx, a)
 

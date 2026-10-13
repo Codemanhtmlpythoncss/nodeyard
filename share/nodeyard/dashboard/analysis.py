@@ -145,6 +145,11 @@ def alerts(state):
                 "In namespace %s." % w["namespace"], "workload", ref)
         if w["kind"] == "Job" and w.get("failed"):
             add("warning", "Job %s has failed %d time(s)" % (w["name"], w["failed"]), "In namespace %s." % w["namespace"], "workload", ref)
+    sp = (state.get("ai") or {}).get("split") or {}
+    if sp.get("stale"):
+        add("critical", "The AI model needs reloading",
+            "%s, so the parts of the model kept there are gone and it can't answer. The dashboard reloads it by itself "
+            "(or press Full refresh)." % sp["stale"]["why"], "ai", "split")
     for v in state["volumes"]:
         if v["kind"] == "PVC" and v["status"] not in ("Bound", ""):
             add("warning", "Volume claim %s is %s" % (v["name"], v["status"]), "In namespace %s." % v["namespace"], "volume", v["name"])
