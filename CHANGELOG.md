@@ -9,6 +9,40 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **The node agent is a C program.** The same answers on the same port, for about 0.3 MB of memory per node
+  instead of ~24 MB (a Python interpreter), and no Python image on each node's disk: a static program of about
+  120 KB for x86, 64-bit and 32-bit Arm runs from a ConfigMap in busybox. Other CPU types keep the Python agent.
+  Rebuild with `share/nodeyard/agent/build.sh`.
+- **Processes › Free up memory:** every process over 5 MB that a cluster node doesn't need (desktop, printing,
+  Bluetooth, update checkers...), with **Move to swap** (just that process, via `process_madvise`; it comes back by
+  itself when used) and **Stop** (its service, optionally kept off at boot, with **Start again**). Kubernetes, the
+  AI model, networking, SSH and nodeyard are never offered. **Set up swap** adds zram or a swap file.
+- **Tuning › How far to push it:** overclock advice for every machine from how hot it runs under load, whether it
+  has throttled and its power supply: Raspberry Pi clock levels, Intel sustained power limits, CPU energy
+  preference, platform profile, and NVIDIA and AMD GPU power, each with a one-click recommended setting.
+  **Reset all** restores every machine and the AI settings.
+- Split models: prompt-cache reuse (`--cache-reuse 256`) and a priority class, so Kubernetes evicts other apps
+  before the model when a node runs short of memory. The AI kernel profile also turns off Wi-Fi power saving and
+  Energy-Efficient Ethernet on the model's links.
+
+### Changed
+
+- **Faster pages over Tailscale:** page files are kept in memory with an ETag (an unchanged file is a 304 with no
+  body) and sent gzip-compressed (the main script drops from about 104 KB to 29 KB); large API answers and the live
+  update stream are compressed too, and every open dashboard shares one encoded copy of each update.
+- `/api/health` also says how old the cluster data is, for outside uptime monitors (still no sign-in, and nothing
+  about the cluster).
+- Responses carry a Permissions-Policy (only the microphone, for voice chat) and no longer name the Python version.
+- The Music player bar fits phones and mid-size windows, and sits at the bottom on the Desk.
+- The keyboard help lists the number-key pages correctly.
+
+### Fixed
+
+- Opening Music could knock the dashboard offline ("Lost contact"): new-song lookups ran up to eight yt-dlp
+  processes inside its memory limit. Now two at a time, at low priority, killed first if memory runs out; the
+  in-RAM audio cache is 40 MB, and the unit uses MemoryHigh/MemoryMax.
+- Lighter Kubernetes no longer changes Go's garbage-collection pace (only a soft memory limit), so k3s isn't slowed.
+
 - **Services page: a monitor for your own services.** Add HTTP(S), TCP and ping checks (with expected status codes,
   a required word on the page, groups and how often to check). Each shows 24 hours of uptime bars, latency, the last
   error and, for HTTPS, days until the certificate expires. History survives restarts. A service that fails twice in
@@ -31,20 +65,6 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   song); a working mute button; and keys on Music and Desk (Space play/pause, arrows skip 10 s, Shift+arrows change
   song, m mutes).
 - The dashboard can be added to a phone's home screen as an app (icon, name and shortcuts).
-
-### Changed
-
-- **Faster pages over Tailscale:** page files are kept in memory with an ETag (an unchanged file is a 304 with no
-  body) and sent gzip-compressed (the main script drops from about 104 KB to 29 KB); large API answers and the live
-  update stream are compressed too, and every open dashboard shares one encoded copy of each update.
-- `/api/health` also says how old the cluster data is, for outside uptime monitors (still no sign-in, and nothing
-  about the cluster).
-- Responses carry a Permissions-Policy (only the microphone, for voice chat) and no longer name the Python version.
-- The Music player bar fits phones and mid-size windows, and sits at the bottom on the Desk.
-- The keyboard help lists the number-key pages correctly.
-
-### Fixed
-
 - **An update now runs the new dashboard.** `install.sh` and `nodeyard update` replaced the files but left the old
   program running, so the new page called things it didn't have (the Terminal page said "Couldn't list devices").
   Updates now restart a running dashboard, and the dashboard notices when its own program changed on disk and

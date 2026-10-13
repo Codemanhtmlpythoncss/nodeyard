@@ -600,6 +600,137 @@ dashboard_password_cmd() {
 
 # --- node agents -------------------------------------------------------------
 
+# The agent is a small static C program (share/nodeyard/agent/agent.c, built by build.sh for these CPU types): about
+# 300 KB of memory per node, where the Python one (agent.py, still used for any other CPU type) took ~25 MB plus a
+# Python image on every node's disk. It runs from a ConfigMap in a busybox image the nodes already have.
+DASH_AGENT_C_IMAGE="busybox:1.36"
+DASH_AGENT_ARCHES="amd64 arm64 arm"
+
+# dashboard_agent_native -- true when this install has the C agent for every CPU type above
+dashboard_agent_native() {
+    local a
+    for a in $DASH_AGENT_ARCHES; do
+        [[ -s "${NY_SHARE}/agent/bin/nodeyard-agent-${a}" ]] || return 1
+    done
+    return 0
+}
+
+# dashboard_agent_version -- a fingerprint of the agent programs (a new one restarts the pods)
+dashboard_agent_version() {
+    local f out=""
+    for f in "${NY_SHARE}/agent/agent.py" "${NY_SHARE}/agent/bin/"nodeyard-agent-*; do
+        [[ -f "$f" ]] && out+="$(ny_sha256 "$f" 2>/dev/null)"
+    done
+    printf '%s' "${out:0:16}" | cut -c1-16
+    return 0
+}
+
+# dashboard_agent_bin_manifest -- the ConfigMap holding the C agent for each CPU type (applied server-side: it's
+# bigger than client-side apply's annotation allows)
+dashboard_agent_bin_manifest() {
+    local a
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: nodeyard-agent-bin, namespace: %s}\nbinaryData:\n' "$DASH_AGENT_NS"
+    for a in $DASH_AGENT_ARCHES; do
+        if [[ "${DASH_AGENT_ELIDE:-0}" == 1 ]]; then
+            printf '  %s: (the %s agent program, %s bytes)\n' "$a" "$a" "$(wc -c <"${NY_SHARE}/agent/bin/nodeyard-agent-${a}" | tr -d ' ')"
+        else
+            printf '  %s: %s\n' "$a" "$(base64 <"${NY_SHARE}/agent/bin/nodeyard-agent-${a}" | tr -d '\n')"
+        fi
+    done
+    return 0
+}
+
+# dashboard_agent_daemonset NAME FLAVOUR -- one DaemonSet. FLAVOUR: c (the C agent on the CPU types above), gpu (the
+# C agent on NVIDIA nodes, in a glibc image so nvidia-smi runs), py (the Python agent: every other CPU type, or every
+# node when this install has no C agent).
+dashboard_agent_daemonset() {
+    local name="$1" flavour="$2" image affinity command mounts volumes extra="" limit=32Mi request=4Mi
+    local arches="[${DASH_AGENT_ARCHES// /, }]"
+    if [[ "$flavour" == py ]]; then
+        image="$DASH_AGENT_IMAGE" limit=96Mi request=24Mi
+        command='["python", "-u", "/agent/agent.py", "--passwd", "/host-passwd"]'
+        mounts="        - {name: script, mountPath: /agent, readOnly: true}"
+        volumes="      - {name: script, configMap: {name: nodeyard-agent-script}}"
+        if dashboard_agent_native; then
+            affinity="[{key: nodeyard.io/gpu, operator: NotIn, values: [nvidia]}, {key: kubernetes.io/arch, operator: NotIn, values: ${arches}}]"
+        else
+            affinity="[{key: nodeyard.io/gpu, operator: NotIn, values: [nvidia]}]"
+        fi
+    else
+        image="$DASH_AGENT_C_IMAGE"
+        command='["/bin/sh", "-c", "case \"$(uname -m)\" in x86_64) a=amd64 ;; aarch64) a=arm64 ;; arm*) a=arm ;; *) echo \"no nodeyard agent program for $(uname -m)\" >&2; exit 1 ;; esac; exec \"/agent-bin/$a\" --passwd /host-passwd"]'
+        mounts="        - {name: bin, mountPath: /agent-bin, readOnly: true}"
+        volumes="      - {name: bin, configMap: {name: nodeyard-agent-bin, defaultMode: 0555}}"
+        affinity="[{key: nodeyard.io/gpu, operator: NotIn, values: [nvidia]}, {key: kubernetes.io/arch, operator: In, values: ${arches}}]"
+    fi
+    if [[ "$flavour" == gpu ]]; then
+        image="$DASH_AGENT_GPU_IMAGE" limit=64Mi
+        affinity="[{key: nodeyard.io/gpu, operator: In, values: [nvidia]}]"
+        extra=$'      # NVIDIA\'s container runtime adds nvidia-smi and the GPU\'s device files (read only)\n      runtimeClassName: nvidia'
+        dashboard_agent_native || {
+            command='["python", "-u", "/agent/agent.py", "--passwd", "/host-passwd"]' limit=160Mi request=24Mi
+            mounts="        - {name: script, mountPath: /agent, readOnly: true}"
+            volumes="      - {name: script, configMap: {name: nodeyard-agent-script}}"
+        }
+    fi
+    cat <<YAML
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ${name}
+  namespace: ${DASH_AGENT_NS}
+  labels: {app: nodeyard-agent}
+spec:
+  selector:
+    matchLabels: {app: nodeyard-agent, flavour: ${flavour}}
+  updateStrategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 1}}
+  template:
+    metadata:
+      labels: {app: nodeyard-agent, flavour: ${flavour}}
+      # a new agent program restarts the pods (a ConfigMap change alone doesn't)
+      annotations: {nodeyard/program-sha256: "$(dashboard_agent_version)"}
+    spec:
+      hostPID: true
+      # on the host's network so it sees the machine's real network links
+      # (and their speed); it still only answers requests with the token
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      tolerations: [{operator: Exists}]
+      terminationGracePeriodSeconds: 2
+      affinity: {nodeAffinity: {requiredDuringSchedulingIgnoredDuringExecution: {nodeSelectorTerms: [{matchExpressions: ${affinity}}]}}}
+${extra:+${extra}
+}      containers:
+      - name: agent
+        image: ${image}
+        command: ${command}
+        ports: [{containerPort: 9093}]
+        env:
+        - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+        - {name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}
+        - {name: NODE_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}
+        - {name: AGENT_TOKEN, valueFrom: {secretKeyRef: {name: nodeyard-agent-token, key: token}}}
+$([[ "$flavour" == gpu ]] && printf '        - {name: NVIDIA_VISIBLE_DEVICES, value: all}\n        - {name: NVIDIA_DRIVER_CAPABILITIES, value: utility}\n')
+        resources:
+          requests: {cpu: 5m, memory: ${request}}
+          limits: {cpu: 300m, memory: ${limit}}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+          runAsUser: 65534
+          runAsNonRoot: true
+        readinessProbe: {httpGet: {path: /healthz, port: 9093}, periodSeconds: 10}
+        volumeMounts:
+${mounts}
+        - {name: passwd, mountPath: /host-passwd, readOnly: true}
+      volumes:
+${volumes}
+      - {name: passwd, hostPath: {path: /etc/passwd, type: File}}
+YAML
+    return 0
+}
+
 dashboard_agent_manifest() {
     local token script
     if ny_secret_exists "$DASH_AGENT_TOKEN"; then
@@ -632,118 +763,16 @@ metadata: {name: nodeyard-agent-script, namespace: ${DASH_AGENT_NS}}
 data:
   agent.py: |
 ${script}
----
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: nodeyard-agent
-  namespace: ${DASH_AGENT_NS}
-  labels: {app: nodeyard-agent}
-spec:
-  selector:
-    matchLabels: {app: nodeyard-agent}
-  updateStrategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 1}}
-  template:
-    metadata:
-      labels: {app: nodeyard-agent}
-      # a new agent program restarts the pods (a ConfigMap change alone doesn't)
-      annotations: {nodeyard/program-sha256: "$(ny_sha256 "${NY_HOME}/share/nodeyard/agent/agent.py" 2>/dev/null || echo unknown)"}
-    spec:
-      hostPID: true
-      # on the host's network so it sees the machine's real network links
-      # (and their speed); it still only answers requests with the token
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
-      tolerations: [{operator: Exists}]
-      terminationGracePeriodSeconds: 2
-      # GPU nodes run the GPU flavour below instead
-      affinity: {nodeAffinity: {requiredDuringSchedulingIgnoredDuringExecution: {nodeSelectorTerms: [{matchExpressions: [{key: nodeyard.io/gpu, operator: NotIn, values: [nvidia]}]}]}}}
-      containers:
-      - name: agent
-        image: ${DASH_AGENT_IMAGE}
-        command: ["python", "-u", "/agent/agent.py", "--passwd", "/host-passwd"]
-        ports: [{containerPort: 9093}]
-        env:
-        - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
-        - {name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}
-        - {name: NODE_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}
-        - {name: AGENT_TOKEN, valueFrom: {secretKeyRef: {name: nodeyard-agent-token, key: token}}}
-        resources:
-          requests: {cpu: 10m, memory: 24Mi}
-          limits: {cpu: 300m, memory: 96Mi}
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          capabilities: {drop: [ALL]}
-          runAsUser: 65534
-          runAsNonRoot: true
-        readinessProbe: {httpGet: {path: /healthz, port: 9093}, periodSeconds: 10}
-        volumeMounts:
-        - {name: script, mountPath: /agent, readOnly: true}
-        - {name: passwd, mountPath: /host-passwd, readOnly: true}
-      volumes:
-      - {name: script, configMap: {name: nodeyard-agent-script}}
-      - {name: passwd, hostPath: {path: /etc/passwd, type: File}}
 YAML
+    if dashboard_agent_native; then
+        dashboard_agent_daemonset nodeyard-agent c
+        dashboard_agent_daemonset nodeyard-agent-py py
+    else
+        dashboard_agent_daemonset nodeyard-agent py
+    fi
     # nodes with an NVIDIA GPU set up for containers (nodeyard ai gpu setup)
     if [[ -n "$(kctl get nodes -l nodeyard.io/gpu=nvidia -o name 2>/dev/null || true)" ]]; then
-        printf -- '---\n'
-        cat <<YAML
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: nodeyard-agent-gpu
-  namespace: ${DASH_AGENT_NS}
-  labels: {app: nodeyard-agent}
-spec:
-  selector:
-    matchLabels: {app: nodeyard-agent}
-  updateStrategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 1}}
-  template:
-    metadata:
-      labels: {app: nodeyard-agent}
-      # a new agent program restarts the pods (a ConfigMap change alone doesn't)
-      annotations: {nodeyard/program-sha256: "$(ny_sha256 "${NY_HOME}/share/nodeyard/agent/agent.py" 2>/dev/null || echo unknown)"}
-    spec:
-      hostPID: true
-      # on the host's network so it sees the machine's real network links
-      # (and their speed); it still only answers requests with the token
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
-      tolerations: [{operator: Exists}]
-      terminationGracePeriodSeconds: 2
-      # NVIDIA's container runtime adds nvidia-smi and the GPU's device files (read only)
-      runtimeClassName: nvidia
-      nodeSelector: {nodeyard.io/gpu: nvidia}
-      containers:
-      - name: agent
-        image: ${DASH_AGENT_GPU_IMAGE}
-        command: ["python", "-u", "/agent/agent.py", "--passwd", "/host-passwd"]
-        ports: [{containerPort: 9093}]
-        env:
-        - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
-        - {name: NODE_NAME, valueFrom: {fieldRef: {fieldPath: spec.nodeName}}}
-        - {name: NODE_IP, valueFrom: {fieldRef: {fieldPath: status.hostIP}}}
-        - {name: NVIDIA_VISIBLE_DEVICES, value: all}
-        - {name: NVIDIA_DRIVER_CAPABILITIES, value: utility}
-        - {name: AGENT_TOKEN, valueFrom: {secretKeyRef: {name: nodeyard-agent-token, key: token}}}
-        resources:
-          requests: {cpu: 10m, memory: 24Mi}
-          limits: {cpu: 300m, memory: 160Mi}
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          capabilities: {drop: [ALL]}
-          runAsUser: 65534
-          runAsNonRoot: true
-        readinessProbe: {httpGet: {path: /healthz, port: 9093}, periodSeconds: 10}
-        volumeMounts:
-        - {name: script, mountPath: /agent, readOnly: true}
-        - {name: passwd, mountPath: /host-passwd, readOnly: true}
-      volumes:
-      - {name: script, configMap: {name: nodeyard-agent-script}}
-      - {name: passwd, hostPath: {path: /etc/passwd, type: File}}
-YAML
+        dashboard_agent_daemonset nodeyard-agent-gpu gpu
     fi
     return 0
 }
@@ -755,14 +784,33 @@ dashboard_agent_install_cmd() {
     [[ -r "${NY_SHARE}/agent/agent.py" ]] || ny_die "The agent program is missing from this nodeyard install." "Update nodeyard: sudo nodeyard update" "$NY_E_PRECONDITION"
     ny_step "Setting up the node agent on every node"
     ny_secret_generate "$DASH_AGENT_TOKEN" 24
-    ny_info "Each node runs one small read-only pod (${DASH_AGENT_IMAGE}); the first start downloads that image."
+    if dashboard_agent_native; then
+        ny_info "Each node runs one small read-only pod: a C program of about 120 KB using well under 1 MB of memory (in ${DASH_AGENT_C_IMAGE})."
+    else
+        ny_info "Each node runs one small read-only pod (${DASH_AGENT_IMAGE}); the first start downloads that image."
+    fi
     ny_confirm "Run the node agent on every node?" y || return 0
     if ny_simulating; then
         ny_plan_add apply "Apply the node agent DaemonSet in namespace ${DASH_AGENT_NS}"
         if [[ "$NY_DRY_RUN" -eq 1 ]]; then
             DASH_AGENT_ELIDE=1 dashboard_agent_manifest | sed -E 's/(token: ")[^"]*"/\1***"/' >&2
+            dashboard_agent_native && DASH_AGENT_ELIDE=1 dashboard_agent_bin_manifest >&2
         fi
     else
+        dashboard_agent_manifest >/dev/null    # (fails early on a broken install, before anything changes)
+        kctl get namespace "$DASH_AGENT_NS" >/dev/null 2>&1 || kctl create namespace "$DASH_AGENT_NS" >/dev/null 2>&1 || true
+        if dashboard_agent_native; then
+            dashboard_agent_bin_manifest | kctl apply --server-side --force-conflicts --field-manager=nodeyard -f - >/dev/null ||
+                ny_die "Saving the agent program in the cluster failed." "Check: sudo nodeyard dashboard agent status"
+        fi
+        # the DaemonSets' selectors gained a "flavour" label, and a selector can't change in place
+        local ds sel
+        for ds in nodeyard-agent nodeyard-agent-gpu; do
+            sel="$(kctl -n "$DASH_AGENT_NS" get daemonset "$ds" -o jsonpath='{.spec.selector.matchLabels.flavour}' 2>/dev/null || true)"
+            if kctl -n "$DASH_AGENT_NS" get daemonset "$ds" >/dev/null 2>&1 && [[ -z "$sel" ]]; then
+                kctl -n "$DASH_AGENT_NS" delete daemonset "$ds" --wait=true >/dev/null 2>&1 || true
+            fi
+        done
         dashboard_agent_manifest | kctl apply -f - >/dev/null || ny_die "Applying the node agent failed." "Check: sudo nodeyard dashboard agent status"
         ny_step "Waiting for the agents to start (the first run downloads the image)"
         kctl rollout status daemonset/nodeyard-agent -n "$DASH_AGENT_NS" --timeout=300s || ny_warn "Not finished yet; check: sudo nodeyard dashboard agent status"

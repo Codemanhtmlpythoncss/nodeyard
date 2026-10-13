@@ -738,6 +738,8 @@ def main():
     diskusage.register(ctx, a)
     import tune          # per-device AI settings, and CPU/GPU power, clock and overclock controls
     tune.register(ctx, a)
+    import memfree       # processes a node doesn't need, moved to swap or stopped (Processes > Free up memory)
+    memfree.register(ctx, a)
     if getattr(ctx, "ai", None) is not None:
         import aiapi as _aiapi
         _aiapi.EXTRA_SPLIT_ARGS = ctx.tuning.run_args

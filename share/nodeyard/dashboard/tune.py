@@ -32,7 +32,7 @@ for f in /boot/firmware/config.txt /boot/config.txt; do
     grep -q '^# nodeyard overclock start' "$f" && echo "pi_ours=1"; break; fi
 done
 command -v vcgencmd >/dev/null 2>&1 && echo "pi_throttled=$(vcgencmd get_throttled 2>/dev/null | cut -d= -f2)"
-command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=index,name,power.limit,power.min_limit,power.max_limit,power.default_limit,persistence_mode --format=csv,noheader,nounits 2>/dev/null | sed 's/^/gpu=/'
+command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=index,name,power.limit,power.min_limit,power.max_limit,power.default_limit,persistence_mode,temperature.gpu --format=csv,noheader,nounits 2>/dev/null | sed 's/^/gpu=/'
 [ -f /etc/systemd/system/nodeyard-tune.service ] && echo "persist=1" || echo "persist=0"
 echo "thp=$(sed 's/.*\[\(.*\)\].*/\1/' /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null)"
 echo "thp_defrags=$(cat /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null | tr -d '[]')"
@@ -50,20 +50,41 @@ for svc in k3s k3s-agent; do systemctl is-active --quiet "$svc" 2>/dev/null && e
 p=$(pidof k3s 2>/dev/null | awk '{print $NF}'); [ -n "$p" ] && echo "k3s_rss_kb=$(awk '/^VmRSS/ {print $2}' "/proc/$p/status")"
 p=$(pidof containerd 2>/dev/null | awk '{print $1}'); [ -n "$p" ] && echo "containerd_rss_kb=$(awk '/^VmRSS/ {print $2}' "/proc/$p/status")"
 [ -f /etc/rancher/k3s/config.yaml.d/90-nodeyard-lean.yaml ] && echo "lean_cfg=1"
+r=/sys/class/powercap/intel-rapl:0
+if [ -f $r/constraint_0_power_limit_uw ]; then echo "rapl_pl1=$(cat $r/constraint_0_power_limit_uw)"; echo "rapl_pl2=$(cat $r/constraint_1_power_limit_uw 2>/dev/null)"
+  echo "rapl_max2=$(cat $r/constraint_1_max_power_uw 2>/dev/null)"; [ -d /sys/class/powercap/intel-rapl-mmio:0 ] && echo "rapl_mmio=1"; fi
+grep -m1 -q GenuineIntel /proc/cpuinfo 2>/dev/null && echo "intel=1"
+echo "epp=$(cat $c/cpu0/cpufreq/energy_performance_preference 2>/dev/null)"
+echo "epps=$(cat $c/cpu0/cpufreq/energy_performance_available_preferences 2>/dev/null)"
+echo "profile=$(cat /sys/firmware/acpi/platform_profile 2>/dev/null)"
+echo "profiles=$(cat /sys/firmware/acpi/platform_profile_choices 2>/dev/null)"
+for d in /sys/class/drm/card[0-9]*/device; do [ -f "$d/power_dpm_force_performance_level" ] || continue
+  h=$(ls -d "$d"/hwmon/hwmon* 2>/dev/null | head -1); n=$(basename "$(dirname "$d")")
+  echo "amdgpu=$n,$(cat "$d/power_dpm_force_performance_level"),$(cat "$h/power1_cap" 2>/dev/null),$(cat "$h/power1_cap_max" 2>/dev/null),$(cat "$h/power1_cap_default" 2>/dev/null),$(cat "$h/temp1_input" 2>/dev/null)"; done
+for w in /sys/class/net/*/wireless; do [ -d "$w" ] || continue; i=$(basename "$(dirname "$w")")
+  command -v iw >/dev/null 2>&1 && echo "wifi=$i,$(iw dev "$i" get power_save 2>/dev/null | awk '{print $NF}')"; done
+command -v ethtool >/dev/null 2>&1 && echo "ethtool=1"
+[ -f /var/lib/nodeyard-tune.orig ] && echo "oc_saved=1"
 ls /etc/systemd/system/k3s*.service.d/90-nodeyard-lean.conf >/dev/null 2>&1 && echo "lean_env=1"
 true'''
 
-# Raspberry Pi overclocks, by model: (label, config lines). Moderate ones only; they need a good power supply and cooling.
+# Raspberry Pi overclocks, by model: (id, label, config lines, about how many °C warmer it runs under load). Moderate
+# ones only; they need a good power supply and cooling. The advice picks the highest that stays clear of the throttle point.
+_PI4 = [("stock", "Stock (1.5-1.8 GHz)", [], 0), ("mild", "1.9 GHz", ["arm_freq=1900", "over_voltage=2"], 3),
+        ("medium", "2.0 GHz", ["arm_freq=2000", "over_voltage=4"], 6), ("high", "2.15 GHz (needs a fan)", ["arm_freq=2147", "over_voltage=6"], 10)]
 PI_PRESETS = {
-    "Raspberry Pi 5": [("stock", "Stock (2.4 GHz)", []), ("mild", "2.6 GHz", ["arm_freq=2600"]),
-                       ("medium", "2.8 GHz (more voltage)", ["arm_freq=2800", "over_voltage_delta=25000"]),
-                       ("high", "3.0 GHz (more voltage, needs active cooling)", ["arm_freq=3000", "over_voltage_delta=50000"])],
-    "Raspberry Pi 4": [("stock", "Stock (1.5-1.8 GHz)", []), ("mild", "1.9 GHz", ["arm_freq=1900", "over_voltage=2"]),
-                       ("medium", "2.0 GHz", ["arm_freq=2000", "over_voltage=4"]),
-                       ("high", "2.1 GHz (needs active cooling)", ["arm_freq=2147", "over_voltage=6"])],
-    "Raspberry Pi 3 Model B Plus": [("stock", "Stock (1.4 GHz)", []), ("mild", "1.5 GHz", ["arm_freq=1500", "over_voltage=2"])],
-    "Raspberry Pi 3": [("stock", "Stock (1.2 GHz)", []), ("mild", "1.3 GHz", ["arm_freq=1300", "over_voltage=2"])],
+    "Raspberry Pi 5": [("stock", "Stock (2.4 GHz)", [], 0), ("mild", "2.6 GHz", ["arm_freq=2600"], 3),
+                       ("medium", "2.8 GHz (a little more voltage)", ["arm_freq=2800", "over_voltage_delta=25000"], 7),
+                       ("high", "3.0 GHz (more voltage; needs the active cooler)", ["arm_freq=3000", "over_voltage_delta=50000"], 12)],
+    "Raspberry Pi 4": _PI4, "Raspberry Pi Compute Module 4": _PI4,
+    "Raspberry Pi 3 Model B Plus": [("stock", "Stock (1.4 GHz)", [], 0), ("mild", "1.5 GHz", ["arm_freq=1500", "over_voltage=2"], 4),
+                                    ("medium", "1.55 GHz (needs a heatsink)", ["arm_freq=1550", "over_voltage=4"], 7)],
+    "Raspberry Pi 3": [("stock", "Stock (1.2 GHz)", [], 0), ("mild", "1.3 GHz", ["arm_freq=1300", "over_voltage=2"], 4),
+                       ("medium", "1.35 GHz (needs a heatsink)", ["arm_freq=1350", "over_voltage=4"], 7)],
+    "Raspberry Pi Zero 2": [("stock", "Stock (1.0 GHz)", [], 0), ("mild", "1.2 GHz", ["arm_freq=1200", "over_voltage=6"], 5)],
 }
+EPP_DEFAULT = "balance_performance"
+PROFILE_DEFAULT = "balanced"
 
 
 class TuneError(Exception):
@@ -82,27 +103,41 @@ def parse_probe(text):
         if k == "gpu":
             parts = [x.strip() for x in v.split(",")]
             if len(parts) >= 7:
-                def num(x):
-                    try:
-                        return float(x)
-                    except ValueError:
-                        return None
-                out["gpus"].append({"index": parts[0], "name": parts[1], "power": num(parts[2]), "min": num(parts[3]), "max": num(parts[4]),
-                                    "default": num(parts[5]), "persistence": parts[6].lower() == "enabled"})
+                out["gpus"].append({"index": parts[0], "name": parts[1], "power": _num(parts[2]), "min": _num(parts[3]), "max": _num(parts[4]),
+                                    "default": _num(parts[5]), "persistence": parts[6].lower() == "enabled", "temp": _num(parts[7]) if len(parts) > 7 else None})
+        elif k == "amdgpu":
+            parts = [x.strip() for x in v.split(",")]
+            if len(parts) >= 6 and re.match(r"^card\d+$", parts[0]):
+                uw = [int(x) if x.isdigit() else None for x in parts[2:5]]
+                out.setdefault("amdgpus", []).append({"card": parts[0], "level": parts[1], "cap": uw[0] and uw[0] // 1000000, "cap_max": uw[1] and uw[1] // 1000000,
+                                                      "cap_default": uw[2] and uw[2] // 1000000, "temp": int(parts[5]) / 1000 if parts[5].isdigit() else None})
+        elif k == "wifi":
+            name, _, ps = v.partition(",")
+            if re.match(r"^[A-Za-z0-9_.-]{1,15}$", name):
+                out.setdefault("wifi", []).append({"iface": name, "power_save": ps.strip() == "on"})
         elif k.startswith("pi_"):
             out["pi"][k[3:]] = v
         elif k in ("hw_min", "hw_max", "max", "swappiness", "turbo", "vfs_cache_pressure", "busy_poll", "rmem_max", "numa_balancing",
-                   "cstates_deep", "cstates_deep_off", "readahead", "k3s_rss_kb", "containerd_rss_kb"):
+                   "cstates_deep", "cstates_deep_off", "readahead", "k3s_rss_kb", "containerd_rss_kb", "rapl_pl1", "rapl_pl2", "rapl_max2"):
             out[k] = int(v) if v.isdigit() else None
         elif k == "thp_defrags":
             out[k] = [x for x in v.split() if re.match(r"^[a-z+]+$", x)]
-        elif k == "governors":
-            out[k] = [g for g in v.split() if re.match(r"^[a-z_]+$", g)]
+        elif k in ("governors", "epps", "profiles"):
+            out[k] = [g for g in v.split() if re.match(r"^[a-z_-]+$", g)]
         else:
             out[k] = v
     out["persist"] = out.get("persist") == "1"
+    out.setdefault("amdgpus", [])
+    out.setdefault("wifi", [])
     out["lean"] = out.get("lean_cfg") == "1" or out.get("lean_env") == "1"
     return out
+
+
+def _num(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
 
 
 def pi_presets(model):
@@ -225,6 +260,12 @@ class Tuning:
                 if g["default"]:
                     lines.append("nvidia-smi -i %s -pl %d" % (g["index"], int(g["default"])))
                     says.append("GPU %s power limit back to %d W" % (g["index"], int(g["default"])))
+            if p.get("oc_saved"):
+                lines.append(OC_RESTORE)
+                says.append("CPU power limits, energy preference, platform profile and AMD GPU power back to what they were")
+            for g in p.get("amdgpus") or []:
+                if g.get("level") not in (None, "auto"):
+                    lines.append("echo auto > /sys/class/drm/%s/device/power_dpm_force_performance_level 2>/dev/null" % g["card"])
             if p["pi"].get("config") and p["pi"].get("ours"):
                 lines.append(PI_BLOCK_REMOVE % {"f": p["pi"]["config"]})
                 says.append("Remove the Raspberry Pi overclock from %s (takes effect after a reboot)" % p["pi"]["config"])
@@ -238,6 +279,8 @@ class Tuning:
                 lines.append("echo 1 > /proc/sys/kernel/numa_balancing")
             if p.get("readahead_dev") and re.match(r"^[a-z0-9]+$", p["readahead_dev"]):
                 lines.append("echo 128 > /sys/class/block/%s/queue/read_ahead_kb" % p["readahead_dev"])
+            for w in p.get("wifi") or []:
+                lines.append("iw dev %s set power_save on 2>/dev/null" % w["iface"])
             says.append("Kernel settings back to the usual defaults (huge pages on request, CPU sleep states, network buffers, read-ahead)")
             if p.get("lean"):
                 lines.append(LEAN_REMOVE)
@@ -309,6 +352,14 @@ class Tuning:
                             "echo 16777216 > /proc/sys/net/core/rmem_max; echo 16777216 > /proc/sys/net/core/wmem_max",
                             "echo '4096 131072 16777216' > /proc/sys/net/ipv4/tcp_rmem; echo '4096 65536 16777216' > /proc/sys/net/ipv4/tcp_wmem"]
                 says.append("Low-latency networking for the split model: busy polling (answers each node's small messages sooner) and larger socket buffers")
+                for w in p.get("wifi") or []:
+                    if w["power_save"]:
+                        runtime.append("iw dev %s set power_save off" % w["iface"])
+                        says.append("Wi-Fi power saving off on %s (it holds packets back for up to ~100 ms to save power)" % w["iface"])
+                if p.get("ethtool"):
+                    runtime.append('for i in $(ls /sys/class/net); do [ -e "/sys/class/net/$i/device" ] && [ ! -d "/sys/class/net/$i/wireless" ] && '
+                                   'ethtool --set-eee "$i" eee off 2>/dev/null; done; true')
+                    says.append("Energy-Efficient Ethernet off on the wired links (waking the link up adds delay to every small message)")
             if ak.get("cstates"):
                 if not p.get("cstates_deep"):
                     raise TuneError("This machine has no deep CPU sleep states to turn off.")
@@ -343,11 +394,12 @@ class Tuning:
                              "# nodeyard Tuning page: lighter Kubernetes (\"Restore defaults\" there removes this file)\n%s\nNYLEAN" % "\n".join(cfg))
             if lean.get("gc"):
                 rss = (p.get("k3s_rss_kb") or 0) // 1024
-                limit = min(2048, max(320, int(rss * 0.7))) if svc == "k3s" else min(1024, max(160, int(rss * 0.75)))
+                # (a soft limit only: Go collects at its normal pace until k3s nears it, so nothing slows down; GOGC stays at its default)
+                limit = min(2048, max(384, int(rss * 0.85))) if svc == "k3s" else min(1024, max(192, int(rss * 0.85)))
                 lines.append(("mkdir -p /etc/systemd/system/%(svc)s.service.d && cat > /etc/systemd/system/%(svc)s.service.d/90-nodeyard-lean.conf <<'NYLEAN'\n"
-                              "[Service]\nEnvironment=GOGC=50\nEnvironment=GOMEMLIMIT=%(limit)dMiB\nNYLEAN") % {"svc": svc, "limit": limit})
-                says.append("k3s returns memory sooner: Go garbage collection at GOGC=50 with a soft limit of %d MiB%s" % (
-                    limit, " (it uses %d MiB now)" % rss if rss else ""))
+                              "[Service]\nEnvironment=GOMEMLIMIT=%(limit)dMiB\nNYLEAN") % {"svc": svc, "limit": limit})
+                says.append("k3s hands back memory it no longer needs once it passes %d MiB%s (a soft limit: Go's normal collection pace, so it isn't slowed)" % (
+                    limit, ", it uses %d MiB now" % rss if rss else ""))
             if not cfg and not lean.get("gc"):
                 raise TuneError("Pick at least one Kubernetes change.")
             lines.append("systemctl daemon-reload")
@@ -356,6 +408,49 @@ class Tuning:
                 says.append("Restart k3s in 5 s to use them (running pods keep running; the cluster API pauses for about 20 s)")
             else:
                 says.append("They take effect the next time k3s restarts")
+        oc = body.get("oc") or {}
+        if oc:
+            save = []
+            if oc.get("pl1_w") not in (None, ""):
+                if not (p.get("intel") and p.get("rapl_pl1") and p.get("rapl_pl2")):
+                    raise TuneError("This machine has no adjustable CPU power limits.")
+                try:
+                    w = int(oc["pl1_w"])
+                except (TypeError, ValueError):
+                    raise TuneError("The power limit must be a number of watts.")
+                top = p["rapl_pl2"] // 1000000
+                if not 5 <= w <= top:
+                    raise TuneError("The sustained power limit can be 5 to %d W (its boost limit)." % top)
+                save.append("pl1")
+                runtime.append("for r in /sys/class/powercap/intel-rapl:0 /sys/class/powercap/intel-rapl-mmio:0; do "
+                               "[ -f $r/constraint_0_power_limit_uw ] && echo %d > $r/constraint_0_power_limit_uw; done; true" % (w * 1000000))
+                says.append("CPU sustained power limit: %d W (from %d W; the boost limit stays %d W)" % (w, p["rapl_pl1"] // 1000000, top))
+            if oc.get("epp"):
+                if oc["epp"] not in (p.get("epps") or []):
+                    raise TuneError("This CPU doesn't offer the %s energy preference." % oc["epp"])
+                save.append("epp")
+                runtime.append('for f in %s/cpu*/cpufreq/energy_performance_preference; do echo %s > "$f"; done 2>/dev/null; true' % (cpu, oc["epp"]))
+                says.append("CPU energy preference: %s (how eagerly it clocks up)" % oc["epp"])
+            if oc.get("profile"):
+                if oc["profile"] not in (p.get("profiles") or []):
+                    raise TuneError("This machine doesn't offer the %s platform profile." % oc["profile"])
+                save.append("profile")
+                runtime.append("echo %s > /sys/firmware/acpi/platform_profile" % oc["profile"])
+                says.append("Platform profile: %s (the firmware's own power and fan setting)" % oc["profile"])
+            for card, watts in (oc.get("amd_cap") or {}).items():
+                g = next((x for x in p.get("amdgpus") or [] if x["card"] == card), None)
+                try:
+                    w = int(watts)
+                except (TypeError, ValueError):
+                    raise TuneError("A GPU power cap must be a number of watts.")
+                if not g or not g.get("cap_max") or not 10 <= w <= g["cap_max"]:
+                    raise TuneError("%s's power cap must be between 10 and %s W." % (card, g and g.get("cap_max")))
+                save.append("amd")
+                runtime.append("for h in /sys/class/drm/%s/device/hwmon/hwmon*; do echo %d > $h/power1_cap; done" % (card, w * 1000000))
+                says.append("AMD GPU %s power cap: %d W (from %s W)" % (card, w, g.get("cap")))
+            if not save:
+                raise TuneError("Pick an overclock setting.")
+            lines.append(OC_SAVE)
         pi = body.get("pi_preset")
         if pi:
             presets = pi_presets(p.get("model"))
@@ -399,6 +494,137 @@ class Tuning:
         with self.lock:
             self.probes[node] = {"at": time.time(), "data": data, "error": "", "busy": False}
         return {"done": says}
+
+    # -- overclocking: how far to push -----------------------------------------------------------------------------
+    def oc_advice(self, n, p):
+        """How far to push each overclock on this machine, judged from how hot it runs under load, whether it has slowed
+        itself down since boot and its power supply: {"lines": [{"what", "advice", "level": go|careful|stop}], "fix": the
+        recommended settings, or None}."""
+        if not p:
+            return {"lines": [], "fix": None}
+        hw = n.get("hw") or {}
+        temp, use = hw.get("temp_c"), hw.get("cpu_use")
+        model = p.get("model") or ""
+        pi = model.startswith("Raspberry Pi")
+        plus = model.startswith("Raspberry Pi 3 Model B Plus")
+        limit = 60 if plus else 80 if pi else 90          # where it starts slowing itself down
+        est = None if temp is None else (temp if (use or 0) >= 60 else temp + (15 if pi else 20))   # under the model's load
+        head = None if est is None else limit - est
+        stop = []
+        if hw.get("undervoltage"):
+            stop.append("its power supply voltage is low (use the official supply first)")
+        thr = (p.get("pi") or {}).get("throttled")
+        if thr and thr not in ("0x0", "0"):
+            stop.append("it has slowed itself down since it booted (%s): fix cooling or power first" % thr)
+        if temp is not None and temp >= limit - 5:
+            stop.append("it's already at %.0f °C" % temp)
+        lines, fix = [], {}
+        loadtxt = ("about %.0f °C under load" % est) if est is not None else "at an unknown temperature (the node agent reads it)"
+        presets = pi_presets(model)
+        if presets and p["pi"].get("config"):
+            freq = p["pi"].get("arm_freq") or ""
+            cur = next((x for x in presets if "arm_freq=" + freq in x[2]), presets[0]) if freq else presets[0]
+            if stop:
+                lines.append({"what": "Raspberry Pi clock (now %s)" % cur[1], "level": "stop", "advice": "Don't overclock: " + "; ".join(stop) + "."})
+            else:
+                ok = [x for x in presets if (est is None and x[3] <= 4) or (est is not None and est + x[3] <= limit - 5)]
+                best = ok[-1] if ok else presets[0]
+                i = presets.index(best)
+                nxt = presets[i + 1] if i + 1 < len(presets) else None
+                if est is None:
+                    txt = "Go no further than %s until its temperature can be read." % best[1]
+                else:
+                    txt = "Push to %s. It runs %s, so that keeps it near %.0f °C, clear of the %d °C where it slows itself%s." % (
+                        best[1], loadtxt, est + best[3], limit, " (a 3B+ slows at 60 °C unless temp_soft_limit is raised)" if plus else "")
+                    if nxt:
+                        txt += " %s would reach about %.0f °C: too hot without better cooling." % (nxt[1], est + nxt[3])
+                    elif i:
+                        txt += " That's as far as nodeyard goes on this model."
+                lines.append({"what": "Raspberry Pi clock (now %s)" % cur[1], "level": "go" if i else "careful", "advice": txt})
+                if presets.index(best) > presets.index(cur):
+                    fix["pi_preset"] = best[0]
+        if p.get("intel") and p.get("rapl_pl1") and p.get("rapl_pl2") and p["rapl_pl2"] > p["rapl_pl1"] * 1.05:
+            pl1, pl2 = p["rapl_pl1"] // 1000000, p["rapl_pl2"] // 1000000
+            what = "CPU power limit (%d W sustained, %d W boost)" % (pl1, pl2)
+            target = None if stop else pl2 if head is not None and head >= 20 else (pl1 + pl2) // 2 if head is None or head >= 10 else None
+            if target:
+                lines.append({"what": what, "level": "go" if target == pl2 else "careful",
+                              "advice": "Raise the sustained limit to %d W. It runs %s%s, so it can hold its boost clock through a long answer instead of "
+                                        "dropping back after about 30 s. Past about %d °C it slows itself, so this can't harm it." % (
+                                            target, loadtxt, "" if head is None else " (%.0f °C of headroom)" % head, limit + 10)})
+                fix["oc"] = dict(fix.get("oc") or {}, pl1_w=target)
+            else:
+                lines.append({"what": what, "level": "stop", "advice": "Leave it: " + ("; ".join(stop) if stop else
+                              "only %.0f °C of headroom under load. Clean the fan or improve the airflow first" % head) + "."})
+        if p.get("epp") and "performance" in (p.get("epps") or []) and p["epp"] != "performance":
+            lines.append({"what": "CPU energy preference (now %s)" % p["epp"], "level": "go",
+                          "advice": "Set it to performance: the CPU clocks up the moment a token starts instead of easing into it. It idles the same."})
+            fix["oc"] = dict(fix.get("oc") or {}, epp="performance")
+        if "performance" in (p.get("profiles") or []) and p.get("profile") != "performance":
+            warm = head is not None and head < 15
+            lines.append({"what": "Platform profile (now %s)" % (p.get("profile") or "?"), "level": "careful" if warm or stop else "go",
+                          "advice": "Set it to performance: the firmware allows more power and spins the fans up sooner%s." % (
+                              " (it runs warm: watch that it stays under %d °C)" % limit if warm else "")})
+            if not warm and not stop:
+                fix["oc"] = dict(fix.get("oc") or {}, profile="performance")
+        for g in p.get("gpus") or []:
+            if g.get("power") and g.get("max") and g["power"] < g["max"] * 0.95:
+                t, what = g.get("temp"), "GPU %s power limit (%d of %d W)" % (g["index"], g["power"], g["max"])
+                if t is not None and t >= 80:
+                    lines.append({"what": what, "level": "stop", "advice": "Leave it: the card is at %.0f °C." % t})
+                    continue
+                w = int(g["max"]) if t is None or t < 65 else int((g["power"] + g["max"]) / 2)
+                lines.append({"what": what, "level": "go" if w == int(g["max"]) else "careful",
+                              "advice": "Raise it to %d W%s: the card holds higher clocks on the model, within its own rated limit." % (
+                                  w, " (it's %.0f °C now)" % t if t is not None else "")})
+                fix["gpu_power"] = dict(fix.get("gpu_power") or {}, **{g["index"]: w})
+        for g in p.get("amdgpus") or []:
+            if g.get("cap") and g.get("cap_max") and g["cap"] < g["cap_max"] * 0.95:
+                t = g.get("temp")
+                w = g["cap_max"] if t is None or t < 65 else (g["cap"] + g["cap_max"]) // 2
+                lines.append({"what": "AMD GPU %s power cap (%d of %d W)" % (g["card"], g["cap"], g["cap_max"]), "level": "go" if w == g["cap_max"] else "careful",
+                              "advice": "Raise it to %d W, within its rated maximum%s." % (w, " (it's %.0f °C now)" % t if t is not None else "")})
+                oc = dict(fix.get("oc") or {})
+                oc["amd_cap"] = dict(oc.get("amd_cap") or {}, **{g["card"]: w})
+                fix["oc"] = oc
+        if not lines:
+            lines.append({"what": "Overclocking", "level": "careful", "advice": "Nothing on this machine can be pushed further from Linux%s." % (
+                "" if pi else ": it's already at its limits, or (x86) its clocks are set in the BIOS")})
+        return {"lines": lines, "fix": fix or None}
+
+    def reset_all(self, confirm):
+        """Restore defaults on every machine that has been read, and the AI settings back to automatic."""
+        ready = [n["name"] for n in self._nodes() if n.get("ready")]
+        with self.lock:
+            read = {k for k, v in self.probes.items() if v.get("data")}
+        plans = []
+        for node in ready:
+            if node in read:
+                says, script = self.plan(node, {"restore": True})
+                plans.append({"node": node, "plan": says, "script": script})
+        ai = sorted(self.ai_prefs())
+        if not confirm:
+            return {"plans": plans, "unread": [x for x in ready if x not in read], "ai": ai}
+        results = {}
+
+        def one(node):
+            try:
+                self.apply(node, {"restore": True}, True)
+                results[node] = ""
+            except TuneError as e:
+                results[node] = str(e)
+        threads = [threading.Thread(target=one, args=(x["node"],), daemon=True) for x in plans]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(150)
+        if ai:
+            st = self.ctx.settings
+            with st.lock:
+                prefs = st.prefs()
+                prefs[PREF_KEY] = {}
+                st._save_prefs(prefs)
+        return {"done": sorted(k for k, v in results.items() if not v), "failed": {k: v for k, v in results.items() if v}, "ai_cleared": ai}
 
     # -- what to suggest ------------------------------------------------------------------------------------------
     def recommendations(self, n, probe, ai, rpc_threads, split=None):
@@ -444,6 +670,8 @@ class Tuning:
                 k.append("huge pages")
             if (probe.get("busy_poll") or 0) == 0 and holds_model:
                 k.append("low-latency networking")
+            if holds_model and any(w["power_save"] for w in probe.get("wifi") or []):
+                k.append("Wi-Fi power saving off")
             if k:
                 out.append({"kind": "power", "what": "Use the AI kernel profile (%s)" % " and ".join(k),
                             "why": "Large-model inference reads gigabytes of weights per token: huge pages cut the address lookups, and busy polling answers "
@@ -453,10 +681,10 @@ class Tuning:
                 server = probe["k3s_service"] == "k3s"
                 drop = [c for c, o in (self.lean_options().items() if server else []) if o["unused"] and o["present"]]
                 out.append({"kind": "power", "what": "Make Kubernetes lighter (k3s uses %d MB here)" % (probe["k3s_rss_kb"] // 1024),
-                            "why": "Its Go runtime keeps more memory than it needs; tuning its garbage collection usually gives back 20-40%%%s. "
+                            "why": "Its Go runtime holds on to memory it no longer needs; a soft memory limit makes it hand that back (often 10-20%%) without slowing it%s. "
                                    "That memory goes to the model." % ((", and " + " and ".join(self.lean_options()[c]["label"] for c in drop) + " can go: nothing uses them") if drop else ""),
                             "fix": {"lean_k3s": {"gc": True, "image_gc": True, "disable": drop, "restart": True}}})
-            if split and split.get("main_node") == n["name"] and (split.get("kv") or "f16") == "f16":
+            if split and split.get("main_node") == n["name"] and (split.get("kv") or "f16") == "f16" and (hw.get("mem_available") or 1 << 40) < 2 * 1073741824:
                 out.append({"kind": "ai", "what": "Halve the conversation memory (KV cache q8_0)",
                             "why": "The model's memory of the conversation uses about 1.5 GB at 16k tokens in full precision; q8_0 halves it with practically the same "
                                    "answers. Run the model again from AI › Models and choose \"Half the memory\".", "fix": None})
@@ -498,6 +726,7 @@ class Tuning:
                 "pi_presets": [{"id": x[0], "label": x[1]} for x in pi_presets((data or {}).get("model"))] if data else [],
                 "tips": self.recommendations(n, data, ai.get(n["name"]) or {}, rpc_threads, split),
                 "lean_options": self.lean_options() if data and data.get("k3s_service") == "k3s" else None,
+                "oc": self.oc_advice(n, data),
             })
         return {"nodes": out, "demo": self.demo, "agents": bool((st.get("agents") or {}).get("installed"))}
 
@@ -505,7 +734,16 @@ class Tuning:
     def _demo_exec(self, node, script):
         cp = any(r in ("control-plane", "master") for r in self._node(node).get("roles") or [])
         st = self.demo_state.setdefault(node, {"governor": "powersave", "max": 3600000, "turbo": 1, "swappiness": 60, "gpu": 220, "persist": 0,
-                                               "thp": "madvise", "busy": 0, "lean": 0, "rss": 610000 if cp else 230000})
+                                               "thp": "madvise", "busy": 0, "lean": 0, "rss": 610000 if cp else 230000,
+                                               "pl1": 15000000, "epp": "balance_power", "profile": "balanced", "oc": 0})
+        for v in re.findall(r"echo (\d+) > \$r/constraint_0_power_limit_uw", script):
+            st["pl1"], st["oc"] = int(v), 1
+        for v in re.findall(r"echo ([a-z_]+) > \"\$f\"; done 2>/dev/null", script):
+            st["epp"], st["oc"] = v, 1
+        for v in re.findall(r"echo ([a-z-]+) > /sys/firmware/acpi/platform_profile$", script, re.M):
+            st["profile"], st["oc"] = v, 1
+        if "rm -f $o" in script and st["oc"]:
+            st.update(pl1=15000000, epp="balance_power", profile="balanced", oc=0)
         if "echo always > /sys/kernel/mm/transparent_hugepage/enabled" in script:
             st["thp"] = "always"
         if "echo madvise > /sys/kernel/mm/transparent_hugepage/enabled" in script:
@@ -516,9 +754,9 @@ class Tuning:
             st["lean"] = 1
         if "rm -f /etc/rancher/k3s/config.yaml.d/90-nodeyard-lean.yaml" in script:
             st["lean"] = 0
-        for gov in re.findall(r'echo ([a-z_]+) > "\$f"; done', script):
+        for gov in re.findall(r'scaling_governor; do echo ([a-z_]+) > "\$f"; done', script):
             st["governor"] = gov
-        for khz in re.findall(r'echo (\d+) > "\$f"; done', script):
+        for khz in re.findall(r'scaling_max_freq; do echo (\d+) > "\$f"; done', script):
             st["max"] = int(khz)
         for v in re.findall(r"echo (\d+) > /proc/sys/vm/swappiness", script):
             st["swappiness"] = int(v)
@@ -532,9 +770,13 @@ class Tuning:
             st.setdefault("pi", "")
             for line in re.findall(r"arm_freq=\d+", script):
                 st["pi"] = line
+            st.setdefault("thr", "0x0")
             if "nodeyard overclock start" not in script and "sed -i" in script:
                 st["pi"] = ""
             gpu += "pi_config=/boot/firmware/config.txt\npi_throttled=0x0\n" + ("pi_%s\npi_ours=1\n" % st["pi"] if st["pi"] else "")
+        else:
+            gpu += ("intel=1\nrapl_pl1=%(pl1)d\nrapl_pl2=28000000\nepp=%(epp)s\nepps=default performance balance_performance balance_power power\n"
+                    "profile=%(profile)s\nprofiles=low-power balanced performance\n" % st) + ("oc_saved=1\n" if st["oc"] else "")
         gpu += ("thp=%(thp)s\nthp_defrags=always defer defer+madvise madvise never\nvfs_cache_pressure=100\nbusy_poll=%(busy)d\nrmem_max=212992\n"
                 "cstates_deep=3\ncstates_deep_off=0\nreadahead_dev=nvme0n1\nreadahead=128\nk3s_service=%(svc)s\nk3s_rss_kb=%(rss)d\ncontainerd_rss_kb=95000\n" %
                 dict(st, svc="k3s" if cp else "k3s-agent")) + ("lean_cfg=1\n" if st["lean"] else "")
@@ -545,6 +787,23 @@ class Tuning:
 LATER_RESTART = "systemd-run --quiet --collect --on-active=5 --unit nodeyard-restart-%(svc)s-$(date +%%s) systemctl restart %(svc)s"
 LEAN_REMOVE = ("rm -f /etc/rancher/k3s/config.yaml.d/90-nodeyard-lean.yaml /etc/systemd/system/k3s.service.d/90-nodeyard-lean.conf "
                "/etc/systemd/system/k3s-agent.service.d/90-nodeyard-lean.conf; systemctl daemon-reload")
+# What the overclock settings were before nodeyard first changed them (Restore defaults puts them back), kept on the node.
+OC_SAVE = r'''if [ ! -f /var/lib/nodeyard-tune.orig ]; then {
+  echo "pl1=$(cat /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw 2>/dev/null)"
+  echo "pl1mmio=$(cat /sys/class/powercap/intel-rapl-mmio:0/constraint_0_power_limit_uw 2>/dev/null)"
+  echo "epp=$(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference 2>/dev/null)"
+  echo "profile=$(cat /sys/firmware/acpi/platform_profile 2>/dev/null)"
+  for h in /sys/class/drm/card[0-9]*/device/hwmon/hwmon*; do [ -f "$h/power1_cap" ] && echo "amdcap $h $(cat "$h/power1_cap")"; done
+} > /var/lib/nodeyard-tune.orig.tmp && mv /var/lib/nodeyard-tune.orig.tmp /var/lib/nodeyard-tune.orig; fi'''
+OC_RESTORE = r'''o=/var/lib/nodeyard-tune.orig
+if [ -f $o ]; then
+  v=$(sed -n 's/^pl1=//p' $o); [ -n "$v" ] && echo "$v" > /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw 2>/dev/null
+  v=$(sed -n 's/^pl1mmio=//p' $o); [ -n "$v" ] && echo "$v" > /sys/class/powercap/intel-rapl-mmio:0/constraint_0_power_limit_uw 2>/dev/null
+  v=$(sed -n 's/^epp=//p' $o); [ -n "$v" ] && for f in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do echo "$v" > "$f"; done 2>/dev/null
+  v=$(sed -n 's/^profile=//p' $o); [ -n "$v" ] && echo "$v" > /sys/firmware/acpi/platform_profile 2>/dev/null
+  grep '^amdcap ' $o | while read -r _ h v; do echo "$v" > "$h/power1_cap" 2>/dev/null; done
+  rm -f $o
+fi; true'''
 PI_BLOCK_REMOVE = '''f='%(f)s'; [ -f "$f.nodeyard-backup" ] || cp "$f" "$f.nodeyard-backup"; sed -i '/^# nodeyard overclock start/,/^# nodeyard overclock end/d' "$f"'''
 PI_BLOCK_ADD = '''printf '\\n# nodeyard overclock start\\n[all]\\n%(lines)s\\n# nodeyard overclock end\\n' >> '%(f)s\''''
 PERSIST = '''cat > /etc/nodeyard-tune.sh <<'NYTUNE'
@@ -594,4 +853,5 @@ def register(ctx, args):
         "/api/tune/probe": wrap(probe),
         "/api/tune/ai": wrap(lambda h, b: t.set_ai(b)),
         "/api/tune/apply": wrap(lambda h, b: t.apply(str(b.get("node") or ""), b.get("settings") or {}, b.get("confirm") is True)),
+        "/api/tune/reset-all": wrap(lambda h, b: t.reset_all(b.get("confirm") is True)),
     })
