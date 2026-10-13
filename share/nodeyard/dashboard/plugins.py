@@ -51,6 +51,9 @@ PLUGINS = [
     ("tuning", "Device tuning", "Per-device AI settings (threads, memory kept free) and CPU/GPU power, clock and overclock settings, applied "
      "as root on the chosen node through a short-lived helper pod after you confirm what will run.",
      ["dashboard"], "changes node power and clock settings (each asks first)", True, ["/api/tune/"], []),
+    ("memory", "Free up memory", "Lists the processes over 5 MB that a cluster node doesn't need and moves them to swap or stops them, "
+     "as root on that node through a short-lived helper pod after you confirm what will run; sets up zram or a swap file.",
+     ["dashboard"], "moves programs to swap or stops them (each asks first)", True, ["/api/memory/"], []),
     ("devices", "Device connections", "Finds each machine's Wi-Fi/LAN and Tailscale addresses and checks them; per-device overrides.",
      ["dashboard", "Mac app"], "read-only checks; settings change only how devices are reached", True, ["/api/devices/"], []),
     ("models", "Model management", "Downloads, runs, switches, unloads and deletes models (split llama.cpp and Ollama), and automatic unloading.",

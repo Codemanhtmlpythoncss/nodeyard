@@ -44,9 +44,33 @@ EQ_MODES = {"flat", "bass", "treble", "rock", "electronic", "vocal", "classical"
 _live_slots = threading.BoundedSemaphore(2)
 _sc_slots = threading.BoundedSemaphore(3)
 
+# yt-dlp is a ~100 MB Python program and runs inside the dashboard's memory allowance (MemoryMax in its unit). Six of
+# them at once (new songs + details + a search) went over it and the kernel stopped the dashboard itself: "Lost
+# contact" every time Music opened, and the search never finished, so it started again on the next visit. Now at most
+# two run at once (background lookups one at a time, so a search or play never waits long), at low priority, and they
+# are the first thing stopped if memory still runs out, never the dashboard.
+_yt_slots = threading.BoundedSemaphore(2)
+_yt_bg = threading.BoundedSemaphore(1)
+_YT_WRAP = ["sh", "-c", '{ echo 900 > /proc/self/oom_score_adj; } 2>/dev/null; command -v nice >/dev/null 2>&1 && exec nice -n 10 "$@"; exec "$@"', "yt-dlp"]
+
+
+def _yt_run(argv, slot="user", **kw):
+    """subprocess.run for yt-dlp (argv[0] is its path). slot: "user" (a search, playlist or download: one of two at a
+    time), "bg" (new-song lookups: one at a time, and only while a user slot is free) or None (playback: never waits)."""
+    if slot is None:
+        return subprocess.run(_YT_WRAP + list(argv), **kw)
+    if slot == "bg":
+        with _yt_bg, _yt_slots:
+            return subprocess.run(_YT_WRAP + list(argv), **kw)
+    with _yt_slots:
+        return subprocess.run(_YT_WRAP + list(argv), **kw)
+
+
 # In-RAM cache of fetched SoundCloud audio (url -> (bytes, content_type)), so a played track loads once, plays
 # seekably, and replays instantly. Nothing is written to the music folder unless the user explicitly downloads.
-_SC_CACHE_MAX = 200 * 1024 * 1024
+# Small: it lives inside the dashboard's memory allowance; older tracks come back from the disk cache (_cache_path),
+# which the kernel can drop when memory is short.
+_SC_CACHE_MAX = 40 * 1024 * 1024
 _sc_cache = collections.OrderedDict()
 _sc_cache_lock = threading.Lock()
 
@@ -704,7 +728,7 @@ class Music:
         if not yt or not self._valid_sc_url(url):
             return False
         try:
-            r = subprocess.run([yt, "-q", "--no-warnings", "--no-playlist", "--simulate", url],
+            r = _yt_run([yt, "-q", "--no-warnings", "--no-playlist", "--simulate", url],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
             return r.returncode == 0
         except (OSError, subprocess.SubprocessError):
@@ -721,7 +745,7 @@ class Music:
         if not yt:
             return False, "yt-dlp isn't installed on the server yet. Use Settings → Update everything (it installs yt-dlp), then search again.", []
         try:
-            result = subprocess.run([yt, "-q", "--no-warnings", "--flat-playlist", "-J", "scsearch25:" + query],
+            result = _yt_run([yt, "-q", "--no-warnings", "--flat-playlist", "-J", "scsearch25:" + query],
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", timeout=40)
         except subprocess.TimeoutExpired:
             return False, "SoundCloud search took too long. Try a shorter search.", []
@@ -751,12 +775,10 @@ class Music:
                          "duration_ms": max(0, duration_ms), "url": url[:1000],
                          "artwork_url": e.get("thumbnail") if self._soundcloud_art_url(e.get("thumbnail")) else ""})
         if nodrm and rows:
-            try:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-                    ok = list(ex.map(lambda t: self.sc_is_playable(t["url"]), rows))
-                rows = [t for t, good in zip(rows, ok) if good]
-            except (OSError, RuntimeError):
-                pass
+            # (one batched look-up instead of a yt-dlp per result: eight at once ran the dashboard out of memory)
+            playable = self._sc_details([t["url"] for t in rows], slot="user")
+            if playable:
+                rows = [t for t in rows if self._sc_clean_url(t["url"]) in playable]
         return True, "", rows
 
     # -- new songs for you (musicdiscover.py does the thinking; this part talks to SoundCloud through yt-dlp) ----------
@@ -797,7 +819,10 @@ class Music:
         # (few picks left only counts once the last search is a while old: an empty result must not search again on every look)
         stale = not d.get("updated") or age > DISCOVER_TTL or (len(fresh) < 8 and age > 900)
         can = self.demo or bool(self.yt_dlp())
-        if can and (stale or (refresh and (age > 45 or not fresh))):
+        # a look that started and never finished (the dashboard was stopped mid-way) isn't retried by itself for 10 minutes
+        tried = d.get("attempt") or 0
+        unfinished = tried > (d.get("updated") or 0) and now - tried < 600
+        if can and ((stale and not unfinished) or (refresh and (age > 45 or not fresh))):
             self._discover_start()
         return {"tracks": fresh, "updated": d.get("updated") or 0, "building": getattr(self, "_discover_busy", False),
                 "error": d.get("error", "") if can else "Finding new songs needs yt-dlp on the server (Settings → Update everything).",
@@ -813,6 +838,7 @@ class Music:
     def _discover_run(self):
         prev = self._discover_load()
         try:
+            self._discover_save(dict(prev, attempt=time.time()))
             cfg = self.cfg()
             history = [x for x in (cfg.get("history") or []) if isinstance(x, dict)]
             dislikes = [x for x in (cfg.get("sc_dislikes") or []) if isinstance(x, dict)]
@@ -894,7 +920,7 @@ class Music:
         if not yt:
             return []
         try:
-            r = subprocess.run([yt, "-q", "--no-warnings", "--flat-playlist", "--playlist-end", str(limit), "-J", target],
+            r = _yt_run([yt, "-q", "--no-warnings", "--flat-playlist", "--playlist-end", str(limit), "-J", target], slot="bg",
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace", timeout=timeout)
             return [e for e in (json.loads(r.stdout or "{}").get("entries") or []) if isinstance(e, dict)] if r.returncode == 0 else []
         except (OSError, ValueError, subprocess.SubprocessError):
@@ -936,7 +962,7 @@ class Music:
             return self._demo_rows("search " + query, 8)
         return [r for r in (self._entry_row(e) for e in self._yt_entries("scsearch%d:%s" % (n, str(query)[:120]), n)) if r]
 
-    def _sc_details(self, urls):
+    def _sc_details(self, urls, slot="bg"):
         """Full details for each track, in a few batches at once. A track yt-dlp can't play (Go+ only, private, gone) gives
         nothing, so it is never suggested."""
         urls = [u for u in urls if self._valid_sc_url(u)]
@@ -949,7 +975,7 @@ class Music:
 
         def batch(chunk):
             try:
-                r = subprocess.run([yt, "-q", "--no-warnings", "--ignore-errors", "--no-playlist", "--skip-download", "-j"] + chunk,
+                r = _yt_run([yt, "-q", "--no-warnings", "--ignore-errors", "--no-playlist", "--skip-download", "-j"] + chunk, slot=slot,
                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace", timeout=150)
             except (OSError, subprocess.SubprocessError):
                 return
@@ -965,7 +991,7 @@ class Music:
                 if row:
                     out[row["url"]] = row
         chunks = [urls[i:i + 18] for i in range(0, len(urls), 18)]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
             list(ex.map(batch, chunks))
         return out
 
@@ -1057,7 +1083,7 @@ class Music:
         try:
             tmpl = os.path.join(tmpdir, "a.%(ext)s")
             try:
-                r = subprocess.run([yt, "-q", "--no-warnings", "--no-playlist", "-f", "bestaudio/best", "-o", tmpl, url],
+                r = _yt_run([yt, "-q", "--no-warnings", "--no-playlist", "-f", "bestaudio/best", "-o", tmpl, url], slot=None,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", timeout=180)
             except subprocess.TimeoutExpired:
                 return None, "the download timed out"
@@ -1126,7 +1152,7 @@ class Music:
             cmd += ["--write-thumbnail", "--embed-thumbnail"]
         cmd.append(url)
         try:
-            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", timeout=300)
+            p = _yt_run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", timeout=300)
         except subprocess.TimeoutExpired:
             return False, "The download took too long."
         except OSError as e:
@@ -1147,7 +1173,7 @@ class Music:
         if not yt:
             return False, "yt-dlp isn't installed on the server. Use Settings → Update everything, then try again.", []
         try:
-            r = subprocess.run([yt, "-q", "--no-warnings", "--flat-playlist", "-J", url],
+            r = _yt_run([yt, "-q", "--no-warnings", "--flat-playlist", "-J", url],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", timeout=60)
         except subprocess.TimeoutExpired:
             return False, "Reading that playlist took too long.", []

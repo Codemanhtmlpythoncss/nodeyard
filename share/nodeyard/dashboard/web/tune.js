@@ -41,6 +41,15 @@
         ${p.gpus.map((g) => html`<label>GPU ${g.index} power limit · ${g.name} <b data-tu-out="gpu${g.index}">${Math.round(g.power)} W</b>
           <input type="range" data-gpu="${g.index}" min="${Math.round(g.min)}" max="${Math.round(g.max)}" step="5" value="${Math.round(g.power)}">
           <span class="faint small">${Math.round(g.min)} to ${Math.round(g.max)} W · default ${Math.round(g.default)} W</span></label>`)}
+        ${p.intel && p.rapl_pl1 && p.rapl_pl2 ? html`<label>CPU sustained power limit <b data-tu-out="pl1">${Math.round(p.rapl_pl1 / 1e6)} W</b>
+          <input type="range" data-k="pl1_w" min="5" max="${Math.round(p.rapl_pl2 / 1e6)}" step="1" value="${Math.round(p.rapl_pl1 / 1e6)}">
+          <span class="faint small">up to its ${Math.round(p.rapl_pl2 / 1e6)} W boost limit: higher holds the boost clock longer</span></label>` : ""}
+        ${p.epps && p.epps.length ? html`<label>CPU energy preference<select class="select" data-k="epp">${raw(p.epps.map((g) => '<option' + (g === p.epp ? " selected" : "") + ">" + esc(g) + "</option>").join(""))}</select>
+          <span class="faint small">performance clocks up the moment a token starts</span></label>` : ""}
+        ${p.profiles && p.profiles.length ? html`<label>Platform profile<select class="select" data-k="profile">${raw(p.profiles.map((g) => '<option' + (g === p.profile ? " selected" : "") + ">" + esc(g) + "</option>").join(""))}</select>
+          <span class="faint small">the firmware's power and fan setting</span></label>` : ""}
+        ${(p.amdgpus || []).filter((g) => g.cap && g.cap_max).map((g) => html`<label>AMD GPU ${g.card} power cap <b data-tu-out="amd${g.card}">${g.cap} W</b>
+          <input type="range" data-amd="${g.card}" min="10" max="${g.cap_max}" step="5" value="${g.cap}"><span class="faint small">up to ${g.cap_max} W</span></label>`)}
         ${n.pi_presets.length ? html`<label>Raspberry Pi overclock<select class="select" data-k="pi_preset"><option value="">Leave as it is</option>${raw(n.pi_presets.map((x) => '<option value="' + esc(x.id) + '">' + esc(x.label) + "</option>").join(""))}</select>
           <span class="faint small">Needs the official power supply and a fan or heatsink; applies after a reboot. ${p.pi.throttled && p.pi.throttled !== "0x0" ? "This Pi has been throttled: fix power or cooling first." : ""}</span></label>` : ""}
         <label class="row small"><input type="checkbox" data-k="persist" ${p.persist ? "checked" : ""}> Keep after a reboot</label>
@@ -62,10 +71,17 @@
           <span class="faint small">${n.mem_total ? gib(n.mem_total) + " in this machine. " : ""}Less leaves more room for the model.</span></label>
         <div class="row"><button class="btn" data-tu-ai-save="${n.node}">Save</button><span class="faint small">Used the next time you run or switch a model in AI › Models.</span></div>
       </div>
-      <h4>Power and overclock</h4>${power}
+      <h4>Power and overclock</h4>${p && n.oc ? ocAdvice(n) : ""}${power}
       ${p ? kernelSection(n, p) : ""}
       ${p && p.k3s_service ? leanSection(n, p) : ""}
     </section>`;
+  }
+  // how far each overclock can go on this machine (tune.py oc_advice), with the recommended settings in one click
+  function ocAdvice(n) {
+    const o = n.oc;
+    return html`<div class="tu-oc"><div class="row" style="justify-content:space-between;gap:8px;align-items:baseline"><b class="small">How far to push it</b>
+        ${o.fix ? html`<button class="btn small primary" data-tu-oc="${n.node}">Review the recommended overclock…</button>` : ""}</div>
+      ${o.lines.map((l) => html`<div class="tu-oc-line ${l.level}"><i class="dot ${l.level === "go" ? "good" : l.level === "stop" ? "bad" : "warn"}"></i><div><b class="small">${l.what}</b><div class="muted small">${l.advice}</div></div></div>`)}</div>`;
   }
   function kernelSection(n, p) {
     const deep = p.cstates_deep || 0;
@@ -83,11 +99,11 @@
     const comp = (key) => { const x = o && o[key]; if (!x || !x.present) return ""; return html`<label class="row small"><input type="checkbox" data-lk-disable="${key}" ${x.unused ? "checked" : "disabled"}> Turn off ${x.label} <span class="faint">(${x.why})</span></label>`; };
     return html`<h4>Lighter Kubernetes</h4><div class="tu-grid" data-tu-lk="${n.node}">
       <div class="muted small">k3s ${server ? "(control plane)" : "(agent)"} uses ${p.k3s_rss_kb ? Math.round(p.k3s_rss_kb / 1024) + " MB" : "–"}${p.containerd_rss_kb ? ", containerd " + Math.round(p.containerd_rss_kb / 1024) + " MB" : ""}${p.lean ? " · already tuned" : ""}</div>
-      <label class="row small"><input type="checkbox" data-lk="gc" checked> Return memory sooner <span class="faint">(Go GC tuned: GOGC=50 and a soft memory limit)</span></label>
+      <label class="row small"><input type="checkbox" data-lk="gc" checked> Return memory sooner <span class="faint">(a soft memory limit; garbage collection keeps its normal pace)</span></label>
       <label class="row small"><input type="checkbox" data-lk="image_gc" checked> Delete unused container images sooner <span class="faint">(at 75% disk, down to 60%)</span></label>
       ${server ? html`${comp("traefik")}${comp("servicelb")}` : ""}
       <label class="row small"><input type="checkbox" data-lk="restart" checked> Restart k3s to use them <span class="faint">(running pods keep running; the API pauses ~20 s)</span></label>
-      <div class="row"><button class="btn" data-tu-lk-review="${n.node}">Review…</button><span class="faint small">Rewriting Kubernetes isn't practical; this trims the k3s you have.</span></div></div>`;
+      <div class="row"><button class="btn" data-tu-lk-review="${n.node}">Review…</button><span class="faint small">Trims the k3s you have without slowing it down.</span></div></div>`;
   }
   function paint() {
     if (S.view !== "tune" || !$("#tu-root")) return;
@@ -96,7 +112,7 @@
     if (document.activeElement && document.activeElement.closest && document.activeElement.closest("#tu-root input, #tu-root select")) return;   // (don't redraw what's being edited)
     setHTML($("#tu-root"), html`<div class="card tu-head"><div class="row wrap" style="justify-content:space-between;gap:10px"><div>
         <h2 style="margin:0">Tuning</h2><div class="muted small mt">Per-device settings for running AI, and power, clock and overclock controls. Nothing on a machine changes until you've seen exactly what will run and pressed Run. Every change is in the audit log.</div></div>
-        <button class="btn" data-tu-probe="all">Read every machine</button></div>
+        <div class="row wrap" style="gap:6px"><button class="btn" data-tu-probe="all">Read every machine</button><button class="btn" data-tu-reset-all>Reset all…</button></div></div>
         ${!d.agents ? html`<p class="warn-t small">Install the node agents (Processes page) for CPU and temperature details.</p>` : ""}</div>
       ${d.nodes.map(nodeCard)}`);
   }
@@ -111,6 +127,12 @@
     if (v("swappiness") && +v("swappiness").value !== p.swappiness) out.swappiness = +v("swappiness").value;
     f.querySelectorAll("[data-gpu]").forEach((el) => { const g = p.gpus.find((x) => x.index === el.dataset.gpu); if (g && Math.abs(+el.value - g.power) >= 1) (out.gpu_power = out.gpu_power || {})[g.index] = +el.value; });
     if (v("pi_preset") && v("pi_preset").value) out.pi_preset = v("pi_preset").value;
+    const oc = {};
+    if (v("pl1_w") && +v("pl1_w").value !== Math.round(p.rapl_pl1 / 1e6)) oc.pl1_w = +v("pl1_w").value;
+    if (v("epp") && v("epp").value !== p.epp) oc.epp = v("epp").value;
+    if (v("profile") && v("profile").value !== p.profile) oc.profile = v("profile").value;
+    f.querySelectorAll("[data-amd]").forEach((el) => { const g = (p.amdgpus || []).find((x) => x.card === el.dataset.amd); if (g && +el.value !== g.cap) (oc.amd_cap = oc.amd_cap || {})[g.card] = +el.value; });
+    if (Object.keys(oc).length) out.oc = oc;
     if (v("persist") && v("persist").checked && Object.keys(out).length) out.persist = true;
     return out;
   }
@@ -119,15 +141,38 @@
     const r = await post("/api/tune/apply", { node, settings, confirm: false }); if (!r) return;
     let dlg = document.getElementById("tu-dialog");
     if (!dlg) { dlg = document.createElement("div"); dlg.id = "tu-dialog"; document.body.appendChild(dlg); }
-    const risky = settings.pi_preset && settings.pi_preset !== "stock";
+    const risky = (settings.pi_preset && settings.pi_preset !== "stock") || (settings.oc && settings.oc.pl1_w);
     setHTML(dlg, html`<div class="tu-back" data-tu-close></div><div class="tu-box" role="dialog" aria-modal="true" aria-label="Review changes on ${node}">
       <h3 style="margin-top:0">Change ${node}?</h3>
       <ul>${r.plan.map((x) => html`<li>${x}</li>`)}</ul>
-      ${risky ? html`<p class="warn-t small">Overclocking runs the chip faster than it was sold at. It can make the machine crash or not boot until the change is undone (remove the "nodeyard overclock" lines from config.txt; a backup is kept next to it). Only do it with good cooling and the official power supply.</p>` : ""}
+      ${risky ? html`<p class="warn-t small">${settings.pi_preset ? "Overclocking runs the chip faster than it was sold at. It can make the machine crash or not boot until the change is undone (remove the \"nodeyard overclock\" lines from config.txt; a backup is kept next to it). Only do it with good cooling and the official power supply."
+        : "A higher power limit makes it run warmer and the fan louder under load. The CPU still slows itself before it gets too hot, and Restore defaults puts the old limit back."}</p>` : ""}
       <details><summary class="small">What will run as root on ${node}</summary><pre class="hl-pre">${r.script}</pre></details>
       <div class="row wrap mt"><button class="btn primary" data-tu-run="${node}">Run on ${node}</button><button class="btn" data-tu-close>Cancel</button></div></div>`);
     dlg.dataset.node = node; dlg._settings = settings; dlg.hidden = false;
     dlg.querySelector("[data-tu-run]").focus();
+  }
+  async function resetAll() {
+    const r = await post("/api/tune/reset-all", { confirm: false }); if (!r) return;
+    let dlg = document.getElementById("tu-dialog");
+    if (!dlg) { dlg = document.createElement("div"); dlg.id = "tu-dialog"; document.body.appendChild(dlg); }
+    const nothing = !r.plans.length && !r.ai.length;
+    setHTML(dlg, html`<div class="tu-back" data-tu-close></div><div class="tu-box" role="dialog" aria-modal="true" aria-label="Reset every machine">
+      <h3 style="margin-top:0">Reset every machine?</h3>
+      ${r.plans.map((x) => html`<details><summary><b>${x.node}</b> <span class="muted small">${x.plan.length} change${x.plan.length === 1 ? "" : "s"}</span></summary><ul>${x.plan.map((l) => html`<li class="small">${l}</li>`)}</ul><pre class="hl-pre">${x.script}</pre></details>`)}
+      ${r.ai.length ? html`<p class="small">AI threads and memory kept free go back to automatic on ${r.ai.join(", ")}.</p>` : ""}
+      ${r.unread.length ? html`<p class="warn-t small">Not read yet, so left as they are: ${r.unread.join(", ")}. Press "Read every machine" first to include them.</p>` : ""}
+      ${nothing ? html`<p class="muted">Nothing to reset: read the machines first.</p>` : ""}
+      <div class="row wrap mt">${nothing ? "" : html`<button class="btn primary" data-tu-reset-run>Reset ${r.plans.length} machine${r.plans.length === 1 ? "" : "s"}</button>`}<button class="btn" data-tu-close>Cancel</button></div></div>`);
+    dlg.hidden = false;
+  }
+  async function resetRun() {
+    const dlg = document.getElementById("tu-dialog"), b = dlg.querySelector("[data-tu-reset-run]");
+    b.disabled = true; b.textContent = "Resetting…";
+    const r = await post("/api/tune/reset-all", { confirm: true });
+    dlg.hidden = true;
+    if (r) toast((r.done.length ? "Reset " + r.done.join(", ") + "." : "") + (Object.keys(r.failed).length ? " Failed: " + Object.entries(r.failed).map(([k, v]) => k + " (" + v + ")").join("; ") : "") + (r.ai_cleared.length ? " AI settings back to automatic." : ""));
+    load();
   }
   async function run(node) {
     const dlg = document.getElementById("tu-dialog"), b = dlg.querySelector("[data-tu-run]");
@@ -143,6 +188,9 @@
     let b;
     if ((b = t.closest("[data-tu-close]"))) { document.getElementById("tu-dialog").hidden = true; return; }
     if ((b = t.closest("[data-tu-run]"))) { run(b.dataset.tuRun); return; }
+    if (t.closest("[data-tu-reset-all]")) { resetAll(); return; }
+    if (t.closest("[data-tu-reset-run]")) { resetRun(); return; }
+    if ((b = t.closest("[data-tu-oc]"))) { const n = TU.data.nodes.find((x) => x.node === b.dataset.tuOc); if (n && n.oc && n.oc.fix) review(n.node, n.oc.fix); return; }
     if ((b = t.closest("[data-tu-probe]"))) { b.disabled = true; const r = await post("/api/tune/probe", { node: b.dataset.tuProbe }); if (r) { TU.data = r; setTimeout(load, 1500); } return; }
     if ((b = t.closest("[data-tu-review]"))) { review(b.dataset.tuReview, collect(b.dataset.tuReview)); return; }
     if ((b = t.closest("[data-tu-restore]"))) { review(b.dataset.tuRestore, { restore: true }); return; }
@@ -174,6 +222,8 @@
     const f = t.closest("[data-tu-form]"); if (!f) return;
     if (t.dataset.k === "max_mhz") f.querySelector('[data-tu-out="max"]').textContent = t.value + " MHz";
     if (t.dataset.gpu != null) f.querySelector('[data-tu-out="gpu' + t.dataset.gpu + '"]').textContent = t.value + " W";
+    if (t.dataset.k === "pl1_w") f.querySelector('[data-tu-out="pl1"]').textContent = t.value + " W";
+    if (t.dataset.amd != null) f.querySelector('[data-tu-out="amd' + t.dataset.amd + '"]').textContent = t.value + " W";
   });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") { const d = document.getElementById("tu-dialog"); if (d && !d.hidden) d.hidden = true; } });
 

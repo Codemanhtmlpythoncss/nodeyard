@@ -799,6 +799,16 @@ metadata:
   labels: {app.kubernetes.io/managed-by: nodeyard}
   annotations: {nodeyard/main: "${PLAN_NAMES[0]}", nodeyard/model-dir: "${SPLIT_MODEL_DIR}"}
 ---
+# When a node runs short of memory, Kubernetes evicts other apps before the model's pods (it never pushes anything
+# out to make room for them: preemptionPolicy Never).
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: {name: nodeyard-ai, labels: {app.kubernetes.io/managed-by: nodeyard}}
+value: 100000
+preemptionPolicy: Never
+globalDefault: false
+description: "nodeyard's split AI model"
+---
 YAML
         if [[ "${SPLIT_LOCAL:-0}" -eq 1 ]]; then
             # already on the main node's disk: nothing to download
@@ -848,6 +858,7 @@ spec:
     metadata: {labels: {app: ${n}, role: rpc}}
     spec:
       nodeSelector: {kubernetes.io/hostname: ${PLAN_NAMES[i]}}
+      priorityClassName: nodeyard-ai
       tolerations: [{operator: Exists}]
       initContainers:
       - name: fetch-llama-cpp
@@ -930,6 +941,7 @@ spec:
     metadata: {labels: {app: llama-main}}
     spec:
       nodeSelector: {kubernetes.io/hostname: ${PLAN_NAMES[0]}}
+      priorityClassName: nodeyard-ai
       tolerations: [{operator: Exists}]${main_rt}
       initContainers:
       - name: fetch-llama-cpp
@@ -973,6 +985,10 @@ ${main_fetch}
         - "2"
         - -cram
         - "$(split_cram)"${kv_args}
+        # reuse the conversation's cached tokens when its start shifts (a trimmed chat history, an agent's moving
+        # window) instead of reading the whole prompt again
+        - --cache-reuse
+        - "256"
         # lets the model call tools (OpenAI-style tool calls: yardcode and other agents need it)
         - --jinja${think_args}${key_args}
         - --host

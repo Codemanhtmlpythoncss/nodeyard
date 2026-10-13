@@ -427,7 +427,7 @@
       NY.freshHTML($("#view"), html`<div id="pr-top"></div>
         <div class="toolbar mt"><select class="select" data-f="proc.node" aria-label="Machine"></select>
         <input class="input" data-f="proc.q" placeholder="Filter by process, user, pod, command…" style="min-width:300px" aria-label="Filter processes">
-        ${seg("proc.mode", [["procs", "Processes"], ["groups", "By pod / service"]])}<span class="grow"></span><span class="muted" id="pr-count"></span></div>
+        ${seg("proc.mode", [["procs", "Processes"], ["groups", "By pod / service"], ["free", "Free up memory"]])}<span class="grow"></span><span class="muted" id="pr-count"></span></div>
         <div class="card"><div id="pr-table"></div></div>`);
     },
     update() {
@@ -459,7 +459,10 @@
           html`${fmt.bytes(top.reduce((s, a) => s + a.rss, 0))} of ${fmt.bytes(totalMem)} in the top ${top.length}`)}
         <div class="grid g-hw mt">${scope.map((nm) => (nodeBy[nm] && nodeBy[nm].hw ? hwCard(nodeBy[nm]) : "")).filter(Boolean)}</div>`);
 
-      if (f.mode === "groups") {
+      if (f.mode === "free") {     // (memfree.js)
+        setHTML($("#pr-count"), "");
+        if (NY.memfree) NY.memfree.paint($("#pr-table"));
+      } else if (f.mode === "groups") {
         const rows = [];
         scope.forEach((nm) => (S.agents.nodes[nm].groups || []).forEach((g) => rows.push({ node: nm, g, name: g.name || g.kind, rss: g.rss, cpu: g.cpu, procs: g.procs })));
         const shown = rows.filter((r) => !q || (r.name + " " + r.node).toLowerCase().includes(q));

@@ -5,8 +5,10 @@ it arrives even when the control node can't reach that kubelet (`kubectl logs` c
 Only the first ~4 KB fits in a termination message, so scripts print their most useful lines first.
 
 host=False: the node's root filesystem read-only at /host (scans).
-host=True:  privileged, in the node's own namespaces (nsenter into PID 1) as root: for the Tuning page's changes, which
-            the page shows and asks about before running. Nothing else uses it.
+host=True:  privileged, in the node's own namespaces (nsenter into PID 1) as root: for the Tuning page's changes and
+            the Memory tab's actions, which the page shows and asks about before running.
+host=True, enter=False: privileged with the host's processes in view (hostPID) but in the helper's own files, for
+            programs it brings along in a ConfigMap (configmap=(name, mount path)): the C node agent's pageout.
 """
 import json
 import os
@@ -38,13 +40,13 @@ def _kubectl(argv, kubeconfig, args, stdin=None, timeout=30):
     return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
 
 
-def run(kubeconfig, node, script, host=False, deadline=300, kind="helper"):
+def run(kubeconfig, node, script, host=False, deadline=300, kind="helper", ns=NS, configmap=None, enter=True):
     """The script's output (text). Raises NodeExecError with a plain reason."""
     argv = kubectl_argv()
     pod = "%s-%s-%s" % (kind, re.sub(r"[^a-z0-9-]+", "-", node.lower()).strip("-")[:30] or "node", os.urandom(3).hex())
     # the answer goes to the termination message (and the logs)
     wrapper = 'out=$(%s 2>&1); printf "%%s\\n" "$out" | head -c 3900 > /dev/termination-log; printf "%%s\\n" "$out"' % (
-        'nsenter -t 1 -m -u -i -n -p -- sh -c "$0"' if host else 'nice -n 15 sh -c "$0" scan /host')
+        ('nsenter -t 1 -m -u -i -n -p -- sh -c "$0"' if enter else 'sh -c "$0"') if host else 'nice -n 15 sh -c "$0" scan /host')
     container = {"name": kind, "image": IMAGE, "imagePullPolicy": "IfNotPresent", "command": ["sh", "-c", wrapper, script],
                  "resources": {"requests": {"cpu": "10m", "memory": "8Mi"}, "limits": {"memory": "128Mi"}}}
     spec = {"nodeName": node, "restartPolicy": "Never", "activeDeadlineSeconds": deadline, "automountServiceAccountToken": False,
@@ -55,8 +57,11 @@ def run(kubeconfig, node, script, host=False, deadline=300, kind="helper"):
     else:
         container["volumeMounts"] = [{"name": "host", "mountPath": "/host", "readOnly": True}]
         spec["volumes"] = [{"name": "host", "hostPath": {"path": "/"}}]
-    manifest = {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": pod, "namespace": NS, "labels": {"app": "nodeyard-" + kind}}, "spec": spec}
-    _kubectl(argv, kubeconfig, ["create", "namespace", NS])      # (already there is fine)
+    if configmap:
+        container.setdefault("volumeMounts", []).append({"name": "progs", "mountPath": configmap[1], "readOnly": True})
+        spec.setdefault("volumes", []).append({"name": "progs", "configMap": {"name": configmap[0], "defaultMode": 0o555, "optional": True}})
+    manifest = {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": pod, "namespace": ns, "labels": {"app": "nodeyard-" + kind}}, "spec": spec}
+    _kubectl(argv, kubeconfig, ["create", "namespace", ns])      # (already there is fine)
     rc, _out, err = _kubectl(argv, kubeconfig, ["apply", "-f", "-"], stdin=json.dumps(manifest).encode())
     if rc:
         raise NodeExecError("couldn't start the helper on %s: %s" % (node, err.strip()[-200:]))
@@ -64,7 +69,7 @@ def run(kubeconfig, node, script, host=False, deadline=300, kind="helper"):
         end = time.time() + deadline + 30
         while time.time() < end:
             time.sleep(2)
-            rc, out, _err = _kubectl(argv, kubeconfig, ["-n", NS, "get", "pod", pod, "-o", "json"])
+            rc, out, _err = _kubectl(argv, kubeconfig, ["-n", ns, "get", "pod", pod, "-o", "json"])
             if rc:
                 continue
             st = json.loads(out).get("status") or {}
@@ -73,7 +78,7 @@ def run(kubeconfig, node, script, host=False, deadline=300, kind="helper"):
                 term = (((st.get("containerStatuses") or [{}])[0].get("state") or {}).get("terminated") or {})
                 text = term.get("message") or ""
                 if text.count("\n") < 2:          # nothing came back that way: the logs need the kubelet reachable
-                    rc, logs, _ = _kubectl(argv, kubeconfig, ["-n", NS, "logs", pod], timeout=20)
+                    rc, logs, _ = _kubectl(argv, kubeconfig, ["-n", ns, "logs", pod], timeout=20)
                     text = logs if rc == 0 and logs.strip() else text
                 if not text.strip():
                     raise NodeExecError("the helper on %s %s without an answer" % (node, "failed" if phase == "Failed" else "finished"))
@@ -83,4 +88,4 @@ def run(kubeconfig, node, script, host=False, deadline=300, kind="helper"):
                 raise NodeExecError("%s refused the helper (%s): its disk or memory may be full" % (node, reason))
         raise NodeExecError("the helper on %s didn't finish in time (is the node up?)" % node)
     finally:
-        _kubectl(argv, kubeconfig, ["-n", NS, "delete", "pod", pod, "--ignore-not-found", "--wait=false"])
+        _kubectl(argv, kubeconfig, ["-n", ns, "delete", "pod", pod, "--ignore-not-found", "--wait=false"])

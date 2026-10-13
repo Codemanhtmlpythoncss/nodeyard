@@ -281,7 +281,12 @@ PROCESS_NAMES = {"nextcloud": "apache2", "postgres": "postgres", "redis": "redis
                  "node-exporter": "node_exporter", "svclb-traefik": "klipper-lb"}
 SYSTEM_PROCESSES = [("k3s-server", "root", 0.10, 560, "k3s.service", "/usr/local/bin/k3s server"), ("containerd", "root", 0.03, 160, "k3s.service", "containerd -c /var/lib/rancher/k3s/agent/etc/containerd/config.toml"),
                     ("systemd-journald", "root", 0.004, 55, "systemd-journald.service", "/lib/systemd/systemd-journald"), ("tailscaled", "root", 0.01, 48, "tailscaled.service", "/usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state"),
-                    ("sshd", "root", 0.001, 9, "ssh.service", "sshd: /usr/sbin/sshd -D"), ("systemd", "root", 0.0, 12, "init.scope", "/sbin/init")]
+                    ("sshd", "root", 0.001, 9, "ssh.service", "sshd: /usr/sbin/sshd -D"), ("systemd", "root", 0.0, 12, "init.scope", "/sbin/init"),
+                    # (left over from a desktop install: the Free up memory tab finds these)
+                    ("cupsd", "root", 0.0, 14, "cups.service", "/usr/sbin/cupsd -l"), ("avahi-daemon", "avahi", 0.001, 6, "avahi-daemon.service", "avahi-daemon: running [yard.local]"),
+                    ("ModemManager", "root", 0.0, 11, "ModemManager.service", "/usr/sbin/ModemManager"), ("snapd", "root", 0.002, 31, "snapd.service", "/usr/lib/snapd/snapd"),
+                    ("unattended-upgr", "root", 0.0, 26, "unattended-upgrades.service", "/usr/bin/python3 /usr/share/unattended-upgrades/unattended-upgrade-shutdown --wait-for-signal"),
+                    ("node", "1000", 0.004, 74, "user@1000.service", "node /home/pi/scripts/backup-watch.js")]
 
 
 DEMO_BENCH = {
@@ -346,7 +351,7 @@ class DemoAgents:
             pid += 7
             procs.append({"pid": pid, "ppid": 1, "name": comm, "state": "S", "threads": 12, "user": user, "rss": rss_mib * MiB, "anon": int(rss_mib * MiB * .8),
                           "file": int(rss_mib * MiB * .2), "shmem": 0, "swap": 0, "cpu": round(cpu * 100 * (1 + wave((name, comm), t, 50, .5)) / node["cpu_cores"], 1),
-                          "cmd": cmd, "group": {"kind": "service", "name": svc}, "started": t - 17 * 86400})
+                          "cmd": cmd, "group": {"kind": "service", "name": svc}, "started": t - 17 * 86400, "start_ticks": 1700 + pid})
         for p in pods:
             pid += 31
             comm = PROCESS_NAMES.get(p["name"].rsplit("-", 2)[0] if p["owner"].startswith("ReplicaSet") else p["name"].rsplit("-", 1)[0], p["name"].split("-")[0])
@@ -374,7 +379,8 @@ class DemoAgents:
             "cpu": {"model": "Raspberry Pi 5 Model B Rev 1.0" if name == "yard-1" else "Cortex-A72 (Raspberry Pi 4 Model B)" if name == "yard-2" else "Intel(R) Core(TM) i5-8259U CPU @ 2.30GHz" if name == "yard-3" else "Intel(R) Core(TM) i7-6500U CPU @ 2.50GHz",
                     "cores": cores, "use": round(100 * cpu_frac, 1)},
             "memory": {"MemTotal": int(mem_total), "MemFree": int(max(0, mem_total - used - cached)), "MemAvailable": int(mem_total - used * .85), "Buffers": int(cached * .1),
-                       "Cached": int(cached * .9), "SReclaimable": int(cached * .05), "AnonPages": int(used * .8), "Shmem": 40 * MiB, "Slab": 160 * MiB, "SwapTotal": 0, "SwapFree": 0,
+                       "Cached": int(cached * .9), "SReclaimable": int(cached * .05), "AnonPages": int(used * .8), "Shmem": 40 * MiB, "Slab": 160 * MiB,
+                       "SwapTotal": 0 if node["arch"] == "arm64" else 2048 * MiB, "SwapFree": 0 if node["arch"] == "arm64" else 1980 * MiB,
                        "Dirty": 2 * MiB, "Mapped": int(used * .15), "KernelStack": 6 * MiB, "PageTables": 12 * MiB},
             "pressure": {"cpu": {"some": round(cpu_frac * 4, 2)}, "memory": {"some": round(max(0, used / mem_total - .7) * 20, 2)}, "io": {"some": 0.3}},
             "vmstat": {"oom_kill": 0, "pgmajfault": 1204, "pswpin": 0, "pswpout": 0}, "disks": [], "temps": [{"name": "cpu_thermal" if node["arch"] == "arm64" else "x86_pkg_temp", "c": round(temp, 1)}],
