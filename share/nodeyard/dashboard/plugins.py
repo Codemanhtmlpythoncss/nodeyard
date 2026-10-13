@@ -48,6 +48,9 @@ PLUGINS = [
     ("homelab", "Homelab tools", "Watches your services (HTTP, TCP, ping) with uptime and certificate expiry, sends alerts to your own webhook, "
      "wakes machines with Wake-on-LAN, runs network diagnostics from this server and serves Prometheus metrics.",
      ["dashboard", "Prometheus"], "checks addresses you add; sends only to the webhook you set", True, ["/api/homelab/", "/api/v1/metrics", "/api/v1/services"], []),
+    ("tuning", "Device tuning", "Per-device AI settings (threads, memory kept free) and CPU/GPU power, clock and overclock settings, applied "
+     "as root on the chosen node through a short-lived helper pod after you confirm what will run.",
+     ["dashboard"], "changes node power and clock settings (each asks first)", True, ["/api/tune/"], []),
     ("devices", "Device connections", "Finds each machine's Wi-Fi/LAN and Tailscale addresses and checks them; per-device overrides.",
      ["dashboard", "Mac app"], "read-only checks; settings change only how devices are reached", True, ["/api/devices/"], []),
     ("models", "Model management", "Downloads, runs, switches, unloads and deletes models (split llama.cpp and Ollama), and automatic unloading.",

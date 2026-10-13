@@ -25,6 +25,7 @@
     { id: "doctor", label: "Doctor", icon: "doctor", sub: "Checks for common problems, with one-click fixes" },
     { id: "services", label: "Services", icon: "services", sub: "Uptime, latency and certificates for your apps and machines" },
     { id: "tools", label: "Tools", icon: "tools", sub: "Network checks, Wake-on-LAN and metrics" },
+    { id: "tune", label: "Tuning", icon: "tune", sub: "AI settings and power, clocks and overclocking for each machine" },
     { id: "commands", label: "Commands", icon: "commands", sub: "Every nodeyard command, runnable from here" },
     { id: "terminal", label: "Terminal", icon: "terminal", sub: "Shells on every device" },
     { id: "apis", label: "APIs", icon: "commands", sub: "Your own self-hosted APIs, for the dashboard and the AI" },

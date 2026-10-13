@@ -9,15 +9,14 @@ Nothing is changed or deleted: the page shows what each big folder is and the co
 """
 import json
 import os
-import re
 import shutil
 import socket
 import subprocess
 import threading
 import time
 
-NS = "nodeyard-shell"
-IMAGE = "busybox:1.36"
+import nodeexec
+
 SCAN_DEADLINE = 300
 
 # One shell script for busybox (the helper pod) and coreutils (this machine). $1 is the root to scan.
@@ -142,9 +141,7 @@ class DiskUsage:
         self.lock = threading.Lock()
         self.results = self._load()
         self.running = set()
-        k3s = shutil.which("k3s") or ("/usr/local/bin/k3s" if os.path.exists("/usr/local/bin/k3s") else "")
-        kubectl = shutil.which("kubectl")
-        self.kubectl = [k3s, "kubectl"] if k3s else ([kubectl] if kubectl else None)
+        self.kubectl = nodeexec.kubectl_argv()
 
     def _load(self):
         try:
@@ -242,52 +239,11 @@ class DiskUsage:
         p = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=SCAN_DEADLINE)
         return p.stdout.decode("utf-8", "replace")
 
-    def _kubectl(self, args, stdin=None, timeout=30):
-        if not self.kubectl:
-            raise RuntimeError("kubectl isn't available on the dashboard's server")
-        p = subprocess.run(self.kubectl + ["--kubeconfig", self.kubeconfig] + args, input=stdin, capture_output=True, timeout=timeout)
-        return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
-
     def _scan_with_pod(self, node):
-        pod = "disk-%s-%s" % (re.sub(r"[^a-z0-9-]+", "-", node.lower()).strip("-")[:40] or "node", os.urandom(3).hex())
-        wrapper = 'out=$(nice -n 15 sh -c "$0" scan /host 2>/dev/null); printf "%s\\n" "$out" | head -c 3900 > /dev/termination-log; printf "%s\\n" "$out"'
-        manifest = {
-            "apiVersion": "v1", "kind": "Pod",
-            "metadata": {"name": pod, "namespace": NS, "labels": {"app": "nodeyard-disk-scan"}},
-            "spec": {"nodeName": node, "restartPolicy": "Never", "activeDeadlineSeconds": SCAN_DEADLINE, "automountServiceAccountToken": False,
-                     "terminationGracePeriodSeconds": 0, "tolerations": [{"operator": "Exists"}],
-                     "containers": [{"name": "scan", "image": IMAGE, "imagePullPolicy": "IfNotPresent", "command": ["sh", "-c", wrapper, SCAN],
-                                     "resources": {"requests": {"cpu": "10m", "memory": "8Mi"}, "limits": {"memory": "128Mi"}},
-                                     "volumeMounts": [{"name": "host", "mountPath": "/host", "readOnly": True}]}],
-                     "volumes": [{"name": "host", "hostPath": {"path": "/"}}]},
-        }
-        self._kubectl(["create", "namespace", NS])     # (already there is fine)
-        rc, _out, err = self._kubectl(["apply", "-f", "-"], stdin=json.dumps(manifest).encode())
-        if rc:
-            raise RuntimeError("couldn't start the scan on %s: %s" % (node, err.strip()[-200:]))
         try:
-            deadline = time.time() + SCAN_DEADLINE + 30
-            while time.time() < deadline:
-                time.sleep(3)
-                rc, out, _err = self._kubectl(["-n", NS, "get", "pod", pod, "-o", "json"])
-                if rc:
-                    continue
-                st = json.loads(out).get("status") or {}
-                phase = st.get("phase")
-                if phase in ("Succeeded", "Failed"):
-                    term = (((st.get("containerStatuses") or [{}])[0].get("state") or {}).get("terminated") or {})
-                    text = term.get("message") or ""
-                    if text.count("\n") < 3:     # nothing came back that way: try the logs (needs the kubelet reachable)
-                        rc, logs, _ = self._kubectl(["-n", NS, "logs", pod], timeout=20)
-                        text = logs if rc == 0 and logs.strip() else text
-                    if not text.strip():
-                        raise RuntimeError("the scan on %s %s without an answer" % (node, "failed" if phase == "Failed" else "finished"))
-                    return text
-                if phase == "Pending" and st.get("reason") in ("OutOfpods", "OutOfDisk") or (st.get("reason") or "").startswith("Evicted"):
-                    raise RuntimeError("%s refused the scan (%s): its disk may be completely full" % (node, st.get("reason")))
-            raise RuntimeError("the scan on %s didn't finish in time (is the node up?)" % node)
-        finally:
-            self._kubectl(["-n", NS, "delete", "pod", pod, "--ignore-not-found", "--wait=false"])
+            return nodeexec.run(self.kubeconfig, node, SCAN, host=False, deadline=SCAN_DEADLINE, kind="disk")
+        except nodeexec.NodeExecError as e:
+            raise RuntimeError(str(e))
 
 
 def demo_scan(node):
