@@ -27,7 +27,9 @@
     queue: [], idx: -1, live: false, seekable: true, shuffle: false, shuffleOrder: null, shufflePos: 0, repeat: "off", rate: 1, eq: "flat",
     scResults: [], playlistResults: [], searchQuery: "", searchError: "", scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
     discoverTracks: [], discoverIndex: 0, discoverSeeded: false, discoverPointerY: null, discoverWheelAt: 0,
+    disc: { tracks: [], updated: 0, building: false, error: "", seeds: [], loaded: false, polls: 0, timer: 0 },   // new songs found for you
     dj: readDJState(),
+    sleep: null,   // the sleep timer: null, "end" (after this song) or a time in ms
     historyId: "", historyElapsed: 0, historySince: 0, lastHistorySave: 0, lastPlaybackSave: 0, restored: false, stopping: false,
     hideDrm: (() => { try { return localStorage.getItem("ny-hidedrm") === "1"; } catch (e) { return false; } })(),
   };
@@ -58,13 +60,14 @@
       "#ny-player button:disabled{opacity:.4;cursor:default}" +
       "#ny-player button.act{color:var(--sc,#ff5500)}" +
       "#ny-player button.act::after{content:'';position:absolute;left:50%;bottom:1px;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--sc,#ff5500)}" +
-      "#ny-player #ny-shuffle,#ny-player #ny-repeat{position:relative}" +
+      "#ny-player #ny-shuffle,#ny-player #ny-repeat,#ny-player #ny-sleep{position:relative}" +
       "#ny-player .loop-state{font-size:10px;font-weight:700;letter-spacing:.03em;color:var(--ink3,#8fa3c0);min-width:46px}" +
       "#ny-player .loop-state.on{color:var(--sc,#ff5500)}" +
       "#ny-player .seek{flex:1;display:flex;align-items:center;gap:8px;min-width:110px}" +
       "#ny-player input[type=range]{flex:1;accent-color:var(--sc,#ff5500)}" +
       "#ny-player .t{font-variant-numeric:tabular-nums;color:var(--ink3,#8fa3c0);font-size:11px;min-width:38px}" +
       "#ny-player .live-pill{color:#ff5a6a;font-weight:600;font-size:11px;letter-spacing:1px}" +
+      "@media (max-width:1100px){#ny-player{flex-wrap:wrap;row-gap:4px}#ny-player canvas,#ny-player #ny-repeat-state,#ny-player #ny-sleep-state{display:none}}" +
       ".sc-tabs{display:inline-flex;gap:3px;flex-wrap:wrap;margin:6px 0 18px;padding:4px;background:rgba(125,160,200,.08);border:1px solid var(--line);border-radius:999px}" +
       ".sc-tabs button{background:none;border:0;color:var(--ink2,#b9c6dd);cursor:pointer;padding:7px 18px;border-radius:999px;font-size:14px;font-weight:600;transition:background .15s,color .15s,box-shadow .15s}" +
       ".sc-tabs button:hover{background:rgba(125,160,200,.15);color:var(--ink,#eaf1ff)}" +
@@ -84,7 +87,7 @@
       ".sc-pbtn{flex:none;width:38px;height:38px;border-radius:50%;background:var(--sc,#ff5500);color:#fff;border:0;cursor:pointer;font-size:15px}" +
       ".sc-pbtn.ghost{background:rgba(125,160,200,.16);color:var(--ink,#eaf1ff)}" +
       ".ny-viz-top{display:block;width:100%;height:56px;margin:2px 0 14px;border-radius:12px;background:linear-gradient(180deg,rgba(255,85,0,.05),rgba(125,160,200,.06))}" +
-      "@media (max-width:760px){#ny-player{bottom:56px}#ny-player .np{max-width:100px}#ny-player canvas{display:none}.sc-discover-card{height:min(70dvh,720px);min-height:400px}.sc-discover-cover{top:10%;width:min(68%,300px)}.sc-discover-meta{left:18px;bottom:62px}.sc-discover-actions{right:12px;bottom:118px}}";
+      "@media (max-width:760px){#ny-player{bottom:56px;gap:3px;padding-left:10px;padding-right:10px}body.desk-mode #ny-player{bottom:0}#ny-player .np{max-width:88px}#ny-player canvas,#ny-player label,#ny-player #ny-copy,#ny-player #ny-repeat-state,#ny-player #ny-sleep-state,#ny-player #ny-sleep,#ny-player #ny-vol,#ny-player #ny-vol-i,#ny-player .t{display:none}#ny-player .seek{min-width:40px;overflow:hidden}#ny-player .seek input{min-width:0;width:100%}.sc-discover-card{height:min(70dvh,720px);min-height:400px}.sc-discover-cover{top:10%;width:min(68%,300px)}.sc-discover-meta{left:18px;bottom:62px}.sc-discover-actions{right:12px;bottom:118px}}";
     document.head.appendChild(style);
     document.addEventListener("error", (e) => { if (e.target && e.target.matches && e.target.matches(".sc-cover img")) e.target.remove(); }, true);
     // SoundCloud-ish accent available as --sc (falls back to orange).
@@ -104,7 +107,8 @@
       '<button id="ny-copy" title="Copy SoundCloud link" aria-label="Copy SoundCloud link">⧉</button>' +
       '<label class="faint small" title="Playback speed">Speed <select id="ny-rate" aria-label="Playback speed"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="1.75">1.75×</option><option value="2">2×</option></select></label>' +
       '<label class="faint small" title="Equalizer">EQ <select id="ny-eq" aria-label="Equalizer mode">' + EQ_OPTIONS + '</select></label>' +
-      '<button id="ny-vol-i" title="Volume">🔊</button><input type="range" id="ny-vol" min="0" max="1" value="1" step="0.05" style="width:70px" aria-label="Volume">' +
+      '<button id="ny-sleep" title="Sleep timer: off" aria-label="Sleep timer: off">⏾</button><span id="ny-sleep-state" class="loop-state"></span>' +
+      '<button id="ny-vol-i" title="Mute" aria-label="Mute">🔊</button><input type="range" id="ny-vol" min="0" max="1" value="1" step="0.05" style="width:70px" aria-label="Volume">' +
       '<button id="ny-close" title="Close player">✕</button>';
     document.body.appendChild(bar);
     audio = new Audio();
@@ -118,7 +122,7 @@
       const rate = Math.max(0.5, Math.min(2, +audio.playbackRate || 1));
       if (Math.abs(rate - M.rate) > 0.001) { M.rate = rate; $("#ny-rate").value = String(rate); savePlayback(false, true); }
     });
-    audio.addEventListener("timeupdate", () => { tick(); historyProgress(false); savePlayback(false, false); });
+    audio.addEventListener("timeupdate", () => { tick(); historyProgress(false); savePlayback(false, false); prefetchNext(); });
     audio.addEventListener("durationchange", tick);
     audio.addEventListener("ended", onEnded);
     audio.addEventListener("play", () => { startViz(); paintBtn(); savePlayback(false, false); });
@@ -137,12 +141,87 @@
     $("#ny-next").onclick = () => { if (!M.live) next(); };
     $("#ny-close").onclick = stop;
     $("#ny-shuffle").onclick = () => { M.shuffle = !M.shuffle; resetShuffle(M.idx); paintBtn(); savePlayback(false, true); };
-    $("#ny-repeat").onclick = () => { M.repeat = M.repeat === "off" ? "one" : M.repeat === "one" ? "all" : "off"; paintBtn(); savePlayback(false, true); };
+    $("#ny-repeat").onclick = cycleRepeat;
     $("#ny-copy").onclick = copyCurrentLink;
     $("#ny-rate").onchange = (e) => setPlaybackRate(e.target.value, true);
     $("#ny-eq").onchange = (e) => setEqualizer(e.target.value, true);
     $("#ny-seek").oninput = (e) => { if (audio.duration && M.seekable && !M.live) audio.currentTime = (e.target.value / 100) * audio.duration; };
-    $("#ny-vol").oninput = (e) => { audio.volume = +e.target.value; savePlayback(false, false); };
+    $("#ny-vol").oninput = (e) => { audio.volume = +e.target.value; if (audio.muted && audio.volume > 0) audio.muted = false; paintVolume(); savePlayback(false, false); };
+    $("#ny-vol-i").onclick = toggleMute;
+    $("#ny-sleep").onclick = cycleSleep;
+    audio.addEventListener("volumechange", () => { paintVolume(); notify(); });
+    setInterval(sleepTick, 1000);
+    mediaHandlers();
+  }
+
+  // ---- volume, mute and the sleep timer ------------------------------------
+  function paintVolume() {
+    const i = $("#ny-vol-i"); if (!i || !audio) return;
+    const quiet = audio.muted || audio.volume === 0;
+    i.textContent = quiet ? "🔇" : audio.volume < 0.5 ? "🔉" : "🔊";
+    i.title = quiet ? "Unmute" : "Mute"; i.setAttribute("aria-label", i.title);
+    const v = $("#ny-vol"); if (v && Math.abs(+v.value - audio.volume) > 0.001) v.value = audio.volume;
+  }
+  // Loop: Off → Song → Playlist → Off (the same order everywhere the player shows it)
+  function cycleRepeat() { ensureBar(); M.repeat = M.repeat === "off" ? "one" : M.repeat === "one" ? "all" : "off"; paintBtn(); savePlayback(false, true); }
+  function toggleMute() { if (!audio) return; audio.muted = !audio.muted; if (!audio.muted && audio.volume === 0) audio.volume = 0.5; paintVolume(); }
+  function setVolume(v) { ensureBar(); audio.volume = Math.max(0, Math.min(1, +v || 0)); if (audio.volume > 0) audio.muted = false; paintVolume(); savePlayback(false, false); }
+  const SLEEP_STEPS = [null, 15, 30, 60, "end"];
+  function sleepLabel() {
+    if (!M.sleep) return "";
+    if (M.sleep === "end") return "end of song";
+    return Math.max(1, Math.ceil((M.sleep - Date.now()) / 60000)) + " min";
+  }
+  function cycleSleep() {
+    const now = M.sleep === "end" ? "end" : M.sleep ? Math.round((M.sleep - Date.now()) / 60000) : null;
+    const at = SLEEP_STEPS.findIndex((x) => x === now || (typeof x === "number" && typeof now === "number" && now <= x));
+    const nextStep = SLEEP_STEPS[(Math.max(0, at) + 1) % SLEEP_STEPS.length];
+    M.sleep = nextStep === null ? null : nextStep === "end" ? "end" : Date.now() + nextStep * 60000;
+    paintSleep(); notify();
+    toast(M.sleep ? "Sleep timer: music stops " + (M.sleep === "end" ? "after this song." : "in " + nextStep + " minutes.") : "Sleep timer off.");
+  }
+  function paintSleep() {
+    const b = $("#ny-sleep"), st = $("#ny-sleep-state"); if (!b) return;
+    const label = sleepLabel();
+    b.classList.toggle("act", !!M.sleep);
+    b.title = "Sleep timer: " + (label || "off") + " (click to change)"; b.setAttribute("aria-label", b.title);
+    if (st) { st.textContent = label; st.classList.toggle("on", !!label); }
+  }
+  function sleepTick() {
+    if (typeof M.sleep !== "number") return;
+    if (Date.now() >= M.sleep) { M.sleep = null; if (audio && !audio.paused) audio.pause(); paintSleep(); notify(); toast("Sleep timer: the music is paused. Good night."); }
+    else paintSleep();
+  }
+
+  // ---- lock screen, media keys and headphone buttons ------------------------------
+  let sessionKey = null;
+  function mediaHandlers() {
+    if (!("mediaSession" in navigator)) return;
+    const set = (action, fn) => { try { navigator.mediaSession.setActionHandler(action, fn); } catch (e) { /* not supported here */ } };
+    set("play", () => { if (audio) audio.play().catch(() => {}); });
+    set("pause", () => { if (audio) audio.pause(); });
+    set("stop", () => stop());
+    set("previoustrack", () => { if (!M.live && M.idx > 0) play(M.idx - 1); });
+    set("nexttrack", () => { if (!M.live && M.queue[M.idx]) next(); });
+    set("seekbackward", (d) => { if (audio && M.seekable && !M.live) audio.currentTime = Math.max(0, audio.currentTime - ((d && d.seekOffset) || 10)); });
+    set("seekforward", (d) => { if (audio && M.seekable && !M.live && audio.duration) audio.currentTime = Math.min(audio.duration - 0.5, audio.currentTime + ((d && d.seekOffset) || 10)); });
+    set("seekto", (d) => { if (audio && M.seekable && !M.live && d && d.seekTime != null) audio.currentTime = d.seekTime; });
+  }
+  function mediaSession() {
+    if (!("mediaSession" in navigator) || !audio) return;
+    try {
+      const t = M.live ? null : M.queue[M.idx], key = M.live ? "live" : t ? trackKey(t) : "";
+      if (key !== sessionKey) {
+        sessionKey = key;
+        const art = t ? artworkSource(t) : "";
+        navigator.mediaSession.metadata = !key ? null : new MediaMetadata({ title: M.live ? "Server audio" : titleOf(t), artist: M.live ? "Live from the host" : subOf(t),
+          album: "nodeyard", artwork: art ? [{ src: new URL(art, location.href).href, sizes: "512x512" }] : [] });
+      }
+      navigator.mediaSession.playbackState = !key ? "none" : audio.paused ? "paused" : "playing";
+      if (t && audio.duration && isFinite(audio.duration) && "setPositionState" in navigator.mediaSession) {
+        navigator.mediaSession.setPositionState({ duration: audio.duration, playbackRate: audio.playbackRate || 1, position: Math.min(audio.currentTime || 0, audio.duration) });
+      }
+    } catch (e) { /* metadata is a nicety */ }
   }
 
   // ---- CAVA-style visualizer ----------------------------------------------
@@ -179,11 +258,18 @@
       if (!vizRAF && !audio.paused) drawViz();
     } catch (e) { /* Web Audio unavailable — fine, sound still plays */ }
   }
+  // the accent colour, read every couple of seconds instead of every frame (reading it forces a style recalculation)
+  let vizColor = "#ff5500", vizColorAt = 0, vizLast = 0;
+  function accent() {
+    const now = performance.now();
+    if (now - vizColorAt > 2000) { vizColorAt = now; vizColor = (getComputedStyle(document.documentElement).getPropertyValue("--sc") || "#ff5500").trim() || "#ff5500"; }
+    return vizColor;
+  }
   function drawBars(cv, bars) {
     const ctx = cv.getContext("2d"); const w = cv.width, h = cv.height;
     ctx.clearRect(0, 0, w, h);
     const step = Math.floor(vizData.length / bars) || 1, bw = w / bars;
-    const col = (getComputedStyle(document.documentElement).getPropertyValue("--sc") || "#ff5500").trim();
+    const col = accent();
     for (let i = 0; i < bars; i++) {
       let v = 0; for (let j = 0; j < step; j++) v += vizData[i * step + j] || 0; v /= step;
       const bh = Math.max(2, (v / 255) * h);
@@ -193,9 +279,11 @@
     }
     ctx.globalAlpha = 1;
   }
-  function drawViz() {
+  function drawViz(now) {
     vizRAF = requestAnimationFrame(drawViz);
     if (!analyser) return;
+    if (now && now - vizLast < 32) return;   // ~30 frames a second is plenty for bars, and half the work
+    vizLast = now || 0;
     const small = document.getElementById("ny-viz"), top = document.getElementById("sc-viz-top");
     if (audio.paused) {
       [small, top].forEach((cv) => { if (cv) cv.getContext("2d").clearRect(0, 0, cv.width, cv.height); });
@@ -234,6 +322,8 @@
     const sk = $("#ny-seek");
     sk.disabled = M.live || !M.seekable;
     if (M.seekable && !M.live && audio.duration) sk.value = (audio.currentTime / audio.duration) * 100;
+    if (!M.lastSession || Date.now() - M.lastSession > 5000) { M.lastSession = Date.now(); mediaSession(); }
+    notify();
   }
   function paintBtn() {
     if (!bar) return;
@@ -254,6 +344,8 @@
     copy.disabled = !(current && current.url);
     copy.title = copy.disabled ? "No SoundCloud link for this track" : "Copy SoundCloud link";
     if (S.view === "music") renderTab();
+    mediaSession(); paintSleep();
+    notify();
   }
 
   // ---- playback -----------------------------------------------------------
@@ -318,15 +410,16 @@
         headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify(body) }).catch(() => {});
     } else postJSON("/api/music/playback", body).catch(() => {});
   }
-  async function restorePlayback() {
-    if (M.restored) return;
+  // force: "press play" with nothing loaded: pick up the last saved queue however old it is, and play it.
+  async function restorePlayback(force) {
+    if (M.restored && !force) return false;
     M.restored = true;
     try {
       const r = await getJSON("/api/music/playback");
       const state = r.playback || {};
       // The native app replaces the Music WKWebView when the user selects AI Galaxy, so pagehide is not guaranteed.
       // Restore any recent player state; the `playing` flag still keeps paused tracks paused.
-      if (!r.ok || !Array.isArray(state.queue) || !state.queue.length || Date.now() / 1000 - (+state.updated || 0) > 180) return;
+      if (!r.ok || !Array.isArray(state.queue) || !state.queue.length || (!force && Date.now() / 1000 - (+state.updated || 0) > 180)) return false;
       ensureBar();
       M.queue = state.queue; M.idx = Math.max(0, Math.min(+state.index || 0, M.queue.length - 1));
       M.shuffle = !!state.shuffle; M.repeat = ["off", "all", "one"].includes(state.repeat) ? state.repeat : "off";
@@ -341,9 +434,11 @@
       audio.addEventListener("loadedmetadata", () => { if (resumeAt < audio.duration) audio.currentTime = resumeAt; }, { once: true });
       $("#ny-np-title").textContent = titleOf(track); $("#ny-np-sub").textContent = subOf(track) + " · resuming…";
       $("#ny-vol").value = audio.volume; bar.classList.add("on"); paintBtn();
-      if (state.playing) audio.play().catch(() => { $("#ny-np-sub").textContent = subOf(track) + " · press play to resume"; });
+      if (state.playing || force) audio.play().catch(() => { $("#ny-np-sub").textContent = subOf(track) + " · press play to resume"; });
       savePlayback(false, true);
+      return true;
     } catch (e) { /* music state is optional */ }
+    return false;
   }
   window.addEventListener("pagehide", () => {
     historyProgress(true, true);
@@ -396,10 +491,26 @@
     }
     toast("Couldn't play that track.");
   }
+  // What plays after this one, without moving anything (null when nothing follows).
+  function peekNext() {
+    if (M.live || !M.queue.length || M.repeat === "one") return null;
+    if (M.shuffle && M.queue.length > 1) return M.shuffleOrder && M.shufflePos < M.shuffleOrder.length ? M.queue[M.shuffleOrder[M.shufflePos]] : null;
+    return M.queue[M.idx + 1] || (M.repeat === "all" ? M.queue[0] : null);
+  }
+  // A SoundCloud song takes the server several seconds to fetch and convert: near the end of this one, ask for the next,
+  // so it starts at once (the server keeps it in memory; this only reads its first two bytes).
+  function prefetchNext() {
+    if (!audio || !audio.duration || audio.duration - audio.currentTime > 30) return;
+    const t = peekNext(); if (!t || !(t.kind === "sc" || t.url)) return;
+    const key = trackKey(t); if (M.prefetched === key) return;
+    M.prefetched = key;
+    fetch(srcFor(t), { headers: { Range: "bytes=0-1" }, cache: "no-store", credentials: "same-origin" }).catch(() => { M.prefetched = ""; });
+  }
   function onEnded() {
     if (M.live) return;
     historyProgress(true);
     const body = historyBody("complete"); if (body) postJSON("/api/music/history", body).catch(() => {});
+    if (M.sleep === "end") { M.sleep = null; paintSleep(); notify(); toast("Sleep timer: stopped after that song. Good night."); return; }
     if (M.repeat === "one") { play(M.idx); return; }
     next();
   }
@@ -425,6 +536,7 @@
     M.live = false; M.idx = -1; M.historyId = "";
     postJSON("/api/music/playback", { clear: true }).catch(() => {});
     if (S.view === "music") renderTab();
+    notify();
   }
   function playLive() {
     ensureBar();
@@ -450,7 +562,7 @@
     return html`<div class="sc-row">
       <button class="sc-pbtn ${playing ? "" : "ghost"}" data-play="${onplay}" title="Play">${playing ? "⏸" : "▶"}</button>
       <div class="sc-cover" aria-hidden="true">♪${cover ? html`<img src="${cover}" alt="" loading="lazy">` : ""}</div>
-      <div class="meta"><div><b>${titleOf(t)}</b></div><div class="faint small">${subOf(t)}${dur ? " · " + dur : ""}</div></div>
+      <div class="meta"><div><b>${titleOf(t)}</b></div><div class="faint small">${subOf(t)}${dur ? " · " + dur : ""}</div>${t.why ? html`<div class="sc-why">${t.why}</div>` : ""}</div>
       ${extra || ""}
       <button class="btn small" data-music="add" data-key="${trackKey(t)}" title="Add to a playlist">＋</button>
     </div>`;
@@ -604,11 +716,15 @@
       const key = item.track.url || item.track.path;
       if (key && !seen.has(key) && selected.length < 150) { seen.add(key); selected.push(item); }
     });
+    // new songs found for this listener (not heard yet): up to 20 of the 150 places, so the prompt stays the same size
+    if (!M.disc.loaded) await loadDiscover(false);
+    const fresh = discovered().filter((t) => !map.has(t.url)).slice(0, 20).map((t) => ({ track: t, sources: new Set(["new"]), plays: 0, lastPlayed: 0 }));
+    append(fresh, 20);
     const unliked = all.filter((item) => !item.sources.has("liked"));
     const liked = all.filter((item) => item.sources.has("liked"));
     const library = unliked.filter((item) => item.sources.has("library"));
     const historyOnly = unliked.filter((item) => !item.sources.has("library") && item.sources.has("history"));
-    append(library, 100);
+    append(library, 100 - fresh.length);
     append(historyOnly, 25);
     append(liked, 25);
     if (selected.length < 150) append(unliked.filter((item) => !seen.has(item.track.url || item.track.path)), 150 - selected.length);
@@ -618,7 +734,8 @@
       return { id: "t" + String(i + 1).padStart(3, "0"), track: { ...t, kind: local ? "local" : "sc" },
         info: { id: "t" + String(i + 1).padStart(3, "0"), title: local ? t.name : t.title, artist: local ? (t.folder || "your library") : (t.artist || "SoundCloud"),
           sources: Array.from(item.sources), liked: item.sources.has("liked"), from_library: item.sources.has("library"),
-          in_listening_history: item.sources.has("history"), plays: item.plays, last_played: item.lastPlayed || undefined } };
+          in_listening_history: item.sources.has("history"), plays: item.plays, last_played: item.lastPlayed || undefined,
+          new_to_you: item.sources.has("new") || undefined, why: item.sources.has("new") ? t.why : undefined } };
     });
   }
   async function readDJStream(response) {
@@ -678,11 +795,15 @@
     M.dj.busy = true; M.dj.error = "";
     const controller = new AbortController(); M.dj.controller = controller; saveDJ(); renderTab();
     try {
-      const catalog = await djCatalog();
+      // one catalogue per DJ session (30 min): the same system prompt every turn lets the model keep it read
+      const fresh = M.dj.catalog && Date.now() - M.dj.catalog.at < 30 * 60000;
+      const catalog = fresh ? M.dj.catalog.rows : await djCatalog();
+      if (!fresh) M.dj.catalog = { at: Date.now(), rows: catalog };
       if (!catalog.length) throw new Error("There are no songs for the DJ yet. Set a Music folder, like some SoundCloud songs, or listen to a few tracks first.");
       const catalogText = catalog.map((x) => x.info);
-      const system = "You are Nodeyard DJ, a warm, confident, conversational music host. Sound like a natural radio presenter: short, personal, lightly playful, never overdo catchphrases. Use listening history and likes to personalize, but never claim you listened to audio or know lyrics unless given. Recommend only catalogue tracks. The user request may be a vibe, activity, artist/style preference, or follow-up. If you need one key detail, ask one concise question and return no tracks. Otherwise create a useful mix. IMPORTANT: for ordinary vibe/activity requests, use unliked tracks from the user's library and listening history first; likes are taste context, not the default source. Never make a mix only from liked tracks when unliked catalogue tracks are available. Include at least half unliked tracks where possible. Only focus on liked tracks when the user explicitly asks for their likes/favourites. Catalogue fields `liked`, `from_library`, and `in_listening_history` tell you which tracks are liked or unliked. Reply with exactly one JSON object and no markdown: {\"speech\":\"spoken response, 1-3 short sentences\",\"playlist_name\":\"short name or empty string\",\"track_ids\":[\"t001\"]}. For a playlist, include 5-20 catalogue IDs in a deliberate order. If there are fewer suitable songs, use fewer. If this is only a greeting or clarifying question, playlist_name must be empty and track_ids must be []. Never invent IDs.\nCATALOGUE:\n" + JSON.stringify(catalogText);
-      const history = (M.dj.messages || []).slice(-8).filter((m) => !m.hidden);
+      const system = "You are Nodeyard DJ, a warm, confident, conversational music host. Sound like a natural radio presenter: short, personal, lightly playful, never overdo catchphrases. Use listening history and likes to personalize, but never claim you listened to audio or know lyrics unless given. Recommend only catalogue tracks. The user request may be a vibe, activity, artist/style preference, or follow-up. If you need one key detail, ask one concise question and return no tracks. Otherwise create a useful mix. IMPORTANT: for ordinary vibe/activity requests, use unliked tracks from the user's library and listening history first; likes are taste context, not the default source. Never make a mix only from liked tracks when unliked catalogue tracks are available. Include at least half unliked tracks where possible. Only focus on liked tracks when the user explicitly asks for their likes/favourites. Catalogue fields `liked`, `from_library`, and `in_listening_history` tell you which tracks are liked or unliked. Tracks with `new_to_you: true` are songs the user has never heard, picked for their taste (`why` says why): put about a quarter of them into ordinary mixes so the user discovers music, and lead with them (at least half) when the user asks for something new, fresh, different or to discover; skip them only when the user asks for songs they know. Reply with exactly one JSON object and no markdown: {\"speech\":\"spoken response, 1-3 short sentences\",\"playlist_name\":\"short name or empty string\",\"track_ids\":[\"t001\"]}. For a playlist, include 5-20 catalogue IDs in a deliberate order. If there are fewer suitable songs, use fewer. If this is only a greeting or clarifying question, playlist_name must be empty and track_ids must be []. Never invent IDs.\nCATALOGUE:\n" + JSON.stringify(catalogText);
+      const all = (M.dj.messages || []).filter((m) => !m.hidden);
+      const history = all.slice(all.length <= 12 ? 0 : all.length - 6 - ((all.length - 6) % 6));   // moves in steps, not every turn
       if (!hidden && history.length && history[history.length - 1].role === "user" && history[history.length - 1].content === userText) history.pop();
       const messages = [{ role: "system", content: system }].concat(history.map((m) => ({ role: m.role, content: m.content })), [{ role: "user", content: userText }]);
       const response = await fetch("/api/v1/chat/completions", { method: "POST", cache: "no-store", credentials: "same-origin",
@@ -709,9 +830,27 @@
           }
         }
       }
+      // and some discovery: a quarter new finds in an ordinary mix, half when asked for something new (never for "my likes" or "songs I know")
+      const wantsNew = /\b(?:new|fresh|discover|different|haven(?:'|’)?t heard|never heard|explore|surprise)\b/i.test(userText);
+      const wantsKnown = asksForLikes || /\b(?:songs? i know|familiar|old favou?rites?|my songs|my library)\b/i.test(userText);
+      const newRows = catalog.filter((row) => row.info.new_to_you && !selectedKeys.has(trackKey(row.track)));
+      if (!wantsKnown && newRows.length && selectedRows.length > 2) {
+        const targetNew = Math.ceil(selectedRows.length * (wantsNew ? 0.5 : 0.25));
+        let newCount = selectedRows.filter((row) => row.info.new_to_you).length;
+        for (let i = selectedRows.length - 1; i >= 1 && newCount < targetNew && newRows.length; i -= 2) {   // every other place from the end: they mix in
+          if (!selectedRows[i].info.new_to_you) {
+            const replacement = newRows.shift();
+            selectedKeys.delete(trackKey(selectedRows[i].track));
+            selectedRows[i] = replacement;
+            selectedKeys.add(trackKey(replacement.track));
+            newCount++;
+          }
+        }
+      }
       const selected = selectedRows.map((row) => row.track);
       const name = String(parsed.playlist_name || "").trim().slice(0, 120);
-      const assistantText = selected.length ? speech + "\n\nI’ve queued “" + (name || "Your mix") + "” with " + selected.length + " tracks and am starting playback now." : speech;
+      const newIn = selectedRows.filter((row) => row.info.new_to_you).length;
+      const assistantText = selected.length ? speech + "\n\nI’ve queued “" + (name || "Your mix") + "” with " + selected.length + " tracks" + (newIn ? " (" + newIn + " new to you)" : "") + " and am starting playback now." : speech;
       M.dj.messages.push({ role: "assistant", content: assistantText });
       if (selected.length) {
         M.dj.draft = { name: name || "Your mix", tracks: selected, saved: false };
@@ -728,7 +867,7 @@
   }
   function startDJ() {
     if (!M.dj.target) { toast("No ready AI model. Start one under AI → Models."); return; }
-    M.dj.active = true; M.dj.messages = []; M.dj.draft = null; M.dj.speak = M.dj.speak !== false; saveDJ(); renderTab();
+    M.dj.active = true; M.dj.messages = []; M.dj.draft = null; M.dj.catalog = null; M.dj.speak = M.dj.speak !== false; saveDJ(); renderTab();
     sendDJRequest("Start my DJ session. Welcome me in one short, warm line, then ask what vibe or activity I want. Do not make a playlist yet.", true);
   }
   function stopDJ() {
@@ -813,27 +952,36 @@
 
   function discoverRecommendations() {
     const rows = [], seen = new Set();
-    const candidates = (M.homeHistoryReady ? homeUnheardRecommendations() : []).concat(homeRecommendations());
+    const candidates = discovered().concat(M.homeHistoryReady ? homeUnheardRecommendations() : [], homeRecommendations());
     candidates.forEach((track) => { const key = trackKey(track); if (key && !seen.has(key)) { seen.add(key); rows.push(track); } });
     return rows;
   }
 
   function renderHome(el) {
     M.homeRecs = homeRecommendations();
-    M.homeUnheard = homeUnheardRecommendations();
+    const found = discovered().filter((t) => !M.homeSessionHeard.has(trackKey(t)));
+    const local = homeUnheardRecommendations();
+    // new finds first, with a few unplayed songs you already own mixed in every fourth place
+    const mixed = [], fq = found.slice(0, 24), lq = local.slice(0, 8);
+    while (fq.length || lq.length) { for (let i = 0; i < 3 && fq.length; i++) mixed.push(fq.shift()); if (lq.length) mixed.push(lq.shift()); }
+    M.homeUnheard = mixed;
     const tracks = M.homeRecs;
     const unheard = M.homeUnheard;
     const likes = M.scLikes.slice(0, 12);
     const playlists = M.playlists.slice(0, 10);
-    const unseenContent = !M.homeHistoryReady
+    const discStatus = M.disc.building ? html`<span class="sc-disc-status"><span class="spin small"></span> Finding new songs for you…</span>`
+      : M.disc.updated ? html`<span class="sc-disc-status">Updated ${U.ago(M.disc.updated)} ago${M.disc.seeds.length ? html` · <span title="${"Started from: " + M.disc.seeds.join(", ")}">from ${M.disc.seeds.length} of your favourites and styles</span>` : ""}</span>` : "";
+    const unseenContent = !M.homeHistoryReady && !unheard.length
       ? html`<div class="empty">${M.homeHistoryError ? "Couldn't check your listening history." : "Checking your listening history…"} ${M.homeHistoryError ? raw('<button class="btn small mt" data-music="home-history-retry">Try again</button>') : ""}</div>`
       : unheard.length
-        ? unheard.map((t) => trackRow(t, "new:" + trackKey(t), t.url ? likeBtn(t) : ""))
-        : html`<div class="empty">You’ve heard every song we can see in your library and likes. Add more songs to find new ones.</div>`;
+        ? unheard.map((t) => trackRow(t, "new:" + trackKey(t), t.url ? html`${likeBtn(t)}${t.why ? html`<button class="btn small" data-music="disc-no" data-key="${t.url}" title="Not for me: show fewer like this">✕</button>` : ""}` : ""))
+        : M.disc.building || !M.disc.loaded ? html`<div class="empty"><div class="spin"></div>Looking on SoundCloud for songs that match your taste…</div>`
+        : html`<div class="empty">${M.disc.error || "No new picks yet."} Like or play a few songs and press Find more.</div>`;
     setHTML(el, html`<div class="card">
       <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h2 style="margin:0">New to you</h2>
-        <div class="muted small mt">Songs from your library and likes that aren’t in your saved listening history.</div></div>
-        ${unheard.length ? raw('<button class="btn primary" data-music="home-unheard-play">▶ Play new songs</button>') : ""}</div>
+        <div class="muted small mt">New songs found on SoundCloud from what you like and play (plus a few unplayed ones you own). It learns from likes, skips and ✕.</div>
+        <div class="mt">${discStatus}</div></div>
+        <div class="row" style="gap:8px">${unheard.length ? raw('<button class="btn primary" data-music="home-unheard-play">▶ Play new songs</button>') : ""}<button class="btn" data-music="disc-refresh" ${M.disc.building ? "disabled" : ""}>↻ Find more</button></div></div>
       <div class="mt">${unseenContent}</div>
     </div>
     <div class="card mt">
@@ -882,7 +1030,7 @@
     const art = artworkSource(track);
     const background = art ? "background-image:url('" + art + "')" : "";
     const liked = M.scLikes.some((item) => item.url === track.url);
-    setHTML(el, html`<div class="sc-discover-feed"><header class="sc-discover-feed-head"><div><h2>Discover</h2><span>For you · from your music</span></div><b>${M.discoverIndex + 1} / ${tracks.length}</b></header>
+    setHTML(el, html`<div class="sc-discover-feed"><header class="sc-discover-feed-head"><div><h2>Discover</h2><span>For you · new finds first, then your music</span></div><b>${M.discoverIndex + 1} / ${tracks.length}</b></header>
       <article class="sc-discover-card" data-discover-stage style="${background}" tabindex="0" aria-label="Discover song: ${titleOf(track)}. Swipe up or down to browse.">
         <div class="sc-discover-shade"></div>
         <div class="sc-discover-cover">${art ? html`<img src="${art}" alt="${titleOf(track)} artwork" loading="lazy">` : html`<span aria-hidden="true">♫</span>`}</div>
@@ -891,8 +1039,8 @@
           <button type="button" data-music="discover-play" aria-label="Play song">▶</button><small>Play</small>
           <button type="button" data-music="discover-add" aria-label="Add song to playlist">＋</button><small>Save</small>
         </aside>
-        <div class="sc-discover-meta"><span class="chip">${track.url ? "SoundCloud" : "Your library"}</span><h2>${titleOf(track)}</h2>
-          <div>${subOf(track)}${track.duration_ms ? " · " + fmtTime(track.duration_ms / 1000) : ""}</div></div>
+        <div class="sc-discover-meta"><span class="chip">${track.why ? "New for you" : track.url ? "SoundCloud" : "Your library"}</span><h2>${titleOf(track)}</h2>
+          <div>${subOf(track)}${track.duration_ms ? " · " + fmtTime(track.duration_ms / 1000) : ""}</div>${track.why ? html`<div class="sc-why">${track.why}</div>` : ""}</div>
         <div class="sc-discover-nav"><button type="button" data-music="discover-prev" ${M.discoverIndex <= 0 ? "disabled" : ""} aria-label="Previous song">⌃</button><button type="button" data-music="discover-next" ${M.discoverIndex >= tracks.length - 1 ? "disabled" : ""} aria-label="Next song">⌄</button></div>
         <div class="sc-discover-hint">Swipe or scroll · ↑ / ↓</div>
       </article></div>`);
@@ -1033,7 +1181,7 @@
 
   // ---- add-to-playlist picker --------------------------------------------
   function findTrack(key) {
-    return [M.queue, M.scResults, M.discoverTracks, M.scLikes, (M.scSet && M.scSet.tracks) || [], (M.openPl && M.openPl.tracks) || [],
+    return [M.queue, M.scResults, M.discoverTracks, M.disc.tracks, M.scLikes, (M.scSet && M.scSet.tracks) || [], (M.openPl && M.openPl.tracks) || [],
       (M.dj.draft && M.dj.draft.tracks) || [], (M.data || {}).tracks || []]
       .flat().find((t) => t && trackKey(t) === key) || null;
   }
@@ -1105,8 +1253,25 @@
 
   async function load() {
     try { const r = await getJSON("/api/music"); if (r.ok) M.data = r; } catch (e) { /* signed out */ }
+    loadDiscover(false);
     await refreshHomeHistory();
   }
+
+  // ---- new songs for you: the server finds them (from your likes and listening) and keeps them fresh ------------
+  async function loadDiscover(refresh) {
+    clearTimeout(M.disc.timer);
+    try {
+      const r = await getJSON("/api/music/discover" + (refresh ? "?refresh=1" : ""));
+      if (r.ok) Object.assign(M.disc, { tracks: r.tracks || [], updated: r.updated || 0, building: !!r.building, error: r.error || "", seeds: r.seeds || [], loaded: true });
+    } catch (e) { M.disc.loaded = true; }
+    if (M.disc.building && M.disc.polls++ < 60) M.disc.timer = setTimeout(() => loadDiscover(false), 4000);
+    else M.disc.polls = 0;
+    if (S.view === "music" && (M.tab === "home" || M.tab === "discover")) {
+      if (M.tab === "discover" && !M.disc.building) M.discoverSeeded = false;
+      renderTab();
+    }
+  }
+  const discovered = () => (M.disc.tracks || []).map((t) => ({ ...t, kind: "sc" }));
 
   async function searchSc() {
     const input = $('[data-music="sc-query"]');
@@ -1194,6 +1359,13 @@
     if (act === "listen") playLive();
     else if (act === "home-play") { if (M.homeRecs.length) playQueue(M.homeRecs, 0); }
     else if (act === "home-unheard-play") { if (M.homeUnheard.length) playQueue(M.homeUnheard, 0); }
+    else if (act === "disc-refresh") { M.disc.building = true; renderTab(); loadDiscover(true); }
+    else if (act === "disc-no") {
+      const track = findTrack(t.dataset.key); if (!track) return;
+      M.disc.tracks = M.disc.tracks.filter((x) => x.url !== track.url); renderTab();
+      const r = await postJSON("/api/music/discover", { action: "dislike", track });
+      if (!r.ok) toast(r.error || "Couldn't save that."); else { toast("Got it — fewer like that."); Object.assign(M.disc, { tracks: r.tracks || M.disc.tracks, building: !!r.building }); if (r.building) loadDiscover(false); else renderTab(); }
+    }
     else if (act === "home-history-retry") { const pending = refreshHomeHistory(); renderTab(); pending.then(() => { if (S.view === "music" && M.tab === "home") renderTab(); }); }
     else if (act === "home-likes") { M.tab = "likes"; renderPage(); }
     else if (act === "home-playlists") { M.tab = "playlists"; renderPage(); }
@@ -1312,6 +1484,15 @@
         !e.target.matches("input,textarea,select,[contenteditable=true]")) {
       e.preventDefault(); moveDiscover(e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : 1); return;
     }
+    if ((S.view === "music" || S.view === "desk") && !(e.target.matches && e.target.matches("input,textarea,select,[contenteditable=true]")) && !e.ctrlKey && !e.metaKey && !e.altKey && audio && (M.queue[M.idx] || M.live)) {
+      if (e.key === "m" || e.key === "M") { e.preventDefault(); toggleMute(); return; }
+      if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && !(S.view === "music" && M.tab === "discover")) {
+        e.preventDefault();
+        if (e.shiftKey) { if (e.key === "ArrowLeft") { if (M.idx > 0 && !M.live) play(M.idx - 1); } else if (!M.live) next(); }
+        else NY.music.skip(e.key === "ArrowLeft" ? -10 : 10);
+        return;
+      }
+    }
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && e.target.matches('[data-music="dj-request"]')) { e.preventDefault(); $('[data-music="dj-send"]')?.click(); return; }
     if (e.key !== "Enter") return;
     if (e.target.matches('[data-music="sc-query"]')) { e.preventDefault(); searchSc(); }
@@ -1340,6 +1521,38 @@
     else if (t.dataset.music === "fw-source") { await postJSON("/api/music/config", { forward_source: t.value }); await load(); renderTab(); }
     else if (t.dataset.music === "nodrm") { M.hideDrm = t.checked; try { localStorage.setItem("ny-hidedrm", t.checked ? "1" : "0"); } catch (e) { /* ignore */ } }
   });
+
+  // ---- the same player, for other pages (the Desk) ------------------------
+  // Pages listen for the "ny-music" document event and read NY.music.state(); they never get their own <audio>.
+  function notify() { document.dispatchEvent(new CustomEvent("ny-music")); }
+  const describe = (t) => ({ key: trackKey(t), title: titleOf(t), sub: subOf(t), art: artworkSource(t) });
+  NY.music = {
+    describe,
+    state() {
+      const t = M.live ? null : M.queue[M.idx];
+      const known = t && t.duration_ms ? t.duration_ms / 1000 : 0;
+      return { live: M.live, track: t ? describe(t) : null, playing: !!(audio && !audio.paused && audio.src),
+        current: audio ? audio.currentTime || 0 : 0, duration: known || (audio && isFinite(audio.duration) ? audio.duration : 0),
+        seekable: !!(t && M.seekable), hasPrev: !!t && M.idx > 0, hasNext: !!t && M.queue.length > 0, shuffle: M.shuffle, repeat: M.repeat,
+        volume: audio ? audio.volume : 1, muted: !!(audio && audio.muted), sleep: sleepLabel() };
+    },
+    toggle() {
+      if (!audio || (!M.live && !M.queue[M.idx])) return false;
+      if (audio.paused) audio.play().catch(() => toast("Playback was blocked. Press Play again."));
+      else audio.pause();
+      return true;
+    },
+    next() { if (audio && !M.live && M.queue[M.idx]) next(); },
+    prev() { if (audio && !M.live && M.idx > 0) play(M.idx - 1); },
+    seek(fraction) { if (audio && !M.live && M.seekable && audio.duration) audio.currentTime = Math.max(0, Math.min(1, +fraction || 0)) * audio.duration; },
+    setShuffle(on) { ensureBar(); M.shuffle = !!on; resetShuffle(M.idx); paintBtn(); savePlayback(false, true); },
+    playQueue(tracks, i) { ensureBar(); playQueue(tracks, i); },
+    setVolume, toggleMute: () => { ensureBar(); toggleMute(); }, cycleSleep: () => { ensureBar(); cycleSleep(); },
+    skip(seconds) { if (audio && !M.live && M.seekable && audio.duration) audio.currentTime = Math.max(0, Math.min(audio.duration - 0.5, audio.currentTime + seconds)); },
+    restore() { return restorePlayback(); },
+    resume() { ensureBar(); return restorePlayback(true); },
+    cycleRepeat,
+  };
 
   V.music = {
     build() { ensureBar(); NY.freshHTML($("#view"), html`<div class="card"><div class="empty"><div class="spin"></div>Loading…</div></div>`); load().then(renderPage); restorePlayback(); },

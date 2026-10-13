@@ -23,6 +23,8 @@
     { id: "events", label: "Events", icon: "events", sub: "What Kubernetes has been doing" },
     { id: "alerts", label: "Alerts", icon: "alerts", sub: "Things that need your attention" },
     { id: "doctor", label: "Doctor", icon: "doctor", sub: "Checks for common problems, with one-click fixes" },
+    { id: "services", label: "Services", icon: "services", sub: "Uptime, latency and certificates for your apps and machines" },
+    { id: "tools", label: "Tools", icon: "tools", sub: "Network checks, Wake-on-LAN and metrics" },
     { id: "commands", label: "Commands", icon: "commands", sub: "Every nodeyard command, runnable from here" },
     { id: "terminal", label: "Terminal", icon: "terminal", sub: "Shells on every device" },
     { id: "apis", label: "APIs", icon: "commands", sub: "Your own self-hosted APIs, for the dashboard and the AI" },
@@ -154,18 +156,33 @@
     if (es && esAgents === want) return;
     if (es) es.close();
     esAgents = want;
-    es = new EventSource("/api/stream" + (want ? "?agents=1" : ""));
-    es.addEventListener("state", (ev) => { esAt = Date.now(); let r; try { r = JSON.parse(ev.data); } catch (e) { return; } if (apply(r)) queueRender(); });
+    es = new EventSource("/api/stream?delta=1" + (want ? "&agents=1" : ""));
+    es.addEventListener("state", (ev) => {
+      esAt = Date.now(); let r; try { r = JSON.parse(ev.data); } catch (e) { return; }
+      // a partial update carries only the sections that changed since the last one (the rest stay as they are)
+      if (r.partial) {
+        if (!S.res || !S.res.state) { closeStream(); connectStream(); return; }
+        r.state = Object.assign({}, S.res.state, r.state); delete r.partial;
+      }
+      if (apply(r)) queueRender();
+    });
     es.addEventListener("auth", () => { location.href = "/login"; });
     es.onopen = () => { esAt = Date.now(); };
   }
   function closeStream() { if (es) { es.close(); es = null; } }
   async function start() {
-    try { const h = await getJSON("/api/history?points=720"); if (h.ok) S.hist = h.points; } catch (e) { /* the chart fills in as data arrives */ }
+    await loadHistory();
     try { await load(); } finally {   // live updates start even if the first drawing failed
       connectStream();
       schedule();
     }
+  }
+  // Only as much history as the chosen chart range shows (at the fastest 2 s reads); more is fetched if it grows.
+  const historyFor = (range) => Math.min(720, Math.ceil(range / 2) + 10);
+  async function loadHistory() {
+    const want = historyFor(S.range);
+    if (S.histPoints >= want) return;
+    try { const h = await getJSON("/api/history?points=" + want); if (h.ok) { S.hist = h.points; S.histPoints = want; } } catch (e) { /* the chart fills in as data arrives */ }
   }
   function schedule() {
     clearTimeout(S.timer);
@@ -228,8 +245,9 @@
   const legend = (items) => html`<div class="legend">${items.map((i) => html`<span><i style="background:${i.color}"></i>${i.name}</span>`)}</div>`;
 
   function alertCard(a) {
-    const open = a.kind === "node" || a.kind === "pod" ? a.kind + ":" + a.ref : a.kind === "workload" ? "wl:" + a.ref : "";
-    return html`<div class="alert ${a.level} ${open ? "click" : ""}" ${open ? raw('data-open="' + esc(open) + '"') : ""}><span class="sev"></span><div><b>${a.title}</b><span>${a.detail}</span></div></div>`;
+    const open = a.kind === "node" || a.kind === "pod" ? a.kind + ":" + a.ref : a.kind === "workload" ? "wl:" + a.ref : a.kind === "service" ? "svc:" + a.ref : "";
+    const goto = a.kind === "monitor" ? "services" : a.kind === "ai" ? "ai" : "";   // the monitor's and the model's alerts open their pages
+    return html`<div class="alert ${a.level} ${open || goto ? "click" : ""}" ${open ? raw('data-open="' + esc(open) + '"') : goto ? raw('data-goto="' + goto + '"') : ""}><span class="sev"></span><div><b>${a.title}</b><span>${a.detail}</span></div></div>`;
   }
   function eventRow(e) {
     return html`<div class="row" style="padding:7px 0;border-bottom:1px solid var(--line);align-items:flex-start"><i class="dot ${e.type === "Warning" ? "warn" : ""}" style="margin-top:6px"></i>
@@ -273,7 +291,8 @@
         ${gpuKpi(t, kpi)}
         ${kpi("Network", html`↓ ${fmt.rate(t.net_rx_rate)}`, "↑ " + fmt.rate(t.net_tx_rate) + " · all nodes", null, spark(rxS, { color: "var(--accent2)" }))}
         ${kpi("Workloads", html`${d.workloads.length}<small> · ${healthyW} healthy</small>`, plural(d.namespaces.length, "namespace") + " · " + plural(d.services.length, "service") + " · " + plural(nodePorts, "NodePort"), null)}
-        ${kpi("Restarts", t.restarts, d.pods.filter((p) => p.restarts > 0).length + " pods have restarted", null)}`);
+        ${kpi("Restarts", t.restarts, d.pods.filter((p) => p.restarts > 0).length + " pods have restarted", null)}
+        ${(() => { const m = S.res.monitor, active = m ? m.total - m.paused : 0; return m && m.total ? kpi("Services", html`${m.up}<small> / ${active} up</small>`, html`<a href="#services">${m.down ? plural(m.down, "service") + " down" : active - m.up ? "Checking " + (active - m.up) : "All answering"}</a>`, donut(frac(m.up, active), { color: m.down ? "var(--bad)" : "var(--good)" })) : ""; })()}`);
 
       const cpu = nodeSeries(0), mem = nodeSeries(1), nodeLeg = legend(cpu.series);
       const rx = sumSeries(2), tx = sumSeries(3), pts = histPts(), ts = pts.map((p) => p.t);
@@ -829,6 +848,7 @@
   function renderChrome() {
     const v = VIEWS.find((x) => x.id === S.view);
     document.body.classList.toggle("desk-mode", S.view === "desk");
+    document.body.classList.toggle("galaxy-mode", S.view === "galaxy");
     $$("[data-view]").forEach((a) => {
       const active = a.dataset.view === S.view;
       a.classList.toggle("on", active);
@@ -905,7 +925,7 @@
     renderChrome();
     const content = $("#content");
     const v = V[S.view];
-    const standalone = S.view === "desk";
+    const standalone = S.view === "desk" || S.view === "galaxy";   // (full-page views: no banners, and they draw before the cluster data comes)
     if (!S.d && !standalone) {
       if (!$("#view")) setHTML(content, html`<div id="banners"></div><div class="loading"><div><div class="spin"></div>${S.res && S.res.error ? "Waiting for the cluster: " + S.res.error : "Reading your cluster…"}</div></div>`);
       return;
@@ -928,7 +948,7 @@
   function applyRoute() {
     const [v, d] = decodeURIComponent(location.hash.slice(1)).split("!");
     const id = VIEWS.some((x) => x.id === v) ? v : "overview";
-    if (id !== S.view) { S.view = id; S.built = null; window.scrollTo(0, 0); }
+    if (id !== S.view) { if (S.view !== "galaxy") S.prevView = S.view; S.view = id; S.built = null; window.scrollTo(0, 0); }
     store.set("view", S.view);
     if (S.d) connectStream();
     if (d) { if (d !== S.drawer) { S.drawer = null; if (S.d) openDrawer(d, true); else S.pending = d; } } else if (S.drawer) closeDrawer(true);
@@ -950,7 +970,8 @@
       S.d.services.forEach((s) => items.push({ label: s.name, sub: s.cluster_ip + " · " + s.namespace, kind: "service", run: () => openDrawer("svc:" + s.namespace + "/" + s.name), hay: (s.name + " " + s.namespace + " " + s.cluster_ip + " " + s.external_ips.join(" ") + " " + s.node_ports.join(" ")).toLowerCase() }));
       S.d.pods.forEach((p) => items.push({ label: p.name, sub: p.namespace + " · " + (p.ip || p.status), kind: "pod", run: () => openDrawer("pod:" + p.namespace + "/" + p.name), hay: (p.name + " " + p.namespace + " " + p.ip + " " + p.node).toLowerCase() }));
     }
-    items.push({ label: "Switch theme", sub: "Dark, light or automatic", kind: "action", run: cycleTheme, hay: "switch theme dark light" }, { label: "Refresh now", sub: "Read the cluster again", kind: "action", run: () => load(true), hay: "refresh reload now" });
+    items.push({ label: "Switch theme", sub: "Dark, light or automatic", kind: "action", run: cycleTheme, hay: "switch theme dark light" }, { label: "Refresh now", sub: "Read the cluster again", kind: "action", run: () => load(true), hay: "refresh reload now" },
+      { label: "Full refresh", sub: "Clear every cache, re-check the nodes and the AI model, reload the page", kind: "action", run: fullRefresh, hay: "full refresh reset cache model reload power" });
     const ql = q.trim().toLowerCase();
     return (ql ? items.filter((i) => ql.split(/\s+/).every((w) => i.hay.includes(w))) : items.filter((i) => i.kind === "page" || i.kind === "node" || i.kind === "action")).slice(0, 40);
   }
@@ -961,7 +982,39 @@
     const sel = $(".item.sel", $("#presults")); if (sel) sel.scrollIntoView({ block: "nearest" });
   }
   function openPalette() { closeModals(); $("#scrim").classList.add("on"); $("#palette").classList.add("on"); const i = $("#pq"); i.value = ""; pSel = 0; renderPalette(); i.focus(); }
-  function closeModals() { $("#palette").classList.remove("on"); $("#helpm").classList.remove("on"); $("#jobm").classList.remove("on"); clearInterval(jobTimer); if (!S.drawer) $("#scrim").classList.remove("on"); }
+  // ---- Full refresh: the server forgets what it remembered, reads the cluster again and makes the model prove it works
+  let fullBusy = false;
+  async function fullRefresh() {
+    if (fullBusy) return;
+    fullBusy = true;
+    closeModals(); $("#scrim").classList.add("on"); $("#fullm").classList.add("on");
+    const body = $("#fullbody"), started = Date.now();
+    const step = (text) => setHTML(body, html`<div class="full-wait"><div class="spin"></div><div><b>${text}</b><div class="muted small" id="full-time"></div></div></div>
+      <p class="muted small">Clearing the dashboard's caches, reading every node again and asking the AI model for a one-word answer (on this cluster that can take up to a minute).</p>`);
+    step("Refreshing everything…");
+    const timer = setInterval(() => { const el = $("#full-time"); if (el) el.textContent = Math.round((Date.now() - started) / 1000) + " s"; }, 500);
+    let r;
+    try { r = await postJSON("/api/refresh-all", {}); } catch (e) { r = { ok: false, error: e.message || "The dashboard didn't answer." }; }
+    clearInterval(timer);
+    fullBusy = false;
+    if (!r.ok) { setHTML(body, html`<p class="bad-t">${r.error || "The full refresh didn't work."}</p><button class="btn" data-act="full-retry">Try again</button>`); return; }
+    const m = r.model, c = r.cluster || {};
+    const modelLine = !m ? "" : ({ ok: ["good", "The AI model answers"], busy: ["good", "The AI model is busy answering"], none: ["", "No split model is deployed"],
+      unloaded: ["", "The AI model is unloaded"], loading: ["warn", "The AI model is still loading"], stale: ["bad", "The AI model needed reloading"],
+      broken: ["bad", "The AI model wasn't answering"] })[m.state] || ["", m.state];
+    setHTML(body, html`<ul class="full-list">
+        <li><i class="dot ${c.read ? "good" : "warn"}"></i><div><b>${c.read ? "Read the cluster again" : "The cluster read is still running"}</b><span>${c.ready}/${c.nodes} nodes ready${c.error ? " · " + c.error : ""}</span></div></li>
+        ${m ? html`<li><i class="dot ${modelLine[0]}"></i><div><b>${modelLine[1]}</b><span>${m.detail}${m.action ? " · " + (m.action === "reloading" ? "Reloading it now: it's back in a few minutes (the AI page shows the progress)." : m.action) : ""}</span></div></li>` : ""}
+        <li><i class="dot good"></i><div><b>Cleared</b><span>${(r.cleared || []).join(", ")}</span></div></li>
+      </ul><p class="muted small" id="full-reload">Reloading the page in 4 s…</p>
+      <div class="row"><button class="btn primary" data-act="full-reload">Reload now</button><button class="btn" data-act="full-stay">Stay on this page</button></div>`);
+    let left = 4;
+    S.fullTimer = setInterval(() => {
+      left--; const el = $("#full-reload"); if (el) el.textContent = "Reloading the page in " + left + " s…";
+      if (left <= 0) { clearInterval(S.fullTimer); location.reload(); }
+    }, 1000);
+  }
+  function closeModals() { $("#palette").classList.remove("on"); $("#helpm").classList.remove("on"); $("#jobm").classList.remove("on"); $("#fullm").classList.remove("on"); clearInterval(S.fullTimer); clearInterval(jobTimer); if (!S.drawer) $("#scrim").classList.remove("on"); }
   function runPalette(i) { const it = pItems[i]; if (!it) return; closeModals(); it.run(); }
 
   // ---- misc actions
@@ -1096,10 +1149,19 @@
     if (t.closest("[data-mobile-live]")) { setLive(!S.live); return; }
     if (t.closest("[data-mobile-help]")) { setMobileMenu(false, false); closeModals(); $("#scrim").classList.add("on"); $("#helpm").classList.add("on"); $("#helpm").focus(); return; }
     if (t.closest("[data-mobile-refresh]")) { setMobileMenu(false, false); load(true); return; }
+    if (t.closest("[data-mobile-fullrefresh]")) { setMobileMenu(false, false); fullRefresh(); return; }
+    const fa = t.closest("[data-act^=full-]");
+    if (fa) {
+      const act = fa.dataset.act;
+      if (act === "full-reload") location.reload();
+      else if (act === "full-retry") fullRefresh();
+      else { clearInterval(S.fullTimer); if (act === "full-close" || act === "full-stay") { closeModals(); load(true); } }
+      return;
+    }
     if (t.closest("[data-mobile-signout]")) { $("#signout").click(); return; }
     if ((el = t.closest("[data-copy]"))) { e.preventDefault(); e.stopPropagation(); copyText(el.dataset.copy); return; }
     if ((el = t.closest("[data-act]"))) { e.preventDefault(); act(el.dataset.act, el); return; }
-    if ((el = t.closest("[data-set]"))) { const [p, v] = el.dataset.set.split(":"); if (p === "range") { S.range = +v; store.set("range", v); } else setPath(p, v); if (S.d) { V[S.view].update(); updateDrawer(false); } syncControls(); return; }
+    if ((el = t.closest("[data-set]"))) { const [p, v] = el.dataset.set.split(":"); if (p === "range") { S.range = +v; store.set("range", v); if (historyFor(S.range) > (S.histPoints || 0)) loadHistory().then(() => { if (S.d) V[S.view].update(); }); } else setPath(p, v); if (S.d) { V[S.view].update(); updateDrawer(false); } syncControls(); return; }
     if ((el = t.closest("th[data-sort]"))) { const [id, k] = el.dataset.sort.split("|"), st = S.sort[id] || (S.sort[id] = { k, dir: 1 }); if (st.k === k) st.dir = -st.dir; else { st.k = k; st.dir = 1; } V[S.view].update(); updateDrawer(false); return; }
     if ((el = t.closest("[data-open]"))) { e.preventDefault(); closeModals(); openDrawer(el.dataset.open); return; }
     if ((el = t.closest("[data-goto]"))) { const [view, qs] = el.dataset.goto.split("?"); const o = {}; if (qs) qs.split("&").forEach((kv2) => { const [k, v] = kv2.split("="); o[k] = decodeURIComponent(v); }); go(view, o); return; }
@@ -1144,8 +1206,9 @@
     if (e.key === "/") { e.preventDefault(); openPalette(); }
     else if (e.key === "?") { closeModals(); $("#scrim").classList.add("on"); $("#helpm").classList.add("on"); }
     else if (/^[0-9]$/.test(e.key) && VIEWS[(+e.key + 9) % 10]) go(VIEWS[(+e.key + 9) % 10].id);
+    else if (e.key === "R") fullRefresh();
     else if (e.key === "r") load(true);
-    else if (e.key === " ") { e.preventDefault(); setLive(!S.live); }
+    else if (e.key === " ") { e.preventDefault(); if ((S.view === "music" || S.view === "desk") && NY.music && NY.music.toggle()) return; setLive(!S.live); }
     else if (e.key === "t") cycleTheme();
   });
   window.addEventListener("hashchange", applyRoute);
@@ -1161,6 +1224,7 @@
   });
   $("#searchbtn").addEventListener("click", openPalette);
   $("#refresh").addEventListener("click", () => load(true));
+  $("#fullrefresh").addEventListener("click", fullRefresh);
   $("#theme").addEventListener("click", cycleTheme);
   $("#helpbtn").addEventListener("click", () => { closeModals(); $("#scrim").classList.add("on"); $("#helpm").classList.add("on"); $("#helpm").focus(); });
   $("#live").addEventListener("click", () => setLive(!S.live));

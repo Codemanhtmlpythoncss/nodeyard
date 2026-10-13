@@ -45,6 +45,9 @@ PLUGINS = [
     ("terminal", "Terminals", "Interactive shells on this server (as the terminal user), on every cluster node through Kubernetes "
      "(as that user or root) and on Tailscale devices over SSH, over Tailscale or your own network only.",
      ["dashboard", "Mac app"], "full shell (you type every command; node shells can be root)", True, ["/api/term/"], []),
+    ("homelab", "Homelab tools", "Watches your services (HTTP, TCP, ping) with uptime and certificate expiry, sends alerts to your own webhook, "
+     "wakes machines with Wake-on-LAN, runs network diagnostics from this server and serves Prometheus metrics.",
+     ["dashboard", "Prometheus"], "checks addresses you add; sends only to the webhook you set", True, ["/api/homelab/", "/api/v1/metrics", "/api/v1/services"], []),
     ("devices", "Device connections", "Finds each machine's Wi-Fi/LAN and Tailscale addresses and checks them; per-device overrides.",
      ["dashboard", "Mac app"], "read-only checks; settings change only how devices are reached", True, ["/api/devices/"], []),
     ("models", "Model management", "Downloads, runs, switches, unloads and deletes models (split llama.cpp and Ollama), and automatic unloading.",
@@ -246,8 +249,10 @@ def register(ctx, args):
                 return h._json({"ok": False, "error": "%s is turned off in Settings › Plugins." % BY_ID[pid][1], "plugin": pid}, 403)
             if not post:
                 return fn(h, arg)
-            if path in ("/api/music/history", "/api/music/playback"):
-                return fn(h, arg)  # high-frequency player state and history updates aren't useful audit entries
+            if path in ("/api/music/history", "/api/music/playback", "/api/term/input", "/api/term/resize"):
+                # high-frequency player state, history, keystrokes and window sizes aren't useful audit entries, and
+                # writing the log for every key typed in a terminal slowed typing (opening a terminal is still logged)
+                return fn(h, arg)
             seen = {}
             real = h._json
 

@@ -8,6 +8,7 @@ import http.client
 import json
 import threading
 import time
+import zlib
 
 AGENT_NS = "nodeyard-system"
 AGENT_LABEL = ("app", "nodeyard-agent")
@@ -93,6 +94,7 @@ class AgentPoller:
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
         self.lock = threading.Lock()
         self.payloads = {}      # node -> full payload
+        self.conns = {}         # agent address -> {"lock", "conn"}: kept alive between reads
         self.oom_base = {}      # node -> oom_kill count when first seen
         self.installed = False
         self.fallback = None    # node name -> other verified addresses (connections.py), tried when the pod IP doesn't answer
@@ -104,18 +106,42 @@ class AgentPoller:
         except OSError:
             return ""
 
+    def reset(self):
+        """Full refresh: drop the kept-alive connections to the agents (a rebooted node's agent is a new process)."""
+        with self.lock:
+            conns, self.conns = self.conns, {}
+        for slot in conns.values():
+            if slot.get("conn") is not None:
+                slot["conn"].close()
+
     def _fetch(self, ip, token):
-        conn = http.client.HTTPConnection(ip, AGENT_PORT, timeout=3)
-        try:
-            conn.request("GET", "/metrics.json", headers={"X-Agent-Token": token})
-            resp = conn.getresponse()
-            if resp.status != 200:
-                return None
-            return json.loads(resp.read(8 * 1024 * 1024))
-        except (OSError, ValueError, http.client.HTTPException):
+        """The agent's numbers over a kept-alive connection to it (one per address), compressed when the agent can."""
+        with self.lock:
+            slot = self.conns.setdefault(ip, {"lock": threading.Lock(), "conn": None})
+        with slot["lock"]:
+            for attempt in (0, 1):
+                conn = slot["conn"]
+                reused = conn is not None
+                if conn is None:
+                    conn = slot["conn"] = http.client.HTTPConnection(ip, AGENT_PORT, timeout=3)
+                try:
+                    conn.request("GET", "/metrics.json", headers={"X-Agent-Token": token, "Accept-Encoding": "gzip"})
+                    resp = conn.getresponse()
+                    body = resp.read(8 * 1024 * 1024)
+                    if resp.will_close or not resp.isclosed():
+                        conn.close()
+                        slot["conn"] = None
+                    if resp.status != 200:
+                        return None
+                    if resp.getheader("Content-Encoding", "") == "gzip":
+                        body = zlib.decompress(body, 31)
+                    return json.loads(body)
+                except (OSError, ValueError, zlib.error, http.client.HTTPException):
+                    conn.close()
+                    slot["conn"] = None
+                    if not (reused and attempt == 0):    # an idle connection the agent had closed: try a fresh one once
+                        return None
             return None
-        finally:
-            conn.close()
 
     def _fetch_any(self, node, ip, token):
         """The agent through its pod address, else through the node's other verified addresses (e.g. Tailscale)."""

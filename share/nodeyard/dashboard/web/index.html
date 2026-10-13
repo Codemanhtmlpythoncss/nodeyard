@@ -7,6 +7,11 @@
 <meta name="referrer" content="no-referrer">
 <title>nodeyard dashboard</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%237c8cff'/%3E%3Cstop offset='1' stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cg stroke='white' stroke-width='2' stroke-linecap='round' fill='none'%3E%3Ccircle cx='9' cy='10' r='2.4'/%3E%3Ccircle cx='23' cy='12' r='2.4'/%3E%3Ccircle cx='13' cy='23' r='2.4'/%3E%3Cpath d='M11 10.5l10 1.2M10 12.4l2 8.2M21.8 14l-7 7.2'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="theme-color" content="#0b1020">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="nodeyard">
 <link rel="stylesheet" href="style.css">
 <script src="theme.js"></script>
 </head>
@@ -27,6 +32,8 @@
     <symbol id="i-events" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
     <symbol id="i-alerts" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/></symbol>
     <symbol id="i-hardware" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/><rect x="9.5" y="9.5" width="5" height="5" rx=".5"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></symbol>
+    <symbol id="i-services" viewBox="0 0 24 24"><path d="M3 12h4l2-5 4 10 2-5h6"/><circle cx="12" cy="12" r="10" opacity=".35"/></symbol>
+    <symbol id="i-tools" viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L3 17.8V21h3.2l6.3-6.3a4 4 0 0 0 5.2-5.4l-2.6 2.6-2.4-.5-.5-2.4z"/></symbol>
     <symbol id="i-commands" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h13"/><path d="m17 10 3 2-3 2"/></symbol>
     <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M12 15h5"/></symbol>
     <symbol id="i-doctor" viewBox="0 0 24 24"><path d="M3 12h4l2-5 4 10 2-5h6"/><circle cx="12" cy="12" r="10" opacity=".35"/></symbol>
@@ -40,6 +47,7 @@
     <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
     <symbol id="i-zip" viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M10 5h2M10 8h2M10 11h2M10 14h2v3h-2z"/></symbol>
     <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></symbol>
+    <symbol id="i-reset" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12.5 7.5 10 12h4l-2.5 4.5"/></symbol>
     <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
     <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></symbol>
     <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
@@ -77,6 +85,7 @@
       <button class="btn device-toggle" id="devsbtn" aria-label="Toggle device monitoring" aria-pressed="true" title="Toggle device monitoring (D)"><svg class="icon"><use href="#i-hardware"/></svg><span>Devices</span></button>
       <span class="pill" id="status" role="status" aria-live="polite" aria-atomic="true"><i class="dot"></i><span>Connecting…</span></span>
       <button class="btn icon-only" id="refresh" aria-label="Refresh now" title="Refresh now (r)"><svg class="icon"><use href="#i-refresh"/></svg></button>
+      <button class="btn icon-only" id="fullrefresh" aria-label="Full refresh" title="Full refresh (Shift+R): clear the dashboard's caches, re-check every node and the AI model (reloading it if it's broken), then reload the page"><svg class="icon"><use href="#i-reset"/></svg></button>
       <a class="btn icon-only" id="export" href="/api/export" download aria-label="Download a JSON snapshot" title="Download a JSON snapshot"><svg class="icon"><use href="#i-download"/></svg></a>
       <button class="btn icon-only" id="theme" aria-label="Switch theme" title="Switch theme (t)"><svg class="icon"><use href="#i-moon"/></svg></button>
     </header>
@@ -95,6 +104,7 @@
     <button class="btn" type="button" data-mobile-export><svg class="icon"><use href="#i-download"/></svg>Export snapshot</button>
     <button class="btn" type="button" data-mobile-live role="switch" aria-checked="true"><span class="dot good"></span><span>Live updates on</span></button>
     <button class="btn" type="button" data-mobile-refresh><svg class="icon"><use href="#i-refresh"/></svg>Refresh now</button>
+    <button class="btn" type="button" data-mobile-fullrefresh><svg class="icon"><use href="#i-reset"/></svg>Full refresh</button>
     <label class="mobile-refresh">Refresh interval<select class="select" id="mobile-interval" aria-label="Refresh interval"><option value="2">2 seconds</option><option value="5">5 seconds</option><option value="10">10 seconds</option><option value="30">30 seconds</option></select></label>
     <button class="btn" type="button" data-mobile-help>Keyboard shortcuts</button>
     <button class="btn hide" type="button" data-mobile-signout>Sign out</button>
@@ -108,15 +118,22 @@
   <h3>Keyboard shortcuts</h3>
   <dl>
     <dt><span class="kbd">Ctrl K</span> or <span class="kbd">/</span></dt><dd>Search everything: nodes, pods, services, IP addresses</dd>
-    <dt><span class="kbd">1</span> – <span class="kbd">0</span></dt><dd>Jump to Overview, Nodes, Processes, Pods, Workloads, Network, Storage, AI, Events, Alerts</dd>
+    <dt><span class="kbd">1</span> – <span class="kbd">0</span></dt><dd>Jump to Overview, Nodes, Processes, Pods, Workloads, Network, Storage, Hardware, AI, AI galaxy</dd>
     <dt><span class="kbd">r</span></dt><dd>Refresh now</dd>
+    <dt><span class="kbd">Shift R</span></dt><dd>Full refresh: clear every cache, re-check the nodes and the AI model (it's reloaded if it can't answer, e.g. after a power cut), then reload the page</dd>
     <dt><span class="kbd">d</span></dt><dd>Toggle the Devices sidebar</dd>
-    <dt><span class="kbd">Space</span></dt><dd>Pause or resume live updates</dd>
+    <dt><span class="kbd">Space</span></dt><dd>Pause or resume live updates (on Music and Desk: play or pause the music)</dd>
+    <dt><span class="kbd">←</span> <span class="kbd">→</span></dt><dd>On Music: skip back or forward 10 seconds; with <span class="kbd">Shift</span>, the previous or next song</dd>
+    <dt><span class="kbd">m</span></dt><dd>On Music and Desk: mute or unmute</dd>
     <dt><span class="kbd">t</span></dt><dd>Switch between dark, light and automatic theme</dd>
     <dt><span class="kbd">Esc</span></dt><dd>Close this panel, the details drawer or search</dd>
   </dl>
   <p class="muted" style="margin:16px 0 0;font-size:12.5px">Actions that change cluster state ask for confirmation. The Devices sidebar stays read-only.</p>
 </div></div>
+<div class="modal" id="fullm" role="dialog" aria-label="Full refresh" tabindex="-1">
+  <div class="modal-head"><b>Full refresh</b><span class="spacer"></span><button class="btn small" data-act="full-close">Close</button></div>
+  <div class="modal-body" id="fullbody"></div>
+</div>
 <div class="modal wide" id="jobm" role="dialog" aria-label="Task">
   <div class="modal-head"><b id="jobtitle">Task</b><span id="jobstatus"></span><span class="spacer"></span><button class="btn small danger hide" id="jobcancel" data-act="job-cancel">Cancel</button><button class="btn small" data-act="job-close">Close</button></div>
   <div class="modal-body" id="jobbody"></div>
@@ -139,6 +156,7 @@
 <script src="apis.js"></script>
 <script src="music.js"></script>
 <script src="desk.js"></script>
+<script src="homelab.js"></script>
 <script src="plugins.js"></script>
 <script src="guide.js"></script>
 <script src="hardware.js"></script>

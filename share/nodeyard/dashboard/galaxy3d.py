@@ -20,6 +20,7 @@ import threading
 import time
 
 import connections
+from httpcache import STATIC
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, "galaxy3d")
@@ -410,11 +411,20 @@ def register(ctx, args):
     g = Galaxy3D(ctx, args)
     ctx.galaxy3d = g
 
+    def cached(h, f, cache):
+        """A file from memory (compressed once), or 304 when the browser's copy is current."""
+        if f["etag"] in [t.strip() for t in h.headers.get("If-None-Match", "").split(",")]:
+            h.send_response(304)
+            for k, v in (("ETag", f["etag"]), ("Cache-Control", cache), ("Vary", "Accept-Encoding")):
+                h.send_header(k, v)
+            h.end_headers()
+            return
+        h._send(200, f["body"], f["ctype"], {"ETag": f["etag"], "Cache-Control": cache}, gz=f["gzip"])
+
     def page(h, q):
         path = h.path.split("?", 1)[0]
         name = PAGES.get(path, "wall")
-        with open(os.path.join(ROOT, "pages", name + ".html"), "rb") as f:
-            h._send(200, f.read(), "text/html; charset=utf-8")
+        cached(h, STATIC.get(os.path.join(ROOT, "pages", name + ".html"), "text/html; charset=utf-8"), "no-cache")
 
     def static(h, path, q):
         full = os.path.realpath(os.path.join(ROOT, "static", path[len("/g3/static/"):]))
@@ -424,8 +434,8 @@ def register(ctx, args):
         ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
         if full.endswith(".js"):
             ctype = "text/javascript; charset=utf-8"
-        with open(full, "rb") as f:
-            h._send(200, f.read(), ctype, {"Cache-Control": "private, max-age=3600"})
+        # three.js and friends are pinned copies: keep them a week; our own files an hour (then a cheap 304)
+        cached(h, STATIC.get(full, ctype), "private, max-age=604800" if "/vendor/" in full else "private, max-age=3600")
 
     def stream(body_fn, key_fn):
         def route(h, q):

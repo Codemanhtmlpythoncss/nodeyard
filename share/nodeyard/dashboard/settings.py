@@ -6,6 +6,7 @@ service are handed to systemd so the restart doesn't cut this request off.
 The page's own preferences (background, blur, dim) live in --state-dir.
 """
 import base64
+import copy
 import ipaddress
 import json
 import math
@@ -92,6 +93,8 @@ class Settings:
         self.public_cache = None
         self.commands_cache = None
         self.weak_cache = None
+        self._prefs_cache = None
+        self._swr_busy = set()
 
     # -- the page's own preferences ---------------------------------------------
 
@@ -99,12 +102,52 @@ class Settings:
         return os.path.join(self.dir, "prefs.json")
 
     def prefs(self):
+        """The saved preferences. Every plugin-guarded request asks (each terminal keystroke, each music save), so the
+        file is parsed again only when it changed on disk; callers get their own copy to change."""
+        path = self._prefs_path()
         try:
-            with open(self._prefs_path(), "r", encoding="utf-8") as f:
-                p = json.load(f)
-            return p if isinstance(p, dict) else {}
-        except (OSError, ValueError):
+            st = os.stat(path)
+            key = (st.st_mtime_ns, st.st_size)
+        except OSError:
             return {}
+        hit = self._prefs_cache
+        if hit is None or hit[0] != key:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    p = json.load(f)
+            except (OSError, ValueError):
+                return {}
+            hit = self._prefs_cache = (key, p if isinstance(p, dict) else {})
+        return copy.deepcopy(hit[1])
+
+    def _fresh_enough(self, name, ttl, compute):
+        """A value from a slow `nodeyard` command (it starts a bash program each time: a second or two on a small
+        control node). The last answer comes back at once and is looked up again in the background once older than
+        ttl; only the very first look (or one after a change cleared it) waits."""
+        with self.lock:
+            hit = getattr(self, name)
+            if hit and time.time() - hit[0] < ttl:
+                return hit[1]
+            if hit:
+                if name not in self._swr_busy:
+                    self._swr_busy.add(name)
+                    threading.Thread(target=self._refresh_value, args=(name, compute), daemon=True).start()
+                return hit[1]
+        val = compute()
+        with self.lock:
+            setattr(self, name, (time.time(), val))
+        return val
+
+    def _refresh_value(self, name, compute):
+        try:
+            val = compute()
+            with self.lock:
+                setattr(self, name, (time.time(), val))
+        except Exception:  # noqa: BLE001 -- keep the last answer
+            pass
+        finally:
+            with self.lock:
+                self._swr_busy.discard(name)
 
     def _save_prefs(self, p):
         os.makedirs(self.dir, mode=0o700, exist_ok=True)
@@ -112,6 +155,7 @@ class Settings:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(p, f)
         os.replace(tmp, self._prefs_path())
+        self._prefs_cache = None
 
     @staticmethod
     def _clean_chat_defaults(value):
@@ -270,20 +314,17 @@ class Settings:
         return {"password": pw} if body.get("random") is True else {}
 
     def weak_ok(self):
-        """`dashboard.weak-password` in the cluster config (cached for 30 s)."""
+        """`dashboard.weak-password` in the cluster config (refreshed in the background every 30 s)."""
         if self.demo:
             return bool(getattr(self, "_demo_weak", False))
-        with self.lock:
-            if self.weak_cache and time.time() - self.weak_cache[0] < 30:
-                return self.weak_cache[1]
+        return self._fresh_enough("weak_cache", 30, self._weak_lookup)
+
+    def _weak_lookup(self):
         try:
             rc, out = self._run(["config", "get", "dashboard.weak-password"], timeout=20)
-            val = rc == 0 and out.strip().splitlines()[-1:] == ["true"]
+            return rc == 0 and out.strip().splitlines()[-1:] == ["true"]
         except SettingsError:
-            val = False
-        with self.lock:
-            self.weak_cache = (time.time(), val)
-        return val
+            return False
 
     def set_weak(self, body):
         on = body.get("on") is True
@@ -374,19 +415,22 @@ class Settings:
         """{'name', 'dashboard': url|None, 'api': url|None} from `nodeyard public status --json` (30 s cache)."""
         if self.demo:
             return {"name": "yard-1.tail1234.ts.net", "dashboard": None, "api": "https://yard-1.tail1234.ts.net:10000/v1", "available": True}
-        with self.lock:
-            if self.public_cache and time.time() - self.public_cache[0] < 30:
-                return self.public_cache[1]
+        return self._fresh_enough("public_cache", 30, self._public_lookup)
+
+    def _public_lookup(self):
         try:
             rc, out = self._run(["public", "status", "--json"], timeout=20)
             data = json.loads([x for x in out.splitlines() if x.startswith("{")][-1]) if rc == 0 else None
         except (SettingsError, ValueError, IndexError):
             data = None
-        st = {"name": data.get("name"), "dashboard": data.get("dashboard"), "api": data.get("api"), "available": True} if isinstance(data, dict) \
+        return {"name": data.get("name"), "dashboard": data.get("dashboard"), "api": data.get("api"), "available": True} if isinstance(data, dict) \
             else {"name": None, "dashboard": None, "api": None, "available": False}
+
+    def reset(self):
+        """Full refresh: forget the answers of the slow `nodeyard` commands and the parsed preferences."""
         with self.lock:
-            self.public_cache = (time.time(), st)
-        return st
+            self.weak_cache = self.public_cache = self.doctor_cache = self.commands_cache = None
+            self._prefs_cache = None
 
     def forget_public(self):
         with self.lock:
@@ -672,6 +716,8 @@ class Settings:
 def register(ctx, args):
     s = Settings(ctx, args)
     ctx.settings = s
+    if not s.demo:   # ask the slow `nodeyard` commands now, so the first page load finds the answers ready
+        threading.Thread(target=lambda: (s.weak_ok(), s.public_state()), daemon=True).start()
 
     def wrap(fn):
         def route(h, arg):

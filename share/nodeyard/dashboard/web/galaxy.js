@@ -36,8 +36,11 @@
     }
     reset() {}
     start() { this.on = true; this.reset(); this.frame(0); if (!still()) this.go(); return this; }
-    go() { if (this.raf || document.hidden) return; this.prev = performance.now(); const tick = (now) => { this.raf = 0; if (!this.c.isConnected) { this.destroy(); return; } const dt = Math.min(0.1, (now - this.prev) / 1000); if (dt >= 1 / this.o.fps - 0.004) { this.prev = now; this.t += dt; this.frame(dt); } this.raf = requestAnimationFrame(tick); }; this.raf = requestAnimationFrame(tick); }
-    halt() { if (this.raf) cancelAnimationFrame(this.raf); this.raf = 0; }
+    go() { if (this.raf || document.hidden) return; this.prev = performance.now(); const tick = (now) => { this.raf = 0; if (!this.c.isConnected) { this.destroy(); return; }
+      // the full-page AI Galaxy hides the wallpaper completely: don't draw it underneath (look again twice a second)
+      if (this.c.closest("#ny-bg") && document.body.classList.contains("galaxy-mode")) { this.raf = setTimeout(() => { this.raf = 0; this.go(); }, 500); this.prev = performance.now(); return; }
+      const dt = Math.min(0.1, (now - this.prev) / 1000); if (dt >= 1 / this.o.fps - 0.004) { this.prev = now; this.t += dt; this.frame(dt); } this.raf = requestAnimationFrame(tick); }; this.raf = requestAnimationFrame(tick); }
+    halt() { if (this.raf) { cancelAnimationFrame(this.raf); clearTimeout(this.raf); } this.raf = 0; }
     destroy() { this.on = false; this.halt(); window.removeEventListener("resize", this._resize); document.removeEventListener("visibilitychange", this._vis); }
     backdrop() {
       const ctx = this.ctx, g = ctx.createRadialGradient(this.w * 0.5, this.h * 0.45, 0, this.w * 0.5, this.h * 0.5, Math.max(this.w, this.h) * 0.75);
@@ -461,11 +464,13 @@
         ", network down " + speed(n.rx) + " up " + speed(n.tx) + (n.gpus[0] ? ", GPU " + (n.gpus[0].name || "") + " " + pct(n.gpus[0].use) : "") + ", " + n.pods + " pods" : ""));
     const bad = (d.pods || []).filter((p) => p.status !== "Running" && !/Succeeded|Completed/.test(p.status)).slice(0, 8).map((p) => p.namespace + "/" + p.name + " " + p.status + " on " + (p.node || "no node"));
     const alerts = ((S.res && S.res.alerts) || []).slice(0, 6).map((x) => x.level + ": " + x.title);
-    return "You are the AI helper on the AI galaxy display of the user's home Kubernetes (k3s) cluster, run with nodeyard. Answer in 1 to 4 short, plain sentences. Use the live state below; if the answer isn't in it, say so.\n" +
-      "Now: " + new Date().toLocaleString() + ". Cluster " + ((d.cluster && d.cluster.name) || "") + ".\nNodes:\n" + lines.join("\n") +
+    return "Now: " + new Date().toLocaleString() + ". Cluster " + ((d.cluster && d.cluster.name) || "") + ".\nNodes:\n" + lines.join("\n") +
       "\nModel: " + (sp ? (sp.alias || sp.model) + (sp.loaded === false ? " (unloaded)" : sp.ready ? " (ready)" : " (loading)") + " split over " + Array.from(new Set((sp.shares || []).map((s) => s.node))).join(", ") : "none") +
       (bad.length ? "\nPods not running: " + bad.join("; ") : "") + (alerts.length ? "\nAlerts: " + alerts.join("; ") : "");
   }
+  // The instructions never change, so the model keeps them read (its prompt cache); the live numbers go with each question.
+  const ASK_SYSTEM = "You are the AI helper on the AI galaxy display of the user's home Kubernetes (k3s) cluster, run with nodeyard. " +
+    "Answer in 1 to 4 short, plain sentences. Each question comes with the cluster's live state; use it, and if the answer isn't in it, say so.";
   async function pickTarget() {
     if (G.target) return G.target;
     try { const r = await getJSON("/api/ai/targets"); const ts = (r.targets || []).filter((t) => t.ready); const t = ts.find((x) => x.id === "split") || ts[0]; G.target = t ? t.id : ""; } catch (e) { G.target = ""; }
@@ -485,7 +490,9 @@
     const target = await pickTarget();
     A.q = q; A.text = ""; A.wait = "Thinking…"; A.busy = true; A.ctrl = new AbortController(); paintAnswer();
     if (!target) { A.busy = false; A.text = "No model is ready to answer. Start one in AI › Models."; paintAnswer(); return; }
-    const messages = [{ role: "system", content: brief() }].concat(A.history.slice(-4), [{ role: "user", content: q }]);
+    // history moves in steps of two exchanges (not one), so the start of the prompt stays the same between questions
+    const keep = A.history.length <= 6 ? A.history : A.history.slice(-4 - (A.history.length % 4));
+    const messages = [{ role: "system", content: ASK_SYSTEM }].concat(keep, [{ role: "user", content: "Live cluster state:\n" + brief() + "\n\nQuestion: " + q }]);
     try {
       const r = await fetch("/api/ai/chat", { method: "POST", signal: A.ctrl.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ target, messages, temperature: 0.3, max_tokens: 400 }) });
       if (!r.ok) { let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ } throw new Error(j.error || "The model didn't answer (HTTP " + r.status + ")."); }
@@ -503,7 +510,7 @@
           if (dl && dl.content) { A.text += dl.content.replace(/<\/?think>/g, ""); paintAnswer(); }
         }
       }
-      A.history.push({ role: "user", content: q }, { role: "assistant", content: A.text }); A.history = A.history.slice(-6);
+      A.history.push({ role: "user", content: q }, { role: "assistant", content: A.text }); if (A.history.length > 10) A.history = A.history.slice(-4);
     } catch (e) {
       if (e.name !== "AbortError") A.text = (A.text ? A.text + "\n\n" : "") + "⚠ " + (e.message || "Something went wrong.");
     } finally { A.busy = false; paintAnswer(); }
@@ -511,10 +518,13 @@
 
   V.galaxy = {
     build() {
-      NY.freshHTML($("#view"), html`<div class="galaxy-embed"><iframe src="/g3/embed" title="AI Galaxy" allow="fullscreen"></iframe></div>`);
+      // the whole page (not the browser's full screen): the dashboard's player bar stays on top, so music keeps playing
+      NY.freshHTML($("#view"), html`<div class="galaxy-embed"><iframe src="/g3/embed" title="AI Galaxy" allow="fullscreen"></iframe>
+        <button type="button" class="galaxy-exit" data-galaxy-exit title="Back to the dashboard">← Dashboard</button></div>`);
     },
     update() {},
   };
+  document.addEventListener("click", (e) => { if (e.target.closest("[data-galaxy-exit]")) NY.ui.go(NY.ui.S.prevView && NY.ui.S.prevView !== "galaxy" ? NY.ui.S.prevView : "overview"); });
   document.addEventListener("submit", (e) => { if (e.target.id === "ux-ask") { e.preventDefault(); const q = $("#ux-q"); ask(q.value); if (!G.ask.busy) q.value = ""; else q.value = ""; } });
   document.addEventListener("click", (e) => {
     const nodeCard = e.target.closest("[data-gx-node]");

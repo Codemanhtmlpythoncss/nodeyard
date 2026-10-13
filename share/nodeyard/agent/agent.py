@@ -18,6 +18,7 @@ import socket
 import sys
 import threading
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PAGE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
@@ -584,10 +585,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
-    def _send(self, code, body, ctype="application/json"):
+    def _send(self, code, body, ctype="application/json", gz=None):
         data = body.encode() if isinstance(body, str) else body
+        if gz is not None and "gzip" in self.headers.get("Accept-Encoding", ""):
+            data = gz
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        if data is gz:
+            self.send_header("Content-Encoding", "gzip")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -605,7 +610,13 @@ class Handler(BaseHTTPRequestHandler):
         snap = self.server.agent.get()
         if snap is None:
             return self._send(503, '{"error":"warming up"}')
-        self._send(200, json.dumps(snap, separators=(",", ":")))
+        # the same snapshot is asked for by the dashboard every few seconds: encode and compress it once
+        cached = self.server.encoded
+        if cached[0] is not snap:
+            body = json.dumps(snap, separators=(",", ":")).encode()
+            z = zlib.compressobj(5, zlib.DEFLATED, 31)
+            cached = self.server.encoded = (snap, body, z.compress(body) + z.flush())
+        self._send(200, cached[1], gz=cached[2])
 
     def do_POST(self):
         self._send(405, '{"error":"read-only"}')
@@ -627,6 +638,7 @@ def main():
     stop = threading.Event()
     threading.Thread(target=agent.loop, args=(stop,), daemon=True).start()
     srv = ThreadingHTTPServer(("0.0.0.0", a.port), Handler)
+    srv.encoded = (None, b"", b"")
     srv.daemon_threads = True
     srv.agent, srv.token = agent, token
     print("nodeyard agent for %s listening on :%d" % (agent.node, a.port), flush=True)

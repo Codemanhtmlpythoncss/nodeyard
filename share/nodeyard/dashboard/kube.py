@@ -6,6 +6,7 @@ only ever issues GET requests.
 """
 import base64
 import concurrent.futures
+import functools
 import http.client
 import json
 import os
@@ -26,26 +27,37 @@ _SUFFIX = {
 _QTY = re.compile(r"^([0-9]*\.?[0-9]+)([A-Za-z]*)$")
 
 
-def parse_quantity(q):
-    """A Kubernetes quantity ("250m", "4", "16244588Ki", "123456789n") as a float."""
-    if q is None:
-        return 0.0
-    m = _QTY.match(str(q).strip())
+@functools.lru_cache(maxsize=4096)
+def _quantity(q):
+    m = _QTY.match(q.strip())
     if not m:
         return 0.0
     num, suffix = float(m.group(1)), m.group(2)
     return num * _SUFFIX.get(suffix, 1) if suffix else num
 
 
-def parse_time(ts):
-    """An RFC 3339 timestamp as epoch seconds (0 if it can't be read)."""
-    if not ts:
+def parse_quantity(q):
+    """A Kubernetes quantity ("250m", "4", "16244588Ki", "123456789n") as a float."""
+    if q is None:
         return 0.0
+    return _quantity(str(q))   # (memoised: every read parses the same capacities again)
+
+
+@functools.lru_cache(maxsize=16384)
+def _time(ts):
     try:
-        base = re.sub(r"\.\d+", "", str(ts)).replace("Z", "+0000")
+        base = re.sub(r"\.\d+", "", ts).replace("Z", "+0000")
         return datetime.strptime(base, "%Y-%m-%dT%H:%M:%S%z").timestamp()
     except ValueError:
         return 0.0
+
+
+def parse_time(ts):
+    """An RFC 3339 timestamp as epoch seconds (0 if it can't be read). Memoised: every read of the cluster parses
+    the same few thousand creation and transition times again, and strptime is slow."""
+    if not ts:
+        return 0.0
+    return _time(str(ts))
 
 
 # --------------------------------------------------------------------------- client
@@ -115,20 +127,42 @@ class KubeClient:
                     except OSError:
                         pass
         self.ctx = ctx
+        self._local = threading.local()
+        self.gen = 0          # bumped by reset(): every thread then opens a fresh connection
 
     def get(self, path, timeout=None, raw=False):
-        conn = http.client.HTTPSConnection(self.host, self.port, context=self.ctx, timeout=timeout or self.timeout)
+        """One GET over this thread's kept-alive connection: every read of the cluster makes ~20 requests, and a new
+        TLS handshake for each one cost more than most of the answers."""
+        timeout = timeout or self.timeout
         headers = {"Accept": "application/json", "User-Agent": "nodeyard-dashboard"}
         if self.token:
             headers["Authorization"] = "Bearer " + self.token
-        try:
-            conn.request("GET", path, headers=headers)
-            resp = conn.getresponse()
-            body = resp.read(8 * 1024 * 1024)
-        except (OSError, http.client.HTTPException, ssl.SSLError) as e:
-            raise KubeError("%s: %s" % (path, e))
-        finally:
-            conn.close()
+        if getattr(self._local, "gen", None) != self.gen:
+            old = getattr(self._local, "conn", None)
+            if old is not None:
+                old.close()
+            self._local.conn, self._local.gen = None, self.gen
+        for attempt in (0, 1):
+            conn = getattr(self._local, "conn", None)
+            reused = conn is not None
+            if conn is None:
+                conn = self._local.conn = http.client.HTTPSConnection(self.host, self.port, context=self.ctx, timeout=timeout)
+            elif conn.sock is not None:
+                conn.sock.settimeout(timeout)
+            try:
+                conn.request("GET", path, headers=headers)
+                resp = conn.getresponse()
+                body = resp.read(8 * 1024 * 1024)
+                if resp.will_close or not resp.isclosed():   # closing, or more than we read: start afresh next time
+                    conn.close()
+                    self._local.conn = None
+                break
+            except (OSError, http.client.HTTPException, ssl.SSLError) as e:
+                conn.close()
+                self._local.conn = None
+                if reused and attempt == 0:
+                    continue        # the server closed an idle connection: once more on a new one
+                raise KubeError("%s: %s" % (path, e))
         if resp.status >= 400:
             raise KubeError("%s: HTTP %d" % (path, resp.status))
         if raw:
@@ -272,6 +306,15 @@ def gpu_progress(state):
         ld["phase"] = "warming up" if ld["pct"] >= 99.5 else "loading"
 
 
+def _started(item, container):
+    """When a pod's container last started running (0 if it isn't running)."""
+    for cs in (item.get("status") or {}).get("containerStatuses") or []:
+        if cs.get("name") == container:
+            run = (cs.get("state") or {}).get("running")
+            return parse_time(run.get("startedAt")) if run else 0.0
+    return 0.0
+
+
 def parse_bench(cm):
     """The ConfigMap `nodeyard hw bench` fills: {node: results}."""
     out = {}
@@ -297,29 +340,47 @@ class KubeSource:
         self.lock = threading.Lock()
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
+    def reset(self):
+        """Full refresh: forget every kept list, kubelet reading and connection, so the next read asks for all of it."""
+        self.__dict__.get("raw_cache", {}).clear()
+        self.summary_cache.clear()
+        self.client.gen += 1
+
     def _try(self, path, timeout=None):
         try:
             return self.client.get(path, timeout=timeout), None
         except KubeError as e:
             return None, str(e)
 
+    # What a read of the cluster asks for, and how often (seconds; 0 = every read). Lists that rarely change are read
+    # less often and reused in between. resourceVersion=0 lets the API server answer from its in-memory cache
+    # instead of the datastore (k3s's SQLite), which is much quicker and lighter on the control node.
+    PATHS = {
+        "version": ("/version", 60), "nodes": ("/api/v1/nodes?resourceVersion=0", 0), "pods": ("/api/v1/pods?resourceVersion=0", 0),
+        "deployments": ("/apis/apps/v1/deployments?resourceVersion=0", 0), "daemonsets": ("/apis/apps/v1/daemonsets?resourceVersion=0", 0),
+        "statefulsets": ("/apis/apps/v1/statefulsets?resourceVersion=0", 0), "jobs": ("/apis/batch/v1/jobs?resourceVersion=0", 0),
+        "cronjobs": ("/apis/batch/v1/cronjobs?resourceVersion=0", 30), "services": ("/api/v1/services?resourceVersion=0", 10),
+        "endpoints": ("/api/v1/endpoints?resourceVersion=0", 10), "ingresses": ("/apis/networking.k8s.io/v1/ingresses?resourceVersion=0", 30),
+        "pvcs": ("/api/v1/persistentvolumeclaims?resourceVersion=0", 30), "pvs": ("/api/v1/persistentvolumes?resourceVersion=0", 30),
+        "events": ("/api/v1/events?limit=400", 6), "namespaces": ("/api/v1/namespaces?resourceVersion=0", 30),
+        "bench": ("/api/v1/namespaces/nodeyard-system/configmaps/nodeyard-bench", 30),
+    }
+
     def collect(self):
         errors = []
-        paths = {
-            "version": "/version", "nodes": "/api/v1/nodes", "pods": "/api/v1/pods?limit=2000",
-            "deployments": "/apis/apps/v1/deployments", "daemonsets": "/apis/apps/v1/daemonsets",
-            "statefulsets": "/apis/apps/v1/statefulsets", "jobs": "/apis/batch/v1/jobs",
-            "cronjobs": "/apis/batch/v1/cronjobs", "services": "/api/v1/services",
-            "endpoints": "/api/v1/endpoints", "ingresses": "/apis/networking.k8s.io/v1/ingresses",
-            "pvcs": "/api/v1/persistentvolumeclaims", "pvs": "/api/v1/persistentvolumes",
-            "events": "/api/v1/events?limit=400", "namespaces": "/api/v1/namespaces",
-            "bench": "/api/v1/namespaces/nodeyard-system/configmaps/nodeyard-bench",
-        }
-        futures = {k: self.pool.submit(self._try, p) for k, p in paths.items()}
+        now = time.time()
+        cache = self.__dict__.setdefault("raw_cache", {})      # key -> (time read, data)
+        due = {k: p for k, (p, every) in self.PATHS.items() if not every or k not in cache or now - cache[k][0] >= every}
+        futures = {k: self.pool.submit(self._try, p) for k, p in due.items()}
         raw = {}
-        for k, fut in futures.items():
-            data, err = fut.result()
+        for k in self.PATHS:
+            if k not in futures:
+                raw[k] = cache[k][1]
+                continue
+            data, err = futures[k].result()
             raw[k] = data or {}
+            if data is not None or k == "bench":
+                cache[k] = (now, raw[k])              # (a failed read is tried again next time)
             if err and k != "bench":  # no speed test run yet is normal
                 errors.append(err)
         if not raw["nodes"]:
@@ -337,13 +398,16 @@ class KubeSource:
                 cpu_n = (sp.get("cpu") or {}).get("usageNanoCores")
                 mem = sp.get("memory") or {}
                 pod_usage[(ref.get("namespace", ""), ref.get("name", ""))] = (
-                    cpu_n / 1e9 if cpu_n is not None else None, mem.get("workingSetBytes"), mem.get("rssBytes"))
+                    round(cpu_n / 1e9, 4) if cpu_n is not None else None, mem.get("workingSetBytes"), mem.get("rssBytes"))
         missing = [n for n in node_names if n not in summaries]
         if missing:
             errors.append("Couldn't read usage from: %s" % ", ".join(missing))
 
         pods = [build_pod(p, pod_usage) for p in raw["pods"].get("items", [])]
-        nodes = [self._build_node(n, {}, summaries, pods) for n in raw["nodes"].get("items", [])]
+        by_node = {}
+        for p in pods:
+            by_node.setdefault(p["node"], []).append(p)
+        nodes = [self._build_node(n, {}, summaries, by_node) for n in raw["nodes"].get("items", [])]
 
         control = [n for n in nodes if any(r in ("control-plane", "master") for r in n["roles"])]
         api = self.client.server
@@ -396,7 +460,7 @@ class KubeSource:
                 self.summary_cache[n] = (now, data)
         return {n: self.summary_cache[n][1] for n in names if n in self.summary_cache}
 
-    def _build_node(self, n, node_usage, summaries, pods):
+    def _build_node(self, n, node_usage, summaries, by_node):
         meta, st, spec = n.get("metadata", {}), n.get("status", {}), n.get("spec", {})
         name = meta["name"]
         info = st.get("nodeInfo", {})
@@ -415,7 +479,7 @@ class KubeSource:
         mem_total = parse_quantity(cap.get("memory"))
         cpu_used, mem_used = node_usage.get(name, (None, None))
         if cpu_used is None and snode.get("cpu"):
-            cpu_used = snode["cpu"].get("usageNanoCores", 0) / 1e9
+            cpu_used = round(snode["cpu"].get("usageNanoCores", 0) / 1e9, 4)
         if mem_used is None and snode.get("memory"):
             mem_used = snode["memory"].get("workingSetBytes")
         smem = snode.get("memory") or {}
@@ -437,10 +501,11 @@ class KubeSource:
                 rx_rate, tx_rate = prev[3], prev[4]
             else:
                 if prev and sampled > prev[0] and rx >= prev[1] and tx >= prev[2]:
-                    rx_rate = (rx - prev[1]) / (sampled - prev[0])
-                    tx_rate = (tx - prev[2]) / (sampled - prev[0])
+                    rx_rate = round((rx - prev[1]) / (sampled - prev[0]), 1)
+                    tx_rate = round((tx - prev[2]) / (sampled - prev[0]), 1)
                 self.net_prev[name] = (sampled, rx, tx, rx_rate, tx_rate)
-        mine = [p for p in pods if p["node"] == name]
+        # (pods grouped by node; a plain list of pods still works)
+        mine = by_node.get(name, []) if isinstance(by_node, dict) else [p for p in by_node if p["node"] == name]
         images = len(st.get("images", []) or [])
         taints = ["%s%s:%s" % (t.get("key", ""), "=" + t["value"] if t.get("value") else "", t.get("effect", ""))
                   for t in spec.get("taints", []) or []]
@@ -563,7 +628,7 @@ class KubeSource:
                     paths.append("%s -> %s" % (p.get("path", "/"), be.get("name", "")))
             addr = [i.get("ip") or i.get("hostname", "") for i in (it.get("status", {}).get("loadBalancer", {}).get("ingress") or [])]
             out.append({"namespace": meta["namespace"], "name": meta["name"], "class": sp.get("ingressClassName", ""),
-                        "hosts": hosts, "paths": paths, "addresses": addr, "created": parse_time(meta.get("creationTimestamp"))})
+                        "hosts": hosts, "paths": paths, "addresses": addr, "tls": bool(sp.get("tls")), "created": parse_time(meta.get("creationTimestamp"))})
         return out
 
     @staticmethod
@@ -634,7 +699,23 @@ class KubeSource:
                 genv = {e.get("name"): e.get("value", "") for e in gcs[0].get("env", []) or []}
                 gate = {"port": int(genv["PORT"]) if genv.get("PORT", "").isdigit() else None, "trusted": [x for x in genv.get("TRUSTED", "").split(",") if x],
                         "ready": gate_ds.get("status", {}).get("numberReady", 0), "desired": gate_ds.get("status", {}).get("desiredNumberScheduled", 0)}
+            # The main server keeps the model's layers in the RPC servers' memory. One that restarted after the main
+            # server started (its node lost power, or its pod was replaced) is empty, but the main server neither
+            # notices nor fails its health check: the model looks ready and isn't.
+            lost = []
+            ready = bool(main and main.get("status", {}).get("readyReplicas"))
+            if ready:
+                items = [i for i in raw["pods"].get("items", []) if i["metadata"].get("namespace") == "ai-split" and not i["metadata"].get("deletionTimestamp")]
+                main_started = max([_started(i, "server") for i in items if i["metadata"]["name"].startswith("llama-main-")] or [0])
+                for name in rpc:
+                    runs = [_started(i, "rpc") for i in items if i["metadata"]["name"].startswith("rpc-%s-" % name)]
+                    runs = [t for t in runs if t]
+                    if not runs:
+                        lost.append({"node": name, "why": "%s's RPC server isn't running" % name})
+                    elif main_started and max(runs) > main_started + 2:
+                        lost.append({"node": name, "why": "%s restarted after the model loaded" % name})
             ai["split"] = {
+                "stale": ({"nodes": [x["node"] for x in lost], "why": "; ".join(x["why"] for x in lost)} if lost else None),
                 "load": load_progress(main, split_pods, shares, rpc, gpu_node),
                 "gate": gate,
                 "model": os.path.basename(opt("-m")), "alias": opt("--alias"), "ctx": opt("-c"),

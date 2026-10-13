@@ -178,11 +178,20 @@ split_model_info() {
 # (no download, so no Hugging Face lookup and no checksum).
 split_local_model_info() {
     local -a nodes=()
-    local scan found node
-    mapfile -t nodes < <(split_ai_nodes)
-    scan="$(split_on_nodes ro "$SPLIT_SCAN_SCRIPT" "${nodes[@]}")"
-    found="$(awk -v f="$SPLIT_FILE" '/^== / {n = $2} $1 == "MODEL" && $3 == f && $2 > best {best = $2; at = n} END {if (at != "") print at, best}' <<<"$scan")"
-    [[ -n "$found" ]] || ny_die "${SPLIT_FILE} isn't downloaded on any node." "See what is there: nodeyard ai split models" "$NY_E_PRECONDITION"
+    local scan found node attempt
+    # Every node, NotReady ones too: a node that drops out for a moment (or whose helper's output can't be read)
+    # shows as an ERROR line, and the file may well be there, so look again before saying it isn't.
+    for attempt in 1 2 3; do
+        mapfile -t nodes < <(split_scan_nodes)
+        scan="$(split_on_nodes ro "$SPLIT_SCAN_SCRIPT" "${nodes[@]}")"
+        found="$(awk -v f="$SPLIT_FILE" '/^== / {n = $2} $1 == "MODEL" && $3 == f && $2 > best {best = $2; at = n} END {if (at != "") print at, best}' <<<"$scan")"
+        [[ -n "$found" ]] && break
+        grep -q '^ERROR' <<<"$scan" || break
+        ((attempt < 3)) || break
+        ny_info "Couldn't read every node's disk (one may be NotReady for a moment); looking again in 10 s…"
+        sleep 10
+    done
+    [[ -n "$found" ]] || ny_die "${SPLIT_FILE} isn't downloaded on any node that could be checked." "See what is there: nodeyard ai split models (a node that keeps dropping out can't be checked)" "$NY_E_PRECONDITION"
     node="${found% *}"
     SPLIT_SIZE="${found#* }"
     SPLIT_SHA=""

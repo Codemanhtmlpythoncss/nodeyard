@@ -167,6 +167,16 @@ class DemoAI:
         with self.lock:
             return any(j["status"] == "running" and j.get("exclusive", True) for j in self.jobs.values())
 
+    def reset(self):
+        """(Full refresh: the demo keeps nothing to forget.)"""
+
+    def check_split(self):
+        st = self.store.snapshot()["state"] or {}
+        sp = (st.get("ai") or {}).get("split")
+        if sp and sp.get("stale"):
+            return {"state": "stale", "detail": "It needs reloading: %s." % sp["stale"]["why"]}
+        return {"state": "ok", "detail": "(demo) It answered a one-word test in 0.4 s."}
+
     def split_slots(self):
         live = [st for st in list(getattr(self, "streams", [])) if not st.done and not st.stopped and not (st.cut_after is not None and st.n >= st.cut_after)]
         return {"processing": bool(live), "task": self.task, "decoded": sum(st.n for st in live), "n_ctx": 8192}
