@@ -84,9 +84,9 @@ def alerts(state):
         if n["disk_used"] is not None and n["disk_total"]:
             f = n["disk_used"] / n["disk_total"]
             if f > 0.95:
-                add("critical", "%s's disk is almost full" % n["name"], "%.0f%% used." % (f * 100), "node", n["name"])
+                add("critical", "%s's disk is almost full" % n["name"], "%.0f%% used. Storage › What's using the space shows why." % (f * 100), "node", n["name"])
             elif f > 0.85:
-                add("warning", "%s's disk is filling up" % n["name"], "%.0f%% used." % (f * 100), "node", n["name"])
+                add("warning", "%s's disk is filling up" % n["name"], "%.0f%% used. Storage › What's using the space shows why." % (f * 100), "node", n["name"])
     for n in state["nodes"]:
         hw = n.get("hw")
         if not hw:

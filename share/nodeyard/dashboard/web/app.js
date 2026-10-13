@@ -619,7 +619,8 @@
 
   // ----- Storage
   V.storage = {
-    build() { NY.freshHTML($("#view"), html`<div class="grid g-2" id="st-top"></div><div class="section-title">Volume claims</div><div class="card"><div id="st-pvc"></div></div><div class="section-title">Persistent volumes</div><div class="card"><div id="st-pv"></div></div>`); },
+    build() { NY.freshHTML($("#view"), html`<div id="st-usage"></div><div class="grid g-2 mt" id="st-top"></div><div class="section-title">Volume claims</div><div class="card"><div id="st-pvc"></div></div><div class="section-title">Persistent volumes</div><div class="card"><div id="st-pv"></div></div>`);
+      if (NY.diskUsage) NY.diskUsage.mount($("#st-usage")); },
     update() {
       const d = S.d, t = S.t;
       const disk = d.nodes.filter((n) => n.disk_total);

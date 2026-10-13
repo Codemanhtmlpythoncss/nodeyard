@@ -356,5 +356,64 @@
     }
   });
 
+  // ---- Storage: what's filling each node's disk ------------------------------------------------------------
+  const DU = { data: null, sel: "", timer: 0, auto: false };
+  const gb = (b) => (b == null ? "–" : b >= 1073741824 ? (b / 1073741824).toFixed(b >= 10737418240 ? 0 : 1) + " GB" : Math.round(b / 1048576) + " MB");
+  async function duLoad() {
+    try { const r = await getJSON("/api/storage/usage"); if (r.ok) DU.data = r; } catch (e) { /* signed out */ }
+    duPaint();
+    clearTimeout(DU.timer);
+    if (DU.data && DU.data.nodes.some((n) => n.scanning) && S.view === "storage") DU.timer = setTimeout(duLoad, 3000);
+  }
+  async function duScan(node) {
+    const r = await act("/api/storage/scan", { node }); if (!r) return;
+    DU.data = r; if (node !== "all") DU.sel = node; duPaint(); clearTimeout(DU.timer); DU.timer = setTimeout(duLoad, 2500);
+  }
+  function duPaint() {
+    const host = $("#st-usage"); if (!host || !DU.data) return;
+    const nodes = DU.data.nodes;
+    if (!DU.sel || !nodes.some((n) => n.node === DU.sel)) {
+      const scanned = nodes.filter((n) => n.at).sort((a, b) => (b.disk ? b.disk.used / b.disk.total : 0) - (a.disk ? a.disk.used / a.disk.total : 0));
+      DU.sel = (scanned[0] || nodes.slice().sort((a, b) => (b.disk_used / (b.disk_total || 1)) - (a.disk_used / (a.disk_total || 1)))[0] || {}).node || "";
+    }
+    const n = nodes.find((x) => x.node === DU.sel);
+    const row = (x) => {
+      const total = (x.disk && x.disk.total) || x.disk_total, used = (x.disk && x.disk.used) || x.disk_used, f = total ? used / total : 0;
+      return html`<button type="button" class="du-node ${x.node === DU.sel ? "on" : ""}" data-du-sel="${x.node}">
+        <span class="du-name"><b>${x.node}</b>${x.local ? html` <span class="chip">this server</span>` : ""}${!x.ready ? html` <span class="chip warn">not ready</span>` : ""}</span>
+        <span class="du-bar"><i class="${f >= 0.9 ? "bad" : f >= 0.8 ? "warn" : ""}" style="width:${Math.round(f * 100)}%"></i></span>
+        <span class="du-num">${total ? gb(total - used) + " free of " + gb(total) : "–"}</span>
+        <span class="du-when">${x.scanning ? html`<span class="spin small"></span> scanning…` : x.error ? html`<span class="bad-t">scan failed</span>` : x.at ? "scanned " + ago(x.at) + " ago" : "not scanned"}</span></button>`;
+    };
+    let detail = "";
+    if (n) {
+      const total = (n.disk && n.disk.total) || n.disk_total || 1;
+      const used = (n.disk && n.disk.used) || n.disk_used || 0;
+      detail = html`<div class="du-detail">
+        <div class="row wrap" style="justify-content:space-between;gap:8px"><div><h3 style="margin:0">${n.node}</h3>
+          <div class="muted small mt">${gb(used)} used of ${gb(total)}${n.took ? " · scan took " + n.took + " s" : ""}${n.error ? html` · <span class="bad-t">${n.error}</span>` : ""}</div></div>
+          <button class="btn ${n.at ? "" : "primary"}" data-du-scan="${n.node}" ${n.scanning ? "disabled" : ""}>${n.scanning ? "Scanning…" : n.at ? "Scan again" : "Scan " + n.node}</button></div>
+        ${n.hotspots.length ? html`<div class="du-list">${n.hotspots.map((h) => html`<div class="du-item">
+            <div class="du-item-head"><b>${h.label}</b><span class="mono faint small">${h.path}</span><span class="grow"></span><b class="du-size">${gb(h.bytes)}</b></div>
+            <span class="du-bar"><i style="width:${Math.max(1, Math.round((100 * h.bytes) / total))}%"></i></span>
+            ${h.what ? html`<div class="muted small">${h.what}</div>` : ""}
+            ${h.tip ? html`<div class="du-tip">${/^(sudo |docker |flatpak |ollama |nodeyard )/.test(h.tip) ? html`To free it: <span class="mono copy" data-copy="${h.tip}" title="Click to copy">${h.tip}</span>` : h.tip}</div>` : ""}
+          </div>`)}</div>`
+          : n.scanning ? html`<div class="empty"><div class="spin"></div>Adding up every folder on ${n.node}. A full disk can take a minute or two.</div>`
+          : html`<div class="empty">Scan ${n.node} to see which folders and files take the space. It only reads; nothing is changed or deleted.</div>`}
+        ${n.files.length ? html`<h3 class="mt">Biggest files</h3><div class="du-files">${n.files.map((f) => html`<div class="row"><span class="mono small grow" style="min-width:0;overflow-wrap:anywhere">${f.path}</span><b class="nowrap">${gb(f.bytes)}</b></div>`)}</div>` : ""}
+      </div>`;
+    }
+    setHTML(host, card("What's using the space", html`<div class="du-nodes">${nodes.map(row)}</div>${detail}`,
+      html`<button class="btn small" data-du-scan="all" ${nodes.every((x) => x.scanning) ? "disabled" : ""}>Scan every node</button>`));
+    // the first look at this page: scan the fullest node if it has never been scanned (or not for a day)
+    if (!DU.auto && n && !n.scanning && (!n.at || Date.now() / 1000 - n.at > 86400) && DU.data.can_scan) { DU.auto = true; duScan(n.node); }
+  }
+  document.addEventListener("click", (e) => {
+    const s = e.target.closest("[data-du-sel]"); if (s) { DU.sel = s.dataset.duSel; duPaint(); return; }
+    const b = e.target.closest("[data-du-scan]"); if (b) { b.disabled = true; duScan(b.dataset.duScan); }
+  });
+  NY.diskUsage = { mount() { duPaint(); duLoad(); } };
+
   NY.homelab = { load: async () => { await load(); return H.services; } };
 })();

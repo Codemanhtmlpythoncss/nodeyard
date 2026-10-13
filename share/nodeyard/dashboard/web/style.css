@@ -1029,3 +1029,27 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .full-list li .dot { margin-top: 6px; }
 .full-list li div { display: grid; gap: 2px; min-width: 0; }
 .full-list li span { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+
+/* Storage: what's using the space */
+.du-nodes { display: grid; gap: 6px; }
+.du-node { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 6px 14px;
+  width: 100%; padding: 8px 10px; border: 1px solid transparent; border-radius: 10px; color: inherit; background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.du-node:hover { background: var(--panel2); }
+.du-node.on { border-color: var(--line2); background: var(--panel2); }
+.du-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.du-num, .du-when { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.du-node .du-bar { grid-column: 1 / -1; grid-row: 2; }
+.du-when .spin.small { display: inline-block; width: 10px; height: 10px; border-width: 2px; margin: 0 4px 0 0; vertical-align: -1px; }
+.du-bar { display: block; height: 8px; overflow: hidden; border-radius: 99px; background: var(--panel2); }
+.du-node.on .du-bar, .du-item .du-bar { background: var(--line); }
+.du-bar i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+.du-bar i.warn { background: var(--warn); } .du-bar i.bad { background: var(--bad); }
+.du-detail { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.du-list { display: grid; gap: 12px; margin-top: 12px; }
+.du-item { display: grid; gap: 5px; }
+.du-item-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.du-size { font-variant-numeric: tabular-nums; }
+.du-tip { font-size: 12.5px; color: var(--text); }
+.du-tip .mono { padding: 1px 6px; border-radius: 6px; background: var(--panel2); }
+.du-files { display: grid; gap: 6px; margin-top: 6px; }
+@media (max-width: 560px) { .du-node { grid-template-columns: minmax(0, 1fr) auto; } .du-when { display: none; } }
