@@ -189,6 +189,7 @@ class Client:
         self.verify_tls = verify_tls
         self.llama = False        # a llama.cpp server (it can report how far it is through reading the prompt)
         self._conn = None
+        self._idle = None    # ((scheme, host, port), connection) kept alive after a plain request
         self._lock = threading.Lock()
 
     # -- plumbing --
@@ -248,25 +249,56 @@ class Client:
             except OSError:
                 pass
 
+    def _roundtrip(self, scheme, host, port, method, full, body=None, timeout=30, limit=8 * 1024 * 1024):
+        """One plain request over the kept-alive connection (start-up asks the server several things in a row, and over
+        https each new connection is a TLS handshake): (status, body). An idle connection the server has since closed
+        is replaced once."""
+        key = (scheme, host, port)
+        for attempt in (0, 1):
+            with self._lock:
+                idle, self._idle = self._idle, None
+            conn = idle[1] if idle and idle[0] == key else None
+            if idle and conn is None:
+                idle[1].close()
+            reused = conn is not None
+            if conn is None:
+                conn = self._connect(scheme, host, port)
+            try:
+                conn.sock.settimeout(timeout)
+                conn.request(method, full, body=body, headers=self._headers())
+                resp = conn.getresponse()
+                raw = resp.read(limit)
+            except (BrokenPipeError, ConnectionResetError, http.client.RemoteDisconnected):
+                conn.close()
+                if reused and attempt == 0:
+                    continue
+                raise
+            except (OSError, http.client.HTTPException):
+                conn.close()
+                raise
+            if resp.will_close or not resp.isclosed():
+                conn.close()
+            else:
+                with self._lock:
+                    old, self._idle = self._idle, (key, conn)
+                if old:
+                    old[1].close()
+            return resp.status, raw
+        raise http.client.HTTPException("no answer")
+
     def request_json(self, method, path, body=None, timeout=30):
         scheme, host, port, full = self._split(path)
-        conn = self._connect(scheme, host, port)
         try:
-            conn.sock.settimeout(timeout)
             payload = json.dumps(body).encode() if body is not None else None
-            conn.request(method, full, body=payload, headers=self._headers())
-            resp = conn.getresponse()
-            raw = resp.read(8 * 1024 * 1024)
+            status, raw = self._roundtrip(scheme, host, port, method, full, payload, timeout)
         except (OSError, http.client.HTTPException) as e:
             raise APIError("The model API stopped answering (%s)." % e, kind="connect")
-        finally:
-            conn.close()
-        if resp.status >= 400:
-            raise self._error(resp.status, raw)
+        if status >= 400:
+            raise self._error(status, raw)
         try:
             return json.loads(raw.decode("utf-8", "replace")) if raw.strip() else {}
         except ValueError:
-            raise APIError("The model API sent something that isn't JSON.", resp.status)
+            raise APIError("The model API sent something that isn't JSON.", status)
 
     def _error(self, status, raw):
         text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
@@ -303,15 +335,8 @@ class Client:
         for path in ("/props", "/v1/props"):
             try:
                 scheme, host, port, _ = self._split("")
-                conn = self._connect(scheme, host, port)
-                try:
-                    conn.sock.settimeout(10)
-                    conn.request("GET", path, headers=self._headers())
-                    resp = conn.getresponse()
-                    raw = resp.read(1 << 20)
-                finally:
-                    conn.close()
-                if resp.status == 200:
+                status, raw = self._roundtrip(scheme, host, port, "GET", path, None, 10, 1 << 20)
+                if status == 200:
                     j = json.loads(raw)
                     n = (j.get("default_generation_settings") or {}).get("n_ctx") or j.get("n_ctx")
                     if n:
@@ -322,15 +347,8 @@ class Client:
         try:
             mid = self.model or (self.models() or [""])[0]
             scheme, host, port, _ = self._split("")
-            conn = self._connect(scheme, host, port)
-            try:
-                conn.sock.settimeout(10)
-                conn.request("POST", "/api/show", body=json.dumps({"model": mid}).encode(), headers=self._headers())
-                resp = conn.getresponse()
-                raw = resp.read(1 << 20)
-            finally:
-                conn.close()
-            if resp.status == 200:
+            status, raw = self._roundtrip(scheme, host, port, "POST", "/api/show", json.dumps({"model": mid}).encode(), 10, 1 << 20)
+            if status == 200:
                 info = json.loads(raw).get("model_info") or {}
                 for k, v in info.items():
                     if k.endswith(".context_length"):
@@ -344,17 +362,10 @@ class Client:
         """'ok', 'loading' or 'down' for the model behind the API."""
         try:
             scheme, host, port, _ = self._split("")
-            conn = self._connect(scheme, host, port)
-            try:
-                conn.sock.settimeout(10)
-                conn.request("GET", "/health", headers=self._headers())
-                resp = conn.getresponse()
-                resp.read(4096)
-            finally:
-                conn.close()
-            if resp.status == 200:
+            status, _raw = self._roundtrip(scheme, host, port, "GET", "/health", None, 10, 4096)
+            if status == 200:
                 return "ok"
-            return "loading" if resp.status in (502, 503) else "down"
+            return "loading" if status in (502, 503) else "down"
         except APIError:
             return "down"
         except (OSError, http.client.HTTPException):
