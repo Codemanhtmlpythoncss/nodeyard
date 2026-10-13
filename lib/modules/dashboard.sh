@@ -394,6 +394,8 @@ Wants=network-online.target
 Type=simple
 ExecStart=${py} ${args}
 Environment=PYTHONDONTWRITEBYTECODE=1
+# Many threads (live streams, checks, chats) each grow a malloc arena that keeps freed memory: two arenas are plenty
+Environment=MALLOC_ARENA_MAX=2
 Environment=HOME=/tmp
 # So audio forwarding can reach a system PulseAudio (set up from the Music page); harmless if none is running.
 Environment=PULSE_SERVER=unix:/run/pulse/native

@@ -63,7 +63,31 @@
         <div class="row"><button class="btn" data-tu-ai-save="${n.node}">Save</button><span class="faint small">Used the next time you run or switch a model in AI › Models.</span></div>
       </div>
       <h4>Power and overclock</h4>${power}
+      ${p ? kernelSection(n, p) : ""}
+      ${p && p.k3s_service ? leanSection(n, p) : ""}
     </section>`;
+  }
+  function kernelSection(n, p) {
+    const deep = p.cstates_deep || 0;
+    return html`<h4>AI kernel profile</h4><div class="tu-grid" data-tu-ak="${n.node}">
+      <div class="muted small">Now: huge pages ${p.thp || "–"} · busy polling ${p.busy_poll ? "on" : "off"} · ${deep ? (p.cstates_deep_off ? p.cstates_deep_off + " of " + deep + " deep sleep states off" : deep + " deep sleep states on") : "no deep sleep states"}${p.readahead_dev ? " · read-ahead " + p.readahead + " KB on " + p.readahead_dev : ""}</div>
+      <label class="row small"><input type="checkbox" data-ak="memory" checked> Huge pages and keep the model in RAM <span class="faint">(swappiness 10${p.numa_balancing != null ? ", no NUMA balancing" : ""})</span></label>
+      <label class="row small"><input type="checkbox" data-ak="network" ${n.ai.share_mib || n.ai.main ? "checked" : ""}> Low-latency networking for the split model <span class="faint">(busy polling, bigger socket buffers)</span></label>
+      ${deep ? html`<label class="row small"><input type="checkbox" data-ak="cstates"> Keep CPU cores out of deep sleep <span class="faint">(faster wake per token; more power and heat)</span></label>` : ""}
+      ${p.readahead_dev ? html`<label class="row small"><input type="checkbox" data-ak="readahead" checked> Faster model loading <span class="faint">(4 MB read-ahead on ${p.readahead_dev})</span></label>` : ""}
+      <label class="row small"><input type="checkbox" data-ak="persist" ${p.persist ? "checked" : ""}> Keep after a reboot</label>
+      <div class="row"><button class="btn" data-tu-ak-review="${n.node}">Review…</button><span class="faint small">Kernel settings that matter for LLMs, changed live; no new kernel to install.</span></div></div>`;
+  }
+  function leanSection(n, p) {
+    const o = n.lean_options, server = p.k3s_service === "k3s";
+    const comp = (key) => { const x = o && o[key]; if (!x || !x.present) return ""; return html`<label class="row small"><input type="checkbox" data-lk-disable="${key}" ${x.unused ? "checked" : "disabled"}> Turn off ${x.label} <span class="faint">(${x.why})</span></label>`; };
+    return html`<h4>Lighter Kubernetes</h4><div class="tu-grid" data-tu-lk="${n.node}">
+      <div class="muted small">k3s ${server ? "(control plane)" : "(agent)"} uses ${p.k3s_rss_kb ? Math.round(p.k3s_rss_kb / 1024) + " MB" : "–"}${p.containerd_rss_kb ? ", containerd " + Math.round(p.containerd_rss_kb / 1024) + " MB" : ""}${p.lean ? " · already tuned" : ""}</div>
+      <label class="row small"><input type="checkbox" data-lk="gc" checked> Return memory sooner <span class="faint">(Go GC tuned: GOGC=50 and a soft memory limit)</span></label>
+      <label class="row small"><input type="checkbox" data-lk="image_gc" checked> Delete unused container images sooner <span class="faint">(at 75% disk, down to 60%)</span></label>
+      ${server ? html`${comp("traefik")}${comp("servicelb")}` : ""}
+      <label class="row small"><input type="checkbox" data-lk="restart" checked> Restart k3s to use them <span class="faint">(running pods keep running; the API pauses ~20 s)</span></label>
+      <div class="row"><button class="btn" data-tu-lk-review="${n.node}">Review…</button><span class="faint small">Rewriting Kubernetes isn't practical; this trims the k3s you have.</span></div></div>`;
   }
   function paint() {
     if (S.view !== "tune" || !$("#tu-root")) return;
@@ -122,6 +146,17 @@
     if ((b = t.closest("[data-tu-probe]"))) { b.disabled = true; const r = await post("/api/tune/probe", { node: b.dataset.tuProbe }); if (r) { TU.data = r; setTimeout(load, 1500); } return; }
     if ((b = t.closest("[data-tu-review]"))) { review(b.dataset.tuReview, collect(b.dataset.tuReview)); return; }
     if ((b = t.closest("[data-tu-restore]"))) { review(b.dataset.tuRestore, { restore: true }); return; }
+    if ((b = t.closest("[data-tu-ak-review]"))) {
+      const f = $('[data-tu-ak="' + b.dataset.tuAkReview + '"]'), c = (k) => { const el = f.querySelector('[data-ak="' + k + '"]'); return !!(el && el.checked); };
+      const ak = { memory: c("memory"), network: c("network"), cstates: c("cstates"), readahead: c("readahead") };
+      if (!Object.values(ak).some(Boolean)) { toast("Tick at least one."); return; }
+      review(b.dataset.tuAkReview, { ai_kernel: ak, persist: c("persist") }); return;
+    }
+    if ((b = t.closest("[data-tu-lk-review]"))) {
+      const f = $('[data-tu-lk="' + b.dataset.tuLkReview + '"]'), c = (k) => { const el = f.querySelector('[data-lk="' + k + '"]'); return !!(el && el.checked); };
+      const disable = [...f.querySelectorAll("[data-lk-disable]")].filter((el) => el.checked && !el.disabled).map((el) => el.dataset.lkDisable);
+      review(b.dataset.tuLkReview, { lean_k3s: { gc: c("gc"), image_gc: c("image_gc"), disable, restart: c("restart") } }); return;
+    }
     if ((b = t.closest("[data-tu-ai-save]"))) {
       const f = $('[data-tu-ai="' + b.dataset.tuAiSave + '"]');
       const r = await post("/api/tune/ai", { node: b.dataset.tuAiSave, threads: f.querySelector('[data-a="threads"]').value, reserve_gib: f.querySelector('[data-a="reserve_gib"]').value });

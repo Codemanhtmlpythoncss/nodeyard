@@ -1665,6 +1665,11 @@
       ${sp && !old ? html`<p style="color:var(--warn)">This restarts the running model with these settings.</p>` : ""}
       <label class="field-l">Name for the API<input class="input" data-v="alias" value="${alias}" spellcheck="false"></label>
       <label class="field-l">Context length (how much text it can remember: attached files count)<input class="input" data-v="ctx" type="number" min="512" max="131072" step="512" value="${(sp && sp.model === file && +sp.ctx) || chatDefaults().context_length}"></label>
+      <label class="field-l">Conversation memory (KV cache)<select class="select" data-v="kv">
+        <option value="f16">Full precision</option>
+        <option value="q8_0" ${fit && fit.need > fit.free ? "selected" : ""}>Half the memory (q8_0): practically the same answers</option>
+        <option value="q4_0">A quarter of the memory (q4_0): fits the most, a little less exact</option></select>
+        <span class="faint small" style="display:block;margin-top:4px">What the model remembers of the conversation takes about 1.5 GB at 16k tokens for a 30B model. A smaller one lets a model fit that otherwise wouldn't.</span></label>
       <div class="field-l">Machines to use
         <label class="check" style="margin-top:8px"><input type="checkbox" data-v="auto" checked> <span><b>Pick the fastest machines automatically</b> (fewer, faster machines usually win: every extra one adds a network hop per word)</span></label>
         <div class="checklist">${nodes.map((n) => html`<label class="check"><input type="checkbox" data-v="n-${n.name}" checked> <span>${n.name}</span> <span class="faint small">${fmt.bytes(n.mem_total, 0)}</span></label>`)}</div>
@@ -1675,7 +1680,7 @@
     const chosen = vals.auto ? [] : nodes.filter((n) => vals["n-" + n.name]).map((n) => n.name);
     if (!vals.auto && !chosen.length) { toast("Pick at least one machine."); return; }
     // Deleting the old model's file is opt-in: a switch must never cost you a download you didn't ask to lose.
-    startJob(sp ? "switch" : "deploy", Object.assign(localNode || localFile ? { local: true } : { repo }, { file, ctx: +vals.ctx || 8192, alias: vals.alias, nodes: chosen, keep_old: !vals.purge }),
+    startJob(sp ? "switch" : "deploy", Object.assign(localNode || localFile ? { local: true } : { repo }, { file, ctx: +vals.ctx || 8192, alias: vals.alias, nodes: chosen, keep_old: !vals.purge, kv_cache: vals.kv || "f16" }),
       (job) => { loadTargets(true); if (job.status === "ok" && old && vals.purge) forgetSavedModel(old); loadDisk(true, true); });
   }
 

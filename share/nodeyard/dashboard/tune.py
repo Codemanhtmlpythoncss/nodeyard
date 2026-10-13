@@ -34,6 +34,23 @@ done
 command -v vcgencmd >/dev/null 2>&1 && echo "pi_throttled=$(vcgencmd get_throttled 2>/dev/null | cut -d= -f2)"
 command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=index,name,power.limit,power.min_limit,power.max_limit,power.default_limit,persistence_mode --format=csv,noheader,nounits 2>/dev/null | sed 's/^/gpu=/'
 [ -f /etc/systemd/system/nodeyard-tune.service ] && echo "persist=1" || echo "persist=0"
+echo "thp=$(sed 's/.*\[\(.*\)\].*/\1/' /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null)"
+echo "thp_defrags=$(cat /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null | tr -d '[]')"
+echo "vfs_cache_pressure=$(cat /proc/sys/vm/vfs_cache_pressure 2>/dev/null)"
+echo "busy_poll=$(cat /proc/sys/net/core/busy_poll 2>/dev/null)"
+echo "rmem_max=$(cat /proc/sys/net/core/rmem_max 2>/dev/null)"
+[ -f /proc/sys/kernel/numa_balancing ] && echo "numa_balancing=$(cat /proc/sys/kernel/numa_balancing)"
+n=0; d=0; for st in /sys/devices/system/cpu/cpu0/cpuidle/state*; do [ -f "$st/latency" ] || continue
+  if [ "$(cat "$st/latency")" -gt 20 ]; then n=$((n + 1)); [ "$(cat "$st/disable")" = 1 ] && d=$((d + 1)); fi; done
+echo "cstates_deep=$n"; echo "cstates_deep_off=$d"
+dev=$(df -P /var/lib/nodeyard/models / 2>/dev/null | awk 'NR == 2 {print $1}'); b=$(basename "$(readlink -f "$dev" 2>/dev/null)")
+[ -e "/sys/class/block/$b/partition" ] && b=$(basename "$(readlink -f "/sys/class/block/$b/..")")
+[ -f "/sys/class/block/$b/queue/read_ahead_kb" ] && echo "readahead_dev=$b" && echo "readahead=$(cat "/sys/class/block/$b/queue/read_ahead_kb")"
+for svc in k3s k3s-agent; do systemctl is-active --quiet "$svc" 2>/dev/null && echo "k3s_service=$svc"; done
+p=$(pidof k3s 2>/dev/null | awk '{print $NF}'); [ -n "$p" ] && echo "k3s_rss_kb=$(awk '/^VmRSS/ {print $2}' "/proc/$p/status")"
+p=$(pidof containerd 2>/dev/null | awk '{print $1}'); [ -n "$p" ] && echo "containerd_rss_kb=$(awk '/^VmRSS/ {print $2}' "/proc/$p/status")"
+[ -f /etc/rancher/k3s/config.yaml.d/90-nodeyard-lean.yaml ] && echo "lean_cfg=1"
+ls /etc/systemd/system/k3s*.service.d/90-nodeyard-lean.conf >/dev/null 2>&1 && echo "lean_env=1"
 true'''
 
 # Raspberry Pi overclocks, by model: (label, config lines). Moderate ones only; they need a good power supply and cooling.
@@ -74,13 +91,17 @@ def parse_probe(text):
                                     "default": num(parts[5]), "persistence": parts[6].lower() == "enabled"})
         elif k.startswith("pi_"):
             out["pi"][k[3:]] = v
-        elif k in ("hw_min", "hw_max", "max", "swappiness", "turbo"):
+        elif k in ("hw_min", "hw_max", "max", "swappiness", "turbo", "vfs_cache_pressure", "busy_poll", "rmem_max", "numa_balancing",
+                   "cstates_deep", "cstates_deep_off", "readahead", "k3s_rss_kb", "containerd_rss_kb"):
             out[k] = int(v) if v.isdigit() else None
+        elif k == "thp_defrags":
+            out[k] = [x for x in v.split() if re.match(r"^[a-z+]+$", x)]
         elif k == "governors":
             out[k] = [g for g in v.split() if re.match(r"^[a-z_]+$", g)]
         else:
             out[k] = v
     out["persist"] = out.get("persist") == "1"
+    out["lean"] = out.get("lean_cfg") == "1" or out.get("lean_env") == "1"
     return out
 
 
@@ -207,6 +228,22 @@ class Tuning:
             if p["pi"].get("config") and p["pi"].get("ours"):
                 lines.append(PI_BLOCK_REMOVE % {"f": p["pi"]["config"]})
                 says.append("Remove the Raspberry Pi overclock from %s (takes effect after a reboot)" % p["pi"]["config"])
+            if p.get("thp") is not None:
+                lines.append("echo madvise > /sys/kernel/mm/transparent_hugepage/enabled; echo madvise > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null")
+            lines += ["echo 100 > /proc/sys/vm/vfs_cache_pressure", "echo 0 > /proc/sys/net/core/busy_poll; echo 0 > /proc/sys/net/core/busy_read",
+                      "echo 212992 > /proc/sys/net/core/rmem_max; echo 212992 > /proc/sys/net/core/wmem_max",
+                      "echo '4096 131072 6291456' > /proc/sys/net/ipv4/tcp_rmem; echo '4096 16384 4194304' > /proc/sys/net/ipv4/tcp_wmem",
+                      'for st in /sys/devices/system/cpu/cpu*/cpuidle/state*/disable; do echo 0 > "$st"; done 2>/dev/null']
+            if p.get("numa_balancing") is not None:
+                lines.append("echo 1 > /proc/sys/kernel/numa_balancing")
+            if p.get("readahead_dev") and re.match(r"^[a-z0-9]+$", p["readahead_dev"]):
+                lines.append("echo 128 > /sys/class/block/%s/queue/read_ahead_kb" % p["readahead_dev"])
+            says.append("Kernel settings back to the usual defaults (huge pages on request, CPU sleep states, network buffers, read-ahead)")
+            if p.get("lean"):
+                lines.append(LEAN_REMOVE)
+                if p.get("k3s_service") in ("k3s", "k3s-agent"):
+                    lines.append(LATER_RESTART % {"svc": p["k3s_service"]})
+                says.append("Kubernetes back to its usual settings (k3s restarts in 5 s; running pods keep running)")
             lines.append("systemctl disable nodeyard-tune.service >/dev/null 2>&1; rm -f /etc/systemd/system/nodeyard-tune.service /etc/nodeyard-tune.sh; "
                          "systemctl daemon-reload 2>/dev/null; true")
             says.append("Remove the keep-after-reboot service")
@@ -254,6 +291,71 @@ class Tuning:
                 raise TuneError("GPU %s's power limit must be between %s and %s W." % (idx, g and g["min"], g and g["max"]))
             runtime.append("nvidia-smi -pm 1 >/dev/null; nvidia-smi -i %s -pl %d" % (g["index"], w))
             says.append("GPU %s (%s) power limit: %d W" % (g["index"], g["name"], w))
+        ak = body.get("ai_kernel") or {}
+        if ak:
+            if ak.get("memory"):
+                if p.get("thp") is not None:
+                    defrag = next((d for d in ("defer+madvise", "madvise") if d in (p.get("thp_defrags") or [])), None)
+                    runtime.append("echo always > /sys/kernel/mm/transparent_hugepage/enabled" +
+                                   ("; echo %s > /sys/kernel/mm/transparent_hugepage/defrag" % defrag if defrag else ""))
+                    says.append("Huge pages for the model's memory (fewer address-translation misses while it reads the weights)")
+                runtime += ["echo 10 > /proc/sys/vm/swappiness", "echo 50 > /proc/sys/vm/vfs_cache_pressure"]
+                says.append("Keep the model in RAM (swappiness 10) and keep file metadata cached (vfs_cache_pressure 50)")
+                if p.get("numa_balancing") is not None:
+                    runtime.append("echo 0 > /proc/sys/kernel/numa_balancing")
+                    says.append("Stop the kernel moving memory between NUMA nodes mid-answer")
+            if ak.get("network"):
+                runtime += ["echo 50 > /proc/sys/net/core/busy_poll; echo 50 > /proc/sys/net/core/busy_read",
+                            "echo 16777216 > /proc/sys/net/core/rmem_max; echo 16777216 > /proc/sys/net/core/wmem_max",
+                            "echo '4096 131072 16777216' > /proc/sys/net/ipv4/tcp_rmem; echo '4096 65536 16777216' > /proc/sys/net/ipv4/tcp_wmem"]
+                says.append("Low-latency networking for the split model: busy polling (answers each node's small messages sooner) and larger socket buffers")
+            if ak.get("cstates"):
+                if not p.get("cstates_deep"):
+                    raise TuneError("This machine has no deep CPU sleep states to turn off.")
+                runtime.append('for st in /sys/devices/system/cpu/cpu*/cpuidle/state*; do [ "$(cat "$st/latency" 2>/dev/null || echo 0)" -gt 20 ] && echo 1 > "$st/disable"; done; true')
+                says.append("Keep CPU cores out of deep sleep (they wake up instantly for each token; uses more power and runs warmer)")
+            if ak.get("readahead"):
+                dev = p.get("readahead_dev") or ""
+                if not re.match(r"^[a-z0-9]+$", dev):
+                    raise TuneError("Couldn't find the disk the models are on.")
+                runtime.append("echo 4096 > /sys/class/block/%s/queue/read_ahead_kb" % dev)
+                says.append("Read ahead 4 MB on %s (loads a model faster)" % dev)
+        lean = body.get("lean_k3s") or {}
+        if lean:
+            svc = p.get("k3s_service")
+            if svc not in ("k3s", "k3s-agent"):
+                raise TuneError("k3s isn't running as a service on this machine.")
+            cfg = []
+            if lean.get("disable"):
+                if svc != "k3s":
+                    raise TuneError("Only the control node's k3s runs Traefik and the load balancer.")
+                opts = self.lean_options()
+                for comp in lean["disable"]:
+                    if comp not in opts or not opts[comp]["unused"]:
+                        raise TuneError("%s can't be turned off: %s" % (comp, (opts.get(comp) or {}).get("why", "unknown component")))
+                cfg += ["disable+:"] + ["  - %s" % c for c in lean["disable"]]
+                says.append("Turn off %s (nothing uses %s)" % (" and ".join(opts[c]["label"] for c in lean["disable"]), "them" if len(lean["disable"]) > 1 else "it"))
+            if lean.get("image_gc"):
+                cfg += ["kubelet-arg+:", "  - image-gc-high-threshold=75", "  - image-gc-low-threshold=60"]
+                says.append("Remove unused container images sooner (at 75% disk instead of 85%)")
+            if cfg:
+                lines.append("mkdir -p /etc/rancher/k3s/config.yaml.d && cat > /etc/rancher/k3s/config.yaml.d/90-nodeyard-lean.yaml <<'NYLEAN'\n"
+                             "# nodeyard Tuning page: lighter Kubernetes (\"Restore defaults\" there removes this file)\n%s\nNYLEAN" % "\n".join(cfg))
+            if lean.get("gc"):
+                rss = (p.get("k3s_rss_kb") or 0) // 1024
+                limit = min(2048, max(320, int(rss * 0.7))) if svc == "k3s" else min(1024, max(160, int(rss * 0.75)))
+                lines.append(("mkdir -p /etc/systemd/system/%(svc)s.service.d && cat > /etc/systemd/system/%(svc)s.service.d/90-nodeyard-lean.conf <<'NYLEAN'\n"
+                              "[Service]\nEnvironment=GOGC=50\nEnvironment=GOMEMLIMIT=%(limit)dMiB\nNYLEAN") % {"svc": svc, "limit": limit})
+                says.append("k3s returns memory sooner: Go garbage collection at GOGC=50 with a soft limit of %d MiB%s" % (
+                    limit, " (it uses %d MiB now)" % rss if rss else ""))
+            if not cfg and not lean.get("gc"):
+                raise TuneError("Pick at least one Kubernetes change.")
+            lines.append("systemctl daemon-reload")
+            if lean.get("restart"):
+                lines.append(LATER_RESTART % {"svc": svc})
+                says.append("Restart k3s in 5 s to use them (running pods keep running; the cluster API pauses for about 20 s)")
+            else:
+                says.append("They take effect the next time k3s restarts")
         pi = body.get("pi_preset")
         if pi:
             presets = pi_presets(p.get("model"))
@@ -270,9 +372,20 @@ class Tuning:
             raise TuneError("Nothing to change.")
         script = "\n".join(lines + runtime)
         if body.get("persist") and runtime:
-            script += "\n" + PERSIST % {"body": "\n".join(runtime).replace("'", "")}
+            script += "\n" + PERSIST % {"body": "\n".join(runtime)}
             says.append("Keep these after a reboot (a small nodeyard-tune service)")
         return says, script
+
+    def lean_options(self):
+        """Bundled k3s parts that can go, and whether anything uses them."""
+        st = self.ctx.store.snapshot().get("state") or {}
+        ing = st.get("ingresses") or []
+        lbs = [s for s in st.get("services") or [] if s.get("type") == "LoadBalancer" and not (s.get("namespace") == "kube-system" and s.get("name") == "traefik")]
+        traefik = any(s.get("namespace") == "kube-system" and s.get("name") == "traefik" for s in st.get("services") or [])
+        return {"traefik": {"label": "Traefik (the bundled web router)", "present": traefik, "unused": not ing,
+                            "why": "%d Ingress%s use%s it" % (len(ing), "es" if len(ing) != 1 else "", "" if len(ing) == 1 else "") if ing else "nothing uses it"},
+                "servicelb": {"label": "the built-in load balancer (servicelb)", "present": True, "unused": not lbs,
+                              "why": ("LoadBalancer services use it: " + ", ".join(s["name"] for s in lbs[:4])) if lbs else "nothing uses it"}}
 
     def _node(self, name):
         return next((n for n in self._nodes() if n["name"] == name), {})
@@ -288,7 +401,7 @@ class Tuning:
         return {"done": says}
 
     # -- what to suggest ------------------------------------------------------------------------------------------
-    def recommendations(self, n, probe, ai, rpc_threads):
+    def recommendations(self, n, probe, ai, rpc_threads, split=None):
         """[{"what", "why", "fix": {...} or None, "kind": "ai"|"power"|"hardware"}] for one node."""
         hw = n.get("hw") or {}
         cpu = (hw.get("hardware") or {}).get("cpu") or {}
@@ -324,6 +437,29 @@ class Tuning:
             if thr and thr not in ("0x0", "0"):
                 out.append({"kind": "hardware", "what": "This Pi has been throttled (%s)" % thr,
                             "why": "Low voltage or heat made it slow down. A better power supply or cooling fixes it; don't overclock until it's 0x0.", "fix": None})
+        if probe:
+            holds_model = bool(split) and (n["name"] in (rpc_threads or {}) or split.get("main_node") == n["name"])
+            k = []
+            if probe.get("thp") not in (None, "always"):
+                k.append("huge pages")
+            if (probe.get("busy_poll") or 0) == 0 and holds_model:
+                k.append("low-latency networking")
+            if k:
+                out.append({"kind": "power", "what": "Use the AI kernel profile (%s)" % " and ".join(k),
+                            "why": "Large-model inference reads gigabytes of weights per token: huge pages cut the address lookups, and busy polling answers "
+                                   "the other nodes' small messages sooner. Undo it any time with Restore defaults.",
+                            "fix": {"ai_kernel": {"memory": True, "network": holds_model, "readahead": bool(probe.get("readahead_dev"))}}})
+            if probe.get("k3s_service") and not probe.get("lean") and (probe.get("k3s_rss_kb") or 0) > 150 * 1024:
+                server = probe["k3s_service"] == "k3s"
+                drop = [c for c, o in (self.lean_options().items() if server else []) if o["unused"] and o["present"]]
+                out.append({"kind": "power", "what": "Make Kubernetes lighter (k3s uses %d MB here)" % (probe["k3s_rss_kb"] // 1024),
+                            "why": "Its Go runtime keeps more memory than it needs; tuning its garbage collection usually gives back 20-40%%%s. "
+                                   "That memory goes to the model." % ((", and " + " and ".join(self.lean_options()[c]["label"] for c in drop) + " can go: nothing uses them") if drop else ""),
+                            "fix": {"lean_k3s": {"gc": True, "image_gc": True, "disable": drop, "restart": True}}})
+            if split and split.get("main_node") == n["name"] and (split.get("kv") or "f16") == "f16":
+                out.append({"kind": "ai", "what": "Halve the conversation memory (KV cache q8_0)",
+                            "why": "The model's memory of the conversation uses about 1.5 GB at 16k tokens in full precision; q8_0 halves it with practically the same "
+                                   "answers. Run the model again from AI › Models and choose \"Half the memory\".", "fix": None})
         temp = hw.get("temp_c")
         if temp is not None and temp >= 80:
             out.append({"kind": "hardware", "what": "It runs hot (%.0f °C)" % temp, "why": "Above about 80 °C CPUs slow themselves down. Improve airflow or the cooler before overclocking.", "fix": None})
@@ -360,13 +496,26 @@ class Tuning:
                        "share_mib": (shares.get(n["name"]) or {}).get("mib"), "main": split.get("main_node") == n["name"]},
                 "probe": data, "probe_at": pr.get("at"), "probe_error": pr.get("error", ""), "probing": bool(pr.get("busy")),
                 "pi_presets": [{"id": x[0], "label": x[1]} for x in pi_presets((data or {}).get("model"))] if data else [],
-                "tips": self.recommendations(n, data, ai.get(n["name"]) or {}, rpc_threads),
+                "tips": self.recommendations(n, data, ai.get(n["name"]) or {}, rpc_threads, split),
+                "lean_options": self.lean_options() if data and data.get("k3s_service") == "k3s" else None,
             })
         return {"nodes": out, "demo": self.demo, "agents": bool((st.get("agents") or {}).get("installed"))}
 
     # -- the demo: a believable machine that remembers what you set -----------------------------------------------
     def _demo_exec(self, node, script):
-        st = self.demo_state.setdefault(node, {"governor": "powersave", "max": 3600000, "turbo": 1, "swappiness": 60, "gpu": 220, "persist": 0})
+        cp = any(r in ("control-plane", "master") for r in self._node(node).get("roles") or [])
+        st = self.demo_state.setdefault(node, {"governor": "powersave", "max": 3600000, "turbo": 1, "swappiness": 60, "gpu": 220, "persist": 0,
+                                               "thp": "madvise", "busy": 0, "lean": 0, "rss": 610000 if cp else 230000})
+        if "echo always > /sys/kernel/mm/transparent_hugepage/enabled" in script:
+            st["thp"] = "always"
+        if "echo madvise > /sys/kernel/mm/transparent_hugepage/enabled" in script:
+            st["thp"] = "madvise"
+        for v in re.findall(r"echo (\d+) > /proc/sys/net/core/busy_poll", script):
+            st["busy"] = int(v)
+        if "cat > /etc/rancher/k3s/config.yaml.d/90-nodeyard-lean.yaml" in script or "90-nodeyard-lean.conf <<" in script:
+            st["lean"] = 1
+        if "rm -f /etc/rancher/k3s/config.yaml.d/90-nodeyard-lean.yaml" in script:
+            st["lean"] = 0
         for gov in re.findall(r'echo ([a-z_]+) > "\$f"; done', script):
             st["governor"] = gov
         for khz in re.findall(r'echo (\d+) > "\$f"; done', script):
@@ -386,10 +535,16 @@ class Tuning:
             if "nodeyard overclock start" not in script and "sed -i" in script:
                 st["pi"] = ""
             gpu += "pi_config=/boot/firmware/config.txt\npi_throttled=0x0\n" + ("pi_%s\npi_ours=1\n" % st["pi"] if st["pi"] else "")
+        gpu += ("thp=%(thp)s\nthp_defrags=always defer defer+madvise madvise never\nvfs_cache_pressure=100\nbusy_poll=%(busy)d\nrmem_max=212992\n"
+                "cstates_deep=3\ncstates_deep_off=0\nreadahead_dev=nvme0n1\nreadahead=128\nk3s_service=%(svc)s\nk3s_rss_kb=%(rss)d\ncontainerd_rss_kb=95000\n" %
+                dict(st, svc="k3s" if cp else "k3s-agent")) + ("lean_cfg=1\n" if st["lean"] else "")
         return ("governor=%(governor)s\ngovernors=performance powersave\nhw_min=800000\nhw_max=3600000\nmax=%(max)d\nturbo=%(turbo)d\nturbo_kind=intel\n"
                 "swappiness=%(swappiness)d\n" % st) + "model=%s\n" % model + gpu + "persist=%d\n" % st["persist"]
 
 
+LATER_RESTART = "systemd-run --quiet --collect --on-active=5 --unit nodeyard-restart-%(svc)s-$(date +%%s) systemctl restart %(svc)s"
+LEAN_REMOVE = ("rm -f /etc/rancher/k3s/config.yaml.d/90-nodeyard-lean.yaml /etc/systemd/system/k3s.service.d/90-nodeyard-lean.conf "
+               "/etc/systemd/system/k3s-agent.service.d/90-nodeyard-lean.conf; systemctl daemon-reload")
 PI_BLOCK_REMOVE = '''f='%(f)s'; [ -f "$f.nodeyard-backup" ] || cp "$f" "$f.nodeyard-backup"; sed -i '/^# nodeyard overclock start/,/^# nodeyard overclock end/d' "$f"'''
 PI_BLOCK_ADD = '''printf '\\n# nodeyard overclock start\\n[all]\\n%(lines)s\\n# nodeyard overclock end\\n' >> '%(f)s\''''
 PERSIST = '''cat > /etc/nodeyard-tune.sh <<'NYTUNE'

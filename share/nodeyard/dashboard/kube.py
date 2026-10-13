@@ -726,7 +726,7 @@ class KubeSource:
                 if host and "-t" in cmd and cmd.index("-t") + 1 < len(cmd) and str(cmd[cmd.index("-t") + 1]).isdigit():
                     threads[host] = int(cmd[cmd.index("-t") + 1])
             ai["split"] = {
-                "threads": threads, "main_node": (tpl.get("nodeSelector") or {}).get("kubernetes.io/hostname", ""),
+                "threads": threads, "main_node": (tpl.get("nodeSelector") or {}).get("kubernetes.io/hostname", ""), "kv": opt("-ctk") or "f16",
                 "stale": ({"nodes": [x["node"] for x in lost], "why": "; ".join(x["why"] for x in lost)} if lost else None),
                 "load": load_progress(main, split_pods, shares, rpc, gpu_node),
                 "gate": gate,
