@@ -42,6 +42,9 @@ LOCAL_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,250}\.gguf$")  # a fi
 ALIAS_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 NODE_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
+# files in a model's repo that aren't a model on their own: speculative-decoding drafts (gpt-oss's "eagle3"), vision
+# projectors, importance matrices
+HELPER_RE = re.compile(r"(?:^|[/_.-])(?:eagle\d*|draft|mtp|mmproj|imatrix)(?:[_.-]|$)", re.I)
 PART_RE = re.compile(r"^(.*)-(\d{5})-of-(\d{5})\.gguf$")
 QUANT_RE = re.compile(r"(?:^|[-_.])((?:UD-)?(?:IQ\d(?:_[A-Z0-9]+)*|Q\d(?:_[A-Z0-9]+)+|Q\d_\d|BF16|F16|F32|MXFP4))(?=[-_.]|$)", re.I)
 CHAT_IMAGE_RE = re.compile(r"^data:image/(jpeg|png|webp);base64,([A-Za-z0-9+/]*={0,2})$")
@@ -321,8 +324,9 @@ class HuggingFace:
         for g in grouped.values():
             qm = QUANT_RE.search(os.path.basename(g["file"]))
             quant = qm.group(1).upper() if qm else ""
-            out.append({"file": g["file"], "size": g["size"], "parts": g["parts"], "quant": quant,
-                        "split_ok": g["parts"] == 1, "ollama": ("hf.co/%s:%s" % (repo, quant)) if quant else ""})
+            helper = bool(HELPER_RE.search(os.path.basename(g["file"])))
+            out.append({"file": g["file"], "size": g["size"], "parts": g["parts"], "quant": quant, "helper": helper,
+                        "split_ok": g["parts"] == 1 and not helper, "ollama": ("hf.co/%s:%s" % (repo, quant)) if quant and not helper else ""})
         out.sort(key=lambda f: f["size"])
         return out
 
