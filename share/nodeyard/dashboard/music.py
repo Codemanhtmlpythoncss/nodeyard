@@ -996,20 +996,81 @@ class Music:
             return self._demo_rows("search " + query, 8)
         return [r for r in (self._entry_row(e) for e in self._yt_entries("scsearch%d:%s" % (n, str(query)[:120]), n, slot=slot)) if r]
 
-    def dj_search(self, query):
-        """Songs for one DJ request that this listener has never heard: a SoundCloud search for what they asked for,
-        minus their history, likes and "not for me" list, checked to really play (one batched look-up)."""
-        q = re.sub(r"\s+", " ", str(query or "")).strip()[:120]
-        if len(q) < 2 or not (self.demo or self.yt_dlp()):
+    # A DJ request is often an activity or a mood ("vibes to code to"), not words to look for: those become a mood
+    # (words to add to a search) and the search is made of the listener's own styles instead.
+    DJ_MOODS = [
+        ("focus", "code coding coder program programming developer dev hacking work working focus focused study studying homework "
+                  "concentrate concentration reading deep grind grinding lock locked productive productivity", ["instrumental", "beats"], "beats to focus to"),
+        ("workout", "gym workout working-out lift lifting run running training cardio pump sport sports", ["workout", "hard"], "workout music"),
+        ("chill", "chill chilling relax relaxing calm mellow late night evening sleep sleeping sleepy cozy lazy sunday", ["chill", "slowed"], "chill vibes"),
+        ("party", "party hype dance dancing club pregame rave turn up", ["party", "mix"], "party mix"),
+        ("drive", "drive driving road roadtrip car cruise cruising", ["drive", "night drive"], "night drive music"),
+        ("sad", "sad rain rainy emotional heartbreak heartbroken cry crying lonely", ["sad", "slowed"], "sad songs"),
+        ("happy", "happy upbeat summer sunny good feel-good cheerful", ["upbeat", "summer"], "feel good music"),
+    ]
+    DJ_FILLER = set(("a an the me my mine i im i'm ive i've want wanna would like could can you please pls give gimme gimmie lemme get "
+                     "make create build put together play some something mix mixes playlist playlists set songs song tracks track music tunes "
+                     "of with for to and that this kind sort type bit little vibe vibes vibey mood moody new fresh different discover more "
+                     "stuff thing things just maybe really hi hello hey thanks thank ok okay yes yeah while during when im about around "
+                     "what do does did think how why who are is it its it's was be that's again now too also so than then up on in at").split())
+
+    def dj_plan(self, text, p):
+        """[(query, kind)] for one request: explicit styles as asked (with the mood's words), else the listener's own styles
+        in that mood, else the mood's own search."""
+        words = [w for w in re.findall(r"[\w'-]+", str(text or "").lower()) if len(w) > 1]
+        mood = None
+        for name, keys, mods, fallback in self.DJ_MOODS:
+            if any(w in keys.split() for w in words):
+                mood = (name, mods, fallback)
+                break
+        mood_words = {k for _n, keys, _m, _f in self.DJ_MOODS for k in keys.split()}
+        style = [w for w in words if w not in self.DJ_FILLER and w not in mood_words][:4]
+        if style:
+            q = " ".join(style)
+            out = [(q + " " + mood[1][0], "style")] if mood else []
+            return out + [((q + " music") if len(style) == 1 and not mood else q, "style")]
+        taste = [w for w, _ in sorted(p["tokens"].items(), key=lambda x: -x[1])
+                 if w not in musicdiscover.GENERIC and w not in musicdiscover.VARIANTS and p.get("token_songs", {}).get(w, 0) >= 2][:2]
+        artists = [p["artist_names"].get(a, a) for a, wt in sorted(p["artists"].items(), key=lambda x: -x[1]) if wt > 0][:1]
+        if mood:
+            out = [("%s %s" % (w, mood[1][0]), "word") for w in taste] or [(mood[2], "mood")]
+            return out[:2] + ([(artists[0], "artist")] if len(out) < 2 and artists else [])
+        return [(w, "word") for w in taste] + [(a, "artist") for a in artists] or [("new music", "mood")]
+
+    def dj_search(self, text, query=""):
+        """Songs for one DJ request that this listener has never heard, found from what they asked for and what they like:
+        searches from dj_plan, plus SoundCloud's "plays next" for their favourite song when the request is a mood; minus
+        their history, likes and "not for me" list; ranked by their taste and checked to play."""
+        text = re.sub(r"\s+", " ", str(text or query or "")).strip()[:300]
+        if len(text) < 2 or not (self.demo or self.yt_dlp()):
             return []
+        cfg = self.cfg()
+        history = [x for x in (cfg.get("history") or []) if isinstance(x, dict)]
+        dislikes = [x for x in (cfg.get("sc_dislikes") or []) if isinstance(x, dict)]
+        p = musicdiscover.profile(self.sc_likes(), history, self.tracks(), dislikes)
+        plan = self.dj_plan(text, p)
         heard = self._heard_urls()
-        rows = [r for r in self._sc_search_rich(q, 24, slot="user") if r["url"] not in heard]
-        if self.demo or not rows:
-            return rows[:12]
-        playable = self._sc_details([r["url"] for r in rows[:16]], slot="user")
-        if playable:      # (when the look-up itself fails, the unchecked results still go out; the player skips a dud)
-            rows = [dict(r, **{k: v for k, v in playable[r["url"]].items() if v}) for r in rows[:16] if r["url"] in playable]
-        return rows[:12]
+        cands = {}
+
+        def add(row, via):
+            if row["url"] in heard:
+                return
+            c = cands.setdefault(row["url"], dict(row, via=[]))
+            c["via"].append(via)
+        for q, kind in plan[:3]:
+            base = {"style": 0.9, "word": 0.6, "artist": 0.6, "mood": 0.5}.get(kind, 0.5)
+            for k, row in enumerate(self._sc_search_rich(q, 20, slot="user")):
+                add(row, ("search", q, base / (1 + 0.1 * k)))
+        if all(kind != "style" for _q, kind in plan) and p["seeds"]:
+            for k, row in enumerate(self._sc_related(p["seeds"][0]["url"], slot="user")[:20]):
+                add(row, ("seed", p["seeds"][0]["title"] or "a song you like", 0.8 / (1 + 0.12 * k)))
+        rows = musicdiscover.rank(cands, p, limit=18, per_artist=2) if cands else []
+        if rows and not self.demo:
+            playable = self._sc_details([r["url"] for r in rows], slot="user")
+            if playable:      # (when the look-up itself fails, the unchecked results still go out; the player skips a dud)
+                rows = [dict(r, **{k: v for k, v in playable[r["url"]].items() if v}) for r in rows if r["url"] in playable]
+        keep = ("url", "title", "artist", "duration_ms", "artwork_url", "genres", "tags", "likes", "why")
+        return [{k: r.get(k) for k in keep} for r in rows[:12]]
 
     def _sc_details(self, urls, slot="bg"):
         """Full details for each track, in a few batches at once. A track yt-dlp can't play (Go+ only, private, gone) gives
@@ -1542,7 +1603,7 @@ def register(ctx, args):
                             "/api/music/playback": _playback_post,
                             "/api/music/history": _history_post, "/api/music/ai": _ai_playlist,
                             "/api/music/like": _sc_like, "/api/music/playlist": _playlist, "/api/music/discover": _discover_post,
-                            "/api/music/dj-search": lambda h, b: h._json({"ok": True, "tracks": music.dj_search(b.get("query"))}),
+                            "/api/music/dj-search": lambda h, b: h._json({"ok": True, "tracks": music.dj_search(b.get("text"), b.get("query"))}),
                             "/api/music/discover-more": lambda h, b: h._json({"ok": True, "tracks": music.discover_more(
                                 b.get("seeds") if isinstance(b.get("seeds"), list) else [], b.get("exclude") if isinstance(b.get("exclude"), list) else [])})})
 
