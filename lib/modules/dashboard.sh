@@ -420,7 +420,11 @@ RestrictNamespaces=true
 LockPersonality=true
 SystemCallArchitectures=native
 CapabilityBoundingSet=
-MemoryMax=400M
+# Memory: past MemoryHigh the kernel reclaims and slows it instead of stopping it; MemoryMax is the hard stop. The
+# yt-dlp lookups it starts for Music count too: they ask to be stopped first (oom_score_adj 900), the dashboard last.
+MemoryHigh=512M
+MemoryMax=768M
+OOMScoreAdjust=-100
 
 [Install]
 WantedBy=multi-user.target
