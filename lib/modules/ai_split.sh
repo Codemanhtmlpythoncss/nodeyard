@@ -1521,6 +1521,107 @@ print("speed: %.1f words(tokens)/s generating, %.1f tokens/s reading the prompt"
 
 # ---------- the model gate: no API key from your own network ----------
 
+# The gate is a small static C program (share/nodeyard/gate/gate.c, built by build.sh for these CPU types): a few
+# hundred KB of memory per node, where the Python one (gate.py, still used for any other CPU type) took ~20 MB plus a
+# Python image on every node's disk. Each CPU type's program is its own ConfigMap (the 32-bit Arm one is the biggest).
+SPLIT_GATE_C_IMAGE="busybox:1.36"
+SPLIT_GATE_ARCHES="amd64 arm64 arm"
+
+# ai_gate_native -- true when this install has the C gate for every CPU type above
+ai_gate_native() {
+    local a
+    for a in $SPLIT_GATE_ARCHES; do
+        [[ -s "${NY_SHARE}/gate/bin/nodeyard-gate-${a}" ]] || return 1
+    done
+    return 0
+}
+
+# ai_gate_version -- a fingerprint of the gate programs (a new one restarts the pods)
+ai_gate_version() {
+    local f out=""
+    for f in "${NY_SHARE}/gate/gate.py" "${NY_SHARE}/gate/bin/"nodeyard-gate-*; do
+        [[ -f "$f" ]] && out+="$(ny_sha256 "$f" 2>/dev/null)"
+    done
+    printf '%s' "${out:0:16}"
+    return 0
+}
+
+# ai_gate_daemonset NAME FLAVOUR PORT TRUSTED -- c: the C gate on the CPU types above; py: the Python gate (every
+# other CPU type, or every node when this install has no C gate)
+ai_gate_daemonset() {
+    local name="$1" flavour="$2" port="$3" trusted="$4" image command mounts volumes affinity a limit=32Mi request=4Mi
+    local arches="[${SPLIT_GATE_ARCHES// /, }]"
+    if [[ "$flavour" == py ]]; then
+        image="$SPLIT_GATE_IMAGE" limit=128Mi request=24Mi
+        command='["python", "-u", "/gate/gate.py"]'
+        mounts="        - {name: script, mountPath: /gate, readOnly: true}"
+        volumes="      - {name: script, configMap: {name: llama-gate-script}}"
+        affinity=""
+        ai_gate_native && affinity="      affinity: {nodeAffinity: {requiredDuringSchedulingIgnoredDuringExecution: {nodeSelectorTerms: [{matchExpressions: [{key: kubernetes.io/arch, operator: NotIn, values: ${arches}}]}]}}}"
+    else
+        image="$SPLIT_GATE_C_IMAGE"
+        command='["/bin/sh", "-c", "case \"$(uname -m)\" in x86_64) a=amd64 ;; aarch64) a=arm64 ;; arm*) a=arm ;; *) echo \"no nodeyard gate program for $(uname -m)\" >&2; exit 1 ;; esac; exec \"/gate-bin/$a/nodeyard-gate\""]'
+        mounts="" volumes=""
+        for a in $SPLIT_GATE_ARCHES; do
+            mounts+="        - {name: bin-${a}, mountPath: /gate-bin/${a}, readOnly: true}"$'\n'
+            volumes+="      - {name: bin-${a}, configMap: {name: llama-gate-bin-${a}, defaultMode: 0555, optional: true}}"$'\n'
+        done
+        mounts="${mounts%$'\n'}" volumes="${volumes%$'\n'}"
+        affinity="      affinity: {nodeAffinity: {requiredDuringSchedulingIgnoredDuringExecution: {nodeSelectorTerms: [{matchExpressions: [{key: kubernetes.io/arch, operator: In, values: ${arches}}]}]}}}"
+    fi
+    cat <<YAML
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ${name}
+  namespace: ${SPLIT_NS}
+  labels: {app: ${SPLIT_GATE_DS}}
+spec:
+  selector:
+    matchLabels: {app: ${SPLIT_GATE_DS}, flavour: ${flavour}}
+  updateStrategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 1}}
+  template:
+    metadata:
+      labels: {app: ${SPLIT_GATE_DS}, flavour: ${flavour}}
+      # a new gate program restarts the pods (a ConfigMap change alone doesn't)
+      annotations: {nodeyard/program-sha256: "$(ai_gate_version)"}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      tolerations: [{operator: Exists}]
+      terminationGracePeriodSeconds: 2
+${affinity:+${affinity}
+}      containers:
+      - name: gate
+        image: ${image}
+        command: ${command}
+        env:
+        - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+        - {name: PORT, value: "${port}"}
+        - {name: PUBLIC_PORT, value: "${SPLIT_GATE_PUBLIC_PORT}"}
+        - {name: UPSTREAM, value: "http://llama.${SPLIT_NS}.svc.cluster.local:8080"}
+        - {name: TRUSTED, value: "${trusted}"}
+        - name: API_KEY
+          valueFrom: {secretKeyRef: {name: llama-api-key, key: api-key, optional: true}}
+        resources:
+          requests: {cpu: 5m, memory: ${request}}
+          limits: {cpu: 500m, memory: ${limit}}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+          runAsUser: 65534
+          runAsNonRoot: true
+        readinessProbe: {httpGet: {path: /gate-health, port: ${port}}, periodSeconds: 10}
+        volumeMounts:
+${mounts}
+      volumes:
+${volumes}
+YAML
+    return 0
+}
+
 ai_gate_manifest() {
     local port="$1" trusted="$2" script
     if [[ "${GATE_ELIDE:-0}" == 1 ]]; then
@@ -1535,54 +1636,31 @@ metadata: {name: llama-gate-script, namespace: ${SPLIT_NS}}
 data:
   gate.py: |
 ${script}
----
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: ${SPLIT_GATE_DS}
-  namespace: ${SPLIT_NS}
-  labels: {app: ${SPLIT_GATE_DS}}
-spec:
-  selector:
-    matchLabels: {app: ${SPLIT_GATE_DS}}
-  updateStrategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 1}}
-  template:
-    metadata:
-      labels: {app: ${SPLIT_GATE_DS}}
-      # a new gate program restarts the pods (a ConfigMap change alone doesn't)
-      annotations: {nodeyard/program-sha256: "$(ny_sha256 "${NY_HOME}/share/nodeyard/gate/gate.py" 2>/dev/null || echo unknown)"}
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
-      tolerations: [{operator: Exists}]
-      terminationGracePeriodSeconds: 2
-      containers:
-      - name: gate
-        image: ${SPLIT_GATE_IMAGE}
-        command: ["python", "-u", "/gate/gate.py"]
-        env:
-        - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
-        - {name: PORT, value: "${port}"}
-        - {name: PUBLIC_PORT, value: "${SPLIT_GATE_PUBLIC_PORT}"}
-        - {name: UPSTREAM, value: "http://llama.${SPLIT_NS}.svc.cluster.local:8080"}
-        - {name: TRUSTED, value: "${trusted}"}
-        - name: API_KEY
-          valueFrom: {secretKeyRef: {name: llama-api-key, key: api-key, optional: true}}
-        resources:
-          requests: {cpu: 10m, memory: 24Mi}
-          limits: {cpu: 500m, memory: 128Mi}
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          capabilities: {drop: [ALL]}
-          runAsUser: 65534
-          runAsNonRoot: true
-        readinessProbe: {httpGet: {path: /gate-health, port: ${port}}, periodSeconds: 10}
-        volumeMounts:
-        - {name: script, mountPath: /gate, readOnly: true}
-      volumes:
-      - {name: script, configMap: {name: llama-gate-script}}
 YAML
+    if ai_gate_native; then
+        ai_gate_daemonset "$SPLIT_GATE_DS" c "$port" "$trusted"
+        ai_gate_daemonset "${SPLIT_GATE_DS}-py" py "$port" "$trusted"
+    else
+        ai_gate_daemonset "$SPLIT_GATE_DS" py "$port" "$trusted"
+    fi
+}
+
+# ai_gate_programs -- the C gate for each CPU type into the cluster (server-side: a program is bigger than client-side
+# apply's annotation allows), and the old single DaemonSet out of the way (its selector had no "flavour")
+ai_gate_programs() {
+    local a sel
+    if ai_gate_native; then
+        for a in $SPLIT_GATE_ARCHES; do
+            kctl -n "$SPLIT_NS" create configmap "llama-gate-bin-${a}" --from-file=nodeyard-gate="${NY_SHARE}/gate/bin/nodeyard-gate-${a}" \
+                --dry-run=client -o yaml | kctl apply --server-side --force-conflicts --field-manager=nodeyard -f - >/dev/null ||
+                ny_die "Saving the gate program in the cluster failed." "Check: nodeyard ai gate status"
+        done
+    fi
+    sel="$(kctl -n "$SPLIT_NS" get daemonset "$SPLIT_GATE_DS" -o jsonpath='{.spec.selector.matchLabels.flavour}' 2>/dev/null || true)"
+    if kctl -n "$SPLIT_NS" get daemonset "$SPLIT_GATE_DS" >/dev/null 2>&1 && [[ -z "$sel" ]]; then
+        kctl -n "$SPLIT_NS" delete daemonset "$SPLIT_GATE_DS" --wait=true >/dev/null 2>&1 || true
+    fi
+    return 0
 }
 
 ai_gate_install() {
@@ -1612,6 +1690,7 @@ ai_gate_install() {
         [[ "$item" =~ ^[0-9a-fA-F:.]+/[0-9]{1,3}$ ]] || ny_usage_error "'${item}' isn't a network like 192.168.1.0/24 or 100.64.0.0/10."
     done
     [[ -r "${NY_SHARE}/gate/gate.py" ]] || ny_die "The gate program is missing from this nodeyard install." "Update nodeyard: sudo nodeyard update" "$NY_E_PRECONDITION"
+    # (the gate's ConfigMaps of programs need the namespace; the model's deploy made it)
     kctl -n "$SPLIT_NS" get service llama >/dev/null 2>&1 ||
         ny_die "No split model is deployed, so there is nothing to put a gate in front of." "Deploy one first: nodeyard ai split plan" "$NY_E_PRECONDITION"
     if [[ -z "$port" ]]; then
@@ -1624,7 +1703,11 @@ ai_gate_install() {
     fi
 
     ny_step "Putting the gate in front of the model on port ${port}"
-    ny_info "Every node runs one small proxy pod (${SPLIT_GATE_IMAGE}). No key is needed from: ${trusted//,/, }"
+    if ai_gate_native; then
+        ny_info "Every node runs one small proxy pod: a C program using well under 1 MB of memory (in ${SPLIT_GATE_C_IMAGE}). No key is needed from: ${trusted//,/, }"
+    else
+        ny_info "Every node runs one small proxy pod (${SPLIT_GATE_IMAGE}). No key is needed from: ${trusted//,/, }"
+    fi
     ny_confirm "Install the gate?" y || return 0
     if ny_simulating; then
         ny_plan_add apply "Apply the model gate DaemonSet and make the model's Service cluster-only"
@@ -1633,6 +1716,8 @@ ai_gate_install() {
             printf '%s\n' "[dry-run] would then switch Service llama to ClusterIP so the gate owns port ${port}" >&2
         fi
     else
+        ai_gate_manifest "$port" "$trusted" >/dev/null    # (fails early on a broken install, before anything changes)
+        ai_gate_programs
         ai_gate_manifest "$port" "$trusted" | kctl apply -f - >/dev/null || ny_die "Applying the gate failed." "Check: nodeyard ai gate status"
     fi
     # The Service must give the port up BEFORE waiting: while it is a NodePort,
@@ -1672,7 +1757,8 @@ ai_gate_remove() {
     local port
     port="$(kctl -n "$SPLIT_NS" get daemonset "$SPLIT_GATE_DS" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="PORT")].value}' 2>/dev/null || true)"
     [[ "$port" =~ ^[0-9]+$ ]] || port=31435
-    ny_run "$(ny_path "$NY_K3S_BIN")" kubectl -n "$SPLIT_NS" delete "daemonset/${SPLIT_GATE_DS}" configmap/llama-gate-script --ignore-not-found >/dev/null || true
+    ny_run "$(ny_path "$NY_K3S_BIN")" kubectl -n "$SPLIT_NS" delete "daemonset/${SPLIT_GATE_DS}" "daemonset/${SPLIT_GATE_DS}-py" configmap/llama-gate-script \
+        configmap/llama-gate-bin-amd64 configmap/llama-gate-bin-arm64 configmap/llama-gate-bin-arm --ignore-not-found >/dev/null || true
     ny_run "$(ny_path "$NY_K3S_BIN")" kubectl -n "$SPLIT_NS" patch service llama --type=json \
         -p '[{"op":"replace","path":"/spec/type","value":"NodePort"},{"op":"add","path":"/spec/ports/0/nodePort","value":'"${port}"'}]' >/dev/null 2>&1 || true
     ny_cfg_set ai "" gate false

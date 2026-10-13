@@ -13,6 +13,9 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   instead of ~24 MB (a Python interpreter), and no Python image on each node's disk: a static program of about
   120 KB for x86, 64-bit and 32-bit Arm runs from a ConfigMap in busybox. Other CPU types keep the Python agent.
   Rebuild with `share/nodeyard/agent/build.sh`.
+- **The model gate is a C program too** (`share/nodeyard/gate/gate.c`): the same rules (no key from your own
+  networks, the key from everywhere else, a wait after 12 wrong keys, the Funnel port that always needs it) in
+  about 0.15 MB per node instead of ~20 MB. Together with the agent that's about 43 MB less on every node.
 - **Processes › Free up memory:** every process over 5 MB that a cluster node doesn't need (desktop, printing,
   Bluetooth, update checkers...), with **Move to swap** (just that process, via `process_madvise`; it comes back by
   itself when used) and **Stop** (its service, optionally kept off at boot, with **Start again**). Kubernetes, the
