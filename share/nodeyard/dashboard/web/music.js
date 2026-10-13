@@ -26,7 +26,7 @@
     data: null, tab: "home", homeHistory: [], homeHistoryReady: false, homeHistoryError: false, homeSessionHeard: new Set(), homeRecs: [], homeUnheard: [],
     queue: [], idx: -1, live: false, seekable: true, shuffle: false, shuffleOrder: null, shufflePos: 0, repeat: "off", rate: 1, eq: "flat",
     scResults: [], playlistResults: [], searchQuery: "", searchError: "", scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
-    discoverTracks: [], discoverIndex: 0, discoverSeeded: false, discoverPointerY: null, discoverWheelAt: 0,
+    discoverTracks: [], discoverIndex: 0, discoverSeeded: false, discoverMoreBusy: false, discoverMoreRetry: 0, discoverWantNext: false, discoverPointerY: null, discoverWheelAt: 0,
     disc: { tracks: [], updated: 0, building: false, error: "", seeds: [], loaded: false, polls: 0, timer: 0 },   // new songs found for you
     dj: readDJState(),
     sleep: null,   // the sleep timer: null, "end" (after this song) or a time in ms
@@ -1068,7 +1068,7 @@
     const art = artworkSource(track);
     const background = art ? "background-image:url('" + art + "')" : "";
     const liked = M.scLikes.some((item) => item.url === track.url);
-    setHTML(el, html`<div class="sc-discover-feed"><header class="sc-discover-feed-head"><div><h2>Discover</h2><span>For you · new finds first, then your music</span></div><b>${M.discoverIndex + 1} / ${tracks.length}</b></header>
+    setHTML(el, html`<div class="sc-discover-feed"><header class="sc-discover-feed-head"><div><h2>Discover</h2><span>For you · new finds first, then your music</span></div><b>${M.discoverIndex + 1} / ${tracks.length}${M.discoverMoreBusy ? raw(' <span class="spin small" title="Finding more songs"></span>') : ""}</b></header>
       <article class="sc-discover-card" data-discover-stage style="${background}" tabindex="0" aria-label="Discover song: ${titleOf(track)}. Swipe up or down to browse.">
         <div class="sc-discover-shade"></div>
         <div class="sc-discover-cover">${art ? html`<img src="${art}" alt="${titleOf(track)} artwork" loading="lazy">` : html`<span aria-hidden="true">♫</span>`}</div>
@@ -1079,14 +1079,76 @@
         </aside>
         <div class="sc-discover-meta"><span class="chip">${track.why ? "New for you" : track.url ? "SoundCloud" : "Your library"}</span><h2>${titleOf(track)}</h2>
           <div>${subOf(track)}${track.duration_ms ? " · " + fmtTime(track.duration_ms / 1000) : ""}</div>${track.why ? html`<div class="sc-why">${track.why}</div>` : ""}</div>
-        <div class="sc-discover-nav"><button type="button" data-music="discover-prev" ${M.discoverIndex <= 0 ? "disabled" : ""} aria-label="Previous song">⌃</button><button type="button" data-music="discover-next" ${M.discoverIndex >= tracks.length - 1 ? "disabled" : ""} aria-label="Next song">⌄</button></div>
-        <div class="sc-discover-hint">Swipe or scroll · ↑ / ↓</div>
+        <div class="sc-discover-nav"><button type="button" data-music="discover-prev" ${M.discoverIndex <= 0 ? "disabled" : ""} aria-label="Previous song">⌃</button><button type="button" data-music="discover-next" ${M.discoverIndex >= tracks.length - 1 && !M.discoverMoreBusy ? "disabled" : ""} aria-label="Next song">⌄</button></div>
+        <div class="sc-discover-hint">Swipe or scroll · ↑ / ↓ · each song plays as you land on it</div>
       </article></div>`);
+    warmDiscover();
+    if (tracks.length - M.discoverIndex <= 8) moreDiscover();
   }
+  // the next two songs in the feed load in the background, one at a time (the server keeps them ready), and their
+  // covers too, so landing on them plays and shows at once
+  const discoverWarm = new Set(), discoverWarmTried = new Map();
+  let discoverWarming = false;
+  async function warmDiscover() {
+    if (discoverWarming) return;
+    discoverWarming = true;
+    try {
+      for (const ahead of [1, 2]) {
+        const t = M.discoverTracks[M.discoverIndex + ahead];
+        if (!t) break;
+        const art = artworkSource(t);
+        if (art && !discoverWarm.has("art:" + art)) { discoverWarm.add("art:" + art); new Image().src = art; }
+        if (!(t.kind === "sc" || t.url)) continue;          // (library files start instantly anyway)
+        const key = trackKey(t);
+        if (discoverWarm.has(key) || Date.now() < (discoverWarmTried.get(key) || 0)) continue;
+        try {
+          const r = await fetch(srcFor(t), { headers: { Range: "bytes=0-1" }, cache: "no-store", credentials: "same-origin" });
+          if (r.ok) discoverWarm.add(key);
+          else discoverWarmTried.set(key, Date.now() + 60000);   // (busy or can't play: not asked again for a minute)
+        } catch (e) { discoverWarmTried.set(key, Date.now() + 60000); }
+      }
+      if (discoverWarm.size > 300) { discoverWarm.clear(); discoverWarmTried.clear(); }
+    } finally { discoverWarming = false; }
+  }
+  // an endless feed: with 8 songs left, more are fetched from what's on screen (SoundCloud's "plays next" for the
+  // song you're on, else a search from your taste), never ones you've heard or already in the feed
+  async function moreDiscover() {
+    if (M.discoverMoreBusy || Date.now() < (M.discoverMoreRetry || 0)) return;
+    const feed = M.discoverTracks, cur = feed[M.discoverIndex] || {};
+    const sc = feed.filter((t) => t.url);
+    const seeds = [cur.url, sc.length ? sc[sc.length - 1].url : ""].filter(Boolean);
+    M.discoverMoreBusy = true; renderTab();
+    let added = 0;
+    try {
+      const r = await postJSON("/api/music/discover-more", { seeds, exclude: sc.map((t) => t.url).slice(-1500) });
+      const have = new Set(M.discoverTracks.map(trackKey));
+      (r.tracks || []).forEach((t) => { const k = trackKey(t); if (k && !have.has(k)) { have.add(k); M.discoverTracks.push(t); added++; } });
+    } catch (e) { /* tried again on the next move */ }
+    M.discoverMoreBusy = false;
+    if (!added) M.discoverMoreRetry = Date.now() + 30000;       // (nothing new this time: don't ask on every move)
+    if (S.view === "music" && M.tab === "discover") {
+      renderTab();
+      if (added && M.discoverWantNext) { M.discoverWantNext = false; moveDiscover(1); }
+    }
+  }
+  let discoverPlayTimer = 0;
   function moveDiscover(delta) {
     if (!M.discoverTracks.length) return;
+    const before = M.discoverIndex;
     M.discoverIndex = Math.max(0, Math.min(M.discoverTracks.length - 1, M.discoverIndex + delta));
+    if (M.discoverTracks.length - M.discoverIndex <= 8) moreDiscover();
+    if (M.discoverIndex === before && delta > 0) M.discoverWantNext = M.discoverMoreBusy;    // at the end: carry on when more arrive
     renderTab();
+    if (M.discoverIndex === before) return;
+    // scrolling onto a song plays it: after a moment, so flicking past several doesn't start (and fetch) each one
+    clearTimeout(discoverPlayTimer);
+    discoverPlayTimer = setTimeout(() => {
+      const t = M.discoverTracks[M.discoverIndex];
+      if (!t || S.view !== "music" || M.tab !== "discover") return;
+      const cur = M.queue[M.idx];
+      if (cur && !M.live && trackKey(cur) === trackKey(t) && audio && !audio.paused) return;   // (already playing)
+      playQueue(M.discoverTracks, M.discoverIndex);
+    }, 350);
   }
 
   function renderSearch(el) {

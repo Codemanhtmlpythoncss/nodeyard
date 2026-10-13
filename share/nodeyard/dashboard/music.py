@@ -947,7 +947,7 @@ class Music:
                 "genres": [str(g)[:40] for g in (e.get("genres") or [])][:5], "tags": [str(t)[:40] for t in (e.get("tags") or [])][:12],
                 "likes": int(e.get("like_count") or 0)}
 
-    def _sc_related(self, url):
+    def _sc_related(self, url, slot="bg"):
         """SoundCloud's own "recommended" list for a track (what its station plays next)."""
         url = self._sc_clean_url(url)
         if self.demo:
@@ -955,7 +955,41 @@ class Music:
         parts = urllib.parse.urlparse(url).path.strip("/").split("/")
         if len(parts) != 2 or parts[1] in ("sets", "albums", "tracks", "likes", "reposts"):
             return []
-        return [r for r in (self._entry_row(e) for e in self._yt_entries(url + "/recommended", 25)) if r]
+        return [r for r in (self._entry_row(e) for e in self._yt_entries(url + "/recommended", 25, slot=slot)) if r]
+
+    def discover_more(self, seeds, exclude):
+        """More new songs for the Discover feed as it's scrolled, so it never runs out: SoundCloud's "recommended" lists
+        for the songs just shown (what their stations play next), else a search from this listener's taste; minus
+        everything they've heard and what the feed already has, checked to play, best match first."""
+        exclude = {self._sc_clean_url(u) for u in (exclude or [])[:2000]}
+        heard = self._heard_urls() | exclude
+        cfg = self.cfg()
+        history = [x for x in (cfg.get("history") or []) if isinstance(x, dict)]
+        dislikes = [x for x in (cfg.get("sc_dislikes") or []) if isinstance(x, dict)]
+        p = musicdiscover.profile(self.sc_likes(), history, self.tracks(), dislikes)
+        cands = {}
+
+        def add(row, via):
+            if row["url"] in heard:
+                return
+            c = cands.setdefault(row["url"], dict(row, via=[]))
+            c["via"].append(via)
+        for i, url in enumerate([u for u in (self._sc_clean_url(x) for x in (seeds or [])) if u][:2]):
+            for k, row in enumerate(self._sc_related(url, slot="user")[:25]):
+                add(row, ("seed", "a song you just heard", (1.0 if i == 0 else 0.7) / (1 + 0.12 * k)))
+        if len(cands) < 8:          # nothing related to go on: a search from their taste, a different one each time
+            self._more_rotation = getattr(self, "_more_rotation", 0) + 1
+            _seeds, queries = musicdiscover.plan(p, 1000 + self._more_rotation)
+            for q, kind in queries[:2]:
+                for k, row in enumerate(self._sc_search_rich(q, 15, slot="user")):
+                    add(row, ("search", q, (0.5 if kind == "artist" else 0.4) / (1 + 0.15 * k)))
+        rows = musicdiscover.rank(cands, p, limit=18, per_artist=3) if cands else []
+        if rows and not self.demo:
+            playable = self._sc_details([r["url"] for r in rows], slot="user")
+            if playable:
+                rows = [dict(r, **{k: v for k, v in playable[r["url"]].items() if v}) for r in rows if r["url"] in playable]
+        keep = ("url", "title", "artist", "duration_ms", "artwork_url", "genres", "tags", "likes", "why")
+        return [dict({k: r.get(k) for k in keep}, kind="sc") for r in rows[:15]]
 
     def _sc_search_rich(self, query, n=15, slot="bg"):
         if self.demo:
@@ -1508,7 +1542,9 @@ def register(ctx, args):
                             "/api/music/playback": _playback_post,
                             "/api/music/history": _history_post, "/api/music/ai": _ai_playlist,
                             "/api/music/like": _sc_like, "/api/music/playlist": _playlist, "/api/music/discover": _discover_post,
-                            "/api/music/dj-search": lambda h, b: h._json({"ok": True, "tracks": music.dj_search(b.get("query"))})})
+                            "/api/music/dj-search": lambda h, b: h._json({"ok": True, "tracks": music.dj_search(b.get("query"))}),
+                            "/api/music/discover-more": lambda h, b: h._json({"ok": True, "tracks": music.discover_more(
+                                b.get("seeds") if isinstance(b.get("seeds"), list) else [], b.get("exclude") if isinstance(b.get("exclude"), list) else [])})})
 
 
 def _stream_bytes(h, data, ctype):
