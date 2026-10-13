@@ -128,6 +128,14 @@ SPLIT_DEFAULT_MODEL_DIR="/var/lib/nodeyard/models"
 # SPEC is "owner/repo:file.gguf", a huggingface.co .../resolve|blob/<rev>/<file>
 # URL, or "local:file.gguf" (or just file.gguf): a model already downloaded on
 # one of the nodes, run from there with no download.
+# split_helper_file FILE -- true for a repo's files that aren't a model on their own: speculative-decoding drafts
+# (gpt-oss's "eagle3" files), vision projectors, importance matrices
+split_helper_file() {
+    local b
+    b="$(basename "$1" | tr '[:upper:]' '[:lower:]')"
+    [[ "$b" =~ (^|[-_.])(eagle[0-9]*|draft|mtp|mmproj|imatrix)([-_.]|$) ]]
+}
+
 split_parse_model() {
     local spec="$1"
     SPLIT_LOCAL=0
@@ -137,6 +145,8 @@ split_parse_model() {
         SPLIT_REV=""
         SPLIT_FILE="${BASH_REMATCH[2]}"
         SPLIT_URL=""
+        split_helper_file "$SPLIT_FILE" && ny_die "${SPLIT_FILE} is a helper file (a speculative-decoding draft or a vision projector), not a model that runs on its own." \
+            "Run the model's own file instead; see what's downloaded: nodeyard ai split models" "$NY_E_PRECONDITION"
         return 0
     fi
     if [[ "$spec" =~ ^https?://huggingface\.co/([^/]+/[^/]+)/(resolve|blob)/([^/]+)/(.+)$ ]]; then
@@ -151,6 +161,8 @@ split_parse_model() {
         ny_die "--model must be 'owner/repo:file.gguf' or a huggingface.co file URL (got: $spec)"
     fi
     [[ "$SPLIT_FILE" == *.gguf ]] || ny_die "The model file must be a single .gguf (got: $SPLIT_FILE)"
+    split_helper_file "$SPLIT_FILE" && ny_die "${SPLIT_FILE} is a helper file (a speculative-decoding draft or a vision projector), not a model that runs on its own." \
+        "Pick the model's own file from ${SPLIT_REPO} (Find models › Show files)" "$NY_E_PRECONDITION"
     [[ "$SPLIT_FILE" =~ -[0-9]{5}-of-[0-9]{5}\.gguf$ ]] && ny_die "Multi-part GGUFs aren't supported yet; pick a single-file quant."
     SPLIT_URL="https://huggingface.co/${SPLIT_REPO}/resolve/${SPLIT_REV}/${SPLIT_FILE}"
     return 0

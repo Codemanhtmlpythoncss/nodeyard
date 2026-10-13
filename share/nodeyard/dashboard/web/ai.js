@@ -1636,7 +1636,7 @@
     if (!f.files.length) return html`<div class="muted" style="padding:12px 0">This repository has no GGUF files.</div>`;
     const cols = [
       { k: "file", t: "File", cls: "wrap mono", v: (x) => x.file, r: (x) => x.file },
-      { k: "quant", t: "Quality", v: (x) => x.quant, r: (x) => (x.quant ? chip(x.quant, "violet") : "") },
+      { k: "quant", t: "Quality", v: (x) => x.quant, r: (x) => (x.helper ? html`${chip("helper file", "warn")} <span class="faint small">not a model on its own</span>` : x.quant ? chip(x.quant, "violet") : "") },
       { k: "size", t: "Size", cls: "num", v: (x) => x.size, r: (x) => fmt.bytes(x.size) + (x.parts > 1 ? " · " + x.parts + " parts" : "") },
       { k: "fit", t: "Fits on your cluster?", v: (x) => x.size, r: (x) => { const fit = fitFor(x.size); return html`<span class="nowrap">${verdict(fit.split)} <span class="faint small">split</span></span> <span class="nowrap">${verdict(fit.single)} <span class="faint small">one machine</span></span>`; } },
       { k: "act", t: "", cls: "right nowrap", r: (x) => raw((x.split_ok ? '<button class="btn small primary" data-ai="s-run" data-repo="' + esc(repo) + '" data-file="' + esc(x.file) + '" data-size="' + x.size + '">Run split</button> ' : "") +
