@@ -734,6 +734,13 @@ def main():
     apiregistry.register(ctx, a)
     import music         # optional: a folder music player and host-audio forwarding, both streamed server-side
     music.register(ctx, a)
+    import diskusage     # what's filling each node's disk, and how to free it
+    diskusage.register(ctx, a)
+    import tune          # per-device AI settings, and CPU/GPU power, clock and overclock controls
+    tune.register(ctx, a)
+    if getattr(ctx, "ai", None) is not None:
+        import aiapi as _aiapi
+        _aiapi.EXTRA_SPLIT_ARGS = ctx.tuning.run_args
     import homelab       # service monitor, notifications, Wake-on-LAN, network tools, Prometheus metrics
     homelab.register(ctx, a)
     import galaxy3d      # the 3D galaxy screens (/g3/), fed from k3s

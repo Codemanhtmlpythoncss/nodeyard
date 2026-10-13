@@ -714,7 +714,19 @@ class KubeSource:
                         lost.append({"node": name, "why": "%s's RPC server isn't running" % name})
                     elif main_started and max(runs) > main_started + 2:
                         lost.append({"node": name, "why": "%s restarted after the model loaded" % name})
+            # each RPC server's -t (threads) and the main server's node, for the Tuning page
+            threads = {}
+            for d in raw["deployments"].get("items", []):
+                md = d["metadata"]
+                if md.get("namespace") != "ai-split" or not md.get("name", "").startswith("rpc-"):
+                    continue
+                tpl_d = d.get("spec", {}).get("template", {}).get("spec", {})
+                cmd = ((tpl_d.get("containers") or [{}])[0].get("command") or [])
+                host = (tpl_d.get("nodeSelector") or {}).get("kubernetes.io/hostname", "")
+                if host and "-t" in cmd and cmd.index("-t") + 1 < len(cmd) and str(cmd[cmd.index("-t") + 1]).isdigit():
+                    threads[host] = int(cmd[cmd.index("-t") + 1])
             ai["split"] = {
+                "threads": threads, "main_node": (tpl.get("nodeSelector") or {}).get("kubernetes.io/hostname", ""), "kv": opt("-ctk") or "f16",
                 "stale": ({"nodes": [x["node"] for x in lost], "why": "; ".join(x["why"] for x in lost)} if lost else None),
                 "load": load_progress(main, split_pods, shares, rpc, gpu_node),
                 "gate": gate,

@@ -53,6 +53,8 @@ Options:
   --model-dir /path        Where the main node keeps the model file
   --no-cache a,b           Don't cache weights on these nodes (slow disks)
   --ctx N                  Context length (default 16384)       [deploy]
+  --kv-cache f16|q8_0|q4_0 Conversation memory precision: q8_0 halves it with practically
+                           the same answers, q4_0 quarters it (default f16) [deploy]
   --think on|off           Allow reasoning output (default off) [deploy]
   --nodeport PORT|0        Chat page + API NodePort (default 31435; 0 = cluster only) [deploy]
   --api-key-file PATH      Require this API key (read from a file) [deploy]
@@ -889,7 +891,9 @@ spec: {selector: {app: ${n}}, ports: [{port: 50052, targetPort: 50052}]}
 YAML
         done
 
-        local think_args="" key_args="" svc_type="NodePort" np_line="    nodePort: ${SPLIT_NODEPORT}"
+        local think_args="" key_args="" kv_args="" svc_type="NodePort" np_line="    nodePort: ${SPLIT_NODEPORT}"
+        # a quantized KV cache (the conversation's memory) needs flash attention; it halves (q8_0) or quarters (q4_0) it
+        if [[ "${SPLIT_KV:-f16}" != "f16" ]]; then kv_args=$'\n        - --flash-attn\n        - "on"\n        - -ctk\n        - "'"${SPLIT_KV}"$'"\n        - -ctv\n        - "'"${SPLIT_KV}"'"'; fi
         if [[ "$SPLIT_THINK" != "on" ]]; then think_args=$'\n        - --reasoning-budget\n        - "0"'; fi
         if [[ -n "$SPLIT_API_KEY" ]]; then key_args=$'\n        - --api-key-file\n        - /secrets/api-key'; fi
         if [[ "$SPLIT_NODEPORT" == "0" ]]; then
@@ -968,7 +972,7 @@ ${main_fetch}
         - -t
         - "2"
         - -cram
-        - "$(split_cram)"
+        - "$(split_cram)"${kv_args}
         # lets the model call tools (OpenAI-style tool calls: yardcode and other agents need it)
         - --jinja${think_args}${key_args}
         - --host
@@ -1012,6 +1016,7 @@ split_parse_flags() {
     SPLIT_NODES=()
     SPLIT_NODEPORT=31435
     SPLIT_CTX=16384
+    SPLIT_KV="f16"
     SPLIT_THINK="off"
     SPLIT_API_KEY=""
     SPLIT_ALIAS=""
@@ -1075,6 +1080,11 @@ split_parse_flags() {
                 SPLIT_CTX="$2"
                 shift 2
                 ;;
+            --kv-cache)
+                [[ $# -ge 2 && "$2" =~ ^(f16|q8_0|q4_0)$ ]] || ny_usage_error "--kv-cache needs f16, q8_0 or q4_0"
+                SPLIT_KV="$2"
+                shift 2
+                ;;
             --think)
                 [[ $# -ge 2 ]] || ny_usage_error "--think needs on|off"
                 SPLIT_THINK="$2"
@@ -1125,6 +1135,8 @@ split_parse_flags() {
     done
     [[ "$SPLIT_NODEPORT" == 0 ]] || ny_valid_int "$SPLIT_NODEPORT" 30000 32767 || ny_usage_error "--nodeport must be 0 or between 30000 and 32767."
     ny_valid_int "$SPLIT_CTX" 512 1048576 || ny_usage_error "--ctx: ${NY_VALID_MSG}"
+    # the main node's extra reserve is mostly the KV cache: a smaller cache needs less of it
+    case "${SPLIT_KV:-f16}" in q8_0) SPLIT_RES_MAIN=640 ;; q4_0) SPLIT_RES_MAIN=448 ;; esac
     ny_valid_enum "$SPLIT_THINK" on off || ny_usage_error "--think: ${NY_VALID_MSG}"
     [[ -z "$SPLIT_ALIAS" || "$SPLIT_ALIAS" =~ ^[A-Za-z0-9._:-]+$ ]] || ny_usage_error "--alias may only contain letters, digits, '.', '_', ':' and '-'."
     # One key for the whole server: a model deployed without --api-key uses the server API key when there is one.

@@ -129,6 +129,10 @@ def clean_chat_messages(messages):
     return clean
 
 
+# The Tuning page's saved per-node settings (--threads/--reserve), added to every split model run it starts.
+EXTRA_SPLIT_ARGS = lambda: []  # noqa: E731
+
+
 def chat_payload_for_target(target, payload):
     """Ollama's OpenAI-compatible endpoint uses a string image_url value."""
     if not str(target).startswith("ollama:"):
@@ -526,9 +530,14 @@ def build_command(action, p, nodes, key_path):
             raise AIError("Bad context length.")
         if not 512 <= ctx <= 131072:
             raise AIError("The context length must be between 512 and 131072.")
-        argv = ["ai", "split", action, "--model", spec, "--ctx", str(ctx)]
+        argv = ["ai", "split", action, "--model", spec, "--ctx", str(ctx)] + list(EXTRA_SPLIT_ARGS())   # (per-node threads/reserve from Tuning)
         if action == "switch" and p.get("keep_old") is True:
             argv.append("--keep-old")
+        kv = str(p.get("kv_cache") or "f16")
+        if kv not in ("f16", "q8_0", "q4_0"):
+            raise AIError("The KV cache must be f16, q8_0 or q4_0.")
+        if kv != "f16":
+            argv += ["--kv-cache", kv]
         chosen = p.get("nodes") or []
         if chosen:
             if not isinstance(chosen, list) or len(chosen) > 30 or not all(isinstance(n, str) and NODE_RE.match(n) and n in nodes for n in chosen):

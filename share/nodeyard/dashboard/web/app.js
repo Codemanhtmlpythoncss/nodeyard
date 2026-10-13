@@ -25,6 +25,7 @@
     { id: "doctor", label: "Doctor", icon: "doctor", sub: "Checks for common problems, with one-click fixes" },
     { id: "services", label: "Services", icon: "services", sub: "Uptime, latency and certificates for your apps and machines" },
     { id: "tools", label: "Tools", icon: "tools", sub: "Network checks, Wake-on-LAN and metrics" },
+    { id: "tune", label: "Tuning", icon: "tune", sub: "AI settings and power, clocks and overclocking for each machine" },
     { id: "commands", label: "Commands", icon: "commands", sub: "Every nodeyard command, runnable from here" },
     { id: "terminal", label: "Terminal", icon: "terminal", sub: "Shells on every device" },
     { id: "apis", label: "APIs", icon: "commands", sub: "Your own self-hosted APIs, for the dashboard and the AI" },
@@ -619,7 +620,8 @@
 
   // ----- Storage
   V.storage = {
-    build() { NY.freshHTML($("#view"), html`<div class="grid g-2" id="st-top"></div><div class="section-title">Volume claims</div><div class="card"><div id="st-pvc"></div></div><div class="section-title">Persistent volumes</div><div class="card"><div id="st-pv"></div></div>`); },
+    build() { NY.freshHTML($("#view"), html`<div id="st-usage"></div><div class="grid g-2 mt" id="st-top"></div><div class="section-title">Volume claims</div><div class="card"><div id="st-pvc"></div></div><div class="section-title">Persistent volumes</div><div class="card"><div id="st-pv"></div></div>`);
+      if (NY.diskUsage) NY.diskUsage.mount($("#st-usage")); },
     update() {
       const d = S.d, t = S.t;
       const disk = d.nodes.filter((n) => n.disk_total);
