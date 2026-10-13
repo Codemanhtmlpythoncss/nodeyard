@@ -915,12 +915,12 @@ class Music:
         url = str(url or "").strip().split("?", 1)[0].split("#", 1)[0].rstrip("/")
         return url if cls._valid_sc_url(url) else ""
 
-    def _yt_entries(self, target, limit, timeout=45):
+    def _yt_entries(self, target, limit, timeout=45, slot="bg"):
         yt = self.yt_dlp()
         if not yt:
             return []
         try:
-            r = _yt_run([yt, "-q", "--no-warnings", "--flat-playlist", "--playlist-end", str(limit), "-J", target], slot="bg",
+            r = _yt_run([yt, "-q", "--no-warnings", "--flat-playlist", "--playlist-end", str(limit), "-J", target], slot=slot,
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace", timeout=timeout)
             return [e for e in (json.loads(r.stdout or "{}").get("entries") or []) if isinstance(e, dict)] if r.returncode == 0 else []
         except (OSError, ValueError, subprocess.SubprocessError):
@@ -957,10 +957,25 @@ class Music:
             return []
         return [r for r in (self._entry_row(e) for e in self._yt_entries(url + "/recommended", 25)) if r]
 
-    def _sc_search_rich(self, query, n=15):
+    def _sc_search_rich(self, query, n=15, slot="bg"):
         if self.demo:
             return self._demo_rows("search " + query, 8)
-        return [r for r in (self._entry_row(e) for e in self._yt_entries("scsearch%d:%s" % (n, str(query)[:120]), n)) if r]
+        return [r for r in (self._entry_row(e) for e in self._yt_entries("scsearch%d:%s" % (n, str(query)[:120]), n, slot=slot)) if r]
+
+    def dj_search(self, query):
+        """Songs for one DJ request that this listener has never heard: a SoundCloud search for what they asked for,
+        minus their history, likes and "not for me" list, checked to really play (one batched look-up)."""
+        q = re.sub(r"\s+", " ", str(query or "")).strip()[:120]
+        if len(q) < 2 or not (self.demo or self.yt_dlp()):
+            return []
+        heard = self._heard_urls()
+        rows = [r for r in self._sc_search_rich(q, 24, slot="user") if r["url"] not in heard]
+        if self.demo or not rows:
+            return rows[:12]
+        playable = self._sc_details([r["url"] for r in rows[:16]], slot="user")
+        if playable:      # (when the look-up itself fails, the unchecked results still go out; the player skips a dud)
+            rows = [dict(r, **{k: v for k, v in playable[r["url"]].items() if v}) for r in rows[:16] if r["url"] in playable]
+        return rows[:12]
 
     def _sc_details(self, urls, slot="bg"):
         """Full details for each track, in a few batches at once. A track yt-dlp can't play (Go+ only, private, gone) gives
@@ -1492,7 +1507,8 @@ def register(ctx, args):
                             "/api/audio/setup-server": _setup_audio, "/api/music/sc-download": _sc_download,
                             "/api/music/playback": _playback_post,
                             "/api/music/history": _history_post, "/api/music/ai": _ai_playlist,
-                            "/api/music/like": _sc_like, "/api/music/playlist": _playlist, "/api/music/discover": _discover_post})
+                            "/api/music/like": _sc_like, "/api/music/playlist": _playlist, "/api/music/discover": _discover_post,
+                            "/api/music/dj-search": lambda h, b: h._json({"ok": True, "tracks": music.dj_search(b.get("query"))})})
 
 
 def _stream_bytes(h, data, ctype):

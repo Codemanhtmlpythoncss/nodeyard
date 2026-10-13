@@ -672,7 +672,7 @@
       </div>
       <div id="dj-chat" style="max-height:380px;overflow:auto;display:flex;flex-direction:column;gap:10px;margin-top:14px">
         ${messages.map((m) => html`<div style="align-self:${m.role === "user" ? "flex-end" : "flex-start"};max-width:min(88%,720px);padding:10px 13px;border-radius:14px;background:${m.role === "user" ? "rgba(255,85,0,.16)" : "var(--panel2,rgba(125,160,200,.09))"}"><div class="small">${m.role === "assistant" ? "🎙 DJ" : "You"}</div><div style="white-space:pre-wrap;margin-top:3px">${m.content}</div></div>`)}
-        ${M.dj.busy ? html`<div class="empty"><div class="spin"></div>DJ is thinking…</div>` : ""}
+        ${M.dj.busy ? html`<div class="empty"><div class="spin"></div>${M.dj.status || "DJ is thinking…"}</div>` : ""}
       </div>
       ${M.dj.draft && M.dj.draft.tracks && M.dj.draft.tracks.length ? html`<div class="mt" style="border-top:1px solid var(--line);padding-top:12px">
         <div class="row wrap" style="justify-content:space-between;align-items:center;gap:8px"><b>DJ set: ${M.dj.draft.name} <span class="faint small">(${M.dj.draft.tracks.length} tracks)</span></b>
@@ -738,6 +738,19 @@
           new_to_you: item.sources.has("new") || undefined, why: item.sources.has("new") ? t.why : undefined } };
     });
   }
+  // what to look for on SoundCloud for one request: its words, minus the filler ("make me a ... mix")
+  const DJ_FILLER = new Set(("a an the me my mine i im i'm ive i've want wanna would like could can you please pls give get make create build put together play " +
+    "some something mix mixes playlist playlists set songs song tracks track music tunes of with for to and that this kind sort type bit little " +
+    "vibe vibes vibey mood moody new fresh different discover more stuff thing things just maybe really hi hello hey thanks thank ok okay yes yeah " +
+    "no nope cool nice great good what do does did think how why who are is it its it's was be that's again now too also so than then").split(" "));
+  function djSearchQuery(text) {
+    const t = String(text || "");
+    // a question with no music words in it ("what do you think?") isn't a request for songs
+    if (/\?\s*$/.test(t) && !/\b(?:mix|playlist|songs?|tracks?|music|play|vibes?)\b/i.test(t)) return "";
+    const words = t.toLowerCase().replace(/[^\p{L}\p{N}' -]+/gu, " ").split(/\s+/).filter((w) => w.length > 1 && !DJ_FILLER.has(w));
+    if (!words.length) return "";
+    return words.length === 1 ? words[0] + " music" : words.slice(0, 6).join(" ");
+  }
   async function readDJStream(response) {
     if (!response.ok) { let body = {}; try { body = await response.json(); } catch (e) { } throw new Error(body.error || "The AI model couldn't answer."); }
     if (!response.body || !response.body.getReader) return (await response.text());
@@ -801,20 +814,41 @@
       if (!fresh) M.dj.catalog = { at: Date.now(), rows: catalog };
       if (!catalog.length) throw new Error("There are no songs for the DJ yet. Set a Music folder, like some SoundCloud songs, or listen to a few tracks first.");
       const catalogText = catalog.map((x) => x.info);
-      const system = "You are Nodeyard DJ, a warm, confident, conversational music host. Sound like a natural radio presenter: short, personal, lightly playful, never overdo catchphrases. Use listening history and likes to personalize, but never claim you listened to audio or know lyrics unless given. Recommend only catalogue tracks. The user request may be a vibe, activity, artist/style preference, or follow-up. If you need one key detail, ask one concise question and return no tracks. Otherwise create a useful mix. IMPORTANT: for ordinary vibe/activity requests, use unliked tracks from the user's library and listening history first; likes are taste context, not the default source. Never make a mix only from liked tracks when unliked catalogue tracks are available. Include at least half unliked tracks where possible. Only focus on liked tracks when the user explicitly asks for their likes/favourites. Catalogue fields `liked`, `from_library`, and `in_listening_history` tell you which tracks are liked or unliked. Tracks with `new_to_you: true` are songs the user has never heard, picked for their taste (`why` says why): put about a quarter of them into ordinary mixes so the user discovers music, and lead with them (at least half) when the user asks for something new, fresh, different or to discover; skip them only when the user asks for songs they know. Reply with exactly one JSON object and no markdown: {\"speech\":\"spoken response, 1-3 short sentences\",\"playlist_name\":\"short name or empty string\",\"track_ids\":[\"t001\"]}. For a playlist, include 5-20 catalogue IDs in a deliberate order. If there are fewer suitable songs, use fewer. If this is only a greeting or clarifying question, playlist_name must be empty and track_ids must be []. Never invent IDs.\nCATALOGUE:\n" + JSON.stringify(catalogText);
+      // songs for this request the listener has never heard: searched on SoundCloud now, sent with this message only
+      // (the catalogue in the system prompt stays the same all session, so the model keeps it read)
+      const asksForLikes = /\b(?:liked songs|my likes|from my likes|favorites?|favourites?|songs?\s+(?:that\s+)?i\s+(?:already\s+)?liked|songs?\s+i(?:'|’)ve liked)\b/i.test(userText);
+      const wantsNew = /\b(?:new|fresh|discover|different|haven(?:'|’)?t heard|never heard|explore|surprise)\b/i.test(userText);
+      const wantsKnown = asksForLikes || /\b(?:songs? i know|familiar|old favou?rites?|my songs|my library|already (?:heard|listened))\b/i.test(userText);
+      let searchRows = [];
+      let query = hidden || wantsKnown ? "" : djSearchQuery(userText);
+      if (!query && !hidden && !wantsKnown && M.dj.lastQuery && /\b(?:more|another|similar|again|like (?:that|this|those))\b/i.test(userText)) query = M.dj.lastQuery;   // "more like that"
+      if (query) M.dj.lastQuery = query;
+      if (query) {
+        M.dj.status = "Looking on SoundCloud for new “" + query + "” songs…"; renderTab();
+        try {
+          const sr = await postJSON("/api/music/dj-search", { query });
+          const known = new Set(catalog.map((x) => trackKey(x.track)));
+          searchRows = (sr.tracks || []).filter((t) => !known.has(trackKey({ ...t, kind: "sc" }))).map((t, i) => {
+            const id = "n" + String(i + 1).padStart(3, "0");
+            return { id, track: { ...t, kind: "sc" }, info: { id, title: t.title, artist: t.artist || "SoundCloud", new_to_you: true, why: "matches “" + query + "”" } };
+          });
+        } catch (e) { /* the catalogue alone still makes a mix */ }
+        M.dj.status = ""; renderTab();
+      }
+      const system = "You are Nodeyard DJ, a warm, confident, conversational music host. Sound like a natural radio presenter: short, personal, lightly playful, never overdo catchphrases. Use listening history and likes to personalize, but never claim you listened to audio or know lyrics unless given. Recommend only catalogue tracks. The user request may be a vibe, activity, artist/style preference, or follow-up. If you need one key detail, ask one concise question and return no tracks. Otherwise create a useful mix. IMPORTANT: for ordinary vibe/activity requests, use unliked tracks from the user's library and listening history first; likes are taste context, not the default source. Never make a mix only from liked tracks when unliked catalogue tracks are available. Include at least half unliked tracks where possible. Only focus on liked tracks when the user explicitly asks for their likes/favourites. Catalogue fields `liked`, `from_library`, and `in_listening_history` tell you which tracks are liked or unliked. Tracks with `new_to_you: true` are songs the user has never heard, picked for their taste (`why` says why): put about a quarter of them into ordinary mixes so the user discovers music, and lead with them (at least half) when the user asks for something new, fresh, different or to discover; skip them only when the user asks for songs they know. A request may come with NEW SONGS FOR THIS REQUEST (ids n001...): songs matching what the user asked for that they have never heard. Unless the user asks for their likes or songs they know, build at least half of the mix from those and the new_to_you catalogue tracks, with a few of their own songs mixed in. Reply with exactly one JSON object and no markdown: {\"speech\":\"spoken response, 1-3 short sentences\",\"playlist_name\":\"short name or empty string\",\"track_ids\":[\"t001\"]}. For a playlist, include 5-20 catalogue IDs in a deliberate order. If there are fewer suitable songs, use fewer. If this is only a greeting or clarifying question, playlist_name must be empty and track_ids must be []. Never invent IDs.\nCATALOGUE:\n" + JSON.stringify(catalogText);
       const all = (M.dj.messages || []).filter((m) => !m.hidden);
       const history = all.slice(all.length <= 12 ? 0 : all.length - 6 - ((all.length - 6) % 6));   // moves in steps, not every turn
       if (!hidden && history.length && history[history.length - 1].role === "user" && history[history.length - 1].content === userText) history.pop();
-      const messages = [{ role: "system", content: system }].concat(history.map((m) => ({ role: m.role, content: m.content })), [{ role: "user", content: userText }]);
+      const userContent = searchRows.length ? userText + "\n\nNEW SONGS FOR THIS REQUEST (found on SoundCloud just now; the user has never heard them): " + JSON.stringify(searchRows.map((x) => x.info)) : userText;
+      const messages = [{ role: "system", content: system }].concat(history.map((m) => ({ role: m.role, content: m.content })), [{ role: "user", content: userContent }]);
       const response = await fetch("/api/v1/chat/completions", { method: "POST", cache: "no-store", credentials: "same-origin",
         headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, signal: controller.signal,
         body: JSON.stringify({ model: M.dj.target, messages, temperature: 0.65, max_tokens: 1400, stream: true }) });
       const parsed = parseDJAnswer(await readDJStream(response));
       const speech = String(parsed.speech || parsed.response || "").trim().slice(0, 2400) || "I couldn't put that into words. Try asking me a different way.";
-      const byId = new Map(catalog.map((x) => [x.id, x]));
+      const byId = new Map(catalog.concat(searchRows).map((x) => [x.id, x]));
       let selectedRows = Array.isArray(parsed.track_ids) ? parsed.track_ids.slice(0, 40).map((id) => byId.get(String(id))).filter(Boolean) : [];
       selectedRows = Array.from(new Map(selectedRows.map((row) => [trackKey(row.track), row])).values());
-      const asksForLikes = /\b(?:liked songs|my likes|from my likes|favorites?|favourites?|songs?\s+(?:that\s+)?i\s+(?:already\s+)?liked|songs?\s+i(?:'|’)ve liked)\b/i.test(userText);
       const selectedKeys = new Set(selectedRows.map((row) => trackKey(row.track)));
       const freshRows = catalog.filter((row) => !row.info.liked && !selectedKeys.has(trackKey(row.track)));
       if (!asksForLikes && freshRows.length && selectedRows.length > 1) {
@@ -830,14 +864,18 @@
           }
         }
       }
-      // and some discovery: a quarter new finds in an ordinary mix, half when asked for something new (never for "my likes" or "songs I know")
-      const wantsNew = /\b(?:new|fresh|discover|different|haven(?:'|’)?t heard|never heard|explore|surprise)\b/i.test(userText);
-      const wantsKnown = asksForLikes || /\b(?:songs? i know|familiar|old favou?rites?|my songs|my library)\b/i.test(userText);
-      const newRows = catalog.filter((row) => row.info.new_to_you && !selectedKeys.has(trackKey(row.track)));
-      if (!wantsKnown && newRows.length && selectedRows.length > 2) {
-        const targetNew = Math.ceil(selectedRows.length * (wantsNew ? 0.5 : 0.25));
+      // and discovery: at least half songs the listener has never heard (three quarters when asked for something new), the
+      // ones found for this request first; never for "my likes" or "songs I know"
+      const newRows = searchRows.concat(catalog.filter((row) => row.info.new_to_you)).filter((row) => !selectedKeys.has(trackKey(row.track)));
+      if (!wantsKnown && newRows.length && selectedRows.length > 1) {
+        const targetNew = Math.ceil(selectedRows.length * (wantsNew ? 0.75 : 0.5));
         let newCount = selectedRows.filter((row) => row.info.new_to_you).length;
-        for (let i = selectedRows.length - 1; i >= 1 && newCount < targetNew && newRows.length; i -= 2) {   // every other place from the end: they mix in
+        // every other place from the end first (they mix in with the known songs), then any other known song but the opener
+        const order = [];
+        for (let i = selectedRows.length - 1; i >= 1; i -= 2) order.push(i);
+        for (let i = selectedRows.length - 1; i >= 1; i--) if (!order.includes(i)) order.push(i);
+        for (const i of order) {
+          if (newCount >= targetNew || !newRows.length) break;
           if (!selectedRows[i].info.new_to_you) {
             const replacement = newRows.shift();
             selectedKeys.delete(trackKey(selectedRows[i].track));
