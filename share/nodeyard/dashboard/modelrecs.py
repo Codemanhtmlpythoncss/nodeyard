@@ -21,11 +21,15 @@ GPU_BW = 80.0              # GB/s a small NVIDIA card reaches
 DECENT = {"coding": 5.0, "chat": 5.0, "reasoning": 6.0, "vision": 3.0, "small": 10.0}
 USABLE = {"coding": 3.0, "chat": 3.0, "reasoning": 3.5, "vision": 2.0, "small": 6.0}
 # quality lost to a smaller quantisation (points out of 100)
-QLOSS = {"Q8_0": 0, "Q6_K": 0, "Q5_K_M": 1, "Q5_K_S": 1, "Q4_K_M": 2, "MXFP4": 2, "IQ4_XS": 3, "Q4_K_S": 3, "IQ4_NL": 3,
-         "Q3_K_L": 5, "Q3_K_M": 6, "IQ3_M": 8, "IQ3_XXS": 11}
+QLOSS = {"Q8_0": 0, "Q6_K_XL": 0, "Q6_K": 0, "Q5_K_XL": 1, "Q5_K_M": 1, "Q5_K_S": 1, "Q4_K_XL": 1, "Q4_K_M": 2, "MXFP4": 2,
+         "IQ4_XS": 3, "Q4_K_S": 3, "IQ4_NL": 3, "Q3_K_XL": 4, "Q3_K_L": 5, "Q3_K_M": 6, "IQ3_M": 8, "IQ3_XXS": 11}
 # quality of each quantisation (best first) and roughly its bytes per parameter, for estimates
-QUANTS = [("Q8_0", 1.06), ("Q6_K", 0.82), ("Q5_K_M", 0.71), ("Q5_K_S", 0.69), ("Q4_K_M", 0.60), ("MXFP4", 0.56), ("IQ4_XS", 0.54),
-          ("Q4_K_S", 0.57), ("IQ4_NL", 0.57), ("Q3_K_L", 0.53), ("Q3_K_M", 0.49), ("IQ3_M", 0.46), ("IQ3_XXS", 0.40)]
+QUANTS = [("Q8_0", 1.06), ("Q6_K_XL", 0.88), ("Q6_K", 0.82), ("Q5_K_XL", 0.74), ("Q5_K_M", 0.71), ("Q5_K_S", 0.69), ("Q4_K_XL", 0.63),
+          ("Q4_K_M", 0.60), ("MXFP4", 0.56), ("IQ4_XS", 0.54), ("Q4_K_S", 0.57), ("IQ4_NL", 0.57), ("Q3_K_XL", 0.52), ("Q3_K_L", 0.53),
+          ("Q3_K_M", 0.49), ("IQ3_M", 0.46), ("IQ3_XXS", 0.40)]
+BPP = dict(QUANTS)
+# files in a model's repo that aren't the model: speculative-decoding drafts, vision projectors, importance matrices
+HELPER_RE = re.compile(r"(?:^|[/_.-])(?:eagle\d*|draft|mtp|mmproj|imatrix|projector|vision)(?:[_.-]|$)", re.I)
 QRANK = {q: i for i, (q, _) in enumerate(QUANTS)}
 CATEGORIES = [("coding", "Coding", "Writing and fixing code, and tool use for agents like yardcode"),
               ("chat", "General chat", "Everyday questions, writing, summaries and translation"),
@@ -177,8 +181,10 @@ class Recommender:
         ai = getattr(self.ctx, "ai", None)
         return getattr(ai, "hf", None)
 
-    def _files(self, repo):
-        """The repo's single-file GGUFs by quant: {quant: (file, size)}; estimated when Hugging Face can't be asked."""
+    def _files(self, repo, params):
+        """The model's GGUFs by quant: {quant: (file, size, single file?)}; None (estimate instead) when Hugging Face
+        can't be asked. Only files whose size fits the parameter count are the model: a repo can also hold a small
+        draft model (gpt-oss has an 0.9 GB "eagle3" Q8_0 next to its 63 GB model) or a vision projector."""
         with self.lock:
             hit = self.files.get(repo)
         if hit and time.time() - hit[0] < 3600:
@@ -190,9 +196,16 @@ class Recommender:
                 got = {}
                 for f in hf.files(repo):
                     q = (f.get("quant") or "").upper()
+                    if q.startswith("UD-"):
+                        q = q[3:]
                     if not q and "mxfp4" in f["file"].lower():
                         q = "MXFP4"
-                    if q in QRANK and (q not in got or f["size"] < got[q][1]):
+                    if q not in QRANK or HELPER_RE.search(f["file"].rsplit("/", 1)[-1]):
+                        continue
+                    expect = params * 1e9 * BPP[q]
+                    if not 0.55 * expect <= f["size"] <= 1.6 * expect:
+                        continue
+                    if q not in got or abs(f["size"] - expect) < abs(got[q][1] - expect):
                         got[q] = (f["file"], f["size"], f.get("split_ok", True))
             except Exception:  # noqa: BLE001 -- offline or gone: estimate instead (marked as such)
                 got = None
@@ -227,8 +240,9 @@ class Recommender:
         snap = self.ctx.store.snapshot()
         state = snap.get("state") or {}
         nodes = machines(state)
-        repos = sorted({e[1] for e in CATALOGUE if e[1]})
-        files = dict(zip(repos, self.pool.map(self._files, repos)))
+        params = {e[1]: e[3] for e in CATALOGUE if e[1]}
+        repos = sorted(params)
+        files = dict(zip(repos, self.pool.map(lambda r: self._files(r, params[r]), repos)))
         ollama = any(p.get("namespace", "").startswith("ollama") or "ollama" in (p.get("name") or "") for p in state.get("pods") or [])
         cats = []
         for cid, label, sub in CATEGORIES:
