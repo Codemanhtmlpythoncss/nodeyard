@@ -739,7 +739,7 @@
     });
   }
   // what to look for on SoundCloud for one request: its words, minus the filler ("make me a ... mix")
-  const DJ_FILLER = new Set(("a an the me my mine i im i'm ive i've want wanna would like could can you please pls give get make create build put together play " +
+  const DJ_FILLER = new Set(("a an the me my mine i im i'm ive i've want wanna would like could can you please pls give gimme gimmie lemme get make create build put together play " +
     "some something mix mixes playlist playlists set songs song tracks track music tunes of with for to and that this kind sort type bit little " +
     "vibe vibes vibey mood moody new fresh different discover more stuff thing things just maybe really hi hello hey thanks thank ok okay yes yeah " +
     "no nope cool nice great good what do does did think how why who are is it its it's was be that's again now too also so than then").split(" "));
@@ -824,13 +824,14 @@
       if (!query && !hidden && !wantsKnown && M.dj.lastQuery && /\b(?:more|another|similar|again|like (?:that|this|those))\b/i.test(userText)) query = M.dj.lastQuery;   // "more like that"
       if (query) M.dj.lastQuery = query;
       if (query) {
-        M.dj.status = "Looking on SoundCloud for new “" + query + "” songs…"; renderTab();
+        M.dj.status = "Finding new songs for that on SoundCloud…"; renderTab();
         try {
-          const sr = await postJSON("/api/music/dj-search", { query });
+          // (the server reads moods and activities, "to code to", "for the gym", as a mood for your own styles)
+          const sr = await postJSON("/api/music/dj-search", { text: userText, query });
           const known = new Set(catalog.map((x) => trackKey(x.track)));
           searchRows = (sr.tracks || []).filter((t) => !known.has(trackKey({ ...t, kind: "sc" }))).map((t, i) => {
             const id = "n" + String(i + 1).padStart(3, "0");
-            return { id, track: { ...t, kind: "sc" }, info: { id, title: t.title, artist: t.artist || "SoundCloud", new_to_you: true, why: "matches “" + query + "”" } };
+            return { id, track: { ...t, kind: "sc" }, info: { id, title: t.title, artist: t.artist || "SoundCloud", new_to_you: true, why: t.why || "found for this request" } };
           });
         } catch (e) { /* the catalogue alone still makes a mix */ }
         M.dj.status = ""; renderTab();
