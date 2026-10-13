@@ -176,6 +176,11 @@
     if (saved.playing) audio.play().then(function () { save(false, true); }).catch(function () { title.textContent += " · press play to resume"; });
     save(false, true);
   }
+  // Inside the dashboard (the in-app AI Galaxy) the dashboard's own player keeps playing and its bar stays on top:
+  // a second player here would start the same queue again and play two songs at once.
+  var embedded = location.pathname === "/g3/embed";
+  try { embedded = embedded || (window.parent !== window && !!window.parent.NY); } catch (e) { /* another site framed us: not the dashboard */ }
+  if (embedded) return;
   fetch("/api/music/playback", { cache: "no-store", credentials: "same-origin" }).then(function (r) { return r.json(); }).then(function (data) {
     var p = data.playback || {}, age = Date.now() / 1000 - (+p.updated || 0);
     // A SwiftUI section change can destroy the Music WKWebView without firing pagehide.

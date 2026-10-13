@@ -810,6 +810,19 @@ body.desk-mode #view { min-height: 100%; }
 .galaxy-embed { width: 100%; height: calc(100dvh - 170px); min-height: 420px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: #03040b; }
 .galaxy-embed iframe { display: block; width: 100%; height: 100%; border: 0; }
 @media (max-width: 760px) { .galaxy-embed { height: calc(100dvh - 210px); min-height: 360px; } }
+/* The AI Galaxy fills the whole page (like the Desk); the music bar stays on top of it */
+body.galaxy-mode { overflow: hidden; }
+/* (the view's fade-in animates a transform, which would pin the "fixed" Galaxy to the content box instead of the page) */
+body.galaxy-mode .content { padding: 0; }
+body.galaxy-mode #view, body.galaxy-mode #view.fade { animation: none; transform: none; filter: none; }
+body.galaxy-mode .side, body.galaxy-mode .top, body.galaxy-mode .devices, body.galaxy-mode .mobile-tabs, body.galaxy-mode .skip-link { display: none !important; }
+body.galaxy-mode .galaxy-embed { position: fixed; inset: 0; z-index: 40; width: 100vw; height: 100dvh; min-height: 0; border: 0; border-radius: 0; }
+body.galaxy-mode:has(#ny-player.on) .galaxy-embed { height: calc(100dvh - 50px); }
+.galaxy-exit { display: none; }
+body.galaxy-mode .galaxy-exit { display: block; position: absolute; top: 12px; left: 12px; z-index: 2; padding: 6px 12px; border: 1px solid #ffffff33; border-radius: 99px;
+  color: #e5efff; background: #050a16cc; font: 600 12px var(--font, system-ui); cursor: pointer; backdrop-filter: blur(8px); opacity: .75; transition: opacity .15s; }
+body.galaxy-mode .galaxy-exit:hover, body.galaxy-mode .galaxy-exit:focus-visible { opacity: 1; }
+@media (max-width: 760px) { body.galaxy-mode #ny-player { bottom: 0; } }
 .desk-page .input { color: #fff; background: #070d1bbd; border-color: #ffffff32; }
 .desk-page .input::placeholder { color: #ffffff88; }
 .desk-form { display: flex; align-items: center; gap: 7px; }

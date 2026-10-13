@@ -848,6 +848,7 @@
   function renderChrome() {
     const v = VIEWS.find((x) => x.id === S.view);
     document.body.classList.toggle("desk-mode", S.view === "desk");
+    document.body.classList.toggle("galaxy-mode", S.view === "galaxy");
     $$("[data-view]").forEach((a) => {
       const active = a.dataset.view === S.view;
       a.classList.toggle("on", active);
@@ -924,7 +925,7 @@
     renderChrome();
     const content = $("#content");
     const v = V[S.view];
-    const standalone = S.view === "desk";
+    const standalone = S.view === "desk" || S.view === "galaxy";   // (full-page views: no banners, and they draw before the cluster data comes)
     if (!S.d && !standalone) {
       if (!$("#view")) setHTML(content, html`<div id="banners"></div><div class="loading"><div><div class="spin"></div>${S.res && S.res.error ? "Waiting for the cluster: " + S.res.error : "Reading your cluster…"}</div></div>`);
       return;
@@ -947,7 +948,7 @@
   function applyRoute() {
     const [v, d] = decodeURIComponent(location.hash.slice(1)).split("!");
     const id = VIEWS.some((x) => x.id === v) ? v : "overview";
-    if (id !== S.view) { S.view = id; S.built = null; window.scrollTo(0, 0); }
+    if (id !== S.view) { if (S.view !== "galaxy") S.prevView = S.view; S.view = id; S.built = null; window.scrollTo(0, 0); }
     store.set("view", S.view);
     if (S.d) connectStream();
     if (d) { if (d !== S.drawer) { S.drawer = null; if (S.d) openDrawer(d, true); else S.pending = d; } } else if (S.drawer) closeDrawer(true);
