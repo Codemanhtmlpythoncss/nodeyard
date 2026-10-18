@@ -77,7 +77,9 @@ def run(kubeconfig, node, script, host=False, deadline=300, kind="helper", ns=NS
             if phase in ("Succeeded", "Failed"):
                 term = (((st.get("containerStatuses") or [{}])[0].get("state") or {}).get("terminated") or {})
                 text = term.get("message") or ""
-                if text.count("\n") < 2:          # nothing came back that way: the logs need the kubelet reachable
+                # nothing came back that way, or it was cut at the termination message's 3900 bytes: the full answer is in
+                # the logs (they need the kubelet reachable)
+                if text.count("\n") < 2 or len(text.encode()) >= 3850:
                     rc, logs, _ = _kubectl(argv, kubeconfig, ["-n", ns, "logs", pod], timeout=20)
                     text = logs if rc == 0 and logs.strip() else text
                 if not text.strip():

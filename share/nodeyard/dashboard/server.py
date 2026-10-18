@@ -750,6 +750,8 @@ def main():
     pwnforge.register(ctx, a)
     import temps         # every machine's sensors, kept for a day (the node page's temperature charts)
     temps.register(ctx, a)
+    import hwcare        # Hardware > Maintenance, Cooling and Lid: a guide per machine, idle fan settings, the lid action
+    hwcare.register(ctx, a)
     if getattr(ctx, "ai", None) is not None:
         import aiapi as _aiapi
         _aiapi.EXTRA_SPLIT_ARGS = ctx.tuning.run_args
