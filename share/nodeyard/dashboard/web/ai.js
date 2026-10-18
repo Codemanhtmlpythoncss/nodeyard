@@ -443,7 +443,7 @@
   V.ai = {
     build() {
       A.built = null;
-      NY.freshHTML($("#view"), html`<div class="toolbar"><span class="seg" id="ai-tabs" role="tablist">${[["chat", "Chat"], ["research", "Research"], ["models", "Models"], ["recommended", "Recommended"], ["search", "Find models"], ["api", "API"]].map(([id, l]) => raw('<button data-ai-tab="' + id + '">' + l + "</button>"))}</span>
+      NY.freshHTML($("#view"), html`<div class="toolbar"><span class="seg" id="ai-tabs" role="tablist">${[["chat", "Chat"], ["research", "Research"], ["models", "Models"], ["recommended", "Recommended"], ["search", "Find models"], ["permissions", "Permissions"], ["api", "API"]].map(([id, l]) => raw('<button data-ai-tab="' + id + '">' + l + "</button>"))}</span>
         <label class="model-pick"><span>AI model</span><select class="select" id="ai-model" aria-label="AI model: pick the one that runs on your cluster"><option>Loading…</option></select></label><span class="grow"></span><span id="ai-status"></span></div><div id="ai-pane"></div>`);
       loadTargets(true);
       loadDisk();
@@ -460,6 +460,7 @@
     else if (t === "search") { loadDisk(); loadOllama(); }
     else if (t === "research") loadResearchList();
     else if (t === "recommended") { loadRecommended(); loadOllama(); }
+    else if (t === "permissions") loadPerms(true);
   }
   function refreshTab() {
     if (S.view !== "ai" || !$("#ai-pane")) return;
@@ -469,11 +470,15 @@
     else if (A.tab === "search") (first ? buildSearch : refreshSearch)();
     else if (A.tab === "research") (first ? buildResearch : refreshResearch)();
     else if (A.tab === "recommended") renderRecommended();
+    else if (A.tab === "permissions") renderPermissions();
     else renderApi();
     A.built = A.tab;
     refreshModelPick();
     const sp = S.d && S.d.ai && S.d.ai.split;
-    setHTML($("#ai-status"), A.targets && A.targets.targets.length ? chip(plural(A.targets.targets.filter((t) => t.ready).length, "model") + " ready", "good") : (sp ? chip(sp.loaded === false ? "model unloaded" : sp.download === "running" ? "downloading" : "model loading" + (sp.load && sp.load.phase === "loading" ? " " + sp.load.pct.toFixed(0) + "%" : ""), "warn") : chip("no models running")));
+    if (!A.perm && !A.permLoading) loadPerms();
+    const permChip = A.perm ? raw('<button class="chip btnlike ' + (A.perm.mode === "all" ? "bad" : A.perm.mode === "auto" ? "warn" : "") + '" data-ai-tab-link="permissions" title="What the AI may do without asking">' + esc(PERM_LABEL[A.perm.mode]) + "</button>") : "";
+    const modelChip = A.targets && A.targets.targets.length ? chip(plural(A.targets.targets.filter((t) => t.ready).length, "model") + " ready", "good") : (sp ? chip(sp.loaded === false ? "model unloaded" : sp.download === "running" ? "downloading" : "model loading" + (sp.load && sp.load.phase === "loading" ? " " + sp.load.pct.toFixed(0) + "%" : ""), "warn") : chip("no models running"));
+    setHTML($("#ai-status"), html`${permChip} ${modelChip}`);
   }
   async function startAIJob(button, action, params, onDone) {
     if (button && button.dataset.aiStarting === "1") return;
@@ -761,6 +766,7 @@
           else if (ev.type === "tool_use") msg.tools.push({ id: ev.id, name: ev.name, summary: ev.summary, status: "running" });
           else if (ev.type === "tool_result") { const x = msg.tools.find((k) => k.id === ev.id); if (x) { x.status = ev.ok ? "ok" : "bad"; x.result = ev.summary; x.text = (ev.text || "").slice(0, 2500); x.diff = ev.diff ? ev.diff.lines.slice(0, 40) : null; } }
           else if (ev.type === "permission") msg.perm = ev;
+          else if (ev.type === "auto_allowed") msg.tools.push({ id: "auto-" + uid(), name: ev.tool, summary: ev.summary, status: "ok", result: "allowed automatically" });
           else if (ev.type === "todos") msg.todos = ev.items;
           else if (ev.type === "usage") usage = ev;
           else if (ev.type === "error") { msg.error = ev.text; if (/stopped in the middle/i.test(ev.text || "")) msg.cut = true; }
@@ -1686,6 +1692,46 @@
       (job) => { loadTargets(true); if (job.status === "ok" && old && vals.purge) forgetSavedModel(old); loadDisk(true, true); });
   }
 
+  // ------------------------------------------------------------------ permissions
+  // What the chat's AI may do without asking (agentapi.py): ask first, auto-accept everyday actions, or anything.
+  const PERM_LABEL = { ask: "Asks first", auto: "Auto-accept", all: "Allows everything" };
+  A.perm = null; A.permLoading = false;
+  async function loadPerms(force) {
+    if (A.permLoading || (A.perm && !force)) return;
+    A.permLoading = true;
+    try { const r = await getJSON("/api/ai/permissions"); if (r.ok) A.perm = r; } catch (e) { /* signed out */ }
+    A.permLoading = false;
+    if (S.view === "ai") refreshTab();
+  }
+  async function setPerm(mode) {
+    if (mode === "all") {
+      const ok = await dialog("Let the AI do anything?", html`<p style="margin-top:0">It will run any command and change any file ${A.perm && A.perm.user ? html`as <b>${A.perm.user}</b>` : "as the terminal user"} without asking first, including deleting things. Only your deny rules stop it.</p>
+        <p class="muted small">It never runs as root, and only over Tailscale or your own network. You can switch back here at any time.</p>`, "Allow everything");
+      if (!ok) { renderPermissions(); return; }
+    }
+    try { const r = await postJSON("/api/ai/permissions", { mode }); if (r.ok) { A.perm = r; toast(PERM_LABEL[mode] + ": used from the next message in each chat."); } else toast(r.error || "Couldn't change it."); }
+    catch (e) { toast("Couldn't reach the dashboard server."); }
+    refreshTab();
+  }
+  function renderPermissions() {
+    const pane = $("#ai-pane"); if (!pane) return;
+    const P = A.perm;
+    if (!P) { setHTML(pane, card("Permissions", html`<div class="empty"><div class="spin"></div>Loading…</div>`)); return; }
+    const who = P.user ? html`<b>${P.user}</b>` : "the terminal user";
+    const opt = (mode, title, sub, items, tone) => html`<button class="perm-opt ${P.mode === mode ? "on" : ""} ${tone}" data-ai="perm-set" data-mode="${mode}" aria-pressed="${P.mode === mode}">
+      <div class="row" style="gap:8px;align-items:center"><span class="perm-radio"></span><b>${title}</b>${P.mode === mode ? chip("in use", "good") : ""}</div>
+      <div class="muted small" style="margin-top:4px">${sub}</div><ul class="small">${items.map((x) => html`<li>${x}</li>`)}</ul></button>`;
+    setHTML(pane, html`<div class="card"><h3 style="margin:0">Permissions</h3>
+      <div class="muted small mt">What the chat's AI may do without asking you first, when its skills let it change things: Python, files and the shell (as ${who}, never root), fetching pages you didn't point it to, and saving playlists. Searching, reading and looking things up never need asking.</div>
+      <div class="perm-grid mt">
+        ${opt("ask", "Ask me first", "Every change waits for your Allow or Deny in the chat.", ["Editing or creating a file", "Running a command or Python", "Fetching a page the conversation didn't point to", "Saving a playlist"], "")}
+        ${opt("auto", "Auto-accept", "Everyday actions go ahead; it still asks when something could do damage.", ["Goes ahead: edits in its work folder, Python, ordinary commands, playlists, pages", "Still asks: risky commands (deleting lots of files, sudo, installing software)", "Still asks: secrets, sensitive files and anything outside its work folder"], "warn")}
+        ${opt("all", "Allow everything", "No questions at all. Fast, and it can break things.", ["Runs any command and changes any file " + (P.user ? "as " + P.user : "as the terminal user"), "Only your deny rules stop it", "Still never root, and never through public access"], "bad")}
+      </div>
+      ${!P.code ? html`<p class="warn-t small mt">Python, files and the shell are off here (${P.code_why}), so this only covers pages and playlists.</p>` : ""}
+      <p class="faint small mt">A change is used from the next message in each chat. Things that went ahead by themselves show in the chat as "allowed automatically".</p></div>`);
+  }
+
   // ------------------------------------------------------------------ recommended
   // The model to run for each kind of work, picked for these machines by modelrecs.py (best that still answers at a
   // decent speed here) next to the best one overall. Run, Run on Ollama and Check speed are Find models' own buttons.
@@ -1980,6 +2026,7 @@
     else if (a === "s-ollama") { if (!S.d.pods.some((p) => p.namespace === "ai-inference" && p.name.startsWith("ollama"))) { toast("Set up Ollama first (Models tab)."); selectTab("models"); return; } const v = await dialog("Download into Ollama?", html`<span class="mono">${el.dataset.name}</span> is downloaded onto every machine that runs Ollama. Large models can take a while.`, "Download"); if (v) startAIJob(el, "pull", { name: el.dataset.name }, () => loadOllama(true)); }
     else if (a === "s-copy") copyText("sudo nodeyard ai split deploy --model " + el.dataset.repo + ":" + el.dataset.file);
     else if (a === "rec-refresh") loadRecommended(true);
+    else if (a === "perm-set") setPerm(el.dataset.mode);
     else if (a === "rec-files") { A.search.q = el.dataset.repo; A.search.results = null; A.search.open = ""; selectTab("search"); runSearch().then(() => showFiles(el.dataset.repo)); }
     else if (a === "reveal-key") { try { const r = await postJSON("/api/ai/reveal-key", {}); if (r.ok) { A.key = r.key; A.useKey = true; renderApi(); } else toast(r.error || "Couldn't read the key."); } catch (err) { /* signed out */ } }
     else if (a === "use-key") { A.useKey = el.checked; renderApi(); }

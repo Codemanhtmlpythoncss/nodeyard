@@ -30,6 +30,10 @@ PLUGINS = [
     ("files", "Files and shell", "Reads and edits files and runs commands in a work folder (asks you first)", ["Read", "Write", "Edit", "LS", "Glob", "Grep", "Bash"], True),
 ]
 BY_ID = {p[0]: p for p in PLUGINS}
+# How much the chat's AI may do without asking (AI › Permissions), saved with the dashboard's settings. Each is one of
+# yardcode's own modes; "auto" also has this server answer its everyday requests (see auto_ok).
+PERM_KEY = "ai_permissions"
+PERM_MODES = {"ask": "default", "auto": "acceptEdits", "all": "bypassPermissions"}
 MAX_PROCS = 3
 IDLE_SECONDS = 20 * 60
 
@@ -111,6 +115,36 @@ class Agents:
                         self.procs.pop(cid, None)
 
     # ---- what can be switched on ------------------------------------------------------------------------
+    # ---- permissions -----------------------------------------------------------------------------------------
+    def perm_mode(self):
+        st = getattr(self.ctx, "settings", None)
+        mode = ((st.prefs() if st else {}).get(PERM_KEY) or {}).get("mode")
+        return mode if mode in PERM_MODES else "ask"
+
+    def perm_view(self, h):
+        ok, why = self.code_ok(h)
+        return {"mode": self.perm_mode(), "user": self.user or "", "code": ok, "code_why": why, "demo": self.demo}
+
+    def set_perm_mode(self, h, body):
+        mode = body.get("mode")
+        if mode not in PERM_MODES:
+            raise AgentError("Pick ask, auto or all.")
+        if h._forwarded() is not None:
+            raise AgentError("Change what the AI may do over Tailscale or your own network, not through public access.", 403)
+        st = self.ctx.settings
+        with st.lock:
+            prefs = st.prefs()
+            prefs[PERM_KEY] = {"mode": mode}
+            st._save_prefs(prefs)
+        return self.perm_view(h)
+
+    @staticmethod
+    def auto_ok(ev):
+        """In "auto": a request the server says yes to by itself. Not when yardcode flags a risk (deleting lots of
+        files, sudo, installing software...), and not for secrets, sensitive files or anything outside the work folder."""
+        why = str(ev.get("reason") or "").lower()
+        return not ev.get("risk") and not any(w in why for w in ("sensitive", "secret", "outside", "your rule"))
+
     def code_ok(self, h):
         if self.demo:
             return True, ""
@@ -177,7 +211,7 @@ class Agents:
             env["NODEYARD_MUSIC_URL"] = "http://%s:%d" % (host, int(getattr(self.ctx, "port", 9092) or 9092))
             env["NODEYARD_MUSIC_COOKIE"] = str(music_cookie or "")[:2048]
         cmd = [sys.executable, self.bin, "--serve-json", "--no-session", "--tools", ",".join(tools), "--api-base", base, "--model", model, "--max-tokens", str(max_tokens or 0),
-               "--permission-mode", "default", "--no-color"]
+               "--permission-mode", PERM_MODES[self.perm_mode()], "--no-color"]
         if code:   # outside the dashboard's sandbox, as the terminal user, in their home folder
             cmd = ["systemd-run", "--quiet", "--collect", "--pipe", "--wait", "--uid=" + self.user, "--setenv=YARDCODE_API_KEY", "-p", "WorkingDirectory=~",
                    "--setenv=LANG=C.UTF-8", "--description=nodeyard dashboard AI plugins"] + cmd
@@ -190,7 +224,7 @@ class Agents:
     def get(self, h, cid, plugins, max_tokens, create=True, target="split", music_cookie=""):
         owner = h._token() or "local"
         # A different model (or the split model running something else) needs a new helper.
-        sig = ",".join(sorted(plugins)) + "|" + str(max_tokens or 0) + "|" + target + "|" + self._model_id(target)
+        sig = ",".join(sorted(plugins)) + "|" + str(max_tokens or 0) + "|" + target + "|" + self._model_id(target) + "|" + self.perm_mode()
         with self.lock:
             pr = self.procs.get(cid)
             if pr and (pr.owner != owner or not pr.alive or pr.signature != sig):
@@ -259,6 +293,7 @@ class Agents:
         h.close_connection = True
         lifecycle = getattr(self.ctx, "lifecycle", None)
         token = lifecycle.begin(target) if lifecycle else None   # the model is in use until this turn ends
+        mode = self.perm_mode()
         try:
             while not pr.q.empty():   # leftovers of an interrupted turn
                 pr.q.get_nowait()
@@ -273,6 +308,10 @@ class Agents:
                         ev = {"type": "exit"}
                     else:
                         continue
+                if ev.get("type") == "permission" and mode == "auto" and ev.get("id") and self.auto_ok(ev):
+                    # auto-accept: say yes here, and show the page what went ahead instead of asking
+                    pr.send({"type": "permission_reply", "id": str(ev["id"]), "decision": "allow", "scope": "once", "feedback": ""})
+                    ev = {"type": "auto_allowed", "tool": ev.get("tool", ""), "summary": ev.get("summary") or ev.get("command") or "", "reason": ev.get("reason", "")}
                 h.wfile.write(("data: %s\n\n" % json.dumps(ev)).encode("utf-8"))
                 h.wfile.flush()
                 if ev.get("type") in ("done", "exit"):
@@ -428,5 +467,13 @@ def register(ctx, args):
         h._json({"ok": True, "plugins": ag.listing(h)})
 
     ctx.get_routes["/api/ai/plugins"] = plugins
+
+    def permissions(h, body):
+        try:
+            h._json(dict(ag.set_perm_mode(h, body) if body is not None else ag.perm_view(h), ok=True))
+        except AgentError as e:
+            h._json({"ok": False, "error": str(e)}, e.code)
+    ctx.get_routes["/api/ai/permissions"] = lambda h, q: permissions(h, None)
+    ctx.post_routes["/api/ai/permissions"] = permissions
     ctx.post_routes.update({"/api/ai/run-code": ag.run_code, "/api/ai/agent": ag.run, "/api/ai/agent/reply": ag.reply, "/api/ai/agent/stop": ag.stop, "/api/ai/agent/reset": ag.reset})
     ctx.post_limits["/api/ai/agent"] = 400000

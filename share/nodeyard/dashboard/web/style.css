@@ -1070,6 +1070,15 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .tu-box { position: fixed; z-index: 91; top: 50%; left: 50%; width: min(560px, calc(100vw - 28px)); max-height: 85dvh; overflow: auto; transform: translate(-50%, -50%);
   padding: 18px; border: 1px solid var(--line2); border-radius: 16px; background: var(--card, var(--panel)); box-shadow: 0 24px 80px #0008; }
 .tu-box ul { margin: 8px 0 12px; padding-left: 20px; }
+.perm-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.perm-opt { text-align: left; font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; cursor: pointer; }
+.perm-opt:hover { border-color: var(--accent); }
+.perm-opt.on { border-color: var(--good); background: color-mix(in srgb, var(--good) 8%, transparent); }
+.perm-opt.on.warn { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, transparent); }
+.perm-opt.on.bad { border-color: var(--bad); background: color-mix(in srgb, var(--bad) 8%, transparent); }
+.perm-opt ul { margin: 8px 0 0; padding-left: 18px; }
+.perm-radio { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line); flex: none; }
+.perm-opt.on .perm-radio { border-color: currentColor; background: radial-gradient(currentColor 40%, transparent 45%); }
 .rec-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; }
 .rec-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; min-width: 0; }
 .rec-card.mine { border-color: color-mix(in srgb, var(--good) 45%, var(--line)); }
