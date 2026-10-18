@@ -284,7 +284,11 @@ class Lifecycle:
         if sp and sp.get("loaded") and sp.get("stale"):
             self._auto_repair(now, sp)     # (broken models are mended whatever the hourly setting says)
             return None
-        if settings["auto_reload"] and self._start_reload(now, sp):
+        with self.lock:
+            last = self.split["last_used"]
+        unload_due = settings["enabled"] and last is not None and now - last >= settings["idle_seconds"]
+        # (when the idle unload is due too, it wins: refreshing would load again a model the user asked to give back)
+        if settings["auto_reload"] and not unload_due and self._start_reload(now, sp):
             return None
         with self.lock:
             s = self.split
