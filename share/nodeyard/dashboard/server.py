@@ -710,6 +710,8 @@ def main():
     ctx.get_routes["/api/agents"] = agents_route
     import turns         # chat answers that survive a dropped connection (the page reconnects and carries on)
     turns.register(ctx, a)
+    import aisearch      # whether the AI may search the web (enforced by every AI route)
+    aisearch.register(ctx, a)
     if importlib.util.find_spec("aiapi"):
         import aiapi
         aiapi.register(ctx, a)

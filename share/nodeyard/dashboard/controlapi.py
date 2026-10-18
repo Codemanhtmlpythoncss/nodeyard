@@ -26,6 +26,7 @@ import threading
 import time
 
 import aiapi
+import aisearch
 
 PREFIX = "/api/v1/"
 FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,200}\.gguf$")
@@ -265,12 +266,17 @@ def register(ctx, args):
             return h._json({"ok": False, "error": str(e)}, 413)
         except (TypeError, ValueError) as e:
             return h._json({"ok": False, "error": str(e) or "Bad temperature or token limit."}, 400)
+        search_ok = aisearch.allowed(ctx, body)
+        if not search_ok:
+            clean = aisearch.with_note(clean)
         payload = {"messages": clean, "temperature": temp, "stream": True}
         if body.get("return_progress") is True and target == "split":
             payload["return_progress"] = True   # llama.cpp's prompt-reading progress, for clients that ask
         if max_tokens:
             payload["max_tokens"] = max_tokens
         tools = body.get("tools")
+        if tools is not None and not search_ok and isinstance(tools, list):   # (web search off: no browser search or page opening)
+            tools = [t for t in tools if not (isinstance(t, dict) and isinstance(t.get("function"), dict) and t["function"].get("name") in aisearch.WEB_CHAT_TOOLS)] or None
         if tools is not None:
             allowed = aiapi.CHAT_TOOL_NAMES
             if not isinstance(tools, list) or not 1 <= len(tools) <= len(allowed):

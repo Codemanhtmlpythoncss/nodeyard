@@ -387,7 +387,12 @@ def register(ctx, args):
     ctx.registry = reg
 
     def _apis(h, q):
-        return h._json({"ok": True, "apis": reg.list(), "tools": reg.tool_specs()})
+        import aisearch
+        tools = reg.tool_specs()
+        if not aisearch.allowed(ctx):    # (web search off: the AI isn't offered your search APIs)
+            search = {e["id"] for e in reg.list() if e.get("kind") == "search"}
+            tools = [t for t in tools if t.get("id") not in search]
+        return h._json({"ok": True, "apis": reg.list(), "tools": tools, "web_search": aisearch.mode(ctx)})
 
     def _save(h, body):
         try:
@@ -404,6 +409,9 @@ def register(ctx, args):
         entry = reg.get(str(body.get("id") or ""))
         if entry is None:
             return h._json({"ok": False, "error": "No such API."}, 404)
+        import aisearch
+        if entry.get("kind") == "search" and not aisearch.allowed(ctx, body):
+            return h._json({"ok": False, "error": "Web search is turned off (AI › Permissions).", "search_off": True}, 403)
         if demo:
             return h._json({"ok": True, "text": "(demo) would call %s; nothing was sent." % entry["name"]})
         try:

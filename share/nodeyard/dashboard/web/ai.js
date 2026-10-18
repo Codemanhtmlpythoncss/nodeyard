@@ -483,7 +483,9 @@
     if (!A.perm && !A.permLoading) loadPerms();
     const permChip = A.perm ? raw('<button class="chip btnlike ' + (A.perm.mode === "all" ? "bad" : A.perm.mode === "auto" ? "warn" : "") + '" data-ai-tab-link="permissions" title="What the AI may do without asking">' + esc(PERM_LABEL[A.perm.mode]) + "</button>") : "";
     const modelChip = A.targets && A.targets.targets.length ? chip(plural(A.targets.targets.filter((t) => t.ready).length, "model") + " ready", "good") : (sp ? chip(sp.loaded === false ? "model unloaded" : sp.download === "running" ? "downloading" : "model loading" + (sp.load && sp.load.phase === "loading" ? " " + sp.load.pct.toFixed(0) + "%" : ""), "warn") : chip("no models running"));
-    setHTML($("#ai-status"), html`${permChip} ${modelChip}`);
+    if (!A.search && !A.searchLoading) loadSearch();
+    const searchChip = searchOff() ? raw('<button class="chip btnlike warn" data-ai-tab-link="permissions" title="The AI answers without searching the web">web search off</button>') : "";
+    setHTML($("#ai-status"), html`${permChip} ${searchChip} ${modelChip}`);
   }
   async function startAIJob(button, action, params, onDone) {
     if (button && button.dataset.aiStarting === "1") return;
@@ -742,7 +744,7 @@
     c.messages.push(msg); renderThread(); renderChatList();
     const sid = uid() + uid();
     return agentTurn(c, msg, t, { url: "/api/ai/agent", id: sid,
-      body: { chat: c.id, turn: sid, target: c.target || "split", text: apiContent(mine), plugins: c.plugins, auto_skills: c.skills_auto !== false, history, max_tokens: c.max_tokens || 0 } });
+      body: { chat: c.id, turn: sid, target: c.target || "split", text: apiContent(mine), plugins: c.plugins, auto_skills: c.skills_auto !== false, history, max_tokens: c.max_tokens || 0, no_search: mine.noSearch || undefined } });
   }
   // One answer of the AI with skills: a new one (topts.body) or one picked up again (topts.seq, no body).
   async function agentTurn(c, msg, t, topts) {
@@ -826,7 +828,7 @@
   const COMMANDS = [
     ["help", "", "Show every command"], ["new", "", "Start a new chat (also /clear)"], ["clear", "", "Start a new chat"], ["compact", "", "Compress the earlier messages to free up the model's memory"],
     ["model", "[name]", "Pick the model for this chat"], ["models", "", "Open the Models tab (load, download, delete)"], ["unload", "", "Unload the model to free memory"], ["max", "[tokens|none]", "Set the longest reply (none = no limit)"],
-    ["web", "[on|off]", "Always search the web first"], ["skills", "[on|off]", "Let the AI choose its available skills automatically"], ["plugins", "[on|off NAME]", "Show or switch skills manually (search, Wikipedia, Python...)"], ["system", "[text]", "Set the system prompt"],
+    ["web", "[on|off]", "Always search the web first"], ["search", "[on|off]", "Let the AI use web search at all (every chat)"], ["nosearch", "message", "Send one message without any web search"], ["skills", "[on|off]", "Let the AI choose its available skills automatically"], ["plugins", "[on|off NAME]", "Show or switch skills manually (search, Wikipedia, Python...)"], ["system", "[text]", "Set the system prompt"],
     ["temp", "[0-2]", "Set creativity"], ["run", "", "Run the last code block the AI wrote"], ["fix", "", "Ask the AI to fix the last code that failed"], ["autofix", "[on|off]", "Run code automatically and let the AI fix errors"],
     ["files", "[ask|always|never]", "When the AI delivers files (default: only when you ask)"], ["retry", "", "Answer the last message again"], ["stop", "", "Stop the answer"], ["copy", "", "Copy the last answer"], ["read", "[on|off]", "Read the last answer aloud; on/off reads every answer as it arrives"], ["talk", "", "Voice chat: talk to it and it answers out loud (Esc ends it)"], ["export", "", "Download this chat as a file"], ["context", "", "How full the model's memory is"],
   ];
@@ -851,7 +853,9 @@
       }
       case "unload": { const v = await dialog("Unload the model?", raw("<p>Nothing can answer until you load one again. Its memory is freed on every machine.</p>"), "Unload"); if (v) { const r = await postJSON("/api/run", { action: "split-unload" }); toast(r.ok ? "Unloading…" : (r.error || "Couldn't unload.")); } break; }
       case "max": if (!arg) toast(c.max_tokens ? "Replies stop at " + c.max_tokens + " tokens." : "No limit on the reply length."); else if (/^(none|no|off|unlimited|0)$/i.test(arg)) { c.max_tokens = 0; saveChats(); toast("No limit on the reply length."); } else if (+arg > 0) { c.max_tokens = Math.min(65536, Math.max(16, +arg | 0)); saveChats(); toast("Replies stop at " + c.max_tokens + " tokens."); } else toast("Give a number, or none."); refreshChat(); break;
-      case "web": c.web = on(arg); saveChats(); toast("Web search first: " + (c.web ? "on" : "off")); break;
+      case "web": c.web = on(arg); saveChats(); toast("Web search first: " + (c.web ? "on" : "off") + (c.web && searchOff() ? " (but web search is off in AI › Permissions)" : "")); break;
+      case "search": await setSearch(on(arg) ? "auto" : "off"); break;
+      case "nosearch": { const msg = line.replace(/^\/nosearch\s*/i, ""); if (!msg.trim()) { toast("Type the message after /nosearch."); break; } A.noSearchNext = true; return send(msg); }
       case "skills": c.skills_auto = on(arg); saveChats(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); refreshChat(); toast("Automatic AI skills: " + (c.skills_auto ? "on" : "off")); break;
       case "autofix": c.autofix = on(arg); saveChats(); toast("Run and fix code automatically: " + (c.autofix ? "on" : "off")); break;
       case "plugins": case "plugin": {
@@ -1433,10 +1437,13 @@
     }
     const hasImageAttachment = !!(mine && (mine.files || []).some((f) => f.kind === "image"));
     const wantsSkills = !!(mine && text && (c.skills_auto !== false || (c.plugins || []).length));
+    const noSearch = A.noSearchNext || searchOff(); A.noSearchNext = false;   // ("/nosearch …", or web search off: the server enforces it too)
+    if (mine && noSearch) mine.noSearch = true;
     if (wantsSkills && !hasImageAttachment) return sendAgent(c, mine, text, t);
     if (wantsSkills && hasImageAttachment) toast("This image message goes straight to the vision model; AI skills are skipped for this turn.");
     const noLimit = !c.max_tokens;
-    if (mine && c.web && text) {   // look things up first, so the model answers with what it found
+    if (mine && c.web && text && noSearch) toast("Web search is off" + (searchOff() ? " (AI › Permissions)" : " for this message") + ": answering without it.");
+    if (mine && c.web && text && !noSearch) {   // look things up first, so the model answers with what it found
       A.searching = c.id; refreshChat();
       try { const w = await webResearch(text); mine.web = { query: text.slice(0, 300), text: w.text, sources: w.sources || [] }; }
       catch (e) { toast("Web search didn't work: " + (e.message || e)); }
@@ -1468,7 +1475,7 @@
     c.messages.push(msg);
     renderThread(); renderChatList();
     const sid = uid() + uid();
-    return chatTurn(c, msg, t, { url: "/api/ai/chat", id: sid, body: { target: c.target, messages: msgs, temperature: c.temperature, max_tokens: noLimit ? 0 : c.max_tokens, stream_id: sid } });
+    return chatTurn(c, msg, t, { url: "/api/ai/chat", id: sid, body: { target: c.target, messages: msgs, temperature: c.temperature, max_tokens: noLimit ? 0 : c.max_tokens, stream_id: sid, no_search: noSearch || undefined } });
   }
   // One plain answer: a new one (topts.body) or one picked up again (topts.seq, no body).
   async function chatTurn(c, msg, t, topts) {
@@ -1791,6 +1798,19 @@
     A.permLoading = false;
     if (S.view === "ai") refreshTab();
   }
+  // Web search: automatic, or off (aisearch.py enforces it on the server)
+  const searchOff = () => !!(A.search && A.search.mode === "off");
+  async function loadSearch() {
+    A.searchLoading = true;
+    try { const r = await getJSON("/api/ai/websearch"); if (r.ok) A.search = r; } catch (e) { /* signed out */ }
+    A.searchLoading = false;
+    if (S.view === "ai") refreshTab();
+  }
+  async function setSearch(mode) {
+    try { const r = await postJSON("/api/ai/websearch", { mode }); if (r.ok) { A.search = r; toast(mode === "off" ? "Web search off: the AI answers from the conversation, files and what it knows." : "Web search on: the AI may search when it helps."); } else toast(r.error || "Couldn't change it."); }
+    catch (e) { toast("Couldn't reach the dashboard server."); }
+    refreshTab();
+  }
   async function setPerm(mode) {
     if (mode === "all") {
       const ok = await dialog("Let the AI do anything?", html`<p style="margin-top:0">It will run any command and change any file ${A.perm && A.perm.user ? html`as <b>${A.perm.user}</b>` : "as the terminal user"} without asking first, including deleting things. Only your deny rules stop it.</p>
@@ -1817,7 +1837,13 @@
         ${opt("all", "Allow everything", "No questions at all. Fast, and it can break things.", ["Runs any command and changes any file " + (P.user ? "as " + P.user : "as the terminal user"), "Only your deny rules stop it", "Still never root, and never through public access"], "bad")}
       </div>
       ${!P.code ? html`<p class="warn-t small mt">Python, files and the shell are off here (${P.code_why}), so this only covers pages and playlists.</p>` : ""}
-      <p class="faint small mt">A change is used from the next message in each chat. Things that went ahead by themselves show in the chat as "allowed automatically".</p></div>`);
+      <p class="faint small mt">A change is used from the next message in each chat. Things that went ahead by themselves show in the chat as "allowed automatically".</p></div>
+      <div class="card mt"><h3 style="margin:0">Web search</h3>
+      <div class="muted small mt">Whether the AI may look things up on the internet (web search, pages, Wikipedia, arXiv, your search APIs and Research reports). The dashboard enforces it for every chat and model, not just by asking the model.</div>
+      <div class="perm-grid mt">${(() => { const m = (A.search && A.search.mode) || "auto", o = (mode, title, sub) => html`<button class="perm-opt ${m === mode ? "on" : ""}" data-ai="search-set" data-mode="${mode}" aria-pressed="${m === mode}">
+        <div class="row" style="gap:8px;align-items:center"><span class="perm-radio"></span><b>${title}</b>${m === mode ? chip("in use", "good") : ""}</div><div class="muted small" style="margin-top:4px">${sub}</div></button>`;
+        return html`${o("auto", "Automatic", "It may search when it helps (and when a chat asks it to search first).")}${o("off", "Off", "It answers from the conversation, your files and what the model already knows, and says so when it can't check something current. Its Python and shell can't reach the internet either.")}`; })()}</div>
+      <p class="faint small mt">For one message only, type <span class="mono">/nosearch</span> before it. <span class="mono">/search on</span> or <span class="mono">/search off</span> changes this setting from the chat.</p></div>`);
   }
 
   // ------------------------------------------------------------------ recommended
@@ -2124,6 +2150,7 @@
     else if (a === "s-copy") copyText("sudo nodeyard ai split deploy --model " + el.dataset.repo + ":" + el.dataset.file);
     else if (a === "rec-refresh") loadRecommended(true);
     else if (a === "perm-set") setPerm(el.dataset.mode);
+    else if (a === "search-set") setSearch(el.dataset.mode);
     else if (a === "rec-files") { A.search.q = el.dataset.repo; A.search.results = null; A.search.open = ""; selectTab("search"); runSearch().then(() => showFiles(el.dataset.repo)); }
     else if (a === "reveal-key") { try { const r = await postJSON("/api/ai/reveal-key", {}); if (r.ok) { A.key = r.key; A.useKey = true; renderApi(); } else toast(r.error || "Couldn't read the key."); } catch (err) { /* signed out */ } }
     else if (a === "use-key") { A.useKey = el.checked; renderApi(); }

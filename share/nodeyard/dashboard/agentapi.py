@@ -9,12 +9,14 @@ user (never root), only over Tailscale or your own network, and every change ask
 import json
 import os
 import queue
+import re
 import secrets
 import subprocess
 import sys
 import threading
 import time
 
+import aisearch
 import turns
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -168,6 +170,8 @@ class Agents:
             reg = getattr(self.ctx, "plugins", None)
             if ok and reg is not None and not reg.skill_enabled(pid):
                 ok, why = False, "turned off in Settings › Plugins"
+            if ok and pid in aisearch.SEARCH_PLUGINS and not aisearch.allowed(self.ctx):
+                ok, why = False, "web search is turned off (AI › Permissions)"
             out.append({"id": pid, "label": label, "desc": desc, "tools": tools, "code": code, "available": ok, "why": why})
         return out
 
@@ -176,6 +180,9 @@ class Agents:
         requested = body.get("plugins") if isinstance(body.get("plugins"), list) else []
         selected = [p for p in requested if isinstance(p, str) and p in BY_ID]
         available = {p["id"]: p for p in self.listing(h)}
+        if not aisearch.allowed(self.ctx, body):    # (this message only: "/nosearch")
+            selected = [p for p in selected if p not in aisearch.SEARCH_PLUGINS]
+            available = {k: (v if k not in aisearch.SEARCH_PLUGINS else dict(v, available=False)) for k, v in available.items()}
         if body.get("auto_skills") is True:
             return [pid for pid, info in available.items() if info["available"]]
         for pid in selected:
@@ -214,9 +221,16 @@ class Agents:
             env["NODEYARD_MUSIC_COOKIE"] = str(music_cookie or "")[:2048]
         cmd = [sys.executable, self.bin, "--serve-json", "--no-session", "--tools", ",".join(tools), "--api-base", base, "--model", model, "--max-tokens", str(max_tokens or 0),
                "--permission-mode", PERM_MODES[self.perm_mode()], "--no-color"]
+        no_search = not any(p in aisearch.SEARCH_PLUGINS for p in plugins)
+        if no_search:   # (web search off, or this chat doesn't use it: say so, and refuse the tools if asked anyway)
+            cmd += ["--disallowedTools", " ".join(aisearch.SEARCH_TOOLS), "--append-system-prompt", aisearch.NOTE]
         if code:   # outside the dashboard's sandbox, as the terminal user, in their home folder
+            net = []
+            if not aisearch.allowed(self.ctx):   # its Python and shell may reach this machine and the model, not the internet
+                host = base.split("://", 1)[-1].split("/", 1)[0].rsplit(":", 1)[0].strip("[]")
+                net = ["-p", "IPAddressDeny=any", "-p", "IPAddressAllow=localhost"] + (["-p", "IPAddressAllow=" + host] if re.match(r"^[0-9a-fA-F.:]+$", host) else [])
             cmd = ["systemd-run", "--quiet", "--collect", "--pipe", "--wait", "--uid=" + self.user, "--setenv=YARDCODE_API_KEY", "-p", "WorkingDirectory=~",
-                   "--setenv=LANG=C.UTF-8", "--description=nodeyard dashboard AI plugins"] + cmd
+                   "--setenv=LANG=C.UTF-8", "--description=nodeyard dashboard AI plugins"] + net + cmd
             if music_enabled:
                 cmd[cmd.index("--description=nodeyard dashboard AI plugins"):cmd.index("--description=nodeyard dashboard AI plugins")] = ["--setenv=NODEYARD_MUSIC_URL", "--setenv=NODEYARD_MUSIC_COOKIE"]
         else:
@@ -226,7 +240,7 @@ class Agents:
     def get(self, h, cid, plugins, max_tokens, create=True, target="split", music_cookie=""):
         owner = h._token() or "local"
         # A different model (or the split model running something else) needs a new helper.
-        sig = ",".join(sorted(plugins)) + "|" + str(max_tokens or 0) + "|" + target + "|" + self._model_id(target) + "|" + self.perm_mode()
+        sig = ",".join(sorted(plugins)) + "|" + str(max_tokens or 0) + "|" + target + "|" + self._model_id(target) + "|" + self.perm_mode() + "|" + aisearch.mode(self.ctx)
         with self.lock:
             pr = self.procs.get(cid)
             if pr and (pr.owner != owner or not pr.alive or pr.signature != sig):
@@ -470,11 +484,15 @@ class DemoProc:
 
     def _turn(self, text):
         e = self.emit
-        e(type="text", delta="I'll look that up. ")
-        e(type="text_end")
-        e(type="tool_use", id="t1", name="WebSearch", summary="WebSearch(%s)" % text[:40], input={"query": text[:80]}, depth=0)
-        time.sleep(0.2)
-        e(type="tool_result", id="t1", name="WebSearch", ok=True, summary="3 results (demo)", text="1. Demo result\n   https://example.com\n   nothing was searched", preview=["Demo result  example.com"], diff=None, depth=0)
+        if "web" in plugins_in(self.signature):
+            e(type="text", delta="I'll look that up. ")
+            e(type="text_end")
+            e(type="tool_use", id="t1", name="WebSearch", summary="WebSearch(%s)" % text[:40], input={"query": text[:80]}, depth=0)
+            time.sleep(0.2)
+            e(type="tool_result", id="t1", name="WebSearch", ok=True, summary="3 results (demo)", text="1. Demo result\n   https://example.com\n   nothing was searched", preview=["Demo result  example.com"], diff=None, depth=0)
+        else:
+            e(type="text", delta="(Web search is off, so this comes from what the model already knows.) ")
+            e(type="text_end")
         if "python" in plugins_in(self.signature) and ("run" in text.lower() or "code" in text.lower() or "python" in text.lower()):
             rid = secrets.token_hex(4)
             w = queue.Queue()

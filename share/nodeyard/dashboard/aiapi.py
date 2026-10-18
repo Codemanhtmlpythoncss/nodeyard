@@ -21,6 +21,7 @@ import threading
 import time
 import urllib.parse
 
+import aisearch
 import turns
 
 UA = "nodeyard-dashboard"
@@ -1494,6 +1495,8 @@ def register(ctx, args):
             turns.send_headers(h, existing)
             return existing.follow(h, 0)
         target = str(body.get("target", ""))
+        if not aisearch.allowed(ctx, body):
+            clean = aisearch.with_note(clean)      # (and /api/ai/web refuses, so no web results can be in it)
         payload = dict({"messages": clean, "temperature": temp}, **({"max_tokens": max_tokens} if max_tokens else {}))
         if target == "split":
             payload["return_progress"] = True   # llama.cpp says how far it has read the prompt (the page shows it)
@@ -1538,6 +1541,9 @@ def register(ctx, args):
         turn.follow(h, 0)
 
     def web(h, body):
+        if not aisearch.allowed(ctx, body):
+            return h._json({"ok": False, "error": "Web search is off for this message." if body.get("no_search") is True else "Web search is turned off (AI › Permissions).",
+                            "search_off": True}, 403)
         import webtools
         try:
             h._json(webtools.research(body.get("query"), demo=bool(getattr(args, "demo", False))))
