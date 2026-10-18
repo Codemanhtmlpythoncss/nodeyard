@@ -58,8 +58,10 @@ It needs `python3` (3.8 or newer; nodeyard offers to install it).
   pods; things that need attention; usage by namespace; recent events.
 - **Nodes**: every machine with status, roles, IP address, CPU, memory, disk,
   clock speed, temperature, load, network, OS and age, sortable. Click one for
-  its history charts (CPU, memory, temperature, clock), memory breakdown,
-  addresses, conditions, taints, labels, its biggest programs and its pods.
+  its history charts (CPU, memory, clock), **temperatures for every sensor**
+  (CPU, GPU, disks, board, Wi-Fi, battery) over 15 minutes to 24 hours with
+  each one's lowest and highest, memory breakdown, addresses, conditions,
+  taints, labels, its biggest programs and its pods.
 - **Devices sidebar**: keep each node's temperature, load, CPU and memory in
   view while using other pages. Expand a node for sensor readings and short
   history charts, or open its full details. Short Ready/NotReady heartbeat
@@ -81,6 +83,15 @@ It needs `python3` (3.8 or newer; nodeyard offers to install it).
   book** of every node, service, ingress and pod IP in one searchable table),
   **Storage**, **Events** and **Alerts** (a node not ready, hot, out of memory
   or disk, a crashing or stuck pod, a workload with missing replicas...).
+- **Hardware**: what every machine is made of and how fast it is, plus
+  **Maintenance**, **Cooling** and **Laptop lid** tabs (see "Looking after the
+  hardware" below).
+- **Cleanup**: pods nobody has used for a while, removed by a policy you
+  control (see below).
+- **PwnForge**: host the PwnForge cybersecurity training platform on the
+  dashboard's machine, if you want it (see below).
+- **Desk**: quotes you can click through and edit (the built-in ones list
+  their sources).
 - **AI**: see below.
 
 Settings also has a confirmed **Restart Kubernetes** action. Workers restart one
@@ -205,6 +216,14 @@ downloading, loading, or unloaded (press Load).
 
 **Port 9092 is taken**: `sudo nodeyard dashboard start --port 9093`.
 
+**A chat answer stopped with "Lost the connection"**: the page tried for 3
+minutes. Press **Resume the answer**; if the dashboard restarted in between, the
+answer is gone and the message says why it restarted.
+
+**Tuning's Restore defaults**: puts back the values the machine had before
+nodeyard first changed it (saved on the machine at the time). Machines nodeyard
+never changed are left alone by Reset all.
+
 ## Control API
 
 There is one server API key for yardcode, the dashboard's `/api/v1` control/chat API, and every split-model deployment. New models inherit it;
@@ -241,6 +260,36 @@ curl -H "Authorization: Bearer $KEY" 'http://DASHBOARD:9092/api/v1/jobs?id=ab12.
 
 The native macOS chat app also uses this API and the shared server key. See [macOS app setup](macos.md).
 
+## When the connection drops mid-answer
+
+Every answer (the AI page, the Desk and Galaxy chats, the AI with skills) is
+written into a numbered list of events on the server, and the page reads it.
+If the connection drops (Wi-Fi, a laptop waking up, a proxy, the dashboard
+restarting), the page says "Connection lost, reconnecting" and picks the
+answer up where it was while the model keeps working; it never asks the model
+twice. If the page closes, the answer is kept, and **Resume the answer** in the
+chat fetches it. An answer nobody reads for 5 minutes is stopped, so it doesn't
+hold the model. The native apps' API sends a keep-alive every 15 s while the
+model reads a long prompt.
+
+The service file sets `OOMPolicy=continue`: if the kernel stops one of the
+dashboard's helpers for memory (a yt-dlp lookup, the DJ voice, an AI helper),
+the dashboard itself keeps running. Why it last restarted, if it did, is in
+`journalctl -u nodeyard-dashboard` ("The dashboard's previous run ended
+because ...").
+
+## AI permissions and web search
+
+**AI › Permissions** sets how much the AI with skills may do without asking
+(Ask me first, Auto-accept, Allow everything) and whether it may search the
+web: **Automatic**, or **Off**. Off is enforced by the server for every chat
+and model: the web, Wikipedia and arXiv tools are taken away, Research and the
+"search first" option refuse, your registered search APIs aren't offered, the
+native apps' browser-search tools are dropped, the code tools' sandbox can't
+reach the internet, and the model is told not to claim it checked anything
+online. `/search on|off` changes it from a chat; `/nosearch your question`
+sends one message without search.
+
 ## Chat settings
 
 Each chat has Settings: the reply length (**No limit** removes the cap), **context compression** (when the conversation nears the
@@ -256,7 +305,7 @@ already running keeps its current context length until it is started again.
 ## Chat: commands, plugins and running code
 
 - **`/` commands**: type `/` in the message box for a menu: `/help`, `/new`, `/compact`, `/model`, `/models`, `/unload`, `/max`
-  (`/max none` = no reply limit), `/web`, `/skills`, `/plugins`, `/system`, `/temp`, `/run`, `/fix`, `/autofix`, `/retry`, `/stop`, `/copy`,
+  (`/max none` = no reply limit), `/web`, `/search`, `/nosearch`, `/skills`, `/plugins`, `/system`, `/temp`, `/run`, `/fix`, `/autofix`, `/retry`, `/stop`, `/copy`,
   `/export`, `/context`, `/files`. A message that really starts with a slash: type `//`.
 - **AI skills** (chat Settings): **Choose automatically** lets the model select from every available skill when useful: search the web and read pages, look things up on Wikipedia or arXiv, get the
   weather, calculate, keep a task list, run Python (code interpreter) or use files and shell. Every tool call shows as a card;
@@ -378,6 +427,63 @@ uses.
 
 Limits: addresses come from the node agents; without them only Kubernetes' node address is known. The node agent
 reports IPv4 addresses. Tailscale must be connected on the dashboard's own machine for its Tailscale checks to pass.
+
+## Looking after the hardware
+
+The Hardware page's **Check this machine** reads, as root and read-only: the
+kind of machine (firmware chassis type, Raspberry Pi model, virtual machine),
+memory slots, fans and whether Linux may set them, CPU throttle counters, disk
+health (SMART, if smartmontools is installed), battery wear and how lid events
+are handled. Then:
+
+- **Maintenance** lists what to do for each machine (clean the vents, add
+  memory, replace a hard disk, check a fan...) with steps, tools, difficulty,
+  benefit and risks, and what each one is based on. Routine advice says so;
+  nothing is called a repair without a measurement.
+- **Cooling** shows fan speeds. An idle profile (idle speed below an idle
+  temperature, full speed from a higher one) is offered only where Linux can
+  really control the fan: a writable hwmon fan (desktops' Super I/O chips) runs
+  a small `nodeyard-fan` service, and a Raspberry Pi 5 gets the firmware's own
+  `fan_temp` settings in config.txt. Above the emergency temperature, or if the
+  sensor can't be read, the fan goes back to the firmware at full speed, and
+  the CPU's own throttling and shutdown limits always apply. Laptop and mini PC
+  fans run by their embedded controller can only be read.
+- **Laptop lid** sets what closing the lid does on battery, on mains power and
+  when docked (suspend, hibernate when it can work, shut down, or keep
+  running), as one systemd-logind (or elogind) drop-in,
+  `/etc/systemd/logind.conf.d/90-nodeyard-lid.conf`, read back from the
+  running logind. Files that override it, desktop power managers and acpid are
+  listed as conflicts.
+
+Every change is shown in full before it runs and has a restore button. Not
+everything can be tested without the hardware: a firmware may still override
+a fan Linux was allowed to set.
+
+## Cleanup
+
+Pods whose containers stopped a while ago (finished jobs, crashed one-off pods,
+evicted pods) pile up. **Cleanup** lists the ones unused for longer than the
+policy (12 hours by default) and why, and removes the ones you pick. Last use
+is when the containers stopped, never the pod's age, and a pod with no stop
+time recorded stays. Running pods, kube-system, protected pods (your list, or
+the label `nodeyard.io/keep=true`) and pods that mount a volume claim or a host
+folder are never removed, and removing a pod deletes nothing else. Automatic
+cleanup (every 30 minutes) is off until you turn it on after seeing the
+policy; changing the policy pauses it, and its dry-run mode only logs.
+
+## PwnForge
+
+The PwnForge page installs [PwnForge](https://github.com/Codemanhtmlpythoncss/pwnforge)
+on the dashboard's machine (code in `/opt/pwnforge`, data in
+`/var/lib/pwnforge`, its own `pwnforge.service` running as the unprivileged
+user `pwnforge`) and starts, stops and updates it. **Turn hosting on** / **off**
+starts it (and at boot) or stops it. It listens on this machine only by
+default; **Your tailnet** or **Every network** can be chosen (every network
+only after its administrator account exists, and with an explicit OK). It is
+never published to the internet. The page shows its health, its log (with
+secrets hidden), diagnostics and the training machines with their network
+isolation; they are started, stopped and deleted through PwnForge's own
+`pwnforge env` commands. The dashboard works the same without it.
 
 ## Plugins and the activity log
 

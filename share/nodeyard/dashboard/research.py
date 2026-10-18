@@ -483,6 +483,9 @@ def register(ctx, args):
         h._json({"ok": False, "error": str(e)}, getattr(e, "code", 400))
 
     def start(h, body):
+        import aisearch
+        if not aisearch.allowed(ctx, body):
+            return h._json({"ok": False, "error": "Research reads the web, and web search is turned off (AI › Permissions).", "search_off": True}, 403)
         try:
             h._json({"ok": True, "id": r.start(body.get("question"), body.get("target"), str(body.get("depth") or "standard"))})
         except ResearchError as e:

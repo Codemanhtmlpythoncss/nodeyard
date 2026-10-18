@@ -139,7 +139,8 @@
   };
   NY.PALETTE = ["#7c8cff", "#22d3ee", "#34d399", "#fbbf24", "#f472b6", "#a78bfa", "#fb923c", "#60a5fa", "#f87171", "#2dd4bf"];
 
-  // area(id, ts, series, {stacked, max, fmt, height}): series = [{name, color, values}]
+  // area(id, ts, series, {stacked, max, fmt, height, gaps}): series = [{name, color, values}]
+  // gaps: lines (no fill), broken where a value is missing, instead of drawing missing values as 0
   NY.area = function (id, ts, series, o) {
     o = o || {};
     const W = 640, H = o.height || 190, L = o.left || 52, R = 10, T = 10, B = 22;
@@ -162,7 +163,8 @@
     const x0 = ts[0], x1 = ts[n - 1] || x0 + 1;
     const X = (t) => L + ((t - x0) / (x1 - x0 || 1)) * (W - L - R);
     const Y = (v) => T + (1 - Math.min(v, max) / max) * (H - T - B);
-    registry[id] = { ts, series, stacked, cum, fmt, W, H, L, R, X, name: o.title || "" };
+    const gaps = !!o.gaps && !stacked;
+    registry[id] = { ts, series, stacked, cum, fmt, W, H, L, R, X, name: o.title || "", gaps };
     let g = "";
     for (let i = 0; i <= 4; i++) {
       const v = (max * i) / 4, y = Y(v);
@@ -173,7 +175,12 @@
       g += `<text class="axis" x="${X(t).toFixed(1)}" y="${H - 5}" text-anchor="${i === 0 ? "start" : i === 3 ? "end" : "middle"}">${esc(shortClock(t))}</text>`;
     }
     let paths = "";
-    for (let k = series.length - 1; k >= 0; k--) {
+    for (let k = series.length - 1; k >= 0 && gaps; k--) {
+      let pen = false, d = "";
+      series[k].values.forEach((v, i) => { if (v == null) { pen = false; return; } d += (pen ? "L" : "M") + X(ts[i]).toFixed(1) + " " + Y(v).toFixed(1) + " "; pen = true; });
+      if (d) paths += `<path d="${d}" fill="none" style="stroke:${series[k].color}" stroke-width="1.7" stroke-linejoin="round"/>`;
+    }
+    for (let k = series.length - 1; k >= 0 && !gaps; k--) {
       const s = series[k], col = s.color;
       const top = cum[k].map((v, i) => (i ? "L" : "M") + X(ts[i]).toFixed(1) + " " + Y(v).toFixed(1)).join(" ");
       if (stacked || k === 0 || o.fillAll) {
@@ -197,7 +204,7 @@
     const cur = svg.querySelector(".cursor"), x = c.X(c.ts[best]);
     cur.setAttribute("x1", x); cur.setAttribute("x2", x); cur.style.display = "block";
     let rows = "", total = 0;
-    c.series.forEach((s) => { const v = s.values[best]; if (v != null) total += v; rows += `<div class="r"><span><i style="background:${s.color}"></i>${esc(s.name)}</span><b>${esc(c.fmt(v == null ? 0 : v))}</b></div>`; });
+    c.series.forEach((s) => { const v = s.values[best]; if (v != null) total += v; rows += `<div class="r"><span><i style="background:${s.color}"></i>${esc(s.name)}</span><b>${esc(v == null && c.gaps ? "–" : c.fmt(v == null ? 0 : v))}</b></div>`; });
     if (c.stacked && c.series.length > 1) rows += `<div class="r" style="border-top:1px solid var(--line);margin-top:5px;padding-top:4px"><span>Total</span><b>${esc(c.fmt(total))}</b></div>`;
     const t = tip();
     t.innerHTML = `<div class="t">${esc(clock(c.ts[best]))}</div>${rows}`;

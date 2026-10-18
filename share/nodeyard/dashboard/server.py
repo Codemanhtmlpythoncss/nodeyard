@@ -708,6 +708,10 @@ def main():
         node = q.get("node", [""])[0]
         h._json({"ok": True, "installed": bool(snap["state"].get("agents", {}).get("installed")), "nodes": agents.payload(snap["state"], node or None)})
     ctx.get_routes["/api/agents"] = agents_route
+    import turns         # chat answers that survive a dropped connection (the page reconnects and carries on)
+    turns.register(ctx, a)
+    import aisearch      # whether the AI may search the web (enforced by every AI route)
+    aisearch.register(ctx, a)
     if importlib.util.find_spec("aiapi"):
         import aiapi
         aiapi.register(ctx, a)
@@ -744,6 +748,16 @@ def main():
     tune.register(ctx, a)
     import memfree       # processes a node doesn't need, moved to swap or stopped (Processes > Free up memory)
     memfree.register(ctx, a)
+    import pwnforge      # optional: host PwnForge (cybersecurity training) from this machine; off unless turned on
+    pwnforge.register(ctx, a)
+    import temps         # every machine's sensors, kept for a day (the node page's temperature charts)
+    temps.register(ctx, a)
+    import hwcare        # Hardware > Maintenance, Cooling and Lid: a guide per machine, idle fan settings, the lid action
+    hwcare.register(ctx, a)
+    import cleanup       # pods nobody has used for a while, removed by a policy you control (off by default)
+    cleanup.register(ctx, a)
+    import quotes        # the Desk's quotes: built-in (checked against their sources) and your own
+    quotes.register(ctx, a)
     if getattr(ctx, "ai", None) is not None:
         import aiapi as _aiapi
         _aiapi.EXTRA_SPLIT_ARGS = ctx.tuning.run_args

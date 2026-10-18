@@ -447,7 +447,9 @@ class Settings:
         if self.demo:
             demo_bin = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "bin", "nodeyard"))
             try:
-                r = subprocess.run(["bash", demo_bin, "--demo", "--no-color"] + argv, capture_output=True, text=True, timeout=120,
+                # (a Mac's own bash is 3.2 and nodeyard needs 4.3+: use Homebrew's when it's there)
+                bash = next((b for b in ("/opt/homebrew/bin/bash", "/usr/local/bin/bash") if os.access(b, os.X_OK)), "bash")
+                r = subprocess.run([bash, demo_bin, "--demo", "--no-color"] + argv, capture_output=True, text=True, timeout=120,
                                    env=dict(ENV, NODEYARD_DEMO_DIR=os.path.join("/tmp", "nodeyard-demo-%d" % os.getuid())))
                 rc, out = r.returncode, r.stdout
             except (OSError, subprocess.TimeoutExpired) as e:

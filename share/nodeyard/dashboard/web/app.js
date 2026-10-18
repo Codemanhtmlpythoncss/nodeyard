@@ -15,6 +15,7 @@
     { id: "processes", label: "Processes", icon: "processes", sub: "What is running on each machine, and what is using the memory and CPU" },
     { id: "pods", label: "Pods", icon: "pods", sub: "Everything that is running, with live usage and logs" },
     { id: "workloads", label: "Workloads", icon: "workloads", sub: "Deployments, daemon sets, stateful sets, jobs and cron jobs" },
+    { id: "cleanup", label: "Cleanup", icon: "reset", sub: "Pods nobody has used for a while, removed by a policy you control" },
     { id: "network", label: "Network", icon: "network", sub: "IP addresses, ports and how to reach things" },
     { id: "storage", label: "Storage", icon: "storage", sub: "Disks and volumes" },
     { id: "hardware", label: "Hardware", icon: "hardware", sub: "What every machine is made of, and how fast it really is" },
@@ -30,6 +31,7 @@
     { id: "terminal", label: "Terminal", icon: "terminal", sub: "Shells on every device" },
     { id: "apis", label: "APIs", icon: "commands", sub: "Your own self-hosted APIs, for the dashboard and the AI" },
     { id: "music", label: "Music", icon: "play", sub: "Play a folder of music, or forward the server's audio" },
+    { id: "pwnforge", label: "PwnForge", icon: "shield", sub: "Host the PwnForge cybersecurity training platform here, if you want it" },
     { id: "settings", label: "Settings", icon: "settings", sub: "Passwords, keys, the dashboard itself and how it looks" },
     { id: "desk", label: "Desk", icon: "desk", sub: "Your wallpaper, clock and widgets" },
     { id: "guide", label: "Setup guide", icon: "help", sub: "Setting up and using this dashboard, step by step" },
@@ -713,6 +715,43 @@
   const chips = (obj) => { const e = Object.entries(obj || {}); return e.length ? html`<div class="row wrap" style="gap:6px">${e.map(([k, v]) => chip(k + (v === "" ? "" : "=" + v)))}</div>` : html`<span class="faint">none</span>`; };
   const sub = (t) => html`<h3 style="margin:22px 0 10px;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em">${t}</h3>`;
 
+  // ---- temperatures: every sensor of a machine over 15 minutes to a day (temps.py keeps them)
+  const TEMPS = { node: "", range: +store.get("temps.range", 3600) || 3600, data: null, at: 0, busy: false };
+  const TEMP_RANGES = [[900, "15 min"], [3600, "1 h"], [21600, "6 h"], [86400, "24 h"]];
+  const KIND_COL = { cpu: "#7c8cff", gpu: "#a78bfa", disk: "#22d3ee", wifi: "#34d399", battery: "#fbbf24", board: "#fb923c", other: "#60a5fa" };
+  function loadTemps(node) {
+    if (TEMPS.busy) return;
+    TEMPS.busy = true;
+    const r = TEMPS.range;
+    getJSON("/api/temps?node=" + encodeURIComponent(node) + "&range=" + r).then((j) => {
+      if (!j.ok || r !== TEMPS.range) return;
+      Object.assign(TEMPS, { node, data: j, at: Date.now() });
+      if (S.drawer === "node:" + node) updateDrawer(false);
+    }).catch(() => { TEMPS.at = Date.now(); }).finally(() => { TEMPS.busy = false; });
+  }
+  function tempsBlock(n) {
+    if (TEMPS.node !== n.name || Date.now() - TEMPS.at > 15000) loadTemps(n.name);
+    const d = TEMPS.node === n.name ? TEMPS.data : null;
+    const right = raw('<span class="seg" role="group">' + TEMP_RANGES.map(([v, l]) => '<button data-temps-range="' + v + '" class="' + (TEMPS.range === v ? "on" : "") + '">' + l + "</button>").join("") + "</span>");
+    if (!d) return card("Temperatures", html`<div class="muted small">Loading…</div>`, right);
+    const ss = d.sensors;
+    if (!ss.length) {
+      return card("Temperatures", empty(d.agent === "none" ? "No temperature readings" : "No temperature sensors",
+        html`<div class="muted small">${d.agent === "none" ? "The node agent isn't running on " + n.name + ": turn the agents on (Processes page) to read its sensors." : "The kernel on " + n.name + " exposes no temperature sensors (common in virtual machines)."}</div>`), right);
+    }
+    const ts = ss[0].points.map((p) => p[0]), used = {};
+    const series = ss.map((s) => { const k = used[s.kind] = (used[s.kind] || 0) + 1; return { name: s.label, color: k === 1 ? KIND_COL[s.kind] : NY.PALETTE[(k + 3) % NY.PALETTE.length], values: s.points.map((p) => p[1]) }; });
+    const state = (s) => (s.state === "ok" ? chip(fmt.temp(s.now), tempClass(s.now))
+      : s.state === "stale" ? raw('<span class="chip warn" title="Last reading ' + esc(fmt.temp(s.last)) + '">no reading for ' + esc(ago(s.last_at)) + "</span>")
+      : raw('<span class="chip bad" title="It reported before, but the agent\'s last answer had nothing from it: a driver or read error, or the device was removed.">not reading</span>'));
+    const rows = ss.map((s, i) => html`<tr><td><i class="dot" style="background:${series[i].color};box-shadow:none"></i> <b>${s.label}</b></td><td>${s.kind_label}</td><td>${state(s)}</td><td class="num">${s.low == null ? "–" : fmt.temp(s.low)}</td><td class="num">${s.high == null ? "–" : fmt.temp(s.high)}</td></tr>`);
+    const lbl = (TEMP_RANGES.find((x) => x[0] === d.range) || [0, ""])[1];
+    return card("Temperatures", html`${d.agent === "stale" ? html`<div class="banner warn"><svg class="icon"><use href="#i-warn"/></svg><span>No fresh readings: ${n.name}'s agent last answered ${d.agent_seen ? ago(d.agent_seen) + " ago" : "a while ago"}. The chart stops there.</span></div>` : ""}
+      ${area("n-temps", ts, series, { fmt: (v) => v.toFixed(1) + " °C", axis: (v) => Math.round(v) + " °C", height: 170, title: "Temperatures", gaps: true })}
+      <div class="tablewrap mt"><table class="tbl"><thead><tr><th>Sensor</th><th>Kind</th><th>Now</th><th class="num">Lowest (${lbl})</th><th class="num">Highest (${lbl})</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="faint small mt">${n.name} · ${d.missing.length ? "no " + d.missing.join(" or ") + " sensor on this machine · " : ""}read every 15 s from its node agent, kept for 24 hours${d.range > 3600 ? "; each point is a 2-minute mean" : ""}</div>`, right);
+  }
+
   function updateDrawer(first) {
     if (!S.drawer || !S.d) return;
     const { kind, rest } = parseRef(S.drawer);
@@ -732,7 +771,8 @@
           <div class="card" style="padding:12px">${donut(frac(n.mem_used, n.mem_total), { size: 78 })}<div class="muted" style="font-size:12px;margin-top:4px">Memory · ${memText(n)}</div></div>
           <div class="card" style="padding:12px">${n.disk_total ? donut(frac(n.disk_used, n.disk_total), { size: 78 }) : donut(0, { size: 78, label: "–" })}<div class="muted" style="font-size:12px;margin-top:4px">Disk · ${n.disk_total ? fmt.bytes(n.disk_used, 0) + " / " + fmt.bytes(n.disk_total, 0) : "n/a"}</div></div></div>
           <div class="grid g-2 mt" style="grid-template-columns:1fr">${card("CPU over time", area("n-cpu", cpu.ts, cpu.series, { max: n.cpu_cores, fmt: fmt.cores, height: 150, title: "CPU" }))}${card("Memory over time", area("n-mem", mem.ts, mem.series, { max: n.mem_total, fmt: (v) => fmt.bytes(v), height: 150, title: "Memory" }))}</div>
-          ${n.hw ? html`<div class="grid g-2 mt" style="grid-template-columns:1fr">${(() => { const t = nodeSeries(4, n.name), f2 = nodeSeries(5, n.name); return html`${card("Temperature", area("n-temp", t.ts, t.series, { fmt: (v) => v.toFixed(0) + " °C", height: 130, title: "Temperature" }), n.hw.temp_c != null ? fmt.temp(n.hw.temp_c) : "")}${card("CPU clock", area("n-freq", f2.ts, f2.series, { fmt: (v) => fmt.mhz(v), left: 62, height: 130, title: "CPU clock", max: n.hw.freq_max || undefined }), fmt.mhz(n.hw.freq_mhz) + " of " + fmt.mhz(n.hw.freq_max))}`; })()}</div>
+          <div class="mt">${tempsBlock(n)}</div>
+          ${n.hw ? html`<div class="grid g-2 mt" style="grid-template-columns:1fr">${(() => { const f2 = nodeSeries(5, n.name); return html`${card("CPU clock", area("n-freq", f2.ts, f2.series, { fmt: (v) => fmt.mhz(v), left: 62, height: 130, title: "CPU clock", max: n.hw.freq_max || undefined }), fmt.mhz(n.hw.freq_mhz) + " of " + fmt.mhz(n.hw.freq_max))}`; })()}</div>
             ${sub("Memory breakdown")}${memBar(n.hw)}${(S.agents && S.agents.nodes && S.agents.nodes[n.name]) ? html`${sub("Biggest programs")}<div class="card" style="padding:4px">${table("nproc", [
               { k: "name", t: "Process", v: (p) => p.name, r: (p) => html`<b>${p.name}</b> <span class="faint mono" style="font-size:11.5px">${p.pid}</span>` },
               { k: "where", t: "Belongs to", v: (p) => p.group.name || p.group.kind, r: (p) => whereChip(p.group) },
@@ -1166,6 +1206,7 @@
     if (t.closest("[data-mobile-signout]")) { $("#signout").click(); return; }
     if ((el = t.closest("[data-copy]"))) { e.preventDefault(); e.stopPropagation(); copyText(el.dataset.copy); return; }
     if ((el = t.closest("[data-act]"))) { e.preventDefault(); act(el.dataset.act, el); return; }
+    if ((el = t.closest("[data-temps-range]"))) { TEMPS.range = +el.dataset.tempsRange; store.set("temps.range", el.dataset.tempsRange); TEMPS.at = 0; const m = /^node:(.+)$/.exec(S.drawer || ""); if (m) { loadTemps(m[1]); updateDrawer(false); } return; }
     if ((el = t.closest("[data-set]"))) { const [p, v] = el.dataset.set.split(":"); if (p === "range") { S.range = +v; store.set("range", v); if (historyFor(S.range) > (S.histPoints || 0)) loadHistory().then(() => { if (S.d) V[S.view].update(); }); } else setPath(p, v); if (S.d) { V[S.view].update(); updateDrawer(false); } syncControls(); return; }
     if ((el = t.closest("th[data-sort]"))) { const [id, k] = el.dataset.sort.split("|"), st = S.sort[id] || (S.sort[id] = { k, dir: 1 }); if (st.k === k) st.dir = -st.dir; else { st.k = k; st.dir = 1; } V[S.view].update(); updateDrawer(false); return; }
     if ((el = t.closest("[data-open]"))) { e.preventDefault(); closeModals(); openDrawer(el.dataset.open); return; }

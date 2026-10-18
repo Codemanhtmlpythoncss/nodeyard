@@ -9,11 +9,15 @@ user (never root), only over Tailscale or your own network, and every change ask
 import json
 import os
 import queue
+import re
 import secrets
 import subprocess
 import sys
 import threading
 import time
+
+import aisearch
+import turns
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -166,6 +170,8 @@ class Agents:
             reg = getattr(self.ctx, "plugins", None)
             if ok and reg is not None and not reg.skill_enabled(pid):
                 ok, why = False, "turned off in Settings › Plugins"
+            if ok and pid in aisearch.SEARCH_PLUGINS and not aisearch.allowed(self.ctx):
+                ok, why = False, "web search is turned off (AI › Permissions)"
             out.append({"id": pid, "label": label, "desc": desc, "tools": tools, "code": code, "available": ok, "why": why})
         return out
 
@@ -174,6 +180,9 @@ class Agents:
         requested = body.get("plugins") if isinstance(body.get("plugins"), list) else []
         selected = [p for p in requested if isinstance(p, str) and p in BY_ID]
         available = {p["id"]: p for p in self.listing(h)}
+        if not aisearch.allowed(self.ctx, body):    # (this message only: "/nosearch")
+            selected = [p for p in selected if p not in aisearch.SEARCH_PLUGINS]
+            available = {k: (v if k not in aisearch.SEARCH_PLUGINS else dict(v, available=False)) for k, v in available.items()}
         if body.get("auto_skills") is True:
             return [pid for pid, info in available.items() if info["available"]]
         for pid in selected:
@@ -212,9 +221,16 @@ class Agents:
             env["NODEYARD_MUSIC_COOKIE"] = str(music_cookie or "")[:2048]
         cmd = [sys.executable, self.bin, "--serve-json", "--no-session", "--tools", ",".join(tools), "--api-base", base, "--model", model, "--max-tokens", str(max_tokens or 0),
                "--permission-mode", PERM_MODES[self.perm_mode()], "--no-color"]
+        no_search = not any(p in aisearch.SEARCH_PLUGINS for p in plugins)
+        if no_search:   # (web search off, or this chat doesn't use it: say so, and refuse the tools if asked anyway)
+            cmd += ["--disallowedTools", " ".join(aisearch.SEARCH_TOOLS), "--append-system-prompt", aisearch.NOTE]
         if code:   # outside the dashboard's sandbox, as the terminal user, in their home folder
+            net = []
+            if not aisearch.allowed(self.ctx):   # its Python and shell may reach this machine and the model, not the internet
+                host = base.split("://", 1)[-1].split("/", 1)[0].rsplit(":", 1)[0].strip("[]")
+                net = ["-p", "IPAddressDeny=any", "-p", "IPAddressAllow=localhost"] + (["-p", "IPAddressAllow=" + host] if re.match(r"^[0-9a-fA-F.:]+$", host) else [])
             cmd = ["systemd-run", "--quiet", "--collect", "--pipe", "--wait", "--uid=" + self.user, "--setenv=YARDCODE_API_KEY", "-p", "WorkingDirectory=~",
-                   "--setenv=LANG=C.UTF-8", "--description=nodeyard dashboard AI plugins"] + cmd
+                   "--setenv=LANG=C.UTF-8", "--description=nodeyard dashboard AI plugins"] + net + cmd
             if music_enabled:
                 cmd[cmd.index("--description=nodeyard dashboard AI plugins"):cmd.index("--description=nodeyard dashboard AI plugins")] = ["--setenv=NODEYARD_MUSIC_URL", "--setenv=NODEYARD_MUSIC_COOKIE"]
         else:
@@ -224,7 +240,7 @@ class Agents:
     def get(self, h, cid, plugins, max_tokens, create=True, target="split", music_cookie=""):
         owner = h._token() or "local"
         # A different model (or the split model running something else) needs a new helper.
-        sig = ",".join(sorted(plugins)) + "|" + str(max_tokens or 0) + "|" + target + "|" + self._model_id(target) + "|" + self.perm_mode()
+        sig = ",".join(sorted(plugins)) + "|" + str(max_tokens or 0) + "|" + target + "|" + self._model_id(target) + "|" + self.perm_mode() + "|" + aisearch.mode(self.ctx)
         with self.lock:
             pr = self.procs.get(cid)
             if pr and (pr.owner != owner or not pr.alive or pr.signature != sig):
@@ -266,6 +282,14 @@ class Agents:
             return h._json({"ok": False, "error": message}, 400)
         if len(text) > 200000:
             return h._json({"ok": False, "error": "That message is too long."}, 413)
+        owner = h._token() or "local"
+        tid = str(body.get("turn") or "")[:64] or secrets.token_hex(8)
+        existing = turns.of(self.ctx).get(tid, owner)
+        if existing is not None:
+            # the page sent the same message again (its first try lost the connection): follow the answer already
+            # being written instead of giving the AI the message twice
+            turns.send_headers(h, existing)
+            return existing.follow(h, 0)
         try:
             pr, _ = self.get(h, cid, plugins, int(body.get("max_tokens") or 0), target=target,
                              music_cookie=h.headers.get("Cookie", "") if "music" in plugins else "")
@@ -281,19 +305,43 @@ class Agents:
                     lines.append("%s: %s" % (m["role"].upper(), m["content"][:1500]))
             if lines:
                 text = "<earlier_conversation>\n%s\n</earlier_conversation>\n\n%s" % ("\n\n".join(lines), text)
+        prev = getattr(pr, "turn", None)
+        if pr.busy and prev is not None and prev.readers == 0:
+            # the page lost the last answer and asked again: stop that one rather than refuse
+            if prev.cancel:
+                prev.cancel()
+            for _ in range(50):
+                if not pr.busy:
+                    break
+                time.sleep(0.1)
         with self.lock:
             if pr.busy:
                 return h._json({"ok": False, "error": "The AI is still answering the last message."}, 409)
-            pr.busy = True
-        h.send_response(200)
-        for k, v in (("Content-Type", "text/event-stream; charset=utf-8"), ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff"), ("X-Accel-Buffering", "no"),
-                     ("Connection", "close")):
-            h.send_header(k, v)
-        h.end_headers()
-        h.close_connection = True
+            turn, existing = turns.of(self.ctx).start(tid, owner, "agent")
+            if turn is None:
+                return h._json({"ok": False, "error": "That answer id is taken."}, 409)
+            pr.busy, pr.turn = True, turn
+        threading.Thread(target=self._work, args=(pr, turn, text, target), name="agent-" + tid[:8], daemon=True).start()
+        try:
+            turns.send_headers(h, turn)
+        except OSError:
+            return
+        turn.follow(h, 0)
+
+    def _work(self, pr, turn, text, target):
+        """One turn of the chat's agent, into a Turn (turns.py): it carries on if the page's connection drops, and the
+        page picks up the events it missed when it reconnects."""
         lifecycle = getattr(self.ctx, "lifecycle", None)
         token = lifecycle.begin(target) if lifecycle else None   # the model is in use until this turn ends
         mode = self.perm_mode()
+
+        def cancel():
+            try:
+                pr.send({"type": "interrupt"})
+            except AgentError:
+                pass
+        turn.cancel = cancel
+        result, detail = "done", ""
         try:
             while not pr.q.empty():   # leftovers of an interrupted turn
                 pr.q.get_nowait()
@@ -302,8 +350,8 @@ class Agents:
                 try:
                     ev = pr.q.get(timeout=15)
                 except queue.Empty:
-                    h.wfile.write(b": ping\n\n")
-                    h.wfile.flush()
+                    if turn.finished:          # stopped as nobody was reading (see turns.Turns.reap)
+                        return
                     if not pr.alive:
                         ev = {"type": "exit"}
                     else:
@@ -312,17 +360,22 @@ class Agents:
                     # auto-accept: say yes here, and show the page what went ahead instead of asking
                     pr.send({"type": "permission_reply", "id": str(ev["id"]), "decision": "allow", "scope": "once", "feedback": ""})
                     ev = {"type": "auto_allowed", "tool": ev.get("tool", ""), "summary": ev.get("summary") or ev.get("command") or "", "reason": ev.get("reason", "")}
-                h.wfile.write(("data: %s\n\n" % json.dumps(ev)).encode("utf-8"))
-                h.wfile.flush()
+                turn.push(ev)
+                if ev.get("type") == "exit":
+                    result, detail = "error", "the AI's helper process ended"
                 if ev.get("type") in ("done", "exit"):
                     break
-        except (BrokenPipeError, ConnectionResetError, OSError, AgentError):
-            try:
-                pr.send({"type": "interrupt"})
-            except AgentError:
-                pass
+        except AgentError as e:
+            turn.push({"type": "error", "text": str(e)})
+            result, detail = "error", str(e)
+        except Exception as e:  # noqa: BLE001 -- one failed answer must never take the dashboard down
+            import traceback
+            traceback.print_exc()
+            turn.push({"type": "error", "text": "The dashboard hit an error while answering: %s" % e})
+            result, detail = "error", repr(e)
         finally:
             pr.busy = False
+            turn.finish(result, detail)
             if lifecycle:
                 lifecycle.end(token)
 
@@ -431,11 +484,15 @@ class DemoProc:
 
     def _turn(self, text):
         e = self.emit
-        e(type="text", delta="I'll look that up. ")
-        e(type="text_end")
-        e(type="tool_use", id="t1", name="WebSearch", summary="WebSearch(%s)" % text[:40], input={"query": text[:80]}, depth=0)
-        time.sleep(0.2)
-        e(type="tool_result", id="t1", name="WebSearch", ok=True, summary="3 results (demo)", text="1. Demo result\n   https://example.com\n   nothing was searched", preview=["Demo result  example.com"], diff=None, depth=0)
+        if "web" in plugins_in(self.signature):
+            e(type="text", delta="I'll look that up. ")
+            e(type="text_end")
+            e(type="tool_use", id="t1", name="WebSearch", summary="WebSearch(%s)" % text[:40], input={"query": text[:80]}, depth=0)
+            time.sleep(0.2)
+            e(type="tool_result", id="t1", name="WebSearch", ok=True, summary="3 results (demo)", text="1. Demo result\n   https://example.com\n   nothing was searched", preview=["Demo result  example.com"], diff=None, depth=0)
+        else:
+            e(type="text", delta="(Web search is off, so this comes from what the model already knows.) ")
+            e(type="text_end")
         if "python" in plugins_in(self.signature) and ("run" in text.lower() or "code" in text.lower() or "python" in text.lower()):
             rid = secrets.token_hex(4)
             w = queue.Queue()

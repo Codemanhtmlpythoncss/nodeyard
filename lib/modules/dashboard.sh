@@ -425,6 +425,9 @@ CapabilityBoundingSet=
 MemoryHigh=512M
 MemoryMax=768M
 OOMScoreAdjust=-100
+# If the kernel stops one of those helpers for memory, keep the dashboard running (systemd's default, stop, restarted the
+# whole dashboard, which dropped every open page and chat answer).
+OOMPolicy=continue
 
 [Install]
 WantedBy=multi-user.target

@@ -4,7 +4,10 @@
   "use strict";
   const { html, raw, setHTML, fmt } = NY;
   const U = NY.ui;
-  const { S, V, $, chip, card, empty, startJob } = U;
+  const { S, V, $, chip, card, empty, startJob, store } = U;
+  // the page's tabs: what every machine is, and (hwcare.js) looking after it
+  const TABS = [["machines", "Machines"], ["maint", "Maintenance"], ["cool", "Cooling"], ["lid", "Laptop lid"]];
+  let tab = TABS.some((t) => t[0] === store.get("hw.tab", "")) ? store.get("hw.tab", "") : "machines";
 
   const gbs = (v) => (v == null ? "–" : v.toFixed(v >= 10 ? 1 : 2) + " GB/s");
   const mbs = (v) => (v == null ? "–" : v >= 1000 ? (v / 1000).toFixed(2) + " GB/s" : Math.round(v) + " MB/s");
@@ -70,8 +73,12 @@
   }
 
   V.hardware = {
-    build() { NY.freshHTML($("#view"), html`<div id="hw-body"></div>`); },
+    build() {
+      NY.freshHTML($("#view"), html`<div class="toolbar"><span class="seg" id="hw-tabs" role="tablist">${TABS.map(([id, l]) => raw('<button data-hw-tab="' + id + '" class="' + (tab === id ? "on" : "") + '">' + l + "</button>"))}</span></div><div id="hw-body"></div>`);
+      if (tab !== "machines") NY.hwcare.show(tab); else NY.hwcare.hide();
+    },
     update() {
+      if (tab !== "machines") return;      // (hwcare.js draws its tabs when its own data changes)
       const list = rows();
       setHTML($("#hw-body"), html`<div class="card"><div class="row wrap" style="gap:10px">
           <span class="muted small grow">RAM type and MT/s need root-only firmware tables, so memory is <b>measured</b> instead (how fast each machine copies memory, which is what limits AI speed).</span>
@@ -82,6 +89,8 @@
   };
 
   document.addEventListener("click", (e) => {
+    const tb = e.target.closest && e.target.closest("[data-hw-tab]");
+    if (tb) { tab = tb.dataset.hwTab; store.set("hw.tab", tab); NY.hwcare.hide(); V.hardware.build(); V.hardware.update(); return; }
     const el = e.target.closest("[data-hw]"); if (!el) return;
     if (el.dataset.hw === "bench") startJob("hw-bench", el.dataset.node ? { node: el.dataset.node } : {}, () => U.load(true));
   });
