@@ -27,7 +27,10 @@ check_args() {
 }
 
 write_dropin() {
-    local dir="$1" data="$2" host="$3" port="$4"
+    local dir="$1" data="$2" host="$3" port="$4" groups="" g
+    for g in libvirt kvm; do
+        if getent group "$g" >/dev/null; then groups+="${groups:+ }$g"; fi
+    done
     install -d -m 0755 "$(dirname "$DROPIN")"
     cat > "$DROPIN.tmp" <<EOF
 # Written by the nodeyard dashboard (PwnForge page): change it there.
@@ -36,6 +39,9 @@ write_dropin() {
 WorkingDirectory=$dir
 Environment=PWNFORGE_DATA_DIR=$data
 ReadWritePaths=$data
+# Only the groups this machine has: the unit asks for libvirt and kvm, and a missing one stops it starting.
+SupplementaryGroups=
+SupplementaryGroups=$groups
 ExecStart=
 ExecStart=$dir/.venv/bin/pwnforge serve --host $host --port $port
 EOF
@@ -110,7 +116,9 @@ cmd_install() {
         'from backend.app.database.init_db import seed; print("catalogue:", seed(include_profiles=True))')
 
     say "step 6/7: website"
-    if (cd "$dir/frontend" && npm ci --no-audit --no-fund --loglevel=error >/dev/null && npm run -s build >/dev/null); then
+    # An older npm (Debian's 10) won't "npm ci" from a lock file a newer npm wrote, so fall back to "npm install".
+    if (cd "$dir/frontend" && { npm ci --no-audit --no-fund --loglevel=error >/dev/null 2>&1 \
+            || npm install --no-audit --no-fund --loglevel=error >/dev/null; } && npm run -s build >/dev/null); then
         say "website built"
     else
         say "warning: the website didn't build; the API still runs (see npm's messages above)"
