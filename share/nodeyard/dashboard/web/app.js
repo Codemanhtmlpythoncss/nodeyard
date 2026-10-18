@@ -30,6 +30,7 @@
     { id: "terminal", label: "Terminal", icon: "terminal", sub: "Shells on every device" },
     { id: "apis", label: "APIs", icon: "commands", sub: "Your own self-hosted APIs, for the dashboard and the AI" },
     { id: "music", label: "Music", icon: "play", sub: "Play a folder of music, or forward the server's audio" },
+    { id: "pwnforge", label: "PwnForge", icon: "shield", sub: "Host the PwnForge cybersecurity training platform here, if you want it" },
     { id: "settings", label: "Settings", icon: "settings", sub: "Passwords, keys, the dashboard itself and how it looks" },
     { id: "desk", label: "Desk", icon: "desk", sub: "Your wallpaper, clock and widgets" },
     { id: "guide", label: "Setup guide", icon: "help", sub: "Setting up and using this dashboard, step by step" },

@@ -746,6 +746,8 @@ def main():
     tune.register(ctx, a)
     import memfree       # processes a node doesn't need, moved to swap or stopped (Processes > Free up memory)
     memfree.register(ctx, a)
+    import pwnforge      # optional: host PwnForge (cybersecurity training) from this machine; off unless turned on
+    pwnforge.register(ctx, a)
     if getattr(ctx, "ai", None) is not None:
         import aiapi as _aiapi
         _aiapi.EXTRA_SPLIT_ARGS = ctx.tuning.run_args
