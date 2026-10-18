@@ -127,7 +127,7 @@
       ${card("Window appearance", html`<p class="muted small" style="margin-top:0">Saved in this browser and applied across the Nodeyard dashboard, Music and AI Galaxy.</p>
         ${field(html`Window transparency <b id="st-window-alpha-v">${appearance.transparency}%</b>`, html`<input type="range" id="st-window-alpha" min="0" max="85" step="5" value="${appearance.transparency}" class="range">`, "Choose the transparency level, then turn on the switch to apply it to every window.")}
         <label class="check"><input type="checkbox" id="st-all-windows-transparent" ${appearance.allTransparent ? raw("checked") : ""}> <span>All windows transparent</span></label>`)}
-      ${card("Update", html`<p class="muted small" style="margin-top:0">Update nodeyard (the dashboard and its dependencies), <span class="mono">sc-pick</span>, and the audio/download tools (ffmpeg, PulseAudio, yt-dlp), then restart the dashboard on the new version. Runs on the server.</p>
+      ${card("Update", html`<p class="muted small" style="margin-top:0">Update nodeyard (the dashboard and its dependencies), <span class="mono">sc-pick</span>, the audio/download tools (ffmpeg, PulseAudio, yt-dlp) and PwnForge if it's installed here, then restart the dashboard on the new version. Runs on the server.</p>
         <button class="btn primary" data-st="update-all">Update everything</button>
         <span id="st-update-msg" class="small faint" style="margin-left:10px"></span>`)}
       ${card("AI chat defaults", html`

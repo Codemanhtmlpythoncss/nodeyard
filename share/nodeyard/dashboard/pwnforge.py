@@ -24,6 +24,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -463,6 +464,20 @@ class PwnForge:
         if rc != 0:
             raise PFError("Couldn't set PwnForge's address: %s" % redact((out + err).strip().splitlines()[-1] if (out + err).strip() else "exit %d" % rc), 500)
         return out
+
+    def update_step(self):
+        """PwnForge's part of Settings → Update everything: a shell step for that root script (it runs after nodeyard
+        itself is updated, so the newest pwnforge-host.sh does the work), or "" when PwnForge isn't installed here."""
+        if self.demo or self.platform_problem() or not self.installed():
+            return ""
+        c = self.cfg
+        try:
+            host = self.bind_host(c["bind"])
+        except PFError as e:
+            return "echo '== PwnForge =='; echo %s; " % shlex.quote("skipped: " + str(e))
+        argv = ["/bin/bash", HOST_SCRIPT, "install", c["path"], c["data_dir"], REPO, host, str(c["port"])]
+        # restarted only if it was running, so the new code is what answers
+        return "echo '== PwnForge =='; %s && systemctl try-restart %s; " % (" ".join(shlex.quote(a) for a in argv), UNIT)
 
     def action(self, body):
         a = str(body.get("action") or "")
