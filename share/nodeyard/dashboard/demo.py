@@ -383,7 +383,8 @@ class DemoAgents:
                        "SwapTotal": 0 if node["arch"] == "arm64" else 2048 * MiB, "SwapFree": 0 if node["arch"] == "arm64" else 1980 * MiB,
                        "Dirty": 2 * MiB, "Mapped": int(used * .15), "KernelStack": 6 * MiB, "PageTables": 12 * MiB},
             "pressure": {"cpu": {"some": round(cpu_frac * 4, 2)}, "memory": {"some": round(max(0, used / mem_total - .7) * 20, 2)}, "io": {"some": 0.3}},
-            "vmstat": {"oom_kill": 0, "pgmajfault": 1204, "pswpin": 0, "pswpout": 0}, "disks": [], "temps": [{"name": "cpu_thermal" if node["arch"] == "arm64" else "x86_pkg_temp", "c": round(temp, 1)}],
+            "vmstat": {"oom_kill": 0, "pgmajfault": 1204, "pswpin": 0, "pswpout": 0}, "disks": [], "temps": [{"name": "cpu_thermal" if node["arch"] == "arm64" else "x86_pkg_temp", "c": round(temp, 1)}] + ([] if node["arch"] == "arm64" else [
+                {"name": "nvme", "c": round(33 + 6 * cpu_frac + 2 * wave((name, "n"), t, 300, 1), 1)}, {"name": "acpitz", "c": round(temp - 9, 1)}]),
             "power": {}, "counts": {"total": 180 + len(pods) * 4, "running": 2, "sleeping": 170 + len(pods) * 4, "zombie": 0, "threads": 900 + len(pods) * 30}, "files": [2400],
             "processes": procs[:60], "groups": sorted(groups.values(), key=lambda g: -g["rss"])}
 

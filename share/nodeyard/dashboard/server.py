@@ -748,6 +748,8 @@ def main():
     memfree.register(ctx, a)
     import pwnforge      # optional: host PwnForge (cybersecurity training) from this machine; off unless turned on
     pwnforge.register(ctx, a)
+    import temps         # every machine's sensors, kept for a day (the node page's temperature charts)
+    temps.register(ctx, a)
     if getattr(ctx, "ai", None) is not None:
         import aiapi as _aiapi
         _aiapi.EXTRA_SPLIT_ARGS = ctx.tuning.run_args
