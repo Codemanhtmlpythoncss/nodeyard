@@ -37,6 +37,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 HOST_SCRIPT = os.path.join(HERE, "pwnforge-host.sh")
 REPO = "https://github.com/Codemanhtmlpythoncss/pwnforge.git"
 UNIT = "pwnforge.service"
+DROPIN = "/etc/systemd/system/pwnforge.service.d/nodeyard.conf"   # written by pwnforge-host.sh
 JOB = "nodeyard-pwnforge-job"
 SVC_USER = "pwnforge"
 DEFAULTS = {"enabled": False, "path": "/opt/pwnforge", "data_dir": "/var/lib/pwnforge", "bind": "local", "port": 8080, "autostart": True}
@@ -71,6 +72,38 @@ def tailscale_ip():
     except (OSError, subprocess.SubprocessError):
         return ""
     return out[0] if out and re.match(r"^\d+\.\d+\.\d+\.\d+$", out[0]) else ""
+
+
+def read_dropin(path=None):
+    """The folder, data folder, address and port pwnforge-host.sh last set up, or None."""
+    try:
+        with open(path or DROPIN, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return None
+    m = re.search(r"^ExecStart=(/\S+)/\.venv/bin/pwnforge serve --host (\S+) --port (\d+)\s*$", text, re.M)
+    d = re.search(r"^Environment=PWNFORGE_DATA_DIR=(/\S+)\s*$", text, re.M)
+    if not m or not d:
+        return None
+    return {"path": m.group(1), "data_dir": d.group(1), "host": m.group(2), "port": int(m.group(3))}
+
+
+def bind_of(host):
+    if host.startswith("127.") or host == "::1":
+        return "local"
+    return "lan" if host in ("0.0.0.0", "::") else "tailnet"
+
+
+def answers_as_pwnforge(host, port):
+    """Whether PwnForge itself is what answers on host:port (its /api/health)."""
+    host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    try:
+        url = "http://%s:%d/api/health" % (("[%s]" % host) if ":" in host else host, port)
+        with urllib.request.urlopen(url, timeout=2) as r:
+            body = json.loads(r.read(4096) or b"{}")
+        return isinstance(body, dict) and body.get("status") == "ok" and "version" in body
+    except (OSError, ValueError, urllib.error.URLError):
+        return False
 
 
 def port_in_use(port):
@@ -116,13 +149,20 @@ class PwnForge:
     # ---- settings ----------------------------------------------------------------------------------------------
     def _load(self):
         cfg = dict(DEFAULTS)
+        saved = None
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-            if isinstance(saved, dict):
-                cfg.update({k: saved[k] for k in DEFAULTS if k in saved})
         except (OSError, ValueError):
             pass
+        if isinstance(saved, dict):
+            cfg.update({k: saved[k] for k in DEFAULTS if k in saved})
+        elif not self.demo:
+            # installed before this page had settings (by hand, or by an older dashboard): use what's there, not the defaults
+            found = read_dropin()
+            if found:
+                cfg.update(path=found["path"], data_dir=found["data_dir"], port=found["port"], bind=bind_of(found["host"]), enabled=True,
+                           autostart=os.path.exists("/etc/systemd/system/multi-user.target.wants/" + UNIT))
         if cfg["bind"] not in BINDS or not PATH_RE.match(str(cfg["path"])) or not PATH_RE.match(str(cfg["data_dir"])):
             cfg.update(bind=DEFAULTS["bind"], path=DEFAULTS["path"], data_dir=DEFAULTS["data_dir"])
         try:
@@ -244,7 +284,10 @@ class PwnForge:
             return {"ok": body.get("status") == "ok", "version": str(body.get("version") or ""), "ms": ms, "initialised": initialised}
         except urllib.error.HTTPError as e:
             return {"ok": False, "error": "HTTP %d from /api/health" % e.code}
-        except (OSError, ValueError, urllib.error.URLError) as e:
+        except ValueError:
+            return {"ok": False, "error": "Something answers on port %d, but it isn't PwnForge (another program uses that port?): "
+                                          "pick another port under Address." % self.cfg["port"]}
+        except (OSError, urllib.error.URLError) as e:
             return {"ok": False, "error": str(getattr(e, "reason", "") or e)[:200]}
 
     # ---- training environments ---------------------------------------------------------------------------------
@@ -476,7 +519,9 @@ class PwnForge:
             raise PFError("That's the dashboard's own port.")
         u = self.unit() if not self.platform_problem() else {"active": "inactive"}
         if port != self.cfg["port"] or u["active"] != "active":
-            if not self.demo and port_in_use(port):
+            found = None if self.demo else read_dropin()
+            ours = found is not None and found["port"] == port and answers_as_pwnforge(found["host"], port)
+            if not self.demo and not ours and port_in_use(port):
                 raise PFError("Something on this machine already listens on port %d. Pick another." % port, 409)
         if bind == "lan":
             if body.get("confirm_lan") is not True:
