@@ -11,20 +11,14 @@
     ["todo", "To-do list", "A small list for today"], ["weather", "Weather", "Conditions for a place you choose"],
     ["calendar", "Calendar", "A month at a glance"], ["notes", "Notes", "A saved scratchpad"],
     ["focus", "Focus timer", "A simple focus and break timer"], ["countdown", "Countdown", "Count down to a date"],
-    ["quote", "Daily quote", "A quote picked locally each day"], ["clocks", "World clocks", "Jersey, New York, Tokyo and Sydney"],
+    ["quote", "Quotes", "Quotes you can change, add and edit (click one for the next)"], ["clocks", "World clocks", "Jersey, New York, Tokyo and Sydney"],
     ["cluster", "Cluster status", "Ready nodes and running pods"], ["music", "Music", "Now playing, with play/pause, previous, next and loop"],
     ["links", "Quick links", "Shortcuts to dashboard pages"], ["mascot", "Little mascot", "A small companion for your desk"],
   ];
   const KNOWN = new Set(CATALOG.map((x) => x[0]));
-  const quotes = [
-    ["The secret of getting ahead is getting started.", "Mark Twain"],
-    ["Great things are done by a series of small things brought together.", "Vincent van Gogh"],
-    ["Simplicity boils down to two steps: identify the essential. Eliminate the rest.", "Leo Babauta"],
-    ["It always seems impossible until it’s done.", "Nelson Mandela"],
-    ["The best way out is always through.", "Robert Frost"],
-    ["Well done is better than well said.", "Benjamin Franklin"],
-    ["Nothing will work unless you do.", "Maya Angelou"],
-  ];
+  // Quotes: the server's list (quotes.py: built-in ones checked against their sources, plus yours), cached for offline
+  const QT = { list: [], rotate: true, interval: 0, intervals: [0], busy: false, at: 0, shown: "", edit: null };
+  try { const c = JSON.parse(store.get("quotes.cache", "null")); if (c && Array.isArray(c.quotes)) Object.assign(QT, { list: c.quotes, rotate: c.rotate !== false, interval: +c.interval || 0 }); } catch (e) { /* none yet */ }
   const mascotLines = ["You’ve got this. One thing at a time.", "Tiny break? Your shoulders called.", "I’m keeping an eye on the clock.", "Nice work showing up today.", "A little progress still counts."];
   const ADDED_V2 = ["player", "chat"];   // shown once to desks saved before these widgets existed
   const initial = { v: 2, widgets: ["player", "chat", "todo", "mascot", "links"], customizing: false, playerSource: "", chat: [], chatTarget: "", chatDraft: "", tasks: [], notes: "", location: "", weather: "", weatherError: "", countdown: null, calendarOffset: 0,
@@ -51,7 +45,60 @@
   const removeButton = (id) => D.customizing ? html`<span class="desk-move"><button type="button" data-desk="move" data-id="${id}" data-dir="-1" aria-label="Move ${title(id)} earlier" ${D.widgets.indexOf(id) === 0 ? "disabled" : ""}>‹</button><button type="button" data-desk="move" data-id="${id}" data-dir="1" aria-label="Move ${title(id)} later" ${D.widgets.indexOf(id) === D.widgets.length - 1 ? "disabled" : ""}>›</button></span><button class="desk-remove" type="button" data-desk="remove" data-id="${id}" aria-label="Remove ${title(id)}">×</button>` : "";
   function widget(id, body) { return html`<article class="desk-widget" data-widget="${id}" ${D.customizing ? raw('draggable="true"') : ""}><header><h2>${title(id)}</h2>${removeButton(id)}</header><div class="desk-widget-body">${body}</div></article>`; }
   function greeting() { const h = new Date().getHours(); return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"; }
-  function quoteToday() { const d = new Date(); const day = Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86400000); return quotes[((day % quotes.length) + quotes.length) % quotes.length]; }
+  function quoteNow() {
+    const n = QT.list.length; if (!n) return null;
+    const d = new Date(), day = Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86400000);
+    const base = !QT.rotate ? 0 : QT.interval ? Math.floor(Date.now() / 1000 / QT.interval) : day;
+    return QT.list[(((base + (D.quoteOffset || 0)) % n) + n) % n];
+  }
+  async function loadQuotes(force) {
+    if (QT.busy || (!force && Date.now() - QT.at < 60000)) return;
+    QT.busy = true;
+    try { const r = await getJSON("/api/quotes"); if (r.ok) { useQuotes(r); } } catch (e) { /* offline: the cached list */ }
+    finally { QT.busy = false; QT.at = Date.now(); }
+  }
+  function useQuotes(r) {
+    Object.assign(QT, { list: r.quotes, rotate: r.rotate, interval: r.interval, intervals: r.intervals || QT.intervals });
+    store.set("quotes.cache", JSON.stringify({ quotes: r.quotes, rotate: r.rotate, interval: r.interval }));
+    paintQuote(true); paintQuoteDialog();
+  }
+  const everyText = () => (!QT.rotate ? "stays until you change it" : !QT.interval ? "a new one each day" : "changes every " + (QT.interval < 60 ? QT.interval + " s" : QT.interval / 60 + " min"));
+  function quoteBody() {
+    const q = quoteNow();
+    if (!q) return html`<p class="desk-empty">Loading quotes…</p>`;
+    const i = QT.list.indexOf(q) + 1;
+    return html`<blockquote class="desk-quote desk-quote-click" role="button" tabindex="0" data-desk="quote-next" title="Show the next quote">${q.kind === "paraphrase" ? "" : "“"}${q.text}${q.kind === "paraphrase" ? "" : "”"}
+        <cite>${q.by}${q.kind === "paraphrase" ? " (paraphrase)" : ""}${q.source ? html`<span class="desk-quote-src">${q.source}</span>` : ""}</cite></blockquote>
+      <div class="desk-quote-bar"><button type="button" class="btn small" data-desk="quote-prev" aria-label="Previous quote">‹</button><span class="desk-muted">${i} of ${QT.list.length} · ${everyText()}</span><button type="button" class="btn small" data-desk="quote-next" aria-label="Next quote">›</button><span class="grow"></span><button type="button" class="btn small" data-desk="quote-manage">Edit quotes</button></div>`;
+  }
+  function paintQuote(force) {
+    const w = $('[data-widget="quote"] .desk-widget-body'); if (!w) return;
+    const q = quoteNow(), key = q ? q.id + "|" + q.text + "|" + QT.list.length : "";
+    if (!force && key === QT.shown) return;
+    QT.shown = key; w.innerHTML = String(quoteBody());
+  }
+  // the quote manager: add, edit, delete, restore, and how often it changes
+  function paintQuoteDialog() {
+    const dlg = document.getElementById("quote-dialog"); if (!dlg || dlg.hidden) return;
+    const e = QT.edit || {};
+    const label = (v) => (v === 0 ? "Each day" : v < 60 ? "Every " + v + " s" : "Every " + v / 60 + " min");
+    dlg.innerHTML = String(html`<div class="tu-back" data-desk="quote-close"></div><div class="tu-box" role="dialog" aria-modal="true" aria-label="Quotes" style="width:min(760px,96vw)">
+      <h3 style="margin-top:0">Quotes</h3>
+      <div class="row wrap" style="gap:10px;align-items:center"><label class="row small" style="gap:6px"><input type="checkbox" data-desk-input="quote-rotate" ${QT.rotate ? "checked" : ""}> Change automatically</label>
+        <select class="input" data-desk-input="quote-interval" ${QT.rotate ? "" : "disabled"}>${raw(QT.intervals.map((v) => '<option value="' + v + '"' + (v === QT.interval ? " selected" : "") + ">" + esc(label(v)) + "</option>").join(""))}</select></div>
+      <ul class="quote-list">${raw(QT.list.map((q) => '<li><div><b>' + esc(q.text) + '</b><div class="desk-muted">' + esc(q.by) + (q.kind === "paraphrase" ? " · paraphrase" : "") + (q.source ? " · " + esc(q.source) : "") + (q.builtin ? (q.edited ? " · built-in, edited" : " · built-in") : " · yours") +
+        '</div></div><span class="row" style="gap:4px"><button type="button" class="btn small" data-desk="quote-edit" data-id="' + esc(q.id) + '">Edit</button><button type="button" class="btn small danger" data-desk="quote-delete" data-id="' + esc(q.id) + '">Delete</button></span></li>').join(""))}</ul>
+      <form class="quote-form" data-desk-form="quote"><b>${e.id ? "Edit quote" : "Add a quote"}</b>
+        <textarea class="input" name="text" rows="2" maxlength="500" placeholder="The exact words" required>${e.text || ""}</textarea>
+        <div class="row wrap" style="gap:8px"><input class="input" name="by" maxlength="100" placeholder="Who said it" value="${e.by || ""}" required><input class="input" name="source" maxlength="200" placeholder="Where (book, talk, post, date)" value="${e.source || ""}"></div>
+        <label class="row small" style="gap:6px"><input type="checkbox" name="paraphrase" ${e.kind === "paraphrase" ? "checked" : ""}> It's a paraphrase, not their exact words</label>
+        <div class="row wrap" style="gap:6px"><button class="btn primary" type="submit">${e.id ? "Save" : "Add"}</button>${e.id ? raw('<button type="button" class="btn" data-desk="quote-new">Cancel edit</button>') : ""}</div></form>
+      <div class="row wrap mt" style="gap:8px;align-items:center"><button type="button" class="btn" data-desk="quote-restore">Restore the built-in quotes</button><label class="row small" style="gap:6px"><input type="checkbox" id="quote-restore-own"> and remove mine</label><span class="grow"></span><button type="button" class="btn" data-desk="quote-close">Close</button></div></div>`);
+  }
+  async function quotePost(url, body) {
+    try { const r = await postJSON(url, body); if (!r.ok) { toast(r.error || "That didn't work."); return null; } useQuotes(r); return r; }
+    catch (e) { toast("Couldn't reach the dashboard."); return null; }
+  }
   function localDate(d) { return new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" }).format(d); }
   function calendar() {
     const now = new Date(), first = new Date(now.getFullYear(), now.getMonth() + D.calendarOffset, 1), offset = (first.getDay() + 6) % 7;
@@ -80,7 +127,7 @@
     if (id === "notes") return widget(id, html`<textarea class="input desk-notes" data-desk-input="notes" maxlength="5000" placeholder="Jot something down…" aria-label="Desk notes">${D.notes}</textarea><div class="desk-note-status">Saved in this browser</div>`);
     if (id === "focus") return widget(id, html`<div class="desk-focus"><div class="desk-focus-time" data-focus-time>${timerText()}</div><div class="desk-muted" data-focus-mode>${D.focus.mode === "focus" ? "Focus" : "Break"}</div><div class="row"><button type="button" class="btn primary" data-desk="focus-toggle">${D.focus.running ? "Pause" : "Start"}</button><button type="button" class="btn" data-desk="focus-reset">Reset</button></div></div>`);
     if (id === "countdown") return widget(id, html`<form class="desk-countdown-form" data-desk-form="countdown"><input class="input" name="title" maxlength="60" placeholder="What are you counting down to?" value="${D.countdown ? D.countdown.title : ""}"><input class="input" name="date" type="date" value="${D.countdown ? D.countdown.date : ""}" aria-label="Countdown date"><button class="btn" type="submit">Save</button></form><div class="desk-countdown">${D.countdown && D.countdown.date ? countdownText() : "Pick a date to start a countdown."}</div>`);
-    if (id === "quote") { const q = quoteToday(); return widget(id, html`<blockquote class="desk-quote">“${q[0]}”<cite>${q[1]}</cite></blockquote><span class="desk-muted">A different quote each day · picked on this device</span>`); }
+    if (id === "quote") { loadQuotes(); QT.shown = ""; return widget(id, quoteBody()); }
     if (id === "clocks") return widget(id, html`<div class="desk-clocks">${[["Jersey", "Europe/Jersey"], ["New York", "America/New_York"], ["Tokyo", "Asia/Tokyo"], ["Sydney", "Australia/Sydney"]].map(([name, zone]) => html`<div><span>${name}</span><b data-zone="${zone}">--:--</b></div>`)}</div>`);
     if (id === "cluster") return widget(id, html`<div class="desk-cluster"><div><b data-cluster="nodes">—</b><span>ready nodes</span></div><div><b data-cluster="pods">—</b><span>running pods</span></div><div><b data-cluster="workloads">—</b><span>workloads</span></div></div><p class="desk-muted" data-cluster-note>${S.d ? "Live dashboard data" : "Waiting for cluster data"}</p>`);
     if (id === "music") return widget(id, html`<div class="desk-player desk-mini">
@@ -133,6 +180,7 @@
       if (D.focus.running && Date.now() >= D.focus.until) { D.focus.running = false; D.focus.mode = D.focus.mode === "focus" ? "break" : "focus"; D.focus.remaining = D.focus.mode === "focus" ? 1500 : 300; save(); const mode = focus.querySelector("[data-focus-mode]"), button = focus.querySelector("[data-desk=focus-toggle]"); if (mode) mode.textContent = D.focus.mode === "focus" ? "Focus" : "Break"; if (button) button.textContent = "Start"; toast(D.focus.mode === "break" ? "Focus block complete. Time for a break." : "Break complete. Ready for another focus block?"); }
     }
     updateCluster();
+    if (D.widgets.includes("quote")) paintQuote();
     if (CH.busy) paintChatStatus();
     if (now.getSeconds() % 5 === 0) paintSystem();
     if (D.widgets.includes("services") && Date.now() - SV.at > 30000 && !document.hidden) loadServices();
@@ -440,6 +488,7 @@
   function click(e) {
     const b = e.target.closest("[data-desk]"); if (!b) return;
     const action = b.dataset.desk;
+    if (action.startsWith("quote-")) return quoteClick(action, b, e);
     if (action === "add") { const id = b.dataset.id; if (KNOWN.has(id) && !D.widgets.includes(id)) { D.widgets.push(id); save(); drawWidgets(); drawPicker(); paintMode(); } }
     else if (action === "remove") { D.widgets = D.widgets.filter((x) => x !== b.dataset.id); save(); drawWidgets(); paintMode(); }
     else if (action === "picker-close") closePicker();
@@ -503,6 +552,39 @@
     if (w && w.dataset.widget !== dragging) { const from = D.widgets.indexOf(dragging), to = D.widgets.indexOf(w.dataset.widget); if (from >= 0 && to >= 0) { D.widgets.splice(to, 0, D.widgets.splice(from, 1)[0]); save(); drawWidgets(); paintMode(); } }
   });
   document.addEventListener("dragend", () => { dragging = ""; document.querySelectorAll(".desk-widget.dragging,.desk-widget.drop").forEach((x) => x.classList.remove("dragging", "drop")); });
+  function quoteClick(action, b, e) {
+    if (action === "quote-next" || action === "quote-prev") {
+      if (D.customizing) return;          // (arranging widgets: a click there isn't meant for the quote)
+      e.stopPropagation();
+      D.quoteOffset = (D.quoteOffset || 0) + (action === "quote-next" ? 1 : -1); save(); paintQuote(true);
+    } else if (action === "quote-manage") {
+      let dlg = document.getElementById("quote-dialog");
+      if (!dlg) { dlg = document.createElement("div"); dlg.id = "quote-dialog"; document.body.appendChild(dlg); }
+      QT.edit = null; dlg.hidden = false; paintQuoteDialog(); loadQuotes(true);
+    } else if (action === "quote-close") { const dlg = document.getElementById("quote-dialog"); if (dlg) dlg.hidden = true; }
+    else if (action === "quote-edit") { QT.edit = QT.list.find((q) => q.id === b.dataset.id) || null; paintQuoteDialog(); }
+    else if (action === "quote-new") { QT.edit = null; paintQuoteDialog(); }
+    else if (action === "quote-delete") quotePost("/api/quotes/delete", { id: b.dataset.id });
+    else if (action === "quote-restore") quotePost("/api/quotes/restore", { own: !!(document.getElementById("quote-restore-own") || {}).checked }).then((r) => { if (r) toast("Built-in quotes restored."); });
+  }
+  document.addEventListener("submit", (e) => {
+    const f = e.target; if (!f.matches || !f.matches('[data-desk-form="quote"]')) return;
+    e.preventDefault(); e.stopPropagation();
+    const fd = new FormData(f);
+    quotePost("/api/quotes/save", { id: QT.edit ? QT.edit.id : "", text: fd.get("text"), by: fd.get("by"), source: fd.get("source"), kind: fd.get("paraphrase") ? "paraphrase" : "quote" })
+      .then((r) => { if (r) { QT.edit = null; paintQuoteDialog(); toast("Saved."); } });
+  }, true);
+  document.addEventListener("change", (e) => {
+    const t = e.target;
+    if (t.dataset && (t.dataset.deskInput === "quote-rotate" || t.dataset.deskInput === "quote-interval")) {
+      const box = document.querySelector('[data-desk-input="quote-rotate"]'), sel = document.querySelector('[data-desk-input="quote-interval"]');
+      quotePost("/api/quotes/settings", { rotate: box.checked, interval: +sel.value });
+    }
+  }, true);
+  document.addEventListener("keydown", (e) => {
+    if ((e.key === "Enter" || e.key === " ") && e.target.matches && e.target.matches(".desk-quote-click")) { e.preventDefault(); e.target.click(); }
+    if (e.key === "Escape") { const dlg = document.getElementById("quote-dialog"); if (dlg && !dlg.hidden) dlg.hidden = true; }
+  });
   document.addEventListener("click", click);
   document.addEventListener("submit", submit);
   document.addEventListener("change", change);

@@ -754,6 +754,8 @@ def main():
     hwcare.register(ctx, a)
     import cleanup       # pods nobody has used for a while, removed by a policy you control (off by default)
     cleanup.register(ctx, a)
+    import quotes        # the Desk's quotes: built-in (checked against their sources) and your own
+    quotes.register(ctx, a)
     if getattr(ctx, "ai", None) is not None:
         import aiapi as _aiapi
         _aiapi.EXTRA_SPLIT_ARGS = ctx.tuning.run_args
