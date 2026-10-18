@@ -102,8 +102,8 @@ class Turn:
                         h.wfile.flush()
                 except (OSError, ValueError) as e:
                     if not self.result:
-                        log("turn %s: the page's connection dropped at event %d (%s); still working, it can reconnect" %
-                            (self.id, n, getattr(e, "strerror", None) or e.__class__.__name__))
+                        log("turn %s (%s): the connection dropped at event %d (%s)%s" % (self.id, self.kind, n, getattr(e, "strerror", None) or e.__class__.__name__,
+                                                                                      "" if self.kind == "api" else "; still working, it can reconnect"))
                     return "gone"
                 if ended and n >= len(self.frames):
                     return "done"

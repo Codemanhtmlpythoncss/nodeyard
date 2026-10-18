@@ -22,11 +22,14 @@ models, running commands and changing settings are NOT in this API: those need t
 import hmac
 import os
 import re
+import secrets
+import socket
 import threading
 import time
 
 import aiapi
 import aisearch
+import turns
 
 PREFIX = "/api/v1/"
 FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,200}\.gguf$")
@@ -295,23 +298,46 @@ def register(ctx, args):
                 clean_tools.append({"type": "function", "function": {"name": name, "description": description, "parameters": parameters}})
             payload["tools"] = clean_tools
             payload["tool_choice"] = "auto"
+        # Headers and a keep-alive go out at once, and then every 15 s while the model reads the prompt: the Mac app
+        # gives up after 30 s without a byte, and a big prompt takes longer than that before the first word. The
+        # model's own failures arrive as an error event in the stream. These clients don't resume, so when one goes
+        # away the model is stopped straight away (it used to be, and nothing would read the rest).
+        turn = turns.Turn(secrets.token_hex(8), "api", "api")
+        box = {}
+
+        def work():
+            conn = None
+            try:
+                conn, resp = backend.open_chat(target, payload)
+                box["conn"] = conn
+                if box.get("gone"):
+                    raise aiapi.AIError("The client went away.", 499)
+                turn.finish(aiapi.pump_stream(turn, conn, resp, lambda: backend.cut_message(target) if hasattr(backend, "cut_message") else
+                                              "The model stopped in the middle of its answer: the connection to it ended early."))
+            except aiapi.AIError as e:
+                turn.push({"error": {"message": str(e), "type": "model", "code": getattr(e, "code", 502)}})
+                turn.finish("error", str(e))
+            except Exception as e:  # noqa: BLE001 -- one failed answer must never take the dashboard down
+                turn.push({"error": {"message": "The dashboard hit an error while answering: %s" % e, "type": "server"}})
+                turn.finish("error", repr(e))
+            finally:
+                if conn is not None:
+                    conn.close()
+
+        threading.Thread(target=work, name="api-chat", daemon=True).start()
         try:
-            conn, resp = backend.open_chat(target, payload)
-        except aiapi.AIError as e:
-            return fail(h, e)
-        try:
-            h.send_response(200)
-            for k, v in (("Content-Type", "text/event-stream; charset=utf-8"), ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff"),
-                         ("X-Accel-Buffering", "no"), ("Connection", "close")):
-                h.send_header(k, v)
-            h.end_headers()
-            h.close_connection = True
-            aiapi.relay_stream(h, conn, resp, lambda: backend.cut_message(target) if hasattr(backend, "cut_message") else
-                               "The model stopped in the middle of its answer: the connection to it ended early.")
+            turns.send_headers(h, turn)
         except OSError:
-            pass  # A cancelled native-app request closes the upstream connection below.
-        finally:
-            conn.close()
+            box["gone"] = True
+            return
+        if turn.follow(h, 0) == "gone":
+            box["gone"] = True
+            conn = box.get("conn")
+            if conn is not None:
+                try:
+                    conn.sock.shutdown(socket.SHUT_RDWR)     # (llama.cpp stops working on it)
+                except (OSError, AttributeError):
+                    pass
 
     import webtools
     webtools.register(ctx, args)
