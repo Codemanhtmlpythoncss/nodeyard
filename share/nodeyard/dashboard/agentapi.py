@@ -15,6 +15,8 @@ import sys
 import threading
 import time
 
+import turns
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 PLUGINS = [
@@ -266,6 +268,14 @@ class Agents:
             return h._json({"ok": False, "error": message}, 400)
         if len(text) > 200000:
             return h._json({"ok": False, "error": "That message is too long."}, 413)
+        owner = h._token() or "local"
+        tid = str(body.get("turn") or "")[:64] or secrets.token_hex(8)
+        existing = turns.of(self.ctx).get(tid, owner)
+        if existing is not None:
+            # the page sent the same message again (its first try lost the connection): follow the answer already
+            # being written instead of giving the AI the message twice
+            turns.send_headers(h, existing)
+            return existing.follow(h, 0)
         try:
             pr, _ = self.get(h, cid, plugins, int(body.get("max_tokens") or 0), target=target,
                              music_cookie=h.headers.get("Cookie", "") if "music" in plugins else "")
@@ -281,19 +291,43 @@ class Agents:
                     lines.append("%s: %s" % (m["role"].upper(), m["content"][:1500]))
             if lines:
                 text = "<earlier_conversation>\n%s\n</earlier_conversation>\n\n%s" % ("\n\n".join(lines), text)
+        prev = getattr(pr, "turn", None)
+        if pr.busy and prev is not None and prev.readers == 0:
+            # the page lost the last answer and asked again: stop that one rather than refuse
+            if prev.cancel:
+                prev.cancel()
+            for _ in range(50):
+                if not pr.busy:
+                    break
+                time.sleep(0.1)
         with self.lock:
             if pr.busy:
                 return h._json({"ok": False, "error": "The AI is still answering the last message."}, 409)
-            pr.busy = True
-        h.send_response(200)
-        for k, v in (("Content-Type", "text/event-stream; charset=utf-8"), ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff"), ("X-Accel-Buffering", "no"),
-                     ("Connection", "close")):
-            h.send_header(k, v)
-        h.end_headers()
-        h.close_connection = True
+            turn, existing = turns.of(self.ctx).start(tid, owner, "agent")
+            if turn is None:
+                return h._json({"ok": False, "error": "That answer id is taken."}, 409)
+            pr.busy, pr.turn = True, turn
+        threading.Thread(target=self._work, args=(pr, turn, text, target), name="agent-" + tid[:8], daemon=True).start()
+        try:
+            turns.send_headers(h, turn)
+        except OSError:
+            return
+        turn.follow(h, 0)
+
+    def _work(self, pr, turn, text, target):
+        """One turn of the chat's agent, into a Turn (turns.py): it carries on if the page's connection drops, and the
+        page picks up the events it missed when it reconnects."""
         lifecycle = getattr(self.ctx, "lifecycle", None)
         token = lifecycle.begin(target) if lifecycle else None   # the model is in use until this turn ends
         mode = self.perm_mode()
+
+        def cancel():
+            try:
+                pr.send({"type": "interrupt"})
+            except AgentError:
+                pass
+        turn.cancel = cancel
+        result, detail = "done", ""
         try:
             while not pr.q.empty():   # leftovers of an interrupted turn
                 pr.q.get_nowait()
@@ -302,8 +336,8 @@ class Agents:
                 try:
                     ev = pr.q.get(timeout=15)
                 except queue.Empty:
-                    h.wfile.write(b": ping\n\n")
-                    h.wfile.flush()
+                    if turn.finished:          # stopped as nobody was reading (see turns.Turns.reap)
+                        return
                     if not pr.alive:
                         ev = {"type": "exit"}
                     else:
@@ -312,17 +346,22 @@ class Agents:
                     # auto-accept: say yes here, and show the page what went ahead instead of asking
                     pr.send({"type": "permission_reply", "id": str(ev["id"]), "decision": "allow", "scope": "once", "feedback": ""})
                     ev = {"type": "auto_allowed", "tool": ev.get("tool", ""), "summary": ev.get("summary") or ev.get("command") or "", "reason": ev.get("reason", "")}
-                h.wfile.write(("data: %s\n\n" % json.dumps(ev)).encode("utf-8"))
-                h.wfile.flush()
+                turn.push(ev)
+                if ev.get("type") == "exit":
+                    result, detail = "error", "the AI's helper process ended"
                 if ev.get("type") in ("done", "exit"):
                     break
-        except (BrokenPipeError, ConnectionResetError, OSError, AgentError):
-            try:
-                pr.send({"type": "interrupt"})
-            except AgentError:
-                pass
+        except AgentError as e:
+            turn.push({"type": "error", "text": str(e)})
+            result, detail = "error", str(e)
+        except Exception as e:  # noqa: BLE001 -- one failed answer must never take the dashboard down
+            import traceback
+            traceback.print_exc()
+            turn.push({"type": "error", "text": "The dashboard hit an error while answering: %s" % e})
+            result, detail = "error", repr(e)
         finally:
             pr.busy = False
+            turn.finish(result, detail)
             if lifecycle:
                 lifecycle.end(token)
 

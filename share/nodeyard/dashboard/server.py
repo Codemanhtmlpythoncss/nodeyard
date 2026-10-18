@@ -708,6 +708,8 @@ def main():
         node = q.get("node", [""])[0]
         h._json({"ok": True, "installed": bool(snap["state"].get("agents", {}).get("installed")), "nodes": agents.payload(snap["state"], node or None)})
     ctx.get_routes["/api/agents"] = agents_route
+    import turns         # chat answers that survive a dropped connection (the page reconnects and carries on)
+    turns.register(ctx, a)
     if importlib.util.find_spec("aiapi"):
         import aiapi
         aiapi.register(ctx, a)

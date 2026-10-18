@@ -98,10 +98,15 @@
     if (S.view === "ai") U.queueRender();
   }
   try { A.chats = JSON.parse(store.get("chats", "[]")) || []; } catch (e) { A.chats = []; }
+  // answers the last page was still receiving when it closed: offer to pick them up again
+  A.chats.forEach((c) => (c.messages || []).forEach((m) => { if (m.lost && !m.error) m.error = "This answer was still arriving when the page closed."; }));
   A.cur = store.get("chat.cur", "") || (A.chats[0] && A.chats[0].id) || "";
   const saveChats = () => {
     // attached files are kept too; if that doesn't fit in the browser's storage, only their names are
-    const pack = (keep) => JSON.stringify(A.chats.slice(0, 30).map((c) => Object.assign({}, c, { messages: c.messages.slice(-200).map((m) => ({ role: m.role, content: m.content, meta: m.meta, thinking: m.thinking,
+    const pack = (keep) => JSON.stringify(A.chats.slice(0, 30).map((c) => Object.assign({}, c, { messages: c.messages.slice(-200).map((m) => ({ role: m.role, content: m.content, meta: m.meta, thinking: m.thinking, error: m.error || undefined, cut: m.cut || undefined, agent: m.agent || undefined,
+      // an answer still being written (or lost on the way) can be picked up again after a reload
+      // (replayed from the start: what was shown may be a little ahead of the last event number noted)
+      lost: m.pending && m.turn && m.turn.id ? { id: m.turn.id, seq: 0, boot: m.turn.boot, url: m.agent ? "/api/ai/agent" : "/api/ai/chat" } : m.lost || undefined,
       files: m.files ? m.files.map((f) => ({ name: f.name, size: f.size, kind: f.kind, mime: f.mime, width: f.width, height: f.height, text: keep ? f.text : null })) : undefined })) })));
     const put = (v) => { try { localStorage.setItem("nodeyard.chats", v); return true; } catch (e) { return false; } };
     try { put(pack(true)) || put(pack(false)); } catch (e) { /* storage blocked */ }
@@ -660,23 +665,14 @@
     return out.concat(rest.map((m, i) => ({ role: m.role, content: apiContent(m, i < keepFrom, dropPriorImages && i < rest.length - 1) })));
   }
   async function streamText(target, messages, maxTok, signal) {
-    const r = await fetch("/api/ai/chat", { method: "POST", cache: "no-store", signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ target, messages, temperature: 0.2, max_tokens: maxTok, stream_id: uid() + uid() }) });
-    if (r.status === 401) { location.href = "/login"; return ""; }
-    if (!r.ok) { let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ } throw new Error(j.error || "The model didn't answer (HTTP " + r.status + ").") ; }
-    const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "", text = "";
-    for (;;) {
-      const { value, done } = await reader.read(); if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let nl;
-      while ((nl = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice(5).trim(); if (payload === "[DONE]") continue;
-        let j; try { j = JSON.parse(payload); } catch (e) { continue; }
-        if (j.error) throw new Error(typeof j.error === "string" ? j.error : j.error.message || "The model reported an error.");
-        const d = j.choices && j.choices[0] && j.choices[0].delta;
-        if (d && d.content) text += d.content;
-      }
+    let text = "";
+    const id = uid() + uid();
+    if (signal) signal.addEventListener("abort", () => postJSON("/api/ai/stop", { id }).catch(() => {}), { once: true });
+    for await (const j of followTurn({ url: "/api/ai/chat", id, signal, body: { target, messages, temperature: 0.2, max_tokens: maxTok, stream_id: id } })) {
+      if (j === "[DONE]") continue;
+      if (j.error) throw new Error(typeof j.error === "string" ? j.error : j.error.message || "The model reported an error.");
+      const d = j.choices && j.choices[0] && j.choices[0].delta;
+      if (d && d.content) text += d.content;
     }
     return text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
   }
@@ -744,49 +740,42 @@
     const history = c.messages.slice(0, -1).filter((m) => !m.error && !m.pending).map((m) => ({ role: m.role, content: m.content || "" }));
     const msg = { role: "assistant", content: "", thinking: "", pending: true, agent: true, tools: [], todos: null, perm: null };
     c.messages.push(msg); renderThread(); renderChatList();
-    const ctrl = new AbortController(), sid = uid() + uid();
-    A.stream = { ctrl, chat: c.id, sid, agent: true }; paintSend();
+    const sid = uid() + uid();
+    return agentTurn(c, msg, t, { url: "/api/ai/agent", id: sid,
+      body: { chat: c.id, turn: sid, target: c.target || "split", text: apiContent(mine), plugins: c.plugins, auto_skills: c.skills_auto !== false, history, max_tokens: c.max_tokens || 0 } });
+  }
+  // One answer of the AI with skills: a new one (topts.body) or one picked up again (topts.seq, no body).
+  async function agentTurn(c, msg, t, topts) {
+    const ctrl = new AbortController();
+    A.stream = { ctrl, chat: c.id, sid: topts.id, agent: true }; msg.pending = true; msg.error = ""; msg.lost = null; paintSend(); paintLast();
     const t0 = performance.now(); let raf = 0, usage = null, ended = false;
     const paint = () => { raf = 0; paintLast(); };
     try {
-      const r = await fetch("/api/ai/agent", { method: "POST", cache: "no-store", signal: ctrl.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ chat: c.id, target: c.target || "split", text: apiContent(mine), plugins: c.plugins, auto_skills: c.skills_auto !== false, history, max_tokens: c.max_tokens || 0 }) });
-      if (r.status === 401) { location.href = "/login"; return; }
-      if (!r.ok) { let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ } throw new Error(j.error || "The AI helper didn't start (HTTP " + r.status + ")."); }
-      const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "";
-      for (;;) {
-        const { value, done } = await reader.read(); if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let nl;
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
-          if (!line.startsWith("data:")) continue;
-          let ev; try { ev = JSON.parse(line.slice(5)); } catch (e) { continue; }
-          if (ev.type === "text") { msg.content += ev.delta; liveRead(msg); }
-          else if (ev.type === "thinking") msg.thinking += ev.delta;
-          else if (ev.type === "tool_use") msg.tools.push({ id: ev.id, name: ev.name, summary: ev.summary, status: "running" });
-          else if (ev.type === "tool_result") { const x = msg.tools.find((k) => k.id === ev.id); if (x) { x.status = ev.ok ? "ok" : "bad"; x.result = ev.summary; x.text = (ev.text || "").slice(0, 2500); x.diff = ev.diff ? ev.diff.lines.slice(0, 40) : null; } }
-          else if (ev.type === "permission") msg.perm = ev;
-          else if (ev.type === "auto_allowed") msg.tools.push({ id: "auto-" + uid(), name: ev.tool, summary: ev.summary, status: "ok", result: "allowed automatically" });
-          else if (ev.type === "todos") msg.todos = ev.items;
-          else if (ev.type === "usage") usage = ev;
-          else if (ev.type === "error") { msg.error = ev.text; if (/stopped in the middle/i.test(ev.text || "")) msg.cut = true; }
-          else if (ev.type === "warn" && !msg.content) msg.content = "_" + ev.text + "_";
-          if (ev.type === "done" || ev.type === "exit") { ended = true; break; }
-          if (!raf) raf = requestAnimationFrame(paint);
-        }
-        if (ended) break;
+      for await (const ev of followTurn(Object.assign({}, topts, { signal: ctrl.signal, onState: turnState(msg, () => { if (!raf) raf = requestAnimationFrame(paint); }) }))) {
+        if (ev.type === "text") { msg.content += ev.delta; liveRead(msg); }
+        else if (ev.type === "thinking") msg.thinking += ev.delta;
+        else if (ev.type === "tool_use") msg.tools.push({ id: ev.id, name: ev.name, summary: ev.summary, status: "running" });
+        else if (ev.type === "tool_result") { const x = msg.tools.find((k) => k.id === ev.id); if (x) { x.status = ev.ok ? "ok" : "bad"; x.result = ev.summary; x.text = (ev.text || "").slice(0, 2500); x.diff = ev.diff ? ev.diff.lines.slice(0, 40) : null; } }
+        else if (ev.type === "permission") msg.perm = ev;
+        else if (ev.type === "auto_allowed") msg.tools.push({ id: "auto-" + uid(), name: ev.tool, summary: ev.summary, status: "ok", result: "allowed automatically" });
+        else if (ev.type === "todos") msg.todos = ev.items;
+        else if (ev.type === "usage") usage = ev;
+        else if (ev.type === "error") { msg.error = ev.text; if (/stopped in the middle/i.test(ev.text || "")) msg.cut = true; }
+        else if (ev.type === "warn" && !msg.content) msg.content = "_" + ev.text + "_";
+        if (ev.type === "done" || ev.type === "exit") ended = true;
+        if (!raf) raf = requestAnimationFrame(paint);
       }
       if (!ended && !ctrl.signal.aborted && !msg.error && (msg.content || msg.tools.length)) { msg.cut = true; msg.error = CUT_TEXT; }
     } catch (e) {
-      if (e.name !== "AbortError") msg.error = netError(e, "Something went wrong.");
+      if (e.name !== "AbortError") turnFailed(msg, e);
     } finally {
       if (ctrl.signal.aborted) { if (TTS.msg === msg) stopReading(); } else liveRead(msg, true);
-      msg.pending = false; msg.perm = null;
+      msg.pending = false; msg.perm = null; msg.conn = null;
       if (!msg.error && !msg.content && !msg.tools.length) msg.error = ctrl.signal.aborted ? "Stopped." : "The AI sent an empty answer.";
       if (msg.error === "Stopped." && (msg.content || msg.tools.length)) msg.error = "";
       msg.meta = [usage && usage.tok_s ? usage.tok_s + " tokens/s" : "", msg.tools.length ? msg.tools.length + " tool call" + (msg.tools.length === 1 ? "" : "s") : "", ((performance.now() - t0) / 1000).toFixed(1) + " s", t.name].filter(Boolean).join(" · ");
       A.stream = null; paintSend(); saveChats(); paintLast(); refreshChat();
-      setTimeout(() => { syncBack(c); autoRun(c, msg); }, 50);
+      if (!msg.lost) setTimeout(() => { syncBack(c); autoRun(c, msg); }, 50);
     }
   }
 
@@ -971,6 +960,12 @@
     if (A.loadingModel) { b.type = "button"; delete b.dataset.ai; b.textContent = "Loading…"; b.classList.remove("danger"); b.disabled = true; b.title = "The model is loading; your message goes out when it is ready"; return; }
     if (A.stream) { b.type = "button"; b.dataset.ai = "stop"; b.textContent = "Stop"; b.classList.remove("primary"); b.classList.add("danger"); b.disabled = false; b.title = "Stop the answer"; }
     else { b.type = "submit"; delete b.dataset.ai; b.textContent = "Send"; b.classList.add("primary"); b.classList.remove("danger"); b.disabled = !((t && t.ready) || pendingLoad(c) || (A.wanted && c && !t)); b.title = A.wanted ? "Loads " + A.wanted.file.replace(/\.gguf$/i, "") + " first" : ""; }
+  }
+  // Before asking again, stop an answer the dashboard may still be writing for a page that lost it.
+  function stopLost(c) {
+    const m = c.messages[c.messages.length - 1]; if (!m || !m.lost) return;
+    if (m.agent) postJSON("/api/ai/agent/stop", { chat: c.id }).catch(() => {}); else postJSON("/api/ai/stop", { id: m.lost.id }).catch(() => {});
+    m.lost = null;
   }
   function stopStream() {
     const st = A.stream; if (!st) return;
@@ -1248,16 +1243,115 @@
 
   const CUT_TEXT = "The model stopped in the middle of its answer: the connection to it ended before it finished. Press Continue to pick up where it stopped.";
   const netError = (e, fallback) => (e && e.name === "TypeError" && /fetch|network|load failed/i.test(e.message || "")
-    ? "The connection to the dashboard dropped before the answer arrived (network or server restart). The model may still be busy; try again in a moment."
+    ? "Couldn't reach the dashboard (network or server restart). Try again in a moment."
     : (e && e.message) || fallback);
+
+  // ---- answers that survive a dropped connection (turns.py on the server)
+  // The POST starts the answer under an id the page picks. The server keeps every event it sends, numbered, so when the
+  // connection drops (Wi-Fi, a laptop waking up, a proxy) the page asks for the rest with GET /api/ai/stream?id=…&from=N
+  // while the model carries on. Sending the same id again never asks the model twice.
+  const TURN_STALL_MS = 45000;     // the server pings every 15 s: this long with nothing at all means the line is dead
+  const TURN_RETRY_MS = 180000;    // keep reconnecting this long (the server keeps an unread answer for 5 minutes)
+  const turnErr = (message, kind, extra) => Object.assign(new Error(message), { kind }, extra || {});
+  const sleepFor = (ms, signal) => new Promise((res, rej) => {
+    const t = setTimeout(() => { window.removeEventListener("online", early); res(); }, ms);
+    const early = () => { clearTimeout(t); res(); };
+    window.addEventListener("online", early, { once: true });
+    if (signal) signal.addEventListener("abort", () => { clearTimeout(t); rej(new DOMException("Aborted", "AbortError")); }, { once: true });
+  });
+  function readOrStall(reader, signal) {
+    let t;
+    const stall = new Promise((res, rej) => { t = setTimeout(() => rej(turnErr("No data for " + TURN_STALL_MS / 1000 + " s", "stall")), TURN_STALL_MS); });
+    return Promise.race([reader.read(), stall]).finally(() => clearTimeout(t));
+  }
+  // Yields each event of the answer (parsed JSON, or the string "[DONE]") exactly once, reconnecting as needed.
+  // opts: { url, body (null: only pick up an answer already running), id, seq, boot, signal, onState(state, info) }
+  async function* followTurn(opts) {
+    let seq = opts.seq || 0, boot = opts.boot || "", started = !opts.body, since = 0, tries = 0;
+    const state = (s, info) => { try { opts.onState && opts.onState(s, Object.assign({ id: opts.id, seq, boot, tries }, info || {})); } catch (e) { /* display only */ } };
+    for (;;) {
+      let r = null, why = "";
+      state(started || tries ? "reconnecting" : "connecting");
+      try {
+        r = started ? await fetch("/api/ai/stream?id=" + encodeURIComponent(opts.id) + "&from=" + seq, { cache: "no-store", signal: opts.signal })
+          : await fetch(opts.url, { method: "POST", cache: "no-store", signal: opts.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify(opts.body) });
+      } catch (e) {
+        if (e.name === "AbortError") throw e;
+        why = (e && e.message) || "network error";
+      }
+      if (r && r.status === 401) { location.href = "/login"; throw turnErr("Signed out.", "auth"); }
+      if (r && r.status === 404 && started) {
+        let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ }
+        const restarted = j.boot && boot && j.boot !== boot;
+        throw turnErr(restarted ? "The dashboard restarted while it was answering, so this answer was lost" + (j.restart && j.restart.why ? " (" + j.restart.why + ")" : "") + ". Try again."
+          : "The dashboard no longer has this answer (it expired or the dashboard restarted). Try again.", restarted ? "restarted" : "gone");
+      }
+      if (r && !r.ok && r.status < 500) {    // the request itself was refused: no point sending it again
+        let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ }
+        throw turnErr(j.error || "The dashboard refused the request (HTTP " + r.status + ").", "http");
+      }
+      if (r && r.ok) {
+        started = true;
+        boot = boot || r.headers.get("X-Nodeyard-Boot") || "";
+        state("open");
+        const reader = r.body.getReader(), dec = new TextDecoder();
+        let buf = "", cur = -1;
+        try {
+          for (;;) {
+            const { value, done } = await readOrStall(reader, opts.signal);
+            if (done) { why = "the stream ended early"; break; }
+            tries = 0; since = 0;
+            buf += dec.decode(value, { stream: true });
+            let nl;
+            while ((nl = buf.indexOf("\n")) >= 0) {
+              const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+              if (line.startsWith("id:")) { cur = +line.slice(3).trim(); continue; }
+              if (!line.startsWith("data:")) continue;
+              const n = cur; cur = -1;
+              if (n >= 0) { if (n < seq) continue; seq = n + 1; }    // (already had it before the reconnect)
+              const payload = line.slice(5).trim();
+              let ev;
+              if (payload === "[DONE]") ev = payload; else { try { ev = JSON.parse(payload); } catch (e) { continue; } }
+              if (ev && ev.type === "turn_end") {
+                state("done", { result: ev.result });
+                if (ev.result === "orphaned") throw turnErr(ev.detail || "The answer was stopped.", "gone");
+                return;
+              }
+              yield ev;
+            }
+          }
+        } catch (e) {
+          if (e.name === "AbortError" || (e.kind && e.kind !== "stall")) throw e;
+          why = (e && e.message) || "network error";
+        } finally { try { reader.cancel(); } catch (e) { /* already closed */ } }
+      } else if (r) why = "HTTP " + r.status;
+      // lost it: try again (the same POST is safe, the server attaches to the answer it already has)
+      tries++;
+      since = since || Date.now();
+      console.warn("chat: connection lost (" + why + "); reconnecting, attempt " + tries);
+      if (Date.now() - since > TURN_RETRY_MS) throw turnErr("Lost the connection to the dashboard (" + why + "). The answer may still be on the server.", "lost", { resume: { id: opts.id, seq, boot, url: opts.url } });
+      state("reconnecting", { why });
+      await sleepFor(Math.min(10000, 1000 * tries), opts.signal);
+    }
+  }
+  // what a connection problem looks like in the chat, while it lasts
+  const connNote = (m) => (m.conn && m.conn.state === "reconnecting" ? '<div class="conn-note"><span class="spin small"></span> Connection lost' + (m.conn.why ? " (" + esc(m.conn.why) + ")" : "") + ". Reconnecting" + (m.conn.tries > 1 ? ", attempt " + m.conn.tries : "") + "… the model keeps working.</div>" : "");
+  const turnState = (msg, paint) => (s, info) => {
+    msg.conn = { state: s, tries: info.tries, why: info.why || "" }; msg.turn = { id: info.id, seq: info.seq, boot: info.boot };
+    if (s === "open" && !info.seq) saveChats();     // so a reload can pick this answer up again
+    paint();
+  };
+  window.addEventListener("pagehide", () => { if (A.stream) saveChats(); });
+  const turnFailed = (msg, e) => { msg.error = e.message || "Something went wrong."; if (e.kind === "lost") msg.lost = e.resume; if (e.kind === "restarted" || e.kind === "gone") msg.lost = null; };
   // While the model reads the prompt (minutes on CPU nodes) say so, with the time so far, instead of bare dots.
   const waitText = (m) => {
+    if (m.conn && m.conn.state === "connecting") return "Connecting to the dashboard…";
     const secs = Math.max(0, Math.round((Date.now() - (m.t0 || Date.now())) / 1000)), p = m.progress;
     if (p && p.total > 0) return "Reading the prompt: " + Math.min(p.processed, p.total).toLocaleString() + " of " + p.total.toLocaleString() + " tokens (" + Math.min(100, Math.round((100 * p.processed) / p.total)) + "%) · " + secs + " s";
     return secs < 3 ? "Thinking…" : "Waiting for the first token · " + secs + " s";
   };
   const waitHint = (m) => (Date.now() - (m.t0 || Date.now()) > 30000 ? "Big models on CPU nodes read the whole conversation before the first word, which can take a few minutes. Stop cancels it." : "");
-  const waitHTML = (m) => '<div class="wait"><span class="typing"><i></i><i></i><i></i></span> <span class="wait-t muted small">' + esc(waitText(m)) + '</span><div class="wait-h faint small">' + esc(waitHint(m)) + "</div></div>";
+  const waitHTML = (m) => '<div class="wait"><span class="typing"><i></i><i></i><i></i></span> <span class="wait-t muted small">' + esc(waitText(m)) + '</span><div class="wait-h faint small">' + esc(waitHint(m)) + "</div>" + connNote(m) + "</div>";
   function tickWait(m) {
     const node = $("#thread .msg.assistant:last-child .wait-t"); if (!node) return;
     node.textContent = waitText(m);
@@ -1267,8 +1361,9 @@
     if (m.role === "user") return '<div class="msg user"><div class="bubble">' + esc(m.content || "").replace(/\n/g, "<br>") + webChips(m) + (m.files && m.files.length ? '<div class="att-chips">' + m.files.map((f, k) =>
       '<button class="att" data-ai="att-dl" data-mi="' + i + '" data-fi="' + k + '" title="Download"><svg class="icon"><use href="#i-file"/></svg><span>' + esc(f.name) + '</span><span class="dim">' + fmt.bytes(f.size) + "</span></button>").join("") + "</div>" : "") + "</div></div>";
     const body = m.error ? (m.content ? md(m.content, i, false) : "") + '<div class="err">' + esc(m.error) + "</div>" +
+        (m.lost && last ? '<button class="btn small primary" data-ai="resume" title="Pick up the answer the dashboard may still be writing">Resume the answer</button> ' : "") +
         (m.cut && m.content && last ? '<button class="btn small primary" data-ai="continue" title="Ask the model to carry on from where it stopped">Continue</button> ' : "") + '<button class="btn small" data-ai="retry">' + (m.cut && m.content ? "Start the answer again" : "Try again") + "</button>"
-      : (m.content || m.thinking ? md((m.thinking ? "<think>" + m.thinking + "</think>" : "") + m.content, i, !!m.pending) + (m.cutNote ? '<div class="faint small">(cut off here; continued below)</div>' : "") : m.pending ? waitHTML(m) : '<span class="typing"><i></i><i></i><i></i></span>');
+      : (m.content || m.thinking ? md((m.thinking ? "<think>" + m.thinking + "</think>" : "") + m.content, i, !!m.pending) + (m.pending ? connNote(m) : "") + (m.cutNote ? '<div class="faint small">(cut off here; continued below)</div>' : "") : m.pending ? waitHTML(m) : '<span class="typing"><i></i><i></i><i></i></span>');
     const meta = m.meta ? '<div class="meta">' + esc(m.meta) + "</div>" : "";
     const tools = !m.pending && !m.error && m.content ? '<div class="tools"><button data-ai="copy-msg" data-i="' + i + '">Copy</button>' +
       (canSpeak() ? '<button data-ai="read-msg" data-i="' + i + '">' + (TTS.msg === m ? "■ Stop reading" : "🔊 Read aloud") + "</button>" : "") + (last ? '<button data-ai="regen">Regenerate</button>' : "") + "</div>" : "";
@@ -1372,52 +1467,45 @@
     const msg = { role: "assistant", content: "", thinking: "", pending: true, t0: Date.now() };
     c.messages.push(msg);
     renderThread(); renderChatList();
-    const ctrl = new AbortController(), sid = uid() + uid();
-    A.stream = { ctrl, chat: c.id, sid };
-    paintSend();
+    const sid = uid() + uid();
+    return chatTurn(c, msg, t, { url: "/api/ai/chat", id: sid, body: { target: c.target, messages: msgs, temperature: c.temperature, max_tokens: noLimit ? 0 : c.max_tokens, stream_id: sid } });
+  }
+  // One plain answer: a new one (topts.body) or one picked up again (topts.seq, no body).
+  async function chatTurn(c, msg, t, topts) {
+    const ctrl = new AbortController();
+    A.stream = { ctrl, chat: c.id, sid: topts.id }; msg.pending = true; msg.error = ""; msg.lost = null; msg.t0 = msg.t0 || Date.now();
+    paintSend(); paintLast();
     const waitTimer = setInterval(() => { if (!msg.content && !msg.thinking && A.cur === c.id) tickWait(msg); }, 1000);
     const t0 = performance.now(); let first = 0, chunks = 0, timings = null, raf = 0, ended = false;
     const paint = () => { raf = 0; paintLast(); };
     try {
-      const r = await fetch("/api/ai/chat", { method: "POST", cache: "no-store", signal: ctrl.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ target: c.target, messages: msgs, temperature: c.temperature, max_tokens: noLimit ? 0 : c.max_tokens, stream_id: sid }) });
-      if (r.status === 401) { location.href = "/login"; return; }
-      if (!r.ok) { let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ } throw new Error(j.error || "The model didn't answer (HTTP " + r.status + ").") ; }
-      const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "";
-      for (;;) {
-        const { value, done } = await reader.read(); if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let nl;
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
-          if (!line.startsWith("data:")) continue;
-          const payload = line.slice(5).trim(); if (payload === "[DONE]") { ended = true; continue; }
-          let j; try { j = JSON.parse(payload); } catch (e) { continue; }
-          if (j.error) { if (j.error.type === "incomplete") msg.cut = true; throw new Error(typeof j.error === "string" ? j.error : j.error.message || "The model reported an error."); }
-          if (j.choices && j.choices[0] && j.choices[0].finish_reason) ended = true;
-          if (j.timings) timings = j.timings;
-          if (j.prompt_progress && !msg.content) {   // llama.cpp: how much of the prompt it has read
-            const pp = j.prompt_progress;
-            msg.progress = { processed: +pp.processed || 0, total: +pp.total || 0, cache: +pp.cache || 0 };
-            if (A.cur === c.id) tickWait(msg);
-          }
-          const d = j.choices && j.choices[0] && j.choices[0].delta;
-          if (d && (d.content || d.reasoning_content)) {
-            if (!first) first = performance.now();
-            chunks++;
-            if (d.content) { msg.content += d.content; liveRead(msg); }
-            if (d.reasoning_content) msg.thinking += d.reasoning_content;
-            if (!raf) raf = requestAnimationFrame(paint);
-          }
+      for await (const j of followTurn(Object.assign({}, topts, { signal: ctrl.signal, onState: turnState(msg, () => { if (!raf) raf = requestAnimationFrame(paint); }) }))) {
+        if (j === "[DONE]") { ended = true; continue; }
+        if (j.error) { if (j.error.type === "incomplete") msg.cut = true; throw new Error(typeof j.error === "string" ? j.error : j.error.message || "The model reported an error."); }
+        if (j.choices && j.choices[0] && j.choices[0].finish_reason) ended = true;
+        if (j.timings) timings = j.timings;
+        if (j.prompt_progress && !msg.content) {   // llama.cpp: how much of the prompt it has read
+          const pp = j.prompt_progress;
+          msg.progress = { processed: +pp.processed || 0, total: +pp.total || 0, cache: +pp.cache || 0 };
+          if (A.cur === c.id) tickWait(msg);
+        }
+        const d = j.choices && j.choices[0] && j.choices[0].delta;
+        if (d && (d.content || d.reasoning_content)) {
+          if (!first) first = performance.now();
+          chunks++;
+          if (d.content) { msg.content += d.content; liveRead(msg); }
+          if (d.reasoning_content) msg.thinking += d.reasoning_content;
+          if (!raf) raf = requestAnimationFrame(paint);
         }
       }
-      // the stream just ended without the model saying it was done: don't pass half an answer off as whole
+      // the answer ended without the model saying it was done: don't pass half an answer off as whole
       if (!ended && !ctrl.signal.aborted && (msg.content || msg.thinking)) { msg.cut = true; msg.error = CUT_TEXT; }
     } catch (e) {
-      if (e.name !== "AbortError") msg.error = netError(e, "Something went wrong.");
+      if (e.name !== "AbortError") turnFailed(msg, e);
     } finally {
       clearInterval(waitTimer);
       if (ctrl.signal.aborted) { if (TTS.msg === msg) stopReading(); } else liveRead(msg, true);
-      msg.pending = false; delete msg.progress;
+      msg.pending = false; msg.conn = null; delete msg.progress;
       if (!msg.error && !msg.content && !msg.thinking) msg.error = ctrl.signal.aborted ? "Stopped." : "The model sent an empty answer.";
       const secs = (performance.now() - (first || t0)) / 1000, tps = timings && timings.predicted_per_second ? timings.predicted_per_second : (chunks > 1 && secs > 0 ? (chunks - 1) / secs : 0);
       if (!msg.error || msg.content) msg.meta = [tps ? tps.toFixed(1) + " tokens/s" : "", (timings && timings.predicted_n ? timings.predicted_n : chunks) + " tokens", ((performance.now() - t0) / 1000).toFixed(1) + " s", t.name].filter(Boolean).join(" · ");
@@ -1425,7 +1513,7 @@
       A.stream = null;
       paintSend();
       saveChats(); paintLast(); refreshChat();
-      setTimeout(() => { syncBack(c); autoRun(c, msg); }, 50);
+      if (!msg.lost) setTimeout(() => { syncBack(c); autoRun(c, msg); }, 50);
     }
   }
 
@@ -1970,7 +2058,16 @@
       send("Your last answer was cut off. Continue exactly where it stopped, without repeating what you already wrote.");
     }
     else if (a === "regen" && c && !A.stream) { while (c.messages.length && c.messages[c.messages.length - 1].role !== "user") c.messages.pop(); send("", true); }
-    else if (a === "retry" && c && !A.stream) { while (c.messages.length && c.messages[c.messages.length - 1].role !== "user") c.messages.pop(); send("", true); }
+    else if (a === "resume" && c && !A.stream) {
+      const m = c.messages[c.messages.length - 1], t = findTarget(c.target) || { name: c.target || "model" };
+      if (m && m.lost) {
+        const lost = m.lost, keep = { content: m.content, thinking: m.thinking, tools: m.tools, todos: m.todos };
+        if (!lost.seq) { m.content = ""; m.thinking = ""; m.todos = null; if (m.agent) m.tools = []; }    // replayed from the start
+        (m.agent ? agentTurn : chatTurn)(c, m, t, { url: lost.url, id: lost.id, seq: lost.seq, boot: lost.boot })
+          .then(() => { if (m.error && !m.content && keep.content) { Object.assign(m, keep); saveChats(); paintLast(); } });
+      }
+    }
+    else if (a === "retry" && c && !A.stream) { stopLost(c); while (c.messages.length && c.messages[c.messages.length - 1].role !== "user") c.messages.pop(); send("", true); }
     else if (a === "goto-chat") { newChat(el.dataset.target); selectTab("chat"); }
     else if (a === "o-chat") { newChat("ollama:" + el.dataset.pod + ":" + el.dataset.model); selectTab("chat"); }
     else if (a === "split-unload") { const v = await dialog("Unload the split model?", html`Every machine gets its memory back. The downloaded file stays on disk, so loading again takes a minute or two. Chat stops working until you load it.`, "Unload"); if (v) startAIJob(el, "split-unload", {}, () => loadTargets(true)); }

@@ -670,6 +670,7 @@ html.embed .tbox { height: calc(100vh - 150px); }
   .chat-main { height: calc(100dvh - 178px); min-height: 380px; }
 }
 .wait { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; } .wait .wait-h:empty { display: none; } .wait .wait-h { flex-basis: 100%; }
+.conn-note { display: flex; align-items: center; gap: 6px; flex-basis: 100%; margin-top: 6px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--warn); color: var(--warn); font-size: 12.5px; }
 .research-body { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 14px; align-items: start; }
 @media (max-width: 900px) { .research-body { grid-template-columns: 1fr; } }
 .rs-item { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; background: none; border: 0; border-radius: 10px; padding: 8px; color: inherit; cursor: pointer; }

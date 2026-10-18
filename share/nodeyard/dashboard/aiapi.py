@@ -12,16 +12,16 @@ import json
 import os
 import re
 import secrets
-import select
 import signal
 import shlex
 import socket
-import ssl
 import subprocess
 import tempfile
 import threading
 import time
 import urllib.parse
+
+import turns
 
 UA = "nodeyard-dashboard"
 HF_HOST = "huggingface.co"
@@ -224,6 +224,42 @@ def relay_stream(h, conn, resp, why_cut):
         h.wfile.flush()
     except OSError:
         return "client-gone"
+    return "cut"
+
+
+def pump_stream(turn, conn, resp, why_cut):
+    """relay_stream for a Turn (turns.py): the model's events are kept, so a page that lost its connection picks
+    them up again instead of the model being asked twice. Returns "done", "cut" or "stopped"."""
+    finished = writing = False
+    while True:
+        try:
+            line = resp.readline()
+        except (OSError, http.client.HTTPException, ValueError):
+            line = b""
+        if not line:
+            break
+        data = line.strip()
+        if not data.startswith(b"data:"):
+            continue
+        data = data[5:].strip()
+        if not data:
+            continue
+        if _finished(data):
+            finished = True
+        elif not writing and b'"content"' in data:
+            writing = True
+            try:
+                sock = getattr(conn, "sock", None)
+                if sock is not None:
+                    sock.settimeout(STALL_SECONDS)
+            except (OSError, AttributeError):
+                pass
+        turn.push(data)
+    if finished:
+        return "done"
+    if getattr(conn, "nodeyard_stopped", False):
+        return "stopped"
+    turn.push({"error": {"message": why_cut(), "type": "incomplete"}})
     return "cut"
 
 
@@ -1417,31 +1453,19 @@ def register(ctx, args):
         except (OSError, AttributeError):
             pass
 
-    def watch(h, conn, done):
-        """Ends the model's work when the page goes away (closed tab, aborted request),
-        not only at the next word it would have sent."""
-        sock = h.connection
-        if isinstance(sock, ssl.SSLSocket):
-            return  # (can't peek through TLS; the Stop button still works)
-        while not done.is_set():
-            try:
-                r, _, _ = select.select([sock], [], [], 1.0)
-                if r and not sock.recv(1, socket.MSG_PEEK):
-                    cut(conn)
-                    return
-                if r:
-                    done.wait(1.0)
-            except (OSError, ValueError):
-                cut(conn)
-                return
-
     def stop(h, body):
         sid = str(body.get("id", ""))[:64]
+        owner = h._token() or "local"
         with streams_lock:
             e = streams.get(sid)
-        if e and e[0] == (h._token() or "local"):
+        if e and e[0] == owner:
             cut(e[1])
-        h._json({"ok": True, "stopped": bool(e)})
+        t = turns.of(ctx).get(sid, owner)
+        if t is not None and t.finished:
+            t = None
+        if t is not None:
+            t.stop_requested = True     # (still connecting to the model: cut it as soon as it answers)
+        h._json({"ok": True, "stopped": bool(e or t)})
 
     def chat(h, body):
         msgs = body.get("messages")
@@ -1461,42 +1485,57 @@ def register(ctx, args):
             return h._json({"ok": False, "error": "Bad temperature or token limit."}, 400)
         sid = str(body.get("stream_id") or "")[:64] or secrets.token_hex(8)
         owner = h._token() or "local"
-        done = threading.Event()
+        turn, existing = turns.of(ctx).start(sid, owner, "chat")
+        if turn is None:
+            if existing is None:
+                return h._json({"ok": False, "error": "That answer id is taken."}, 409)
+            # the page sent the same question again (its first try lost the connection): follow the answer already
+            # being written instead of asking the model twice
+            turns.send_headers(h, existing)
+            return existing.follow(h, 0)
+        target = str(body.get("target", ""))
+        payload = dict({"messages": clean, "temperature": temp}, **({"max_tokens": max_tokens} if max_tokens else {}))
+        if target == "split":
+            payload["return_progress"] = True   # llama.cpp says how far it has read the prompt (the page shows it)
+            # reuse the KV cache for the part of the prompt it has already read (the system prompt and earlier
+            # turns): on this cluster reading is ~15-19 tokens/s, so a repeated prefix is minutes saved
+            payload["cache_prompt"] = True
 
         def on_conn(conn):
             with streams_lock:
                 streams[sid] = (owner, conn)
-            threading.Thread(target=watch, args=(h, conn, done), daemon=True).start()
-        try:
-            try:
-                target = str(body.get("target", ""))
-                payload = dict({"messages": clean, "temperature": temp}, **({"max_tokens": max_tokens} if max_tokens else {}))
-                if target == "split":
-                    payload["return_progress"] = True   # llama.cpp says how far it has read the prompt (the page shows it)
-                    # reuse the KV cache for the part of the prompt it has already read (the system prompt and earlier
-                    # turns): on this cluster reading is ~15-19 tokens/s, so a repeated prefix is minutes saved
-                    payload["cache_prompt"] = True
-                conn, resp = backend.open_chat(target, payload, on_conn=on_conn)
-            except AIError as e:
-                return fail(h, e)
-            try:
-                h.send_response(200)
-                for k, v in (("Content-Type", "text/event-stream; charset=utf-8"), ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff"),
-                             ("X-Accel-Buffering", "no"), ("Connection", "close")):
-                    h.send_header(k, v)
-                h.end_headers()
-                h.close_connection = True
-                relay_stream(h, conn, resp, lambda: backend.cut_message(target) if hasattr(backend, "cut_message") else
-                             "The model stopped in the middle of its answer: the connection to it ended before it finished.")
-            except (OSError, http.client.HTTPException):
-                pass  # the page went away
-            finally:
-                conn.close()
-        finally:
-            done.set()
-            with streams_lock:
-                streams.pop(sid, None)
+            turn.cancel = lambda: cut(conn)
 
+        def work():
+            conn = None
+            try:
+                conn, resp = backend.open_chat(target, payload, on_conn=on_conn)
+                if getattr(turn, "stop_requested", False):
+                    cut(conn)
+                result = pump_stream(turn, conn, resp, lambda: backend.cut_message(target) if hasattr(backend, "cut_message") else
+                                     "The model stopped in the middle of its answer: the connection to it ended before it finished.")
+                turn.finish(result)
+            except AIError as e:
+                # the model (not the page's connection) failed: say so, so the page doesn't offer to reconnect
+                turn.push({"error": {"message": str(e), "type": "model", "code": e.code}})
+                turn.finish("error", str(e))
+            except Exception as e:  # noqa: BLE001 -- one failed answer must never take the dashboard down
+                import traceback
+                traceback.print_exc()
+                turn.push({"error": {"message": "The dashboard hit an error while answering: %s" % e, "type": "server"}})
+                turn.finish("error", repr(e))
+            finally:
+                if conn is not None:
+                    conn.close()
+                with streams_lock:
+                    streams.pop(sid, None)
+
+        threading.Thread(target=work, name="chat-" + sid[:8], daemon=True).start()
+        try:
+            turns.send_headers(h, turn)
+        except OSError:
+            return
+        turn.follow(h, 0)
 
     def web(h, body):
         import webtools
