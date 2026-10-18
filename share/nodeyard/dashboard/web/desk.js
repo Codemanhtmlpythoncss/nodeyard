@@ -447,30 +447,20 @@
     CH.wait = "Sending…"; CH.started = Date.now(); CH.stick = true; paintChat();
     let finished = false, reason = "";
     try {
-      const r = await fetch("/api/ai/chat", { method: "POST", cache: "no-store", signal: CH.ctrl.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" },
-        body: JSON.stringify({ target: D.chatTarget, messages: [{ role: "system", content: CHAT_SYSTEM }].concat(history), temperature: 0.3, max_tokens: 900, stream_id: CH.sid }) });
-      if (r.status === 401) { location.href = "/login"; return; }
-      if (!r.ok) { let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ } throw new Error(j.error || "The model didn't answer (HTTP " + r.status + ")."); }
-      CH.wait = "Thinking…"; paintChatStatus();
-      const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "";
-      for (;;) {
-        const { value, done } = await reader.read(); if (done) break;
-        buf += dec.decode(value, { stream: true }); let i;
-        while ((i = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
-          if (!line.startsWith("data:")) continue;
-          const data = line.slice(5).trim();
-          if (data === "[DONE]") { finished = true; continue; }
-          let j; try { j = JSON.parse(data); } catch (e) { continue; }
-          if (j.error) throw new Error(j.error.message || j.error);
-          if (j.prompt_progress && !reply.content) { const pp = j.prompt_progress; CH.wait = "Reading your message… " + Math.round((100 * (pp.processed || 0)) / Math.max(1, pp.total || 1)) + "%"; paintChatStatus(); }
-          const choice = j.choices && j.choices[0];
-          if (!choice) continue;
-          if (choice.finish_reason) { finished = true; reason = choice.finish_reason; }
-          const delta = choice.delta || {};
-          if (delta.content) { reply.content += delta.content; CH.wait = "Writing…"; paintChatSoon(); }
-          else if (delta.reasoning_content && !reply.content) { CH.wait = "Thinking…"; paintChatStatus(); }
-        }
+      // (NY.ai.followTurn: if the connection drops, it reconnects and picks the answer up where it was)
+      const events = NY.ai.followTurn({ url: "/api/ai/chat", id: CH.sid, signal: CH.ctrl.signal,
+        body: { target: D.chatTarget, messages: [{ role: "system", content: CHAT_SYSTEM }].concat(history), temperature: 0.3, max_tokens: 900, stream_id: CH.sid },
+        onState: (st, info) => { CH.wait = st === "connecting" ? "Sending…" : st === "reconnecting" ? "Connection lost; reconnecting" + (info.tries > 1 ? " (" + info.tries + ")" : "") + "…" : st === "open" && !reply.content ? "Thinking…" : CH.wait; paintChatStatus(); } });
+      for await (const j of events) {
+        if (j === "[DONE]") { finished = true; continue; }
+        if (j.error) throw new Error(j.error.message || j.error);
+        if (j.prompt_progress && !reply.content) { const pp = j.prompt_progress; CH.wait = "Reading your message… " + Math.round((100 * (pp.processed || 0)) / Math.max(1, pp.total || 1)) + "%"; paintChatStatus(); }
+        const choice = j.choices && j.choices[0];
+        if (!choice) continue;
+        if (choice.finish_reason) { finished = true; reason = choice.finish_reason; }
+        const delta = choice.delta || {};
+        if (delta.content) { reply.content += delta.content; CH.wait = "Writing…"; paintChatSoon(); }
+        else if (delta.reasoning_content && !reply.content) { CH.wait = "Thinking…"; paintChatStatus(); }
       }
       if (!finished && !visibleText(reply.content)) throw new Error("The model closed the connection without answering. Try again.");
       if (!finished) reply.content += "\n\n⚠ The answer was cut off.";

@@ -485,7 +485,7 @@
   }
   async function ask(q) {
     const A = G.ask;
-    if (A.busy) { if (A.ctrl) A.ctrl.abort(); return; }
+    if (A.busy) { if (A.sid) NY.ui.postJSON("/api/ai/stop", { id: A.sid }).catch(() => {}); if (A.ctrl) A.ctrl.abort(); return; }
     q = (q || "").trim(); if (!q) return;
     const target = await pickTarget();
     A.q = q; A.text = ""; A.wait = "Thinking…"; A.busy = true; A.ctrl = new AbortController(); paintAnswer();
@@ -494,26 +494,20 @@
     const keep = A.history.length <= 6 ? A.history : A.history.slice(-4 - (A.history.length % 4));
     const messages = [{ role: "system", content: ASK_SYSTEM }].concat(keep, [{ role: "user", content: "Live cluster state:\n" + brief() + "\n\nQuestion: " + q }]);
     try {
-      const r = await fetch("/api/ai/chat", { method: "POST", signal: A.ctrl.signal, headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify({ target, messages, temperature: 0.3, max_tokens: 400 }) });
-      if (!r.ok) { let j = {}; try { j = await r.json(); } catch (e) { /* not JSON */ } throw new Error(j.error || "The model didn't answer (HTTP " + r.status + ")."); }
-      const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "";
-      for (;;) {
-        const { value, done } = await rd.read(); if (done) break;
-        buf += dec.decode(value, { stream: true }); let i;
-        while ((i = buf.indexOf("\n")) >= 0) {
-          const l = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
-          if (!l.startsWith("data:") || l.includes("[DONE]")) continue;
-          let j; try { j = JSON.parse(l.slice(5)); } catch (e) { continue; }
-          if (j.error) throw new Error(j.error.message || j.error);
-          if (j.prompt_progress && !A.text) { const pp = j.prompt_progress; A.wait = "Reading the cluster summary… " + Math.round((100 * (pp.processed || 0)) / Math.max(1, pp.total || 1)) + "%"; paintAnswer(); }
-          const dl = j.choices && j.choices[0] && j.choices[0].delta;
-          if (dl && dl.content) { A.text += dl.content.replace(/<\/?think>/g, ""); paintAnswer(); }
-        }
+      A.sid = Date.now().toString(36) + Math.random().toString(36).slice(2);
+      const events = NY.ai.followTurn({ url: "/api/ai/chat", id: A.sid, signal: A.ctrl.signal, body: { target, messages, temperature: 0.3, max_tokens: 400, stream_id: A.sid },
+        onState: (st, info) => { if (st === "reconnecting") { A.wait = "Connection lost; reconnecting" + (info.tries > 1 ? " (" + info.tries + ")" : "") + "…"; paintAnswer(); } } });
+      for await (const j of events) {
+        if (j === "[DONE]") continue;
+        if (j.error) throw new Error(j.error.message || j.error);
+        if (j.prompt_progress && !A.text) { const pp = j.prompt_progress; A.wait = "Reading the cluster summary… " + Math.round((100 * (pp.processed || 0)) / Math.max(1, pp.total || 1)) + "%"; paintAnswer(); }
+        const dl = j.choices && j.choices[0] && j.choices[0].delta;
+        if (dl && dl.content) { A.text += dl.content.replace(/<\/?think>/g, ""); paintAnswer(); }
       }
       A.history.push({ role: "user", content: q }, { role: "assistant", content: A.text }); if (A.history.length > 10) A.history = A.history.slice(-4);
     } catch (e) {
       if (e.name !== "AbortError") A.text = (A.text ? A.text + "\n\n" : "") + "⚠ " + (e.message || "Something went wrong.");
-    } finally { A.busy = false; paintAnswer(); }
+    } finally { A.busy = false; A.sid = ""; paintAnswer(); }
   }
 
   V.galaxy = {

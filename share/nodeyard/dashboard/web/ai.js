@@ -2215,5 +2215,5 @@
     else if (e.target.id === "lc-auto-reload") saveLifecycle({ auto_reload: e.target.checked });
     else if (e.target.id === "lc-idle") { if (e.target.value === "custom") { A.lifeCustom = true; U.queueRender(); } else saveLifecycle({ idle_seconds: +e.target.value }); }
   });
-  NY.ai = { streaming: () => !!A.stream };   // (the page waits for an answer to finish before reloading onto an update)
+  NY.ai = { streaming: () => !!A.stream, followTurn };   // (followTurn: the Desk and Galaxy chats reconnect the same way)   // (the page waits for an answer to finish before reloading onto an update)
 })();
