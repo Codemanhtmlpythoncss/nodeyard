@@ -145,6 +145,7 @@
     setHTML(dlg, html`<div class="tu-back" data-tu-close></div><div class="tu-box" role="dialog" aria-modal="true" aria-label="Review changes on ${node}">
       <h3 style="margin-top:0">Change ${node}?</h3>
       <ul>${r.plan.map((x) => html`<li>${x}</li>`)}</ul>
+      ${(r.skipped || []).length ? html`<p class="muted small">Already set, so left alone: ${r.skipped.join("; ")}.</p>` : ""}
       ${risky ? html`<p class="warn-t small">${settings.pi_preset ? "Overclocking runs the chip faster than it was sold at. It can make the machine crash or not boot until the change is undone (remove the \"nodeyard overclock\" lines from config.txt; a backup is kept next to it). Only do it with good cooling and the official power supply."
         : "A higher power limit makes it run warmer and the fan louder under load. The CPU still slows itself before it gets too hot, and Restore defaults puts the old limit back."}</p>` : ""}
       <details><summary class="small">What will run as root on ${node}</summary><pre class="hl-pre">${r.script}</pre></details>
@@ -162,6 +163,7 @@
       ${r.plans.map((x) => html`<details><summary><b>${x.node}</b> <span class="muted small">${x.plan.length} change${x.plan.length === 1 ? "" : "s"}</span></summary><ul>${x.plan.map((l) => html`<li class="small">${l}</li>`)}</ul><pre class="hl-pre">${x.script}</pre></details>`)}
       ${r.ai.length ? html`<p class="small">AI threads and memory kept free go back to automatic on ${r.ai.join(", ")}.</p>` : ""}
       ${r.unread.length ? html`<p class="warn-t small">Not read yet, so left as they are: ${r.unread.join(", ")}. Press "Read every machine" first to include them.</p>` : ""}
+      ${(r.untouched || []).length ? html`<p class="muted small">Never changed by nodeyard, so left as they are: ${r.untouched.join(", ")}.</p>` : ""}
       ${nothing ? html`<p class="muted">Nothing to reset: read the machines first.</p>` : ""}
       <div class="row wrap mt">${nothing ? "" : html`<button class="btn primary" data-tu-reset-run>Reset ${r.plans.length} machine${r.plans.length === 1 ? "" : "s"}</button>`}<button class="btn" data-tu-close>Cancel</button></div></div>`);
     dlg.hidden = false;
@@ -179,7 +181,15 @@
     b.disabled = true; b.textContent = "Running…";
     const r = await post("/api/tune/apply", { node, settings: dlg._settings, confirm: true });
     dlg.hidden = true;
-    if (r) toast("Done on " + node + ": " + r.done.join("; ") + ".");
+    if (r && (r.failed || []).length) {
+      // what the machine really shows afterwards, not what was asked for
+      setHTML(dlg, html`<div class="tu-back" data-tu-close></div><div class="tu-box" role="dialog" aria-modal="true" aria-label="Not everything took on ${node}">
+        <h3 style="margin-top:0">Not everything took on ${node}</h3>
+        <ul>${r.results.map((x) => html`<li>${x.ok ? chip("ok", "good") : chip("didn't take", "bad")} ${x.what}: now ${x.now == null ? "unknown" : String(x.now)}</li>`)}</ul>
+        <p class="muted small">The machine refused or reset what isn't marked ok (a driver or firmware that doesn't allow it, or something else setting it back). Read again to check.</p>
+        <div class="row wrap mt"><button class="btn" data-tu-close>Close</button></div></div>`);
+      dlg.hidden = false;
+    } else if (r) toast("Done on " + node + (r.results && r.results.length ? " and checked" : "") + ": " + r.done.join("; ") + ".");
     load();
   }
   document.addEventListener("click", async (e) => {
