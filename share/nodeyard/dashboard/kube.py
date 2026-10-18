@@ -63,7 +63,9 @@ def parse_time(ts):
 # --------------------------------------------------------------------------- client
 
 class KubeError(Exception):
-    pass
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status     # (the HTTP status, when the API answered)
 
 
 def load_kubeconfig(path):
@@ -171,6 +173,34 @@ class KubeClient:
             return json.loads(body)
         except ValueError:
             raise KubeError("%s: not JSON" % path)
+
+
+    def delete(self, path, body=None, timeout=None):
+        """One DELETE (on a fresh connection: deletes are rare). body: e.g. {"preconditions": {"uid": ...}}, so only the
+        exact object that was checked is removed, never a new one that took its name. Returns the reply (JSON)."""
+        headers = {"Accept": "application/json", "Content-Type": "application/json", "User-Agent": "nodeyard-dashboard"}
+        if self.token:
+            headers["Authorization"] = "Bearer " + self.token
+        conn = http.client.HTTPSConnection(self.host, self.port, context=self.ctx, timeout=timeout or self.timeout)
+        try:
+            conn.request("DELETE", path, body=json.dumps(body or {}), headers=headers)
+            resp = conn.getresponse()
+            data = resp.read(1024 * 1024)
+        except (OSError, http.client.HTTPException, ssl.SSLError) as e:
+            raise KubeError("%s: %s" % (path, e))
+        finally:
+            conn.close()
+        if resp.status >= 400:
+            msg = ""
+            try:
+                msg = json.loads(data).get("message", "")
+            except ValueError:
+                pass
+            raise KubeError("%s: HTTP %d%s" % (path, resp.status, (": " + msg) if msg else ""), resp.status)
+        try:
+            return json.loads(data or b"{}")
+        except ValueError:
+            return {}
 
 
 # --------------------------------------------------------------------------- pods

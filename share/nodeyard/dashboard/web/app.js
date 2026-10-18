@@ -15,6 +15,7 @@
     { id: "processes", label: "Processes", icon: "processes", sub: "What is running on each machine, and what is using the memory and CPU" },
     { id: "pods", label: "Pods", icon: "pods", sub: "Everything that is running, with live usage and logs" },
     { id: "workloads", label: "Workloads", icon: "workloads", sub: "Deployments, daemon sets, stateful sets, jobs and cron jobs" },
+    { id: "cleanup", label: "Cleanup", icon: "reset", sub: "Pods nobody has used for a while, removed by a policy you control" },
     { id: "network", label: "Network", icon: "network", sub: "IP addresses, ports and how to reach things" },
     { id: "storage", label: "Storage", icon: "storage", sub: "Disks and volumes" },
     { id: "hardware", label: "Hardware", icon: "hardware", sub: "What every machine is made of, and how fast it really is" },

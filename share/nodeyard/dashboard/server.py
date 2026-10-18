@@ -752,6 +752,8 @@ def main():
     temps.register(ctx, a)
     import hwcare        # Hardware > Maintenance, Cooling and Lid: a guide per machine, idle fan settings, the lid action
     hwcare.register(ctx, a)
+    import cleanup       # pods nobody has used for a while, removed by a policy you control (off by default)
+    cleanup.register(ctx, a)
     if getattr(ctx, "ai", None) is not None:
         import aiapi as _aiapi
         _aiapi.EXTRA_SPLIT_ARGS = ctx.tuning.run_args
