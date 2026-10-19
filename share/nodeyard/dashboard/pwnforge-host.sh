@@ -6,6 +6,7 @@
 #   pwnforge-host.sh configure DIR DATA HOST PORT        the address and port it listens on (a drop-in for the unit)
 #   pwnforge-host.sh virt      DIR DATA HOST PORT        real lab machines: KVM/libvirt, firmware, base images
 #   pwnforge-host.sh https     on|off PORT               an https:// address on the tailnet (Tailscale Serve)
+#   pwnforge-host.sh tailnet-access on|off [CIDR]        reach lab targets by IP from your tailnet (no VM egress)
 #
 # Safe to run again: it never touches the database's users, progress or machines, and it never downloads OS images.
 # The service runs as the unprivileged user "pwnforge" (in the libvirt and kvm groups when they exist), as PwnForge's
@@ -253,10 +254,116 @@ cmd_configure() {
     say "OK"
 }
 
+# Reach lab target VMs directly from the tailnet (so you can nmap/ssh them by IP), while the VMs stay unable to
+# reach the internet or each other's networks. Does three things: enables IPv4 forwarding, advertises the lab
+# supernet over Tailscale (you approve the route once in the admin console), and installs narrow firewall rules
+# that permit ONLY tailscale0 <-> lab-subnet forwarding. A boot unit re-applies the rules.
+# Current advertised routes with $1 added (op=add) or removed (op=del), preserving everything else (the exit-node
+# default routes in particular). Prints a comma-separated list (possibly empty).
+ts_routes() {
+    local op="$1" cidr="$2"
+    tailscale debug prefs 2>/dev/null | CIDR="$cidr" OP="$op" python3 -c '
+import json, os, sys
+cur = (json.load(sys.stdin).get("AdvertiseRoutes") or [])
+cidr, op = os.environ["CIDR"], os.environ["OP"]
+cur = [r for r in cur if r != cidr]
+if op == "add":
+    cur.append(cidr)
+print(",".join(cur))
+'
+}
+
+TAILNET_RULES=/usr/local/sbin/pwnforge-tailnet-rules.sh
+TAILNET_UNIT="$UNIT_DIR/pwnforge-tailnet.service"
+
+write_tailnet_rules() {
+    local cidr="$1"
+    cat > "$TAILNET_RULES" <<EOF
+#!/bin/sh
+# Written by the nodeyard dashboard (PwnForge tailnet access). Allows your tailnet to reach lab targets in $cidr,
+# and nothing else; lab VMs cannot start connections out (no internet, no other labs). Idempotent.
+set -e
+CIDR="$cidr"
+CH=PWNFORGE-TAILNET
+iptables -N \$CH 2>/dev/null || iptables -F \$CH
+iptables -A \$CH -i tailscale0 -d \$CIDR -j ACCEPT
+iptables -A \$CH -s \$CIDR -o tailscale0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A \$CH -s \$CIDR ! -o tailscale0 -j DROP
+iptables -A \$CH -j RETURN
+# jump from FORWARD, first, exactly once
+iptables -C FORWARD -j \$CH 2>/dev/null && iptables -D FORWARD -j \$CH 2>/dev/null || true
+iptables -I FORWARD 1 -j \$CH
+EOF
+    chmod 0755 "$TAILNET_RULES"
+}
+
+clear_tailnet_rules() {
+    iptables -D FORWARD -j PWNFORGE-TAILNET 2>/dev/null || true
+    iptables -F PWNFORGE-TAILNET 2>/dev/null || true
+    iptables -X PWNFORGE-TAILNET 2>/dev/null || true
+    rm -f "$TAILNET_RULES"
+    systemctl disable --now pwnforge-tailnet.service >/dev/null 2>&1 || true
+    rm -f "$TAILNET_UNIT"
+    systemctl daemon-reload || true
+}
+
+cmd_tailnet_access() {
+    local action="$1" cidr="${2:-10.200.0.0/16}"
+    [[ $(id -u) == 0 ]] || fail "needs root"
+    case "$action" in on|off) ;; *) fail "say on or off" ;; esac
+    [[ "$cidr" =~ ^10\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ || "$cidr" =~ ^172\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ || "$cidr" =~ ^192\.168\.[0-9]+\.[0-9]+/[0-9]+$ ]] \
+        || fail "lab subnet must be a private CIDR (e.g. 10.200.0.0/16)"
+    command -v tailscale >/dev/null 2>&1 || fail "Tailscale isn't installed on this machine"
+    command -v iptables >/dev/null 2>&1 || fail "iptables isn't available on this machine"
+
+    if [[ "$action" == off ]]; then
+        clear_tailnet_rules
+        local routes; routes="$(ts_routes del "$cidr")"
+        timeout 20 tailscale set --advertise-routes="$routes" >/dev/null 2>&1 || true
+        say "tailnet access to lab targets: off (other advertised routes kept)"
+        say "OK"
+        return 0
+    fi
+
+    say "step 1/4: IPv4 forwarding"
+    echo 1 > /proc/sys/net/ipv4/ip_forward
+    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-pwnforge-tailnet.conf
+
+    say "step 2/4: firewall (tailnet <-> $cidr only; no VM egress)"
+    write_tailnet_rules "$cidr"
+    sh "$TAILNET_RULES"
+
+    say "step 3/4: a boot unit so the rules survive a reboot"
+    cat > "$TAILNET_UNIT" <<EOF
+[Unit]
+Description=PwnForge lab tailnet access firewall rules
+After=tailscaled.service network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=$TAILNET_RULES
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now pwnforge-tailnet.service >/dev/null 2>&1 || true
+
+    say "step 4/4: advertise the lab subnet over Tailscale (keeping your existing routes, e.g. the exit node)"
+    local routes; routes="$(ts_routes add "$cidr")"
+    if ! timeout 30 tailscale set --advertise-routes="$routes" >/dev/null 2>&1; then
+        say "warning: couldn't advertise the route automatically; run: tailscale set --advertise-routes=$routes"
+    fi
+    say "tailnet access: on. APPROVE the route $cidr for this machine at https://login.tailscale.com/admin/machines"
+    say "then on your device: tailscale up --accept-routes, and you can reach a lab target by its IP (ssh/nmap)."
+    say "OK"
+}
+
 case "${1:-}" in
     install) shift; (( $# == 5 )) || fail "usage: install DIR DATA REPO HOST PORT"; cmd_install "$@" ;;
     configure) shift; (( $# == 4 )) || fail "usage: configure DIR DATA HOST PORT"; cmd_configure "$@" ;;
     virt) shift; (( $# == 4 )) || fail "usage: virt DIR DATA HOST PORT"; cmd_virt "$@" ;;
     https) shift; (( $# == 2 )) || fail "usage: https on|off PORT"; cmd_https "$@" ;;
-    *) fail "usage: $0 install|configure|virt|https ..." ;;
+    tailnet-access) shift; (( $# >= 1 && $# <= 2 )) || fail "usage: tailnet-access on|off [CIDR]"; cmd_tailnet_access "$@" ;;
+    *) fail "usage: $0 install|configure|virt|https|tailnet-access ..." ;;
 esac
