@@ -40,6 +40,12 @@ REPO = "https://github.com/Codemanhtmlpythoncss/pwnforge.git"
 UNIT = "pwnforge.service"
 DROPIN = "/etc/systemd/system/pwnforge.service.d/nodeyard.conf"   # written by pwnforge-host.sh
 JOB = "nodeyard-pwnforge-job"
+# systemd's own housekeeping for the short-lived --collect job unit: harmless once the unit is gone, and it floods
+# the log so a successful install looks failed. Genuine failure lines ("Main process exited", "Failed with result",
+# "status=1/FAILURE") are NOT matched here and stay visible.
+JOB_NOISE_RE = re.compile(
+    r"(?m)^.*%s(?:\.service)?: (?:Failed to open /run/systemd/transient/|Consumed [\d.]+\w* CPU time|"
+    r"Deactivated successfully|Scheduled restart job|Unit .* has finished).*\n?" % re.escape(JOB))
 SVC_USER = "pwnforge"
 DEFAULTS = {"enabled": False, "path": "/opt/pwnforge", "data_dir": "/var/lib/pwnforge", "bind": "local", "port": 8080, "autostart": True}
 BINDS = {"local": "This machine only", "tailnet": "Your tailnet", "https": "Your tailnet, over HTTPS",
@@ -466,7 +472,7 @@ class PwnForge:
             rc, out, _ = self._run(["journalctl", "-u", JOB, "--since", "@%d" % int(j["started"] - 2), "-o", "cat", "--no-pager", "-q"], 15)
         except PFError:
             return ""
-        return redact(out)[-20000:]
+        return redact(JOB_NOISE_RE.sub("", out))[-20000:]
 
     def start_job(self, what, argv):
         v = self.job_view()
