@@ -136,6 +136,25 @@ cmd_install() {
     install -m 0644 "$dir/deploy/systemd/pwnforge.service" "$UNIT_DIR/pwnforge.service"
     write_dropin "$dir" "$data" "$host" "$port" || true
     systemctl daemon-reload
+
+    # Real machines, automatically: PwnForge disables simulated labs, so on a host that can run real guests
+    # (apt-based, x86_64/arm64) set them up now. Idempotent — present images aren't re-downloaded — and
+    # best-effort, so a host that can't do it still finishes install (labs show how to enable real machines).
+    case "$(uname -m)" in
+        x86_64 | amd64 | aarch64 | arm64)
+            if command -v apt-get >/dev/null 2>&1; then
+                say "setting up real machines automatically"
+                if ( cmd_virt "$dir" "$data" "$host" "$port" ); then
+                    say "real machines ready"
+                else
+                    say "note: couldn't finish real-machine setup automatically; open the PwnForge page and press 'Set up real machines' to retry"
+                fi
+            else
+                say "note: not an apt host, so real machines aren't set up automatically; install QEMU and libvirt, then use 'Set up real machines'"
+            fi
+            ;;
+        *) say "note: $(uname -m) can't run PwnForge's real machines (needs x86_64 or arm64)" ;;
+    esac
     say "OK"
 }
 

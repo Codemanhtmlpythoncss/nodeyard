@@ -169,7 +169,7 @@
       } else if (a === "install") {
         const d = PF.data, upd = d.installed;
         if (!(await confirmDlg(upd ? "Update PwnForge?" : "Install PwnForge?", html`<p style="margin-top:0">${upd ? "Gets the newest PwnForge from" : "Downloads PwnForge from"} <span class="mono">${d.repo}</span> into <span class="mono">${d.config.path}</span>, installs its Python packages and builds its website, then installs its service (user <span class="mono">pwnforge</span>, data in <span class="mono">${d.config.data_dir}</span>).</p>
-          <p class="muted small">If git, python3-venv, nodejs or npm are missing it installs them with apt. It never downloads OS images, and an update keeps your users, progress and machines. It takes a few minutes.</p>`, upd ? "Update" : "Install"))) return;
+          <p class="muted small">If git, python3-venv, nodejs or npm are missing it installs them with apt. On an x86_64 or arm64 Linux host it then sets up real machines automatically — QEMU, libvirt and the cloud images for this CPU (about 1 GB, downloaded once) — so labs boot real VMs, not simulations. An update keeps your users, progress and machines, and doesn't re-download images. It takes a few minutes.</p>`, upd ? "Update" : "Install"))) return;
         PF.jobLog = ""; await post("/api/pwnforge/action", { action: "install" }, "install");
       } else if (a === "virt") {
         if (!(await confirmDlg("Set up real machines?", html`<p style="margin-top:0">Installs QEMU, libvirt and the firmware virtual machines need (with apt), lets PwnForge's user use libvirt, and downloads the Debian, Alpine and Ubuntu cloud images for this CPU (about 1 GB). If this host has no KVM device, guests still run as real VMs using slower QEMU software emulation.</p>
