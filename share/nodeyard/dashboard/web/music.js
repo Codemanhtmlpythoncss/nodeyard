@@ -1353,14 +1353,53 @@
     const tracks = (M.data || {}).tracks || [];
     const q = (M._libq || "").toLowerCase();
     const shown = q ? tracks.filter((t) => (t.name + " " + (t.folder || "")).toLowerCase().includes(q)) : tracks;
+    const uploads = tracks.filter((t) => (t.folder || "") === "Uploads" || (t.folder || "").indexOf("Uploads") === 0);
     setHTML(el, html`<div class="card">
       <div class="row" style="justify-content:space-between;align-items:center;gap:8px">
         <input class="input" data-music="lib-filter" value="${M._libq || ""}" placeholder="Filter the library…" style="flex:1">
+        <button class="btn small" data-music="lib-upload">⬆ Upload songs</button>
         ${shown.length ? raw('<button class="btn small primary" data-music="lib-play">▶ Play all</button>') : ""}</div>
-      ${!(M.data || {}).dir ? html`<p class="small mt">No music folder set — pick one in <b>Settings</b>.</p>` : ""}
+      ${raw('<input type="file" data-music="lib-file" accept="audio/*,.mp3,.m4a,.flac,.ogg,.opus,.wav,.aac" multiple style="display:none">')}
+      <div data-music="up-progress" class="small faint mt" style="display:none"></div>
+      ${uploads.length ? html`<div class="mt"><div class="small faint">Your uploads (${uploads.length}) — tap ✕ to remove</div>
+        <div class="row wrap mt" style="gap:6px">${uploads.map((t) => html`<span class="tag" style="display:inline-flex;align-items:center;gap:6px">${t.name}
+          ${raw('<button class="btn small" data-music="up-del" data-path="' + esc(t.path) + '" title="Delete" style="padding:0 6px;line-height:1.4">✕</button>')}</span>`)}</div></div>` : ""}
+      ${!(M.data || {}).dir && !uploads.length ? html`<p class="small mt">No music folder set — pick one in <b>Settings</b>, or upload songs above.</p>` : ""}
       <div class="mt">${shown.length
         ? shown.map((t) => trackRow(t, "lib:" + trackKey(t)))
-        : html`<div class="empty">${(M.data || {}).dir ? "No matching files." : "Set a music folder in Settings to see your library."}</div>`}</div></div>`);
+        : html`<div class="empty">${(M.data || {}).dir || uploads.length ? "No matching files." : "Upload songs above, or set a music folder in Settings."}</div>`}</div></div>`);
+  }
+
+  async function uploadSong(file, onProgress) {
+    const ext = (file.name.split(".").pop() || "").toLowerCase();
+    const id = (window.crypto && crypto.randomUUID ? crypto.randomUUID().replace(/-/g, "") : (Date.now().toString(16) + Math.random().toString(16).slice(2))).slice(0, 12);
+    const CH = 2 * 1024 * 1024;   // raw bytes per piece (server piece limit is 3 MB)
+    let offset = 0; const total = file.size;
+    if (total > 80 * 1024 * 1024) throw new Error(file.name + " is too big (80 MB at most).");
+    do {
+      const slice = file.slice(offset, Math.min(offset + CH, total));
+      const buf = new Uint8Array(await slice.arrayBuffer());
+      let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+      const done = offset + slice.size >= total;
+      const r = await postJSON("/api/music/upload", { id, ext, name: file.name, offset, data: btoa(bin), done });
+      if (!r || !r.ok) throw new Error((r && r.error) || "Upload failed.");
+      offset += slice.size;
+      if (onProgress) onProgress(offset, total);
+    } while (offset < total);
+  }
+
+  async function uploadFiles(files) {
+    const prog = $('[data-music="up-progress"]'); if (prog) prog.style.display = "";
+    let done = 0; const list = Array.from(files || []);
+    for (const f of list) {
+      try {
+        await uploadSong(f, (sent, total) => { if (prog) prog.textContent = "Uploading " + f.name + " — " + Math.round(sent / total * 100) + "% (" + (done + 1) + "/" + list.length + ")"; });
+        done++;
+      } catch (e) { toast(e.message || ("Couldn't upload " + f.name)); }
+    }
+    if (prog) prog.textContent = done ? ("Uploaded " + done + " song" + (done === 1 ? "" : "s") + ".") : "Nothing was uploaded.";
+    await load(); renderTab();
+    if (done) toast("Uploaded " + done + " song" + (done === 1 ? "" : "s") + ".");
   }
 
   function renderSettings(el) {
@@ -1601,6 +1640,8 @@
       if (!r.ok) { toast(r.error || "Couldn't save the playlist."); return; }
       M.dj.draft.saved = true; await load(); M.playlists = (M.data || {}).playlists || M.playlists; saveDJ(); renderTab(); toast("Saved to Playlists.");
     }
+    else if (act === "lib-upload") { const inp = $('[data-music="lib-file"]'); if (inp) inp.click(); }
+    else if (act === "up-del") { if (confirm("Delete this uploaded song?")) { const r = await postJSON("/api/music/upload-delete", { path: t.dataset.path }); if (r.ok) { await load(); renderTab(); toast("Deleted."); } else toast(r.error || "Couldn't delete it."); } }
     else if (act === "save-dir") await saveDir($('[data-music="dir"]').value.trim());
     else if (act === "browse") openBrowse($('[data-music="dir"]').value.trim());
     else if (act === "b-open" || act === "b-short") openBrowse(t.dataset.path);
@@ -1737,6 +1778,7 @@
     else if (t.dataset.music === "dj-speak") { M.dj.speak = t.checked; saveDJ(); if (!t.checked) stopDJVoice(); }
     else if (t.dataset.music === "fw-toggle") { const r = await postJSON("/api/music/config", { forward_enabled: t.checked }); if (r.ok) { await load(); renderTab(); } }
     else if (t.dataset.music === "fw-source") { await postJSON("/api/music/config", { forward_source: t.value }); await load(); renderTab(); }
+    else if (t.dataset.music === "lib-file") { const files = t.files; t.value = ""; if (files && files.length) await uploadFiles(files); }
     else if (t.dataset.music === "nodrm") { M.hideDrm = t.checked; try { localStorage.setItem("ny-hidedrm", t.checked ? "1" : "0"); } catch (e) { /* ignore */ } }
   });
 
