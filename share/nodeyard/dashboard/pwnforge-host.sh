@@ -82,7 +82,7 @@ cmd_install() {
     say "step 1/7: checking what this machine has"
     need_packages
     if [[ ! -e /dev/kvm ]]; then
-        say "note: no /dev/kvm, so PwnForge runs its simulation driver (no real VMs) until KVM/libvirt are set up"
+        say "note: no /dev/kvm; real guests will use QEMU software emulation after real-machine setup (slower, never simulated)"
     fi
 
     say "step 2/7: service user"
@@ -155,7 +155,6 @@ cmd_virt() {
     check_args "$dir" "$data" "$host" "$port"
     [[ $(id -u) == 0 ]] || fail "needs root"
     [[ -x "$dir/.venv/bin/pwnforge" ]] || fail "PwnForge isn't installed in $dir: install it first"
-    [[ -e /dev/kvm ]] || fail "this machine has no /dev/kvm: turn on virtualisation (VT-x/AMD-V) in its firmware settings, or use a machine that has it"
     command -v apt-get >/dev/null 2>&1 || fail "real machines are set up here with apt (Debian, Ubuntu, Raspberry Pi OS); install QEMU and libvirt yourself, then run this again"
     arch="$(uname -m)"
     local pkgs=(qemu-utils libvirt-daemon-system libvirt-clients python3-libvirt)
@@ -194,7 +193,11 @@ cmd_virt() {
     write_dropin "$dir" "$data" "$host" "$port" || true
     systemctl daemon-reload
     systemctl try-restart "$UNIT_NAME" || true
-    say "real machines: on (the first start of each kind of machine prepares its image once, which takes a few minutes)"
+    if [[ -e /dev/kvm ]]; then
+        say "real machines: on (KVM accelerated; the first start of each kind of machine prepares its image once)"
+    else
+        say "real machines: on (QEMU TCG software emulation; real guests, slower without KVM)"
+    fi
     say "OK"
 }
 

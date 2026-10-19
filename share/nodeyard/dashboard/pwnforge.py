@@ -389,11 +389,17 @@ class PwnForge:
 
     # ---- the page ----------------------------------------------------------------------------------------------
     def virt_status(self):
-        """Whether PwnForge can boot real machines here: KVM, libvirt, and libvirt's Python binding in its venv."""
+        """Whether PwnForge can boot real machines, accelerated by KVM when it is available."""
         if self.demo:
-            return {"kvm": True, "libvirt": True, "binding": True, "ready": True}
+            return {"linux": True, "kvm": True, "libvirt": True, "binding": True,
+                    "qemu": True, "qemu_img": True, "ready": True}
+        linux = platform.system() == "Linux"
         kvm = os.path.exists("/dev/kvm")
         libvirt = bool(shutil.which("virsh")) or os.path.exists("/usr/sbin/libvirtd")
+        arch = platform.machine().lower()
+        qemu_name = "qemu-system-aarch64" if arch in ("aarch64", "arm64") else "qemu-system-x86_64"
+        qemu = bool(shutil.which(qemu_name))
+        qemu_img = bool(shutil.which("qemu-img"))
         venv = os.path.join(self.cfg["path"], ".venv", "lib")
         binding = False
         try:
@@ -402,7 +408,9 @@ class PwnForge:
                     binding = True
         except OSError:
             pass
-        return {"kvm": kvm, "libvirt": libvirt, "binding": binding, "ready": kvm and libvirt and binding}
+        return {"linux": linux, "kvm": kvm, "libvirt": libvirt, "binding": binding,
+                "qemu": qemu, "qemu_img": qemu_img,
+                "ready": linux and libvirt and binding and qemu and qemu_img}
 
     def view(self):
         problem = self.platform_problem()
