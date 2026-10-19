@@ -176,7 +176,7 @@ cmd_virt() {
     [[ -x "$dir/.venv/bin/pwnforge" ]] || fail "PwnForge isn't installed in $dir: install it first"
     command -v apt-get >/dev/null 2>&1 || fail "real machines are set up here with apt (Debian, Ubuntu, Raspberry Pi OS); install QEMU and libvirt yourself, then run this again"
     arch="$(uname -m)"
-    local pkgs=(qemu-utils libvirt-daemon-system libvirt-clients python3-libvirt)
+    local pkgs=(qemu-utils libvirt-daemon-system libvirt-clients python3-libvirt ipxe-qemu)
     local keys=()
     case "$arch" in
         aarch64 | arm64) pkgs+=(qemu-system-arm qemu-efi-aarch64); keys=(debian-13-base-arm64 alpine-base-arm64 ubuntu-2404-base-arm64) ;;
