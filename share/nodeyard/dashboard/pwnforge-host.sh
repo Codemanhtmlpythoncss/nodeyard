@@ -6,7 +6,7 @@
 #   pwnforge-host.sh configure DIR DATA HOST PORT        the address and port it listens on (a drop-in for the unit)
 #   pwnforge-host.sh virt      DIR DATA HOST PORT        real lab machines: KVM/libvirt, firmware, base images
 #   pwnforge-host.sh https     on|off PORT               an https:// address on the tailnet (Tailscale Serve)
-#   pwnforge-host.sh tailnet-access on|off [CIDR]        reach lab targets by IP from your tailnet (no VM egress)
+#   pwnforge-host.sh tailnet-access on|off|status [CIDR] reach lab targets by IP from LAN and tailnet (no VM egress)
 #
 # Safe to run again: it never touches the database's users, progress or machines, and it never downloads OS images.
 # The service runs as the unprivileged user "pwnforge" (in the libvirt and kvm groups when they exist), as PwnForge's
@@ -254,10 +254,9 @@ cmd_configure() {
     say "OK"
 }
 
-# Reach lab target VMs directly from the tailnet (so you can nmap/ssh them by IP), while the VMs stay unable to
-# reach the internet or each other's networks. Does three things: enables IPv4 forwarding, advertises the lab
-# supernet over Tailscale (you approve the route once in the admin console), and installs narrow firewall rules
-# that permit ONLY tailscale0 <-> lab-subnet forwarding. A boot unit re-applies the rules.
+# Reach lab target VMs directly from the LAN and tailnet (so you can nmap/ssh them by IP), while the VMs stay unable
+# to reach the internet or each other's networks. Enables forwarding, advertises the lab supernet over Tailscale
+# (you approve the route once in the admin console), and installs narrow firewall rules. A boot unit reapplies them.
 # Current advertised routes with $1 added (op=add) or removed (op=del), preserving everything else (the exit-node
 # default routes in particular). Prints a comma-separated list (possibly empty).
 ts_routes() {
@@ -275,6 +274,32 @@ print(",".join(cur))
 
 TAILNET_RULES=/usr/local/sbin/pwnforge-tailnet-rules.sh
 TAILNET_UNIT="$UNIT_DIR/pwnforge-tailnet.service"
+TAILNET_SYSCTL=/etc/sysctl.d/99-pwnforge-tailnet.conf
+TAILNET_STATE=/var/lib/pwnforge-tailnet
+
+private_lab_cidr() {
+    python3 - "$1" <<'PY'
+import ipaddress, sys
+try:
+    network = ipaddress.ip_network(sys.argv[1], strict=False)
+except ValueError:
+    raise SystemExit(1)
+if network.version != 4 or not network.is_private or network.prefixlen < 8 or network.prefixlen > 30:
+    raise SystemExit(1)
+print(network)
+PY
+}
+
+lan_interface() {
+    # The main-table default route remains the physical LAN even when Tailscale provides an exit node.
+    ip -4 route show default 2>/dev/null | awk '{for (i=1; i<NF; i++) if ($i=="dev" && $(i+1)!="tailscale0" && $(i+1)!="lo") {print $(i+1); exit}}'
+}
+
+lan_address() {
+    local iface="$1"
+    [[ -n "$iface" ]] || return 0
+    ip -4 -o addr show dev "$iface" scope global 2>/dev/null | awk 'NR==1 {sub(/\/.*/, "", $4); print $4}'
+}
 
 write_tailnet_rules() {
     local cidr="$1"
@@ -285,16 +310,17 @@ write_tailnet_rules() {
 set -e
 CIDR="$cidr"
 CH=PWNFORGE-TAILNET
-# the host's local-network interface (the one with the default route), so LAN devices can reach labs too
-LAN=\$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* dev \\([^ ]*\\).*/\\1/p' | head -1)
+# the host's local-network interface (main-table default route), so LAN devices can reach labs too
+LAN=\$(ip -4 route show default 2>/dev/null | awk '{for (i=1; i<NF; i++) if (\$i=="dev" && \$(i+1)!="tailscale0" && \$(i+1)!="lo") {print \$(i+1); exit}}')
 iptables -N \$CH 2>/dev/null || iptables -F \$CH
 iptables -A \$CH -i tailscale0 -d \$CIDR -j ACCEPT
-if [ -n "\$LAN" ] && [ "\$LAN" != tailscale0 ]; then iptables -A \$CH -i "\$LAN" -d \$CIDR -j ACCEPT; fi
+if [ -n "\$LAN" ]; then iptables -A \$CH -i "\$LAN" -d \$CIDR -j ACCEPT; fi
 iptables -A \$CH -s \$CIDR -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A \$CH -s \$CIDR -j DROP
+iptables -A \$CH -d \$CIDR -j DROP
 iptables -A \$CH -j RETURN
 # jump from FORWARD, first, exactly once
-iptables -C FORWARD -j \$CH 2>/dev/null && iptables -D FORWARD -j \$CH 2>/dev/null || true
+while iptables -C FORWARD -j \$CH 2>/dev/null; do iptables -D FORWARD -j \$CH; done
 iptables -I FORWARD 1 -j \$CH
 EOF
     chmod 0755 "$TAILNET_RULES"
@@ -310,29 +336,63 @@ clear_tailnet_rules() {
     systemctl daemon-reload || true
 }
 
+cmd_tailnet_status() {
+    local cidr="$1" iface lanip advertised=no firewall=no boot=no forwarding=no route_state
+    if [[ -r /proc/sys/net/ipv4/ip_forward ]] && [[ $(cat /proc/sys/net/ipv4/ip_forward) == 1 ]]; then forwarding=yes; fi
+    if iptables -C FORWARD -j PWNFORGE-TAILNET 2>/dev/null &&
+        iptables -C PWNFORGE-TAILNET -i tailscale0 -d "$cidr" -j ACCEPT 2>/dev/null &&
+        iptables -C PWNFORGE-TAILNET -s "$cidr" -j DROP 2>/dev/null; then firewall=yes; fi
+    if systemctl is-enabled --quiet pwnforge-tailnet.service 2>/dev/null; then boot=yes; fi
+    if command -v tailscale >/dev/null 2>&1; then
+        route_state="$(tailscale debug prefs 2>/dev/null | CIDR="$cidr" python3 -c 'import json,os,sys; print("yes" if os.environ["CIDR"] in (json.load(sys.stdin).get("AdvertiseRoutes") or []) else "no")' 2>/dev/null || echo no)"
+        [[ "$route_state" == yes ]] && advertised=yes
+    fi
+    iface="$(lan_interface)"
+    lanip="$(lan_address "$iface")"
+    [[ -n "$iface" ]] || iface=unavailable
+    [[ -n "$lanip" ]] || lanip=unavailable
+    local macos_command="unavailable"
+    if [[ "$lanip" != unavailable ]]; then macos_command="sudo ./pwnforge-lab-access-macos.sh install $cidr $lanip"; fi
+    printf 'cidr=%s\nipv4_forwarding=%s\nfirewall=%s\nboot_persistence=%s\ntailnet_route_advertised=%s\nlan_interface=%s\nlan_address=%s\nmacos_command=%s\n' \
+        "$cidr" "$forwarding" "$firewall" "$boot" "$advertised" "$iface" "$lanip" "$macos_command"
+}
+
 cmd_tailnet_access() {
-    local action="$1" cidr="${2:-10.200.0.0/16}"
+    local action="$1" cidr="${2:-}"
+    [[ -n "$cidr" ]] || cidr="10.200.0.0/16"
     [[ $(id -u) == 0 ]] || fail "needs root"
-    case "$action" in on|off) ;; *) fail "say on or off" ;; esac
-    [[ "$cidr" =~ ^10\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ || "$cidr" =~ ^172\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ || "$cidr" =~ ^192\.168\.[0-9]+\.[0-9]+/[0-9]+$ ]] \
-        || fail "lab subnet must be a private CIDR (e.g. 10.200.0.0/16)"
-    command -v tailscale >/dev/null 2>&1 || fail "Tailscale isn't installed on this machine"
+    case "$action" in on|off|status) ;; *) fail "say on, off or status" ;; esac
+    cidr="$(private_lab_cidr "$cidr")" || fail "lab subnet must be a valid private IPv4 CIDR (e.g. 10.200.0.0/16)"
+    if [[ "$action" == status ]]; then cmd_tailnet_status "$cidr"; return 0; fi
     command -v iptables >/dev/null 2>&1 || fail "iptables isn't available on this machine"
+    [[ "$action" != on ]] || command -v tailscale >/dev/null 2>&1 || fail "Tailscale isn't installed on this machine"
 
     if [[ "$action" == off ]]; then
         clear_tailnet_rules
-        local routes; routes="$(ts_routes del "$cidr")"
-        timeout 20 tailscale set --advertise-routes="$routes" >/dev/null 2>&1 || true
-        say "tailnet access to lab targets: off (other advertised routes kept)"
+        if command -v tailscale >/dev/null 2>&1; then
+            local routes; routes="$(ts_routes del "$cidr")"
+            timeout 20 tailscale set --advertise-routes="$routes" >/dev/null 2>&1 || fail "firewall is disabled, but Tailscale route withdrawal failed; remove $cidr from the device's advertised routes"
+        else
+            say "warning: Tailscale isn't installed, so remove the stale $cidr route from the admin console if it is still listed"
+        fi
+        if [[ -r "$TAILNET_STATE/forwarding.previous" ]]; then
+            local previous; previous="$(cat "$TAILNET_STATE/forwarding.previous")"
+            if [[ -w /proc/sys/net/ipv4/ip_forward ]]; then echo "$previous" > /proc/sys/net/ipv4/ip_forward; fi
+        fi
+        rm -f "$TAILNET_SYSCTL"
+        rm -rf "$TAILNET_STATE"
+        say "lab access disabled"
         say "OK"
         return 0
     fi
 
     say "step 1/4: IPv4 forwarding"
+    install -d -m 0755 "$TAILNET_STATE"
+    if [[ ! -e "$TAILNET_STATE/forwarding.previous" ]]; then cat /proc/sys/net/ipv4/ip_forward > "$TAILNET_STATE/forwarding.previous"; fi
     echo 1 > /proc/sys/net/ipv4/ip_forward
-    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-pwnforge-tailnet.conf
+    echo "net.ipv4.ip_forward=1" > "$TAILNET_SYSCTL"
 
-    say "step 2/4: firewall (tailnet <-> $cidr only; no VM egress)"
+    say "step 2/4: firewall (tailnet and LAN to $cidr; no VM egress)"
     write_tailnet_rules "$cidr"
     sh "$TAILNET_RULES"
 
@@ -350,17 +410,22 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-    systemctl enable --now pwnforge-tailnet.service >/dev/null 2>&1 || true
+    systemctl enable --now pwnforge-tailnet.service >/dev/null 2>&1 || fail "couldn't enable the persistent lab firewall unit"
 
-    say "step 4/4: advertise the lab subnet over Tailscale (keeping your existing routes, e.g. the exit node)"
+    say "step 4/4: advertise the lab subnet over Tailscale (keeping other routes)"
     local routes; routes="$(ts_routes add "$cidr")"
     if ! timeout 30 tailscale set --advertise-routes="$routes" >/dev/null 2>&1; then
-        say "warning: couldn't advertise the route automatically; run: tailscale set --advertise-routes=$routes"
+        fail "firewall and forwarding are enabled, but Tailscale route advertisement failed; check tailscale status"
     fi
-    local lanip; lanip="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p' | head -1)"
+    local lanif lanip
+    lanif="$(lan_interface)"
+    lanip="$(lan_address "$lanif")"
+    [[ -n "$lanif" ]] || lanif=unavailable
+    [[ -n "$lanip" ]] || lanip='<this-host-LAN-IP>'
     say "lab access: on (tailnet + local network)."
-    say "  Tailnet: approve route $cidr at https://login.tailscale.com/admin/machines, then on your device: tailscale set --accept-routes"
-    say "  Local network: on each device add a route to $cidr via this host, e.g. (macOS/Linux):  sudo ip route add $cidr via ${lanip:-<this-host-LAN-IP>}"
+    say "  Tailnet: approve route $cidr at https://login.tailscale.com/admin/machines; client devices must accept subnet routes."
+    say "  Local network: install the downloadable macOS route helper and use $lanip as the gateway."
+    say "  LAN interface: $lanif; check with: pwnforge-host.sh tailnet-access status $cidr"
     say "  Then reach a lab target by its IP (ssh/nmap)."
     say "OK"
 }
@@ -370,6 +435,6 @@ case "${1:-}" in
     configure) shift; (( $# == 4 )) || fail "usage: configure DIR DATA HOST PORT"; cmd_configure "$@" ;;
     virt) shift; (( $# == 4 )) || fail "usage: virt DIR DATA HOST PORT"; cmd_virt "$@" ;;
     https) shift; (( $# == 2 )) || fail "usage: https on|off PORT"; cmd_https "$@" ;;
-    tailnet-access) shift; (( $# >= 1 && $# <= 2 )) || fail "usage: tailnet-access on|off [CIDR]"; cmd_tailnet_access "$@" ;;
+    tailnet-access) shift; (( $# >= 1 && $# <= 2 )) || fail "usage: tailnet-access on|off|status [CIDR]"; cmd_tailnet_access "$@" ;;
     *) fail "usage: $0 install|configure|virt|https|tailnet-access ..." ;;
 esac
