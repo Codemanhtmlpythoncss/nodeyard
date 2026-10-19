@@ -25,7 +25,7 @@
   const M = {
     data: null, tab: "home", homeHistory: [], homeHistoryReady: false, homeHistoryError: false, homeSessionHeard: new Set(), homeRecs: [], homeUnheard: [],
     queue: [], idx: -1, live: false, seekable: true, shuffle: false, shuffleOrder: null, shufflePos: 0, repeat: "off", rate: 1, eq: "flat",
-    scResults: [], playlistResults: [], searchQuery: "", searchError: "", scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null,
+    scResults: [], playlistResults: [], searchQuery: "", searchError: "", scSet: null, scLikes: [], playlists: [], openPl: null, addTrack: null, uploadMessage: "",
     discoverTracks: [], discoverIndex: 0, discoverSeeded: false, discoverMoreBusy: false, discoverMoreRetry: 0, discoverWantNext: false, discoverPointerY: null, discoverWheelAt: 0,
     disc: { tracks: [], updated: 0, building: false, error: "", seeds: [], loaded: false, polls: 0, timer: 0 },   // new songs found for you
     dj: readDJState(),
@@ -1361,7 +1361,7 @@
         <button class="btn small" data-music="lib-upload">⬆ Upload songs</button>
         ${shown.length ? raw('<button class="btn small primary" data-music="lib-play">▶ Play all</button>') : ""}</div>
       ${raw('<input type="file" data-music="lib-file" accept="audio/*,.mp3,.m4a,.flac,.ogg,.opus,.wav,.aac" multiple style="display:none">')}
-      <div data-music="up-progress" class="small faint mt" style="display:none" role="status" aria-live="polite"></div>
+      <div data-music="up-progress" class="small faint mt" style="${M.uploadMessage ? "" : "display:none"}" role="status" aria-live="polite">${M.uploadMessage}</div>
       <div class="small faint mt">Choose files above or drag audio files into this panel.</div>
       ${uploads.length ? html`<div class="mt"><div class="small faint">Your uploads (${uploads.length}) — tap ✕ to remove</div>
         <div class="row wrap mt" style="gap:6px">${uploads.map((t) => html`<span class="tag" style="display:inline-flex;align-items:center;gap:6px">${t.name}
@@ -1379,32 +1379,63 @@
     let offset = 0; const total = file.size;
     if (!total) throw new Error(file.name + " is empty.");
     if (total > 80 * 1024 * 1024) throw new Error(file.name + " is too big (80 MB at most).");
-    do {
-      const slice = file.slice(offset, Math.min(offset + CH, total));
-      const buf = new Uint8Array(await slice.arrayBuffer());
-      let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
-      const done = offset + slice.size >= total;
-      const r = await postJSON("/api/music/upload", { id, ext, name: file.name, offset, data: btoa(bin), done });
-      if (!r || !r.ok) throw new Error((r && r.error) || "Upload failed.");
-      offset += slice.size;
-      if (onProgress) onProgress(offset, total);
-    } while (offset < total);
+    try {
+      do {
+        const slice = file.slice(offset, Math.min(offset + CH, total));
+        const buf = new Uint8Array(await slice.arrayBuffer());
+        let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+        const done = offset + slice.size >= total;
+        const r = await postJSON("/api/music/upload", { id, ext, name: file.name, offset, data: btoa(bin), done });
+        if (!r || !r.ok) throw new Error((r && r.error) || "Upload failed.");
+        offset += slice.size;
+        if (onProgress) onProgress(offset, total);
+      } while (offset < total);
+    } catch (e) {
+      // A failed later chunk must not leave an orphaned .part file on the server.
+      try { await postJSON("/api/music/upload-cancel", { id }); } catch (cleanupError) { /* stale parts are also pruned on the next upload */ }
+      throw e;
+    }
   }
 
   async function uploadFiles(files) {
-    const prog = $('[data-music="up-progress"]'); if (prog) prog.style.display = "";
-    let done = 0; const list = Array.from(files || []); const failed = [];
-    for (const f of list) {
-      try {
-        await uploadSong(f, (sent, total) => { if (prog) prog.textContent = "Uploading " + f.name + " — " + Math.round(sent / total * 100) + "% (" + (done + 1) + "/" + list.length + ")"; });
-        done++;
-      } catch (e) { failed.push(f.name); toast(e.message || ("Couldn't upload " + f.name)); }
+    const list = Array.from(files || []); if (!list.length) return;
+    M.uploadMessage = "Preparing uploads…";
+    const failed = [], progress = list.map(() => 0), active = new Map();
+    const totalBytes = list.reduce((sum, f) => sum + f.size, 0);
+    let done = 0, next = 0;
+    const paint = () => {
+      const current = Array.from(active.values());
+      const sent = progress.reduce((sum, bytes) => sum + bytes, 0);
+      const percent = totalBytes ? Math.min(100, Math.floor(sent / totalBytes * 100)) : 0;
+      const status = current.length ? "Uploading " + current.join(", ") : "Preparing uploads";
+      const message = status + " — " + percent + "% overall · " + done + "/" + list.length + " complete";
+      const node = $('[data-music="up-progress"]');
+      M.uploadMessage = message;
+      if (node) { node.style.display = ""; node.textContent = message; }
+    };
+    paint();
+    async function worker() {
+      while (next < list.length) {
+        const i = next++; const file = list[i]; active.set(i, file.name); paint();
+        try {
+          await uploadSong(file, (sent) => { progress[i] = sent; paint(); });
+          progress[i] = file.size; done++;
+        } catch (e) {
+          progress[i] = 0; failed.push({ name: file.name, error: e && e.message || "Upload failed." });
+        } finally { active.delete(i); paint(); }
+      }
     }
-    if (prog) prog.textContent = done
-      ? "Uploaded " + done + " song" + (done === 1 ? "" : "s") + (failed.length ? "; " + failed.length + " failed." : ".")
-      : "Nothing was uploaded.";
+    // Two workers overlap network waits while keeping browser memory and server write pressure bounded.
+    await Promise.all(Array.from({ length: Math.min(2, list.length) }, () => worker()));
+    const failedNames = failed.length ? " Failed: " + failed.slice(0, 3).map((item) => item.name).join(", ") + (failed.length > 3 ? "…" : "") : "";
+    const summary = (done
+      ? "Uploaded " + done + " of " + list.length + " song" + (list.length === 1 ? "" : "s") + (failed.length ? "; " + failed.length + " failed." : ".")
+      : "Nothing was uploaded. " + failed.length + " file" + (failed.length === 1 ? "" : "s") + " failed.") + failedNames;
+    M.uploadMessage = summary;
+    const node = $('[data-music="up-progress"]'); if (node) { node.style.display = ""; node.textContent = summary; }
     await load(); renderTab();
-    if (done) toast("Uploaded " + done + " song" + (done === 1 ? "" : "s") + (failed.length ? "; " + failed.length + " failed." : "."));
+    if (done) toast(summary);
+    else if (failed.length) toast(failed[0].error || summary);
   }
 
   function renderSettings(el) {
@@ -1451,9 +1482,10 @@
       '<h3>Add to playlist<span class="right"><button class="btn small" data-music="pk-cancel">Close</button></span></h3>' +
       '<div class="faint small" style="margin-bottom:8px">' + esc(titleOf(track)) + "</div>" +
       '<div class="row" style="gap:6px;margin-bottom:8px"><input class="input" id="pk-new" placeholder="New playlist name" style="flex:1"><button class="btn primary" data-music="pk-new">Create & add</button></div>' +
-      '<div style="overflow:auto;flex:1">' +
+      (M.playlists.length > 4 ? '<input class="input" data-music="pk-filter" placeholder="Filter playlists…" aria-label="Filter playlists" style="margin-bottom:6px">' : "") +
+      '<div style="overflow:auto;flex:1" data-pk-list>' +
       (M.playlists.length ? M.playlists.map((p) => '<button class="btn small" data-music="pk-add" data-id="' + esc(p.id) + '" style="display:block;width:100%;text-align:left;margin:3px 0">♪ ' + esc(p.name) + ' <span class="faint small">(' + p.count + ")</span></button>").join("") : '<div class="faint small">No playlists yet — make one above.</div>') +
-      "</div></div>";
+      '</div><div class="faint small" data-pk-empty hidden>No matching playlists.</div></div>';
   }
   const closeAddPicker = () => { const m = document.getElementById("pl-picker"); if (m) m.remove(); M.addTrack = null; };
   async function addToPlaylist(pid, track) {
@@ -1742,6 +1774,13 @@
 
   document.addEventListener("input", (e) => {
     if (e.target.matches('[data-music="lib-filter"]')) { M._libq = e.target.value; renderTab(); const inp = $('[data-music="lib-filter"]'); if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); } }
+    else if (e.target.matches('[data-music="pk-filter"]')) {
+      const q = e.target.value.trim().toLocaleLowerCase(); let shown = 0;
+      document.querySelectorAll("#pl-picker [data-music=pk-add]").forEach((button) => {
+        const match = button.textContent.toLocaleLowerCase().includes(q); button.hidden = !match; if (match) shown++;
+      });
+      const empty = document.querySelector("#pl-picker [data-pk-empty]"); if (empty) empty.hidden = shown > 0;
+    }
   });
   document.addEventListener("keydown", (e) => {
     if (S.view === "music" && M.tab === "discover" && (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) &&

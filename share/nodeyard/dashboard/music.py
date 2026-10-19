@@ -582,6 +582,21 @@ class Music:
         return {"ok": True, "path": UPLOAD_PREFIX + rel, "name": os.path.splitext(os.path.basename(final))[0],
                 "folder": "Uploads", "size": os.path.getsize(final)}
 
+    def cancel_upload(self, uid):
+        """Remove a partial upload after the browser reports a failed chunk."""
+        uid = str(uid or "")
+        if not UPLOAD_RE.match(uid):
+            raise MusicError("Bad upload.")
+        tmp = os.path.join(self.upload_dir(), ".part-" + uid)
+        with self.lock:
+            try:
+                os.remove(tmp)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                raise MusicError("Couldn't clean up the partial upload: %s" % e, 500)
+        return {"ok": True}
+
     def delete_upload(self, rel):
         """Delete one uploaded song (only a file inside music-uploads/)."""
         rel = str(rel or "")
@@ -1668,6 +1683,12 @@ def register(ctx, args):
         except MusicError as e:
             return h._json({"ok": False, "error": str(e)}, e.code)
 
+    def _upload_cancel(h, body):
+        try:
+            return h._json(music.cancel_upload(body.get("id")))
+        except MusicError as e:
+            return h._json({"ok": False, "error": str(e)}, e.code)
+
     def _sc_playlist(h, q):
         ok, msg, tracks = music.sc_playlist(q.get("url", [""])[0])
         return h._json({"ok": ok, "title": msg if ok else "", "error": "" if ok else msg, "tracks": tracks}, 200 if ok else 400)
@@ -1779,6 +1800,7 @@ def register(ctx, args):
                                 b.get("seeds") if isinstance(b.get("seeds"), list) else [], b.get("exclude") if isinstance(b.get("exclude"), list) else [])})})
     ctx.post_routes["/api/music/upload"] = _upload
     ctx.post_routes["/api/music/upload-delete"] = _upload_delete
+    ctx.post_routes["/api/music/upload-cancel"] = _upload_cancel
     ctx.post_limits["/api/music/upload"] = UPLOAD_BODY_MAX
 
 
