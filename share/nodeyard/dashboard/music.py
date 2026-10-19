@@ -1271,7 +1271,8 @@ class Music:
                "artist": str(track.get("artist") or "Unknown artist")[:200],
                "duration_ms": max(0, min(86_400_000, duration_ms)),
                "url": str(track["url"])[:1000],
-               "artwork_url": track.get("artwork_url") if self._soundcloud_art_url(track.get("artwork_url")) else ""}
+               "artwork_url": track.get("artwork_url") if self._soundcloud_art_url(track.get("artwork_url")) else "",
+               "added": int(time.time())}
         with self.lock:
             cfg = self.cfg()
             saved = cfg.get("sc_likes")
@@ -1294,12 +1295,19 @@ class Music:
         for row in rows[:500]:
             track = self._norm_track(row)
             if track and track.get("kind") == "local":
+                if row.get("added"):
+                    track["added"] = row["added"]
                 out.append(track)
         return out
 
     def likes(self):
-        """SoundCloud and local tracks shown together in the dashboard's Likes tab."""
-        return self.sc_likes() + self.local_likes()
+        """SoundCloud and local tracks together in the Likes tab, most recently liked first.
+
+        Likes carry an "added" timestamp; the sort is stable, so older likes saved before timestamps
+        existed keep their previous order (below anything liked since)."""
+        combined = self.sc_likes() + self.local_likes()
+        combined.sort(key=lambda t: t.get("added") or 0, reverse=True)
+        return combined
 
     def like(self, track, liked):
         """Save or remove a SoundCloud or local track like."""
@@ -1307,6 +1315,7 @@ class Music:
             normalized = self._norm_track({**track, "kind": "local"})
             if not normalized:
                 return False, "Choose a track from your music library.", self.likes()
+            normalized["added"] = int(time.time())
             with self.lock:
                 cfg = self.cfg()
                 saved = cfg.get("local_likes")
