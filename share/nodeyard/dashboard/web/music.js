@@ -1778,7 +1778,12 @@
     else if (t.dataset.music === "dj-speak") { M.dj.speak = t.checked; saveDJ(); if (!t.checked) stopDJVoice(); }
     else if (t.dataset.music === "fw-toggle") { const r = await postJSON("/api/music/config", { forward_enabled: t.checked }); if (r.ok) { await load(); renderTab(); } }
     else if (t.dataset.music === "fw-source") { await postJSON("/api/music/config", { forward_source: t.value }); await load(); renderTab(); }
-    else if (t.dataset.music === "lib-file") { const files = t.files; t.value = ""; if (files && files.length) await uploadFiles(files); }
+    else if (t.dataset.music === "lib-file") {
+      // Snapshot before clearing the input: clearing it can empty its FileList, and reset lets you pick the same song again.
+      const files = Array.from(t.files || []);
+      t.value = "";
+      if (files.length) await uploadFiles(files);
+    }
     else if (t.dataset.music === "nodrm") { M.hideDrm = t.checked; try { localStorage.setItem("ny-hidedrm", t.checked ? "1" : "0"); } catch (e) { /* ignore */ } }
   });
 
