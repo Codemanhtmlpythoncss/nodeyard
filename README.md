@@ -143,6 +143,38 @@ nodeyard --demo
 
 Read [getting started](docs/getting-started.md) for the full walk-through.
 
+## PwnForge lab access from a Mac or Linux client
+
+If PwnForge is hosted by Nodeyard, the host can route directly to its isolated
+lab subnet while keeping lab-to-internet and lab-to-lab forwarding blocked.
+First enable **Direct lab access** in the Nodeyard dashboard and approve the
+advertised subnet route in the Tailscale admin console. The client installer
+does not change the host or approve a Tailscale route.
+
+Install the small `pwnforge` command on macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Codemanhtmlpythoncss/nodeyard/tailnet-lab-access/share/nodeyard/dashboard/web/pwnforge-install-macos.sh | sh
+pwnforge install 10.200.0.0/16 192.168.1.123
+```
+
+Or install it on Linux with systemd and iproute2:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Codemanhtmlpythoncss/nodeyard/tailnet-lab-access/share/nodeyard/dashboard/web/pwnforge-install-linux.sh | sh
+pwnforge install 10.200.0.0/16 192.168.1.123
+```
+
+Replace the example subnet and LAN address with the values shown by the
+dashboard's routing status. The command installs a persistent LAN fallback;
+it leaves an active Tailscale subnet route in control. Linux clients may need
+to accept approved routes with `sudo tailscale set --accept-routes=true`.
+Useful commands are `pwnforge status`, `pwnforge test <lab-IP> 22`, and
+`pwnforge remove`. Removing the client helper leaves Tailscale settings alone.
+
+The same installers are available in the dashboard's **Direct lab access**
+card.
+
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
