@@ -1354,6 +1354,8 @@
     const tracks = (M.data || {}).tracks || [];
     const q = (M._libq || "").toLowerCase();
     const shown = q ? tracks.filter((t) => (t.name + " " + (t.folder || "")).toLowerCase().includes(q)) : tracks;
+    const CAP = 300;                         // only build this many rows; big libraries kill the DOM otherwise
+    const rows = shown.slice(0, CAP);
     const uploads = tracks.filter((t) => (t.folder || "") === "Uploads" || (t.folder || "").indexOf("Uploads") === 0);
     setHTML(el, html`<div class="card music-library-drop" data-music-library-drop>
       <div class="row" style="justify-content:space-between;align-items:center;gap:8px">
@@ -1368,7 +1370,8 @@
           ${raw('<button class="btn small" data-music="up-del" data-path="' + esc(t.path) + '" title="Delete" style="padding:0 6px;line-height:1.4">✕</button>')}</span>`)}</div></div>` : ""}
       ${!(M.data || {}).dir && !uploads.length ? html`<p class="small mt">No music folder set — pick one in <b>Settings</b>, or upload songs above.</p>` : ""}
       <div class="mt">${shown.length
-        ? shown.map((t) => trackRow(t, "lib:" + trackKey(t), likeBtn(t)))
+        ? html`${rows.map((t) => trackRow(t, "lib:" + trackKey(t), likeBtn(t)))}${shown.length > CAP
+            ? html`<div class="small faint mt" style="text-align:center">Showing ${CAP} of ${shown.length} — type in the filter to narrow, or press Play all to queue them all.</div>` : ""}`
         : html`<div class="empty">${(M.data || {}).dir || uploads.length ? "No matching files." : "Upload songs above, or set a music folder in Settings."}</div>`}</div></div>`);
   }
 
