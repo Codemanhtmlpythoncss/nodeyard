@@ -763,10 +763,13 @@ def register(ctx, args):
                 h.wfile.write(piece)
 
     def update_all(h, body):
-        """Update nodeyard (dashboard + its deps), sc-pick, and the audio/download tools, then restart the dashboard.
+        """Update nodeyard (dashboard + its deps), sc-pick, the audio/download tools and PwnForge (when it's installed here),
+        then restart the dashboard.
         Runs outside the dashboard's sandbox via a detached systemd unit, like the other system-changing actions."""
         if getattr(args, "demo", False):
             return h._json({"ok": True, "message": "(demo) nothing was updated."})
+        pf = getattr(ctx, "pwnforge", None)
+        pf_step = pf.update_step() if pf is not None else ""   # "" unless PwnForge is installed on this machine
         # Everything the Music page needs, installed system-wide (/usr/local/bin) so the dashboard finds it whatever
         # user it runs as: the SoundCloud search helper (soundcloud-cli, built with Go — same as sc-pick's first run),
         # the arch-correct yt-dlp binary (streaming + playlists), ffmpeg (transcode) and PulseAudio (forwarding).
@@ -782,6 +785,7 @@ def register(ctx, args):
             "curl -fsSL \"https://github.com/yt-dlp/yt-dlp/releases/latest/download/$F\" -o /usr/local/bin/yt-dlp && chmod +x /usr/local/bin/yt-dlp; "
             "echo '== SoundCloud search helper =='; "
             "if command -v go >/dev/null 2>&1; then GOBIN=/usr/local/bin GOFLAGS=-mod=mod GOPATH=/root/go HOME=/root go install github.com/tamnd/soundcloud-cli/cmd/soundcloud@latest || echo 'soundcloud-cli build failed'; fi; "
+            + pf_step +
             "echo '== restart =='; nodeyard dashboard start --yes; echo '== done =='"
         )
         try:
@@ -789,7 +793,7 @@ def register(ctx, args):
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         except OSError as e:
             return h._json({"ok": False, "error": "Couldn't start the update: %s" % e}, 500)
-        return h._json({"ok": True, "message": "Update started — nodeyard, sc-pick, the SoundCloud search helper, yt-dlp, ffmpeg and PulseAudio. Building the search helper with Go can take a few minutes. The dashboard restarts when done. Watch it in Terminal: journalctl -u nodeyard-update -f"})
+        return h._json({"ok": True, "message": "Update started — nodeyard, sc-pick, the SoundCloud search helper, yt-dlp, ffmpeg and PulseAudio" + (", PwnForge" if pf_step else "") + ". Building the search helper with Go can take a few minutes. The dashboard restarts when done. Watch it in Terminal: journalctl -u nodeyard-update -f"})
 
     ctx.get_routes.update({
         "/api/settings": wrap(lambda h, q: s.view(h._token())),
