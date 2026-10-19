@@ -280,15 +280,18 @@ write_tailnet_rules() {
     local cidr="$1"
     cat > "$TAILNET_RULES" <<EOF
 #!/bin/sh
-# Written by the nodeyard dashboard (PwnForge tailnet access). Allows your tailnet to reach lab targets in $cidr,
-# and nothing else; lab VMs cannot start connections out (no internet, no other labs). Idempotent.
+# Written by the nodeyard dashboard (PwnForge lab access). Lets your tailnet AND the host's local network reach lab
+# targets in $cidr, and nothing else; lab VMs cannot start connections out (no internet, no other labs). Idempotent.
 set -e
 CIDR="$cidr"
 CH=PWNFORGE-TAILNET
+# the host's local-network interface (the one with the default route), so LAN devices can reach labs too
+LAN=\$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* dev \\([^ ]*\\).*/\\1/p' | head -1)
 iptables -N \$CH 2>/dev/null || iptables -F \$CH
 iptables -A \$CH -i tailscale0 -d \$CIDR -j ACCEPT
-iptables -A \$CH -s \$CIDR -o tailscale0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A \$CH -s \$CIDR ! -o tailscale0 -j DROP
+if [ -n "\$LAN" ] && [ "\$LAN" != tailscale0 ]; then iptables -A \$CH -i "\$LAN" -d \$CIDR -j ACCEPT; fi
+iptables -A \$CH -s \$CIDR -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A \$CH -s \$CIDR -j DROP
 iptables -A \$CH -j RETURN
 # jump from FORWARD, first, exactly once
 iptables -C FORWARD -j \$CH 2>/dev/null && iptables -D FORWARD -j \$CH 2>/dev/null || true
@@ -354,8 +357,11 @@ EOF
     if ! timeout 30 tailscale set --advertise-routes="$routes" >/dev/null 2>&1; then
         say "warning: couldn't advertise the route automatically; run: tailscale set --advertise-routes=$routes"
     fi
-    say "tailnet access: on. APPROVE the route $cidr for this machine at https://login.tailscale.com/admin/machines"
-    say "then on your device: tailscale up --accept-routes, and you can reach a lab target by its IP (ssh/nmap)."
+    local lanip; lanip="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p' | head -1)"
+    say "lab access: on (tailnet + local network)."
+    say "  Tailnet: approve route $cidr at https://login.tailscale.com/admin/machines, then on your device: tailscale set --accept-routes"
+    say "  Local network: on each device add a route to $cidr via this host, e.g. (macOS/Linux):  sudo ip route add $cidr via ${lanip:-<this-host-LAN-IP>}"
+    say "  Then reach a lab target by its IP (ssh/nmap)."
     say "OK"
 }
 
