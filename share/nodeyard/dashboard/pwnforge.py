@@ -16,11 +16,12 @@ outside access, and changes neither.
 
   GET  /api/pwnforge          status, settings, health, environments
   GET  /api/pwnforge/logs     the service's recent log (and the last install's), secrets hidden
-  POST /api/pwnforge/action   {action: start|stop|restart|enable|disable|hosting-on|hosting-off|install|doctor}
+  POST /api/pwnforge/action   {action: start|stop|restart|enable|disable|hosting-on|hosting-off|install|doctor|lab-access-on|lab-access-off|lab-access-status}
   POST /api/pwnforge/config   {bind: local|tailnet|lan, port, confirm_lan}
   POST /api/pwnforge/env      {action: start|stop|delete, kind: vm|lab, id} or {action: cleanup, apply}
 """
 import json
+import ipaddress
 import os
 import platform
 import re
@@ -546,6 +547,25 @@ class PwnForge:
             return {"started": True}
         if not self.installed():
             raise PFError("PwnForge isn't installed yet: press Install first.", 409)
+        if a in ("lab-access-on", "lab-access-off", "lab-access-status"):
+            try:
+                network = ipaddress.ip_network(str(body.get("cidr") or "10.200.0.0/16"), strict=True)
+            except ValueError:
+                raise PFError("Enter a canonical private IPv4 network, such as 10.200.0.0/16.")
+            if network.version != 4 or not network.is_private or not 8 <= network.prefixlen <= 30:
+                raise PFError("Lab access only accepts private IPv4 networks with a prefix from /8 through /30.")
+            cidr = str(network)
+            if a == "lab-access-status":
+                if self.demo:
+                    return {"output": "cidr=%s\nipv4_forwarding=no\nfirewall=no\nboot_persistence=no\ntailnet_route_advertised=no\nlan_interface=demo\nlan_address=demo" % cidr, "exit": 0}
+                rc, out, err = self._root(["/bin/bash", HOST_SCRIPT, "tailnet-access", "status", cidr], 20)
+                return {"output": redact((out + ("\n" + err if err.strip() else "")).strip()), "exit": rc}
+            if self.demo:
+                return {}
+            operation = "on" if a == "lab-access-on" else "off"
+            self.start_job("lab IP access " + operation,
+                           ["/bin/bash", HOST_SCRIPT, "tailnet-access", operation, cidr])
+            return {"started": True}
         if a in ("start", "stop", "restart"):
             self._systemctl(a)
         elif a in ("enable", "disable"):
