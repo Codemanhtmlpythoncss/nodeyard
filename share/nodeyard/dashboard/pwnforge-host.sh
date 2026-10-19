@@ -351,10 +351,10 @@ cmd_tailnet_status() {
     lanip="$(lan_address "$iface")"
     [[ -n "$iface" ]] || iface=unavailable
     [[ -n "$lanip" ]] || lanip=unavailable
-    local macos_command="unavailable"
-    if [[ "$lanip" != unavailable ]]; then macos_command="sudo ./pwnforge-lab-access-macos.sh install $cidr $lanip"; fi
-    printf 'cidr=%s\nipv4_forwarding=%s\nfirewall=%s\nboot_persistence=%s\ntailnet_route_advertised=%s\nlan_interface=%s\nlan_address=%s\nmacos_command=%s\n' \
-        "$cidr" "$forwarding" "$firewall" "$boot" "$advertised" "$iface" "$lanip" "$macos_command"
+    local client_command="unavailable"
+    if [[ "$lanip" != unavailable ]]; then client_command="pwnforge install $cidr $lanip"; fi
+    printf 'cidr=%s\nipv4_forwarding=%s\nfirewall=%s\nboot_persistence=%s\ntailnet_route_advertised=%s\nlan_interface=%s\nlan_address=%s\nclient_command=%s\n' \
+        "$cidr" "$forwarding" "$firewall" "$boot" "$advertised" "$iface" "$lanip" "$client_command"
 }
 
 cmd_tailnet_access() {

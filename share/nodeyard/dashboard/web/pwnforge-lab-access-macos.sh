@@ -1,10 +1,11 @@
 #!/bin/bash
 # Persistent direct access from a Mac to PwnForge's private lab subnet.
-# Usage:
-#   bash ./pwnforge-lab-access-macos.sh install 10.200.0.0/16 192.168.1.123
-#   bash ./pwnforge-lab-access-macos.sh status
-#   bash ./pwnforge-lab-access-macos.sh remove
-#   bash ./pwnforge-lab-access-macos.sh test 10.200.0.20 22
+# Install this file as `pwnforge` with pwnforge-install-macos.sh, then use:
+#   pwnforge install 10.200.0.0/16 192.168.1.123
+#   pwnforge status
+#   pwnforge remove
+#   pwnforge test 10.200.0.20 22
+# PWNFORGE_LAB_ACCESS_CLI=macOS
 #
 # macOS accepts approved Tailscale subnet routes automatically. This helper adds a
 # launchd-managed LAN route when the Mac is on the same LAN, and yields to a route
@@ -26,7 +27,7 @@ PwnForge macOS lab route helper
   test <target-IP> [port]             Test a TCP port (default: 22)
 
 Example:
-  bash ./pwnforge-lab-access-macos.sh install 10.200.0.0/16 192.168.1.123
+  pwnforge install 10.200.0.0/16 192.168.1.123
 
 Approved Tailscale subnet routes are picked up automatically by macOS.
 USAGE
@@ -61,6 +62,23 @@ route_field() {
   awk -F': *' -v key="$1" '$1 ~ key {print $2; exit}'
 }
 
+ipv4_to_int() {
+  awk -F. 'NF != 4 {exit 1} {n=0; for (i=1;i<=4;i++) {if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1; n=n*256+$i} printf "%.0f", n}' <<< "$1"
+}
+
+same_lan() {
+  local iface="$1" info local_ip mask mask_hex local_num gateway_num mask_num
+  info="$(/sbin/ifconfig "$iface" 2>/dev/null || true)"
+  local_ip="$(awk '/inet / && $2 != "127.0.0.1" {print $2; exit}' <<< "$info")"
+  mask="$(awk '/inet / {for (i=1; i<=NF; i++) if ($i=="netmask") {print $(i+1); exit}}' <<< "$info")"
+  [[ -n "$local_ip" && "$mask" == 0x* ]] || return 1
+  mask_hex="${mask#0x}"
+  local_num="$(ipv4_to_int "$local_ip")" || return 1
+  gateway_num="$(ipv4_to_int "$GATEWAY")" || return 1
+  mask_num=$((16#$mask_hex))
+  (( (local_num & mask_num) == (gateway_num & mask_num) ))
+}
+
 install_helper() {
   local cidr="$1" gateway="$2"
   valid_private_cidr "$cidr" || { echo "Use a canonical private IPv4 network, such as 10.200.0.0/16." >&2; exit 2; }
@@ -70,7 +88,9 @@ install_helper() {
   install -d -o root -g wheel -m 0755 /usr/local/libexec "$(/usr/bin/dirname "$CONFIG")"
   printf 'CIDR=%s\nGATEWAY=%s\n' "$cidr" "$gateway" > "$CONFIG.tmp"
   chown root:wheel "$CONFIG.tmp"
-  chmod 0600 "$CONFIG.tmp"
+  # The config contains only a private CIDR and the host's LAN address; status
+  # should work as the regular user, while the root-owned directory protects it.
+  chmod 0644 "$CONFIG.tmp"
   mv -f "$CONFIG.tmp" "$CONFIG"
 
   cat > "$WORKER" <<'WORKER_EOF'
@@ -95,7 +115,7 @@ host_info="$(/sbin/route -n get -inet "$GATEWAY" 2>/dev/null || true)"
 host_iface="$(route_field interface <<< "$host_info")"
 
 if [[ "$route_gateway" == "$GATEWAY" ]]; then
-  if [[ "$host_iface" == "$default_iface" ]] && /usr/sbin/arp -n "$GATEWAY" 2>/dev/null | /usr/bin/grep -Eq ' at [[:xdigit:]]{1,2}(:[[:xdigit:]]{1,2}){5} '; then exit 0; fi
+  if [[ "$host_iface" == "$default_iface" ]] && same_lan "$default_iface" && /usr/sbin/arp -n "$GATEWAY" 2>/dev/null | /usr/bin/grep -Eq ' at [[:xdigit:]]{1,2}(:[[:xdigit:]]{1,2}){5} '; then exit 0; fi
   # The Mac left that LAN; remove only our own stale route so an approved utun route can take over.
   /sbin/route -n delete -inet -net "$CIDR" "$GATEWAY" >/dev/null 2>&1 || true
   exit 0
@@ -103,7 +123,7 @@ fi
 
 # Don't replace another specific route or try to install a LAN route while away from that LAN.
 if [[ -n "$route_gateway" && "$route_gateway" != "$default_gateway" ]]; then exit 0; fi
-if [[ -z "$default_iface" || "$host_iface" != "$default_iface" ]]; then exit 0; fi
+if [[ -z "$default_iface" || "$host_iface" != "$default_iface" ]] || ! same_lan "$default_iface"; then exit 0; fi
 if ! /usr/sbin/arp -n "$GATEWAY" 2>/dev/null | /usr/bin/grep -Eq ' at [[:xdigit:]]{1,2}(:[[:xdigit:]]{1,2}){5} '; then exit 0; fi
 /sbin/route -n add -inet -net "$CIDR" "$GATEWAY" >/dev/null 2>&1 || true
 WORKER_EOF

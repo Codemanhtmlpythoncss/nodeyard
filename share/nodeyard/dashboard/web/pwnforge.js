@@ -92,9 +92,10 @@
         <button class="btn small" data-pf="lab-access-status">Check routing</button>
         <button class="btn small primary" data-pf="lab-access-on">Enable direct access</button>
         <button class="btn small" data-pf="lab-access-off">Disable direct access</button>
-        <a class="btn small" href="/pwnforge-lab-access-macos.sh" download="pwnforge-lab-access-macos.sh">Download macOS setup</a>
+        <a class="btn small" href="/pwnforge-install-macos.sh" download="pwnforge-install-macos.sh">Install macOS CLI</a>
+        <a class="btn small" href="/pwnforge-install-linux.sh" download="pwnforge-install-linux.sh">Install Linux CLI</a>
       </div>
-      <div class="muted small mt">On a Mac, macOS accepts approved Tailscale subnet routes automatically. The downloadable helper installs a reversible launchd LAN route for use when Tailscale is disconnected and this Mac is on the server's LAN.</div>`);
+      <div class="muted small mt">The installer adds a <span class="mono">pwnforge</span> command. Run <span class="mono">pwnforge install 10.200.0.0/16 &lt;server-LAN-IP&gt;</span> once; then use <span class="mono">pwnforge status</span> or <span class="mono">pwnforge test &lt;lab-IP&gt; 22</span>. macOS and Linux use a persistent LAN fallback and leave approved Tailscale routes in control.</div>`);
   }
 
   function envCard(d) {
