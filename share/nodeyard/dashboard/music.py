@@ -17,6 +17,7 @@ import concurrent.futures
 import glob
 import hashlib
 import json
+import base64
 import os
 import pwd
 import re
@@ -40,6 +41,12 @@ DISCOVER_TTL = 6 * 3600       # new picks are looked for again after this (soone
 DISCOVER_KEEP = 40
 MAX_DISLIKES = 300
 DOWNLOAD_PREFIX = "__nodeyard_downloads__/"
+UPLOAD_PREFIX = "__nodeyard_uploads__/"
+UPLOAD_RE = re.compile(r"^[0-9a-f]{6,32}$")
+UPLOAD_CHUNK_MAX = 3 * 1024 * 1024        # one piece of an upload
+UPLOAD_FILE_MAX = 80 * 1024 * 1024        # one song
+UPLOAD_LIB_MAX = 4 * 1024 * 1024 * 1024   # all uploaded songs together
+UPLOAD_BODY_MAX = UPLOAD_CHUNK_MAX * 4 // 3 + 64 * 1024   # a chunk, as base64 JSON
 EQ_MODES = {"flat", "bass", "treble", "rock", "electronic", "vocal", "classical"}
 _live_slots = threading.BoundedSemaphore(2)
 _sc_slots = threading.BoundedSemaphore(3)
@@ -129,6 +136,12 @@ echo '== done =='
 """
 
 
+class MusicError(Exception):
+    def __init__(self, message, code=400):
+        super().__init__(message)
+        self.code = code
+
+
 class Music:
     def __init__(self, state_dir, demo=False, terminal_user=""):
         self.path = os.path.join(state_dir or "/var/lib/nodeyard/dashboard", "music.json")
@@ -152,6 +165,9 @@ class Music:
 
     def download_dir(self):
         return os.path.join(os.path.dirname(self.path), "music-downloads")
+
+    def upload_dir(self):
+        return os.path.join(os.path.dirname(self.path), "music-uploads")
 
     def cache_limit(self):
         try:
@@ -418,7 +434,7 @@ class Music:
         """The library's audio files. Walking a big folder tree takes a while, and the Music page, the DJ, the AI and the
         recommender all ask: the list is kept for 30 s, or until the folder (or the downloads folder) changes."""
         base = self._base()
-        roots = [x for x in (base, self.download_dir()) if x]
+        roots = [x for x in (base, self.download_dir(), self.upload_dir()) if x]
         try:
             key = (base, tuple(os.stat(x).st_mtime_ns if os.path.isdir(x) else 0 for x in roots))
         except OSError:
@@ -437,6 +453,9 @@ class Music:
         downloaded = self.download_dir()
         if os.path.isdir(downloaded):
             roots.append((downloaded, DOWNLOAD_PREFIX))
+        uploaded = self.upload_dir()
+        if os.path.isdir(uploaded):
+            roots.append((uploaded, UPLOAD_PREFIX))
         for library, prefix in roots:
             for root, dirs, files in os.walk(library):
                 depth = root[len(library):].count(os.sep)
@@ -456,7 +475,8 @@ class Music:
                         continue
                     folder = os.path.dirname(rel)
                     if prefix:
-                        folder = os.path.join("Downloads", folder) if folder else "Downloads"
+                        top = "Uploads" if prefix == UPLOAD_PREFIX else "Downloads"
+                        folder = os.path.join(top, folder) if folder else top
                     out.append({"path": prefix + rel, "name": os.path.splitext(name)[0], "folder": folder, "size": size})
                     if len(out) >= MAX_TRACKS:
                         return out
@@ -469,14 +489,114 @@ class Music:
         if rel.startswith(DOWNLOAD_PREFIX):
             base = self.download_dir()
             rel = rel[len(DOWNLOAD_PREFIX):]
+        elif rel.startswith(UPLOAD_PREFIX):
+            base = self.upload_dir()
+            rel = rel[len(UPLOAD_PREFIX):]
         if not base or not rel or ".." in rel.split("/"):
             return None
+        base = os.path.realpath(base)
         full = os.path.realpath(os.path.join(base, rel.lstrip("/")))
         if full != base and not full.startswith(base + os.sep):
             return None
         if os.path.splitext(full)[1].lower() not in AUDIO_EXT or not os.path.isfile(full):
             return None
         return full
+
+    # -- uploading your own songs --------------------------------------------
+
+    @staticmethod
+    def _safe_name(name, ext):
+        """A filename of the user's title plus the real extension, with nothing that could escape the folder."""
+        stem = re.sub(r"[^A-Za-z0-9 ._()\-]", "_", os.path.basename(str(name or ""))).strip(" ._") or "track"
+        stem = re.sub(r"\s+", " ", stem)[:120]
+        if stem.lower().endswith(ext):
+            stem = stem[:-len(ext)].strip(" ._") or "track"
+        return stem + ext
+
+    def upload(self, body):
+        """One ordered piece of a song upload; the last one ("done") checks it and adds it to your library.
+
+        Chunks are base64 in JSON (the dashboard has no multipart parser), assembled into music-uploads/."""
+        uid = str(body.get("id", ""))
+        if not UPLOAD_RE.match(uid):
+            raise MusicError("Bad upload.")
+        ext = ("." + re.sub(r"[^a-z0-9]", "", str(body.get("ext", "")).lower().lstrip(".")))[:6]
+        if ext not in AUDIO_EXT:
+            raise MusicError("That isn't an audio file we can play (MP3, M4A, FLAC, OGG, Opus, WAV, AAC).")
+        try:
+            data = base64.b64decode(str(body.get("data", "")), validate=True)
+            offset = int(body.get("offset", 0))
+        except (ValueError, TypeError):
+            raise MusicError("Bad upload data.")
+        if len(data) > UPLOAD_CHUNK_MAX:
+            raise MusicError("Upload pieces are 3 MB at most.", 413)
+        up = self.upload_dir()
+        tmp = os.path.join(up, ".part-" + uid)
+        with self.lock:
+            os.makedirs(up, mode=0o755, exist_ok=True)
+            if offset == 0:
+                for n in os.listdir(up):   # forget pieces nobody finished
+                    f = os.path.join(up, n)
+                    if n.startswith(".part-") and time.time() - os.path.getmtime(f) > 3600:
+                        try:
+                            os.remove(f)
+                        except OSError:
+                            pass
+            size = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+            if offset != size:
+                raise MusicError("The upload got out of step. Try again.", 409)
+            if size + len(data) > UPLOAD_FILE_MAX:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise MusicError("That song is too big (80 MB at most).", 413)
+            with open(tmp, "ab") as f:
+                f.write(data)
+            size += len(data)
+            if not body.get("done"):
+                return {"received": size}
+            have = 0
+            for n in os.listdir(up):
+                if not n.startswith(".part-"):
+                    try:
+                        have += os.path.getsize(os.path.join(up, n))
+                    except OSError:
+                        pass
+            if have + size > UPLOAD_LIB_MAX:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise MusicError("Your uploaded songs are full (4 GB). Delete some first.", 413)
+            final = os.path.join(up, self._safe_name(body.get("name"), ext))
+            stem, e = os.path.splitext(final)
+            i = 2
+            while os.path.exists(final):
+                final = "%s (%d)%s" % (stem, i, e)
+                i += 1
+            os.replace(tmp, final)
+            os.chmod(final, 0o644)
+        self.reset()
+        rel = os.path.relpath(final, up)
+        return {"ok": True, "path": UPLOAD_PREFIX + rel, "name": os.path.splitext(os.path.basename(final))[0],
+                "folder": "Uploads", "size": os.path.getsize(final)}
+
+    def delete_upload(self, rel):
+        """Delete one uploaded song (only a file inside music-uploads/)."""
+        rel = str(rel or "")
+        if rel.startswith(UPLOAD_PREFIX):
+            rel = rel[len(UPLOAD_PREFIX):]
+        up = os.path.realpath(self.upload_dir())
+        if not rel or ".." in rel.split("/"):
+            raise MusicError("Unknown song.", 404)
+        full = os.path.realpath(os.path.join(up, rel.lstrip("/")))
+        if (full != up and not full.startswith(up + os.sep)) or not os.path.isfile(full):
+            raise MusicError("Unknown song.", 404)
+        with self.lock:
+            os.remove(full)
+        self.reset()
+        return {"ok": True}
 
     # -- audio forwarding ----------------------------------------------------
 
@@ -1497,6 +1617,20 @@ def register(ctx, args):
                         "redeploy (Settings → Update everything) so the dashboard connects to it, then play something on "
                         "the server and press Test capture. Watch: journalctl -u nodeyard-audio-setup -f"})
 
+    def _upload(h, body):
+        if demo:
+            return h._json({"ok": True, "received": 0, "demo": True})
+        try:
+            return h._json(dict({"ok": True}, **music.upload(body)))
+        except MusicError as e:
+            return h._json({"ok": False, "error": str(e)}, e.code)
+
+    def _upload_delete(h, body):
+        try:
+            return h._json(music.delete_upload(body.get("path")))
+        except MusicError as e:
+            return h._json({"ok": False, "error": str(e)}, e.code)
+
     def _sc_playlist(h, q):
         ok, msg, tracks = music.sc_playlist(q.get("url", [""])[0])
         return h._json({"ok": ok, "title": msg if ok else "", "error": "" if ok else msg, "tracks": tracks}, 200 if ok else 400)
@@ -1606,6 +1740,9 @@ def register(ctx, args):
                             "/api/music/dj-search": lambda h, b: h._json({"ok": True, "tracks": music.dj_search(b.get("text"), b.get("query"))}),
                             "/api/music/discover-more": lambda h, b: h._json({"ok": True, "tracks": music.discover_more(
                                 b.get("seeds") if isinstance(b.get("seeds"), list) else [], b.get("exclude") if isinstance(b.get("exclude"), list) else [])})})
+    ctx.post_routes["/api/music/upload"] = _upload
+    ctx.post_routes["/api/music/upload-delete"] = _upload_delete
+    ctx.post_limits["/api/music/upload"] = UPLOAD_BODY_MAX
 
 
 def _stream_bytes(h, data, ctype):
