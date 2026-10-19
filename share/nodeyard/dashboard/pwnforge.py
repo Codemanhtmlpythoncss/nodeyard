@@ -42,7 +42,9 @@ DROPIN = "/etc/systemd/system/pwnforge.service.d/nodeyard.conf"   # written by p
 JOB = "nodeyard-pwnforge-job"
 SVC_USER = "pwnforge"
 DEFAULTS = {"enabled": False, "path": "/opt/pwnforge", "data_dir": "/var/lib/pwnforge", "bind": "local", "port": 8080, "autostart": True}
-BINDS = {"local": "This machine only", "tailnet": "Your tailnet", "lan": "Every network this machine is on"}
+BINDS = {"local": "This machine only", "tailnet": "Your tailnet", "https": "Your tailnet, over HTTPS",
+         "lan": "Every network this machine is on"}
+SERVE_KEPT = (443, 8443, 10000)   # the dashboard's own https:// and its public access (Tailscale Funnel)
 PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]{1,200}$")
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 ENV_TTL = 15
@@ -73,6 +75,19 @@ def tailscale_ip():
     except (OSError, subprocess.SubprocessError):
         return ""
     return out[0] if out and re.match(r"^\d+\.\d+\.\d+\.\d+$", out[0]) else ""
+
+
+def tailscale_name():
+    """This machine's MagicDNS name (e.g. pi.example.ts.net), or "" without Tailscale or MagicDNS."""
+    ts = shutil.which("tailscale") or ("/usr/bin/tailscale" if os.path.exists("/usr/bin/tailscale") else "")
+    if not ts:
+        return ""
+    try:
+        out = subprocess.run([ts, "status", "--json", "--peers=false"], capture_output=True, text=True, timeout=4, check=False).stdout
+        name = str(((json.loads(out or "{}") or {}).get("Self") or {}).get("DNSName") or "").rstrip(".")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+    return name if re.match(r"^[A-Za-z0-9.-]+$", name) else ""
 
 
 def read_dropin(path=None):
@@ -238,7 +253,7 @@ class PwnForge:
                 "since": since if kv.get("ActiveState") == "active" else 0, "restarts": int(kv.get("NRestarts") or 0), "result": kv.get("Result", "")}
 
     def bind_host(self, bind):
-        if bind == "local":
+        if bind in ("local", "https"):     # (over HTTPS, Tailscale Serve is the only way in from elsewhere)
             return "127.0.0.1"
         if bind == "lan":
             return "0.0.0.0"
@@ -254,6 +269,9 @@ class PwnForge:
         if c["bind"] == "tailnet":
             ip = "100.64.0.1" if self.demo else tailscale_ip()
             return [{"url": "http://%s:%d/" % (ip, port), "note": "devices on your tailnet"}] if ip else []
+        if c["bind"] == "https":
+            name = "pi.example.ts.net" if self.demo else tailscale_name()
+            return [{"url": "https://%s:%d/" % (name, port), "note": "devices on your tailnet, over HTTPS"}] if name else []
         host = socket.gethostname()
         out = [{"url": "http://%s:%d/" % (host, port), "note": "every network this machine is on"}]
         ip = "" if self.demo else tailscale_ip()
@@ -370,6 +388,22 @@ class PwnForge:
             return None
 
     # ---- the page ----------------------------------------------------------------------------------------------
+    def virt_status(self):
+        """Whether PwnForge can boot real machines here: KVM, libvirt, and libvirt's Python binding in its venv."""
+        if self.demo:
+            return {"kvm": True, "libvirt": True, "binding": True, "ready": True}
+        kvm = os.path.exists("/dev/kvm")
+        libvirt = bool(shutil.which("virsh")) or os.path.exists("/usr/sbin/libvirtd")
+        venv = os.path.join(self.cfg["path"], ".venv", "lib")
+        binding = False
+        try:
+            for d in os.listdir(venv):
+                if os.path.exists(os.path.join(venv, d, "site-packages", "libvirt.py")):
+                    binding = True
+        except OSError:
+            pass
+        return {"kvm": kvm, "libvirt": libvirt, "binding": binding, "ready": kvm and libvirt and binding}
+
     def view(self):
         problem = self.platform_problem()
         out = {"config": dict(self.cfg), "binds": BINDS, "problem": problem, "demo": self.demo, "repo": REPO, "job": self.job_view()}
@@ -377,7 +411,7 @@ class PwnForge:
             return out
         inst = self.installed()
         u = self.unit()
-        out.update(installed=inst, unit=u, urls=self.urls())
+        out.update(installed=inst, unit=u, urls=self.urls(), virt=self.virt_status())
         if inst and u["active"] == "active":
             out["health"] = self.health()
         if inst:
@@ -465,6 +499,14 @@ class PwnForge:
             raise PFError("Couldn't set PwnForge's address: %s" % redact((out + err).strip().splitlines()[-1] if (out + err).strip() else "exit %d" % rc), 500)
         return out
 
+    def _https(self, action, port):
+        if self.demo:
+            return
+        rc, out, err = self._root(["/bin/bash", HOST_SCRIPT, "https", action, str(port)], 90)
+        if rc != 0:
+            last = (out + err).strip().splitlines()
+            raise PFError(redact(last[-1] if last else "exit %d" % rc).replace("pwnforge-host: FAILED: ", ""), 500)
+
     def update_step(self):
         """PwnForge's part of Settings → Update everything: a shell step for that root script (it runs after nodeyard
         itself is updated, so the newest pwnforge-host.sh does the work), or "" when PwnForge isn't installed here."""
@@ -511,6 +553,10 @@ class PwnForge:
                 self._save()
             self._systemctl("stop")
             self._systemctl("disable")
+        elif a == "virt":
+            c = self.cfg
+            self.start_job("real machines setup", ["/bin/bash", HOST_SCRIPT, "virt", c["path"], c["data_dir"], self.bind_host(c["bind"]), str(c["port"])])
+            return {"started": True}
         elif a == "doctor":
             if self.demo:
                 return {"output": "Host\n  driver: simulation\nCatalogue courses=89 profiles=1440\ndoctor: OK", "exit": 0}
@@ -523,7 +569,7 @@ class PwnForge:
     def set_config(self, body):
         bind = str(body.get("bind") or self.cfg["bind"])
         if bind not in BINDS:
-            raise PFError("Pick this machine only, your tailnet or every network.")
+            raise PFError("Pick this machine only, your tailnet (with or without HTTPS) or every network.")
         try:
             port = int(body.get("port", self.cfg["port"]))
         except (TypeError, ValueError):
@@ -545,6 +591,11 @@ class PwnForge:
             if not h.get("ok") or h.get("initialised") is not True:
                 raise PFError("Start PwnForge and create its administrator account first (on this machine or over the tailnet); "
                               "until then anyone on the network could claim it.", 409)
+        if bind == "https":
+            if port in SERVE_KEPT:
+                raise PFError("Port %d is kept for the dashboard's own https:// address and public access: pick another." % port)
+            if not self.demo and not tailscale_name():
+                raise PFError("HTTPS needs Tailscale with MagicDNS on this machine (https://login.tailscale.com/admin/dns).", 409)
         self.bind_host(bind)   # (the tailnet needs a Tailscale address)
         old = dict(self.cfg)
         with self.lock:
@@ -553,11 +604,22 @@ class PwnForge:
         if self.installed() and not self.platform_problem():
             try:
                 out = self._configure()
+                if bind == "https":
+                    self._https("on", port)
             except PFError:
                 with self.lock:
                     self.cfg = old
                     self._save()
+                try:
+                    self._configure()          # back to the address it had
+                except PFError:
+                    pass
                 raise
+            if old["bind"] == "https" and (bind != "https" or old["port"] != port):
+                try:
+                    self._https("off", old["port"])
+                except PFError:
+                    pass
             return {"applied": True, "output": out[-2000:]}
         return {"applied": False}
 

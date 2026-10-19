@@ -41,6 +41,11 @@
       if (u.active === "failed") lines.push(html`<div class="err mt small">The service failed (${u.result || "unknown"}). Its log says why: open Logs.</div>`);
       if (h && h.ok && h.initialised === false) lines.push(html`<div class="banner warn mt"><svg class="icon"><use href="#i-warn"/></svg><span>Open PwnForge now and create its <b>administrator account</b>: until you do, whoever opens it first could. Keep it on <b>This machine only</b> or <b>Your tailnet</b> until then.</span></div>`);
       if (u.active === "active" && (d.urls || []).length) lines.push(html`<div class="mt">${d.urls.map((x) => html`<div><a href="${x.url}" target="_blank" rel="noopener">${x.url}</a> <span class="muted small">${x.note}</span></div>`)}</div>`);
+      const v = d.virt || {};
+      lines.push(html`<div class="mt small row wrap" style="gap:6px">${v.ready ? chip("real machines", "good") : chip("simulated machines")}<span class="muted">${v.ready
+        ? "Labs boot real virtual machines (KVM). The first start of each kind of machine prepares its image once, which takes a few minutes."
+        : !v.kvm ? "This machine has no KVM (/dev/kvm), so labs run as simulations."
+        : "Labs run as simulations until real machines are set up here."}</span></div>`);
     } else {
       lines.push(html`<p class="muted" style="margin-top:0">PwnForge is a self-hosted cybersecurity training platform: courses, and practice machines on isolated virtual networks (KVM/libvirt, or a simulation driver without them).
         Install puts it in <span class="mono">${c.path}</span> with its data in <span class="mono">${c.data_dir}</span>, as its own service running as the unprivileged user <span class="mono">pwnforge</span>.
@@ -55,6 +60,8 @@
       else acts.push(btn("start", "Start"));
       acts.push(u.enabled ? btn("disable", "Don't start at boot") : btn("enable", "Start at boot"));
       acts.push(btn("logs", "Logs"), btn("doctor", "Diagnostics"), btn("install", "Update", "", "Gets the newest PwnForge and rebuilds it; your users, progress and machines are kept"));
+      const v = d.virt || {};
+      if (v.kvm && !v.ready) acts.push(btn("virt", job && job.running && job.what === "real machines setup" ? "Setting up…" : "Set up real machines", "primary", "Installs QEMU and libvirt so labs boot real virtual machines"));
     }
     return card("PwnForge", html`${lines}<div class="row wrap mt" style="gap:6px">${acts}</div>`, d.installed ? html`<span class="muted small">${u.active || ""}</span>` : "");
   }
@@ -69,6 +76,7 @@
     return card("Address", html`<div class="perm-grid">
         ${opt("local", "This machine only", "127.0.0.1. The safest: reach it from elsewhere with an SSH tunnel.")}
         ${opt("tailnet", "Your tailnet", "This machine's Tailscale address: only your own devices on Tailscale can open it.")}
+        ${opt("https", "Your tailnet, HTTPS", "The same, at an https:// address with a real certificate (Tailscale Serve). Needs MagicDNS and HTTPS certificates on for your tailnet.")}
         ${opt("lan", "Every network", "0.0.0.0: anyone on the networks this machine is on. Only once its administrator account exists. Never use this for a machine that's on the internet.")}
       </div>
       <div class="row wrap mt" style="gap:8px"><label class="row small" style="gap:6px">Port <input id="pf-port" type="number" min="1024" max="65535" value="${c.port}" style="width:100px"></label>
@@ -163,6 +171,12 @@
         if (!(await confirmDlg(upd ? "Update PwnForge?" : "Install PwnForge?", html`<p style="margin-top:0">${upd ? "Gets the newest PwnForge from" : "Downloads PwnForge from"} <span class="mono">${d.repo}</span> into <span class="mono">${d.config.path}</span>, installs its Python packages and builds its website, then installs its service (user <span class="mono">pwnforge</span>, data in <span class="mono">${d.config.data_dir}</span>).</p>
           <p class="muted small">If git, python3-venv, nodejs or npm are missing it installs them with apt. It never downloads OS images, and an update keeps your users, progress and machines. It takes a few minutes.</p>`, upd ? "Update" : "Install"))) return;
         PF.jobLog = ""; await post("/api/pwnforge/action", { action: "install" }, "install");
+      } else if (a === "virt") {
+        if (!(await confirmDlg("Set up real machines?", html`<p style="margin-top:0">Installs QEMU, libvirt and the firmware virtual machines need (with apt), lets PwnForge's user use libvirt, and downloads the Debian, Alpine and Ubuntu cloud images for this CPU (about 1 GB).</p>
+          <ul class="small"><li>Lab machines then boot for real, each on its own isolated virtual network; you log in with the username and password the lab page shows.</li>
+          <li>The first start of each kind of machine prepares its image once (installs its packages, which needs the internet), so it takes a few minutes. Later starts take seconds.</li>
+          <li>Windows labs can't run on an ARM machine such as a Raspberry Pi.</li></ul>`, "Set up"))) return;
+        PF.jobLog = ""; await post("/api/pwnforge/action", { action: "virt" }, a);
       } else if (a === "hosting-off") {
         if (!(await confirmDlg("Turn PwnForge hosting off?", html`<p style="margin-top:0">Stops PwnForge and stops it starting at boot. Running practice machines are managed by libvirt and keep running; stop them first below if you want them off too. Nothing is deleted.</p>`, "Turn off"))) return;
         await post("/api/pwnforge/action", { action: "hosting-off" }, a);
