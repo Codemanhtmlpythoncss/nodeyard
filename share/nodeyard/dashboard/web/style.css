@@ -1022,6 +1022,10 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .sc-disc-status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
 .sc-disc-status .spin.small { width: 12px; height: 12px; border-width: 2px; margin: 0; }
 
+/* Music library file-drop target (music.js) */
+.music-library-drop { transition: outline-color .15s, background-color .15s; }
+.music-library-drop.dragover { outline: 2px dashed var(--accent, #8ba2ff); outline-offset: -5px; background: color-mix(in srgb, var(--accent, #8ba2ff) 7%, var(--card, var(--panel))); }
+
 /* Full refresh dialog */
 .full-wait { display: flex; align-items: center; gap: 14px; margin: 6px 0 12px; }
 .full-wait .spin { margin: 0; }

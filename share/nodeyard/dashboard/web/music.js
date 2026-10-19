@@ -1031,7 +1031,7 @@
   function renderPage() {
     const el = $("#view"); if (!el || S.view !== "music") return;
     const d = M.data || {};
-    M.scLikes = Array.isArray((d.sc || {}).likes) ? d.sc.likes : [];
+    M.scLikes = Array.isArray(d.likes) ? d.likes : (Array.isArray((d.sc || {}).likes) ? d.sc.likes : []);
     M.playlists = Array.isArray(d.playlists) ? d.playlists : [];
     const tabs = [["home", "Home"], ["discover", "Discover"], ["search", "Search"], ["dj", "DJ"], ["playlists", "Playlists"], ["likes", "Likes"], ["library", "Library"], ["settings", "Settings"]];
     NY.freshHTML(el, html`
@@ -1124,7 +1124,7 @@
     const unseenContent = !M.homeHistoryReady && !unheard.length
       ? html`<div class="empty">${M.homeHistoryError ? "Couldn't check your listening history." : "Checking your listening history…"} ${M.homeHistoryError ? raw('<button class="btn small mt" data-music="home-history-retry">Try again</button>') : ""}</div>`
       : unheard.length
-        ? unheard.map((t) => trackRow(t, "new:" + trackKey(t), t.url ? html`${likeBtn(t)}${t.why ? html`<button class="btn small" data-music="disc-no" data-key="${t.url}" title="Not for me: show fewer like this">✕</button>` : ""}` : ""))
+        ? unheard.map((t) => trackRow(t, "new:" + trackKey(t), html`${likeBtn(t)}${t.url && t.why ? html`<button class="btn small" data-music="disc-no" data-key="${t.url}" title="Not for me: show fewer like this">✕</button>` : ""}`))
         : M.disc.building || !M.disc.loaded ? html`<div class="empty"><div class="spin"></div>Looking on SoundCloud for songs that match your taste…</div>`
         : html`<div class="empty">${M.disc.error || "No new picks yet."} Like or play a few songs and press Find more.</div>`;
     setHTML(el, html`<div class="card">
@@ -1138,7 +1138,7 @@
       <div class="row wrap" style="justify-content:space-between;align-items:center;gap:10px"><div><h2 style="margin:0">Made for you</h2>
         <div class="muted small mt">Ranked by a local algorithm using your library, likes and listening history. No AI.</div></div>
         ${tracks.length ? raw('<button class="btn primary" data-music="home-play">▶ Play recommendations</button>') : ""}</div>
-      <div class="mt">${tracks.length ? tracks.map((t) => trackRow(t, "rec:" + trackKey(t), t.url ? likeBtn(t) : ""))
+      <div class="mt">${tracks.length ? tracks.map((t) => trackRow(t, "rec:" + trackKey(t), likeBtn(t)))
         : html`<div class="empty">Add songs to your library, like a few tracks, or listen to music to build your recommendations.</div>`}</div>
     </div>
     <div class="card mt">
@@ -1179,13 +1179,13 @@
     }
     const art = artworkSource(track);
     const background = art ? "background-image:url('" + art + "')" : "";
-    const liked = M.scLikes.some((item) => item.url === track.url);
+    const liked = M.scLikes.some((item) => trackKey(item) === trackKey(track));
     setHTML(el, html`<div class="sc-discover-feed"><header class="sc-discover-feed-head"><div><h2>Discover</h2><span>For you · new finds first, then your music</span></div><b>${M.discoverIndex + 1} / ${tracks.length}${M.discoverMoreBusy ? raw(' <span class="spin small" title="Finding more songs"></span>') : ""}</b></header>
       <article class="sc-discover-card" data-discover-stage style="${background}" tabindex="0" aria-label="Discover song: ${titleOf(track)}. Swipe up or down to browse.">
         <div class="sc-discover-shade"></div>
         <div class="sc-discover-cover">${art ? html`<img src="${art}" alt="${titleOf(track)} artwork" loading="lazy">` : html`<span aria-hidden="true">♫</span>`}</div>
         <aside class="sc-discover-actions">
-          ${track.url ? html`<button type="button" data-music="discover-like" aria-label="${liked ? "Unlike" : "Like"} song">${liked ? "♥" : "♡"}</button><small>${liked ? "Liked" : "Like"}</small>` : ""}
+          <button type="button" data-music="discover-like" aria-label="${liked ? "Unlike" : "Like"} song">${liked ? "♥" : "♡"}</button><small>${liked ? "Liked" : "Like"}</small>
           <button type="button" data-music="discover-play" aria-label="Play song">▶</button><small>Play</small>
           <button type="button" data-music="discover-add" aria-label="Add song to playlist">＋</button><small>Save</small>
         </aside>
@@ -1305,9 +1305,10 @@
       </div>`);
   }
   function likeBtn(t) {
-    const liked = M.scLikes.some((x) => x.url === t.url);
-    return html`<button class="btn small" data-music="sc-like" data-key="${t.url}" title="${liked ? "Unlike" : "Like"}">${liked ? "♥" : "♡"}</button>
-      <button class="btn small" data-music="sc-dl" data-key="${t.url}" title="Download to Nodeyard Music">⬇</button>`;
+    const key = trackKey(t);
+    const liked = M.scLikes.some((x) => trackKey(x) === key);
+    return html`<button class="btn small" data-music="sc-like" data-key="${key}" title="${liked ? "Unlike" : "Like"}" aria-label="${liked ? "Unlike" : "Like"} ${titleOf(t)}">${liked ? "♥" : "♡"}</button>
+      ${t.url ? html`<button class="btn small" data-music="sc-dl" data-key="${t.url}" title="Download to Nodeyard Music">⬇</button>` : ""}`;
   }
 
   function renderPlaylists(el) {
@@ -1354,19 +1355,20 @@
     const q = (M._libq || "").toLowerCase();
     const shown = q ? tracks.filter((t) => (t.name + " " + (t.folder || "")).toLowerCase().includes(q)) : tracks;
     const uploads = tracks.filter((t) => (t.folder || "") === "Uploads" || (t.folder || "").indexOf("Uploads") === 0);
-    setHTML(el, html`<div class="card">
+    setHTML(el, html`<div class="card music-library-drop" data-music-library-drop>
       <div class="row" style="justify-content:space-between;align-items:center;gap:8px">
         <input class="input" data-music="lib-filter" value="${M._libq || ""}" placeholder="Filter the library…" style="flex:1">
         <button class="btn small" data-music="lib-upload">⬆ Upload songs</button>
         ${shown.length ? raw('<button class="btn small primary" data-music="lib-play">▶ Play all</button>') : ""}</div>
       ${raw('<input type="file" data-music="lib-file" accept="audio/*,.mp3,.m4a,.flac,.ogg,.opus,.wav,.aac" multiple style="display:none">')}
-      <div data-music="up-progress" class="small faint mt" style="display:none"></div>
+      <div data-music="up-progress" class="small faint mt" style="display:none" role="status" aria-live="polite"></div>
+      <div class="small faint mt">Choose files above or drag audio files into this panel.</div>
       ${uploads.length ? html`<div class="mt"><div class="small faint">Your uploads (${uploads.length}) — tap ✕ to remove</div>
         <div class="row wrap mt" style="gap:6px">${uploads.map((t) => html`<span class="tag" style="display:inline-flex;align-items:center;gap:6px">${t.name}
           ${raw('<button class="btn small" data-music="up-del" data-path="' + esc(t.path) + '" title="Delete" style="padding:0 6px;line-height:1.4">✕</button>')}</span>`)}</div></div>` : ""}
       ${!(M.data || {}).dir && !uploads.length ? html`<p class="small mt">No music folder set — pick one in <b>Settings</b>, or upload songs above.</p>` : ""}
       <div class="mt">${shown.length
-        ? shown.map((t) => trackRow(t, "lib:" + trackKey(t)))
+        ? shown.map((t) => trackRow(t, "lib:" + trackKey(t), likeBtn(t)))
         : html`<div class="empty">${(M.data || {}).dir || uploads.length ? "No matching files." : "Upload songs above, or set a music folder in Settings."}</div>`}</div></div>`);
   }
 
@@ -1375,6 +1377,7 @@
     const id = (window.crypto && crypto.randomUUID ? crypto.randomUUID().replace(/-/g, "") : (Date.now().toString(16) + Math.random().toString(16).slice(2))).slice(0, 12);
     const CH = 2 * 1024 * 1024;   // raw bytes per piece (server piece limit is 3 MB)
     let offset = 0; const total = file.size;
+    if (!total) throw new Error(file.name + " is empty.");
     if (total > 80 * 1024 * 1024) throw new Error(file.name + " is too big (80 MB at most).");
     do {
       const slice = file.slice(offset, Math.min(offset + CH, total));
@@ -1390,16 +1393,18 @@
 
   async function uploadFiles(files) {
     const prog = $('[data-music="up-progress"]'); if (prog) prog.style.display = "";
-    let done = 0; const list = Array.from(files || []);
+    let done = 0; const list = Array.from(files || []); const failed = [];
     for (const f of list) {
       try {
         await uploadSong(f, (sent, total) => { if (prog) prog.textContent = "Uploading " + f.name + " — " + Math.round(sent / total * 100) + "% (" + (done + 1) + "/" + list.length + ")"; });
         done++;
-      } catch (e) { toast(e.message || ("Couldn't upload " + f.name)); }
+      } catch (e) { failed.push(f.name); toast(e.message || ("Couldn't upload " + f.name)); }
     }
-    if (prog) prog.textContent = done ? ("Uploaded " + done + " song" + (done === 1 ? "" : "s") + ".") : "Nothing was uploaded.";
+    if (prog) prog.textContent = done
+      ? "Uploaded " + done + " song" + (done === 1 ? "" : "s") + (failed.length ? "; " + failed.length + " failed." : ".")
+      : "Nothing was uploaded.";
     await load(); renderTab();
-    if (done) toast("Uploaded " + done + " song" + (done === 1 ? "" : "s") + ".");
+    if (done) toast("Uploaded " + done + " song" + (done === 1 ? "" : "s") + (failed.length ? "; " + failed.length + " failed." : "."));
   }
 
   function renderSettings(el) {
@@ -1452,7 +1457,7 @@
   }
   const closeAddPicker = () => { const m = document.getElementById("pl-picker"); if (m) m.remove(); M.addTrack = null; };
   async function addToPlaylist(pid, track) {
-    const r = await postJSON("/api/music/playlist", { action: "add", id: pid, track });
+    const r = await postJSON("/api/music/playlist", { action: "add", id: pid, track: trackForApi(track) });
     if (r.ok) { M.playlists = r.playlists || M.playlists; toast("Added."); } else toast(r.error || "Couldn't add.");
   }
 
@@ -1651,7 +1656,7 @@
     else if (act === "discover-prev") moveDiscover(-1);
     else if (act === "discover-next") moveDiscover(1);
     else if (act === "discover-play") { if (M.discoverTracks[M.discoverIndex]) playQueue(M.discoverTracks, M.discoverIndex); }
-    else if (act === "discover-like") { const tr = M.discoverTracks[M.discoverIndex]; if (tr) await toggleLike(tr.url); }
+    else if (act === "discover-like") { const tr = M.discoverTracks[M.discoverIndex]; if (tr) await toggleLike(trackKey(tr)); }
     else if (act === "discover-add") { const tr = M.discoverTracks[M.discoverIndex]; if (tr) openAddPicker(tr); }
     else if (act === "discover-library") { M.tab = "library"; renderPage(); }
     else if (act === "discover-likes") { M.tab = "likes"; renderPage(); }
@@ -1722,11 +1727,12 @@
   }
   async function toggleLike(url) {
     const track = findTrack(url); if (!track) return;
-    const liked = !M.scLikes.some((x) => x.url === url);
-    const r = await postJSON("/api/music/like", { track, liked });
+    const liked = !M.scLikes.some((x) => trackKey(x) === url);
+    const r = await postJSON("/api/music/like", { track: trackForApi(track), liked });
     if (!r.ok) { toast(r.error || "Couldn't save that like."); return; }
     M.scLikes = Array.isArray(r.likes) ? r.likes : [];
-    if (M.data && M.data.sc) M.data.sc.likes = M.scLikes;   // keep it through a renderPage() (tab switch)
+    if (M.data) M.data.likes = M.scLikes;
+    if (M.data && M.data.sc) M.data.sc.likes = M.scLikes.filter((x) => x.url);   // SoundCloud consumers use this list
     renderTab();
   }
   async function openPlaylist(id) {
@@ -1769,6 +1775,30 @@
     if (M.tab !== "discover" || !e.target.closest("[data-discover-stage]") || Math.abs(e.deltaY) < 25 || Date.now() - M.discoverWheelAt < 450) return;
     e.preventDefault(); M.discoverWheelAt = Date.now(); moveDiscover(e.deltaY > 0 ? 1 : -1);
   }, { passive: false });
+  const audioExtensions = new Set(["mp3", "m4a", "flac", "ogg", "opus", "wav", "aac"]);
+  const libraryDropTarget = (e) => e.target && e.target.closest && e.target.closest("[data-music-library-drop]");
+  const isFileDrag = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
+  document.addEventListener("dragenter", (e) => {
+    const card = libraryDropTarget(e); if (!card || !isFileDrag(e)) return;
+    e.preventDefault(); card.classList.add("dragover");
+  });
+  document.addEventListener("dragover", (e) => {
+    const card = libraryDropTarget(e); if (!card || !isFileDrag(e)) return;
+    e.preventDefault(); e.dataTransfer.dropEffect = "copy"; card.classList.add("dragover");
+  });
+  document.addEventListener("dragleave", (e) => {
+    const card = libraryDropTarget(e);
+    if (card && (!e.relatedTarget || !card.contains(e.relatedTarget))) card.classList.remove("dragover");
+  });
+  document.addEventListener("drop", async (e) => {
+    const card = libraryDropTarget(e); if (!card || !isFileDrag(e)) return;
+    e.preventDefault(); card.classList.remove("dragover");
+    const files = Array.from(e.dataTransfer.files || []);
+    const audioFiles = files.filter((f) => (f.type || "").toLowerCase().startsWith("audio/") || audioExtensions.has((f.name.split(".").pop() || "").toLowerCase()));
+    if (audioFiles.length < files.length) toast("Skipped " + (files.length - audioFiles.length) + " non-audio file" + (files.length - audioFiles.length === 1 ? "" : "s") + ".");
+    if (audioFiles.length) await uploadFiles(audioFiles);
+    else if (files.length) toast("Drop audio files such as MP3, M4A, FLAC, OGG, WAV or AAC.");
+  });
   document.addEventListener("change", async (e) => {
     const t = e.target.closest && e.target.closest("[data-music]"); if (!t) return;
     if (t.dataset.music === "cache-limit") { const r = await postJSON("/api/music/config", { cache_limit: +t.value }); if (r.ok) { await load(); renderTab(); toast("Recent song cache updated."); } else toast(r.error || "Couldn't update the cache size."); }

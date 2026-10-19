@@ -1270,6 +1270,42 @@ class Music:
             self._save(cfg)
         return True, "", current[:500]
 
+    def local_likes(self):
+        """Saved local tracks, including uploads. Ignore entries whose files were removed."""
+        rows = self.cfg().get("local_likes")
+        if not isinstance(rows, list):
+            return []
+        out = []
+        for row in rows[:500]:
+            track = self._norm_track(row)
+            if track and track.get("kind") == "local":
+                out.append(track)
+        return out
+
+    def likes(self):
+        """SoundCloud and local tracks shown together in the dashboard's Likes tab."""
+        return self.sc_likes() + self.local_likes()
+
+    def like(self, track, liked):
+        """Save or remove a SoundCloud or local track like."""
+        if isinstance(track, dict) and track.get("path") and self.resolve(track.get("path")):
+            normalized = self._norm_track({**track, "kind": "local"})
+            if not normalized:
+                return False, "Choose a track from your music library.", self.likes()
+            with self.lock:
+                cfg = self.cfg()
+                saved = cfg.get("local_likes")
+                saved = saved if isinstance(saved, list) else []
+                key = normalized["path"]
+                current = [row for row in saved if isinstance(row, dict) and row.get("path") != key]
+                if liked:
+                    current.insert(0, normalized)
+                cfg["local_likes"] = current[:500]
+                self._save(cfg)
+            return True, "", self.likes()
+        ok, error, _ = self.sc_like(track, liked)
+        return ok, error, self.likes()
+
     # -- SoundCloud streaming & playlists (so tracks play in the browser) -----
 
     def yt_dlp(self):
@@ -1456,7 +1492,7 @@ class Music:
     def _norm_track(self, t):
         if not isinstance(t, dict):
             return None
-        if t.get("kind") == "sc" and self._valid_sc_url(t.get("url")):
+        if self._valid_sc_url(t.get("url")):
             try:
                 dur = max(0, min(86_400_000, int(t.get("duration_ms") or 0)))
             except (TypeError, ValueError):
@@ -1464,7 +1500,7 @@ class Music:
             return {"kind": "sc", "url": str(t["url"])[:1000], "title": str(t.get("title") or "Untitled")[:300],
                     "artist": str(t.get("artist") or "")[:200], "duration_ms": dur,
                     "artwork_url": t.get("artwork_url") if self._soundcloud_art_url(t.get("artwork_url")) else ""}
-        if t.get("kind") == "local" and t.get("path") and self.resolve(t.get("path")):
+        if t.get("path") and self.resolve(t.get("path")):
             return {"kind": "local", "path": str(t["path"])[:1000], "name": str(t.get("name") or t["path"])[:300],
                     "folder": str(t.get("folder") or "")[:300]}
         return None
@@ -1525,6 +1561,7 @@ def register(ctx, args):
                                     "enabled": bool(c.get("forward_enabled")),
                                     "source": c.get("forward_source", ""), "auto_source": music.default_source() if have_ff else "",
                                     "sources": music.sources(), "ffmpeg": have_ff},
+                        "likes": music.likes(),
                         "sc": {"search_ready": demo or bool(music.yt_dlp()), "stream_ready": music.stream_ready(),
                                "likes": music.sc_likes()},
                         "playlists": music.playlists()})
@@ -1597,7 +1634,7 @@ def register(ctx, args):
 
     def _sc_like(h, body):
         liked = body.get("liked") is True
-        ok, error, likes = music.sc_like(body.get("track"), liked)
+        ok, error, likes = music.like(body.get("track"), liked)
         return h._json({"ok": ok, "error": error, "likes": likes}, 200 if ok else 400)
 
     def _test(h, body):
