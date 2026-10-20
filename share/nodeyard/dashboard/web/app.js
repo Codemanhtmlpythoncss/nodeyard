@@ -1071,12 +1071,54 @@
     renderChrome(); toast("Theme: " + next);
   }
   function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("on"), 1600); }
-  async function copyText(text) {
-    try { await navigator.clipboard.writeText(text); } catch (e) {
-      const ta = document.createElement("textarea"); ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0"; document.body.appendChild(ta); ta.select();
-      try { document.execCommand("copy"); } catch (e2) { /* nothing more to try */ } ta.remove();
+  function legacyCopyText(text) {
+    const ta = document.createElement("textarea");
+    const previous = document.activeElement;
+    const selectionStart = previous && typeof previous.selectionStart === "number" ? previous.selectionStart : null;
+    const selectionEnd = previous && typeof previous.selectionEnd === "number" ? previous.selectionEnd : null;
+    const selectionDirection = previous && previous.selectionDirection;
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.setAttribute("aria-hidden", "true");
+    // Keep it in the viewport: Safari may refuse execCommand('copy') on an
+    // unfocused or fully hidden textarea, especially on an ordinary HTTP page.
+    ta.style.cssText = "position:fixed;top:0;left:0;width:2px;height:2px;padding:0;border:0;opacity:0.01;font-size:16px;";
+    document.body.appendChild(ta);
+    let copied = false;
+    try {
+      ta.focus({ preventScroll: true });
+      ta.select();
+      ta.setSelectionRange(0, ta.value.length);
+      copied = document.execCommand("copy") === true;
+    } catch (e) { /* Clipboard access can be denied by browser policy. */ }
+    ta.remove();
+    if (previous && previous.isConnected && typeof previous.focus === "function") {
+      try { previous.focus({ preventScroll: true }); } catch (e) { previous.focus(); }
+      if (selectionStart !== null && typeof previous.setSelectionRange === "function") {
+        try { previous.setSelectionRange(selectionStart, selectionEnd, selectionDirection || "none"); } catch (e) { /* not a text input anymore */ }
+      }
     }
-    toast("Copied " + (text.length > 40 ? text.slice(0, 40) + "…" : text));
+    return copied;
+  }
+  async function copyText(text) {
+    text = String(text == null ? "" : text);
+    if (!text) { toast("Nothing to copy."); return false; }
+    // Clipboard API requires a secure context. On this dashboard's HTTP LAN
+    // and Tailscale addresses, use the synchronous fallback during the click
+    // gesture so Safari still permits the copy operation.
+    if (window.isSecureContext && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      try {
+        await navigator.clipboard.writeText(text);
+        toast("Copied " + (text.length > 40 ? text.slice(0, 40) + "…" : text));
+        return true;
+      } catch (e) { /* Try the selection-based fallback below. */ }
+    }
+    if (legacyCopyText(text)) {
+      toast("Copied " + (text.length > 40 ? text.slice(0, 40) + "…" : text));
+      return true;
+    }
+    toast("Couldn't copy. Open the dashboard over HTTPS, or copy the text manually.");
+    return false;
   }
   function setLive(on) { S.live = on; store.set("live", on ? "1" : "0"); if (on) { connectStream(); load(true); } else closeStream(); schedule(); renderChrome(); }
   function download(name, text) { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }
