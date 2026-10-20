@@ -257,7 +257,9 @@ cmd_configure() {
 # Reach lab target VMs directly from the tailnet (so you can nmap/ssh them by IP), while the VMs stay unable to
 # reach the internet or each other's networks. Does three things: enables IPv4 forwarding, advertises the lab
 # supernet over Tailscale (you approve the route once in the admin console), and installs narrow firewall rules
-# that permit ONLY tailscale0 <-> lab-subnet forwarding. A boot unit re-applies the rules.
+# that permit ONLY tailscale0/LAN -> lab-subnet forwarding. Replies are masqueraded to the bridge address because
+# isolated guests have no default route; this keeps return traffic working without giving guests outbound access.
+# A boot unit re-applies the rules.
 # Current advertised routes with $1 added (op=add) or removed (op=del), preserving everything else (the exit-node
 # default routes in particular). Prints a comma-separated list (possibly empty).
 ts_routes() {
@@ -285,6 +287,7 @@ write_tailnet_rules() {
 set -e
 CIDR="$cidr"
 CH=PWNFORGE-TAILNET
+NAT=PWNFORGE-TAILNET-NAT
 # the host's local-network interface (the one with the default route), so LAN devices can reach labs too
 LAN=\$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* dev \\([^ ]*\\).*/\\1/p' | head -1)
 iptables -N \$CH 2>/dev/null || iptables -F \$CH
@@ -296,14 +299,26 @@ iptables -A \$CH -j RETURN
 # jump from FORWARD, first, exactly once
 iptables -C FORWARD -j \$CH 2>/dev/null && iptables -D FORWARD -j \$CH 2>/dev/null || true
 iptables -I FORWARD 1 -j \$CH
+# Give isolated guests a return path without adding a default route inside them. Conntrack reverses this
+# translation for replies, while the filter above still drops new connections initiated by a guest.
+iptables -t nat -N \$NAT 2>/dev/null || iptables -t nat -F \$NAT
+iptables -t nat -A \$NAT -d \$CIDR ! -s \$CIDR -j MASQUERADE
+iptables -t nat -C POSTROUTING -j \$NAT 2>/dev/null && iptables -t nat -D POSTROUTING -j \$NAT 2>/dev/null || true
+iptables -t nat -I POSTROUTING 1 -j \$NAT
 EOF
     chmod 0755 "$TAILNET_RULES"
 }
 
 clear_tailnet_rules() {
+    local cidr="${1:-10.200.0.0/16}"
     iptables -D FORWARD -j PWNFORGE-TAILNET 2>/dev/null || true
     iptables -F PWNFORGE-TAILNET 2>/dev/null || true
     iptables -X PWNFORGE-TAILNET 2>/dev/null || true
+    iptables -t nat -D POSTROUTING -j PWNFORGE-TAILNET-NAT 2>/dev/null || true
+    iptables -t nat -F PWNFORGE-TAILNET-NAT 2>/dev/null || true
+    iptables -t nat -X PWNFORGE-TAILNET-NAT 2>/dev/null || true
+    # Remove the direct rule used by older releases of this helper.
+    iptables -t nat -D POSTROUTING -d "$cidr" ! -s "$cidr" -j MASQUERADE 2>/dev/null || true
     rm -f "$TAILNET_RULES"
     systemctl disable --now pwnforge-tailnet.service >/dev/null 2>&1 || true
     rm -f "$TAILNET_UNIT"
@@ -320,7 +335,7 @@ cmd_tailnet_access() {
     command -v iptables >/dev/null 2>&1 || fail "iptables isn't available on this machine"
 
     if [[ "$action" == off ]]; then
-        clear_tailnet_rules
+        clear_tailnet_rules "$cidr"
         local routes; routes="$(ts_routes del "$cidr")"
         timeout 20 tailscale set --advertise-routes="$routes" >/dev/null 2>&1 || true
         say "tailnet access to lab targets: off (other advertised routes kept)"
