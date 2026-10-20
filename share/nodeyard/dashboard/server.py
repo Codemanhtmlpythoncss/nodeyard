@@ -740,6 +740,8 @@ def main():
     apiregistry.register(ctx, a)
     import music         # optional: a folder music player and host-audio forwarding, both streamed server-side
     music.register(ctx, a)
+    import video         # optional: upload and watch movies and series, streamed server-side with resume
+    video.register(ctx, a)
     import djvoice       # the DJ's natural voice: Piper text-to-speech on this server, downloaded when asked for
     djvoice.register(ctx, a)
     import diskusage     # what's filling each node's disk, and how to free it
