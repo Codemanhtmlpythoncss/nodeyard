@@ -8,6 +8,8 @@ The dashboard never needs PwnForge. Off or not installed, this page just says so
   - it sets the address: this machine only (the default), your tailnet, or all host interfaces (only after PwnForge's
     administrator account exists, and only when asked for in so many words). The all-interface option supports LAN
     and OpenVPN clients; keep the host firewall in place and never forward PwnForge's web port from the router;
+  - one-click Tailscale setup binds the website to the private tailnet address, enables persistent lab forwarding and
+    firewall rules, and advertises the isolated lab subnet. A tailnet administrator approves that route once;
   - it shows the service's health (/api/health), its log with anything that looks like a secret hidden, and the
     training environments through `pwnforge env` (PwnForge's own services, run as the service user), so they are
     started, stopped and removed exactly as the website would. Nothing here edits PwnForge's database.
@@ -17,7 +19,7 @@ outside access, and changes neither.
 
   GET  /api/pwnforge          status, settings, health, environments
   GET  /api/pwnforge/logs     the service's recent log (and the last install's), secrets hidden
-  POST /api/pwnforge/action   {action: start|stop|restart|enable|disable|hosting-on|hosting-off|install|doctor|lab-access-on|lab-access-off|lab-access-status}
+  POST /api/pwnforge/action   {action: start|stop|restart|enable|disable|hosting-on|hosting-off|install|doctor|tailnet-setup|lab-access-on|lab-access-off|lab-access-status}
   POST /api/pwnforge/config   {bind: local|tailnet|lan, port, confirm_lan}
   POST /api/pwnforge/env      {action: start|stop|delete, kind: vm|lab, id} or {action: cleanup, apply}
 """
@@ -548,6 +550,26 @@ class PwnForge:
             return {"started": True}
         if not self.installed():
             raise PFError("PwnForge isn't installed yet: press Install first.", 409)
+        if a == "tailnet-setup":
+            try:
+                network = ipaddress.ip_network(str(body.get("cidr") or "10.200.0.0/16"), strict=True)
+            except ValueError:
+                raise PFError("Enter a canonical private IPv4 network, such as 10.200.0.0/16.")
+            if network.version != 4 or not network.is_private or not 8 <= network.prefixlen <= 30:
+                raise PFError("Lab access only accepts private IPv4 networks with a prefix from /8 through /30.")
+            if self.demo:
+                return {"demo": True}
+            if not tailscale_ip():
+                raise PFError("Tailscale isn't connected on this host yet. Connect it to your tailnet, then retry.", 409)
+            running_job = self.job_view()
+            if running_job and running_job["running"]:
+                raise PFError("PwnForge is busy with %s already." % running_job["what"], 409)
+            # Keep an intentional HTTPS setup; otherwise bind the website directly to the private tailnet address.
+            # set_config validates the address and applies it through the root-owned host helper.
+            bind = "https" if self.cfg["bind"] == "https" and tailscale_name() else "tailnet"
+            self.set_config({"bind": bind, "port": self.cfg["port"]})
+            self.start_job("Tailscale lab routing setup", ["/bin/bash", HOST_SCRIPT, "tailnet-access", "on", str(network)])
+            return {"started": True, "bind": bind, "cidr": str(network)}
         if a in ("lab-access-on", "lab-access-off", "lab-access-status"):
             try:
                 network = ipaddress.ip_network(str(body.get("cidr") or "10.200.0.0/16"), strict=True)
