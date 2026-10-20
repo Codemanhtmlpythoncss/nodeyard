@@ -77,11 +77,11 @@
         ${opt("local", "This machine only", "127.0.0.1. The safest: reach it from elsewhere with an SSH tunnel.")}
         ${opt("tailnet", "Your tailnet", "This machine's Tailscale address: only your own devices on Tailscale can open it.")}
         ${opt("https", "Your tailnet, HTTPS", "The same, at an https:// address with a real certificate (Tailscale Serve). Needs MagicDNS and HTTPS certificates on for your tailnet.")}
-        ${opt("lan", "Every network", "0.0.0.0: anyone on the networks this machine is on. Only once its administrator account exists. Never use this for a machine that's on the internet.")}
+        ${opt("lan", "LAN and VPN (all host interfaces)", "0.0.0.0: lets devices on your LAN and OpenVPN clients reach the site. Keep the host firewall enabled, and never forward the PwnForge web port from your router. Only use after creating the administrator account.")}
       </div>
       <div class="row wrap mt" style="gap:8px"><label class="row small" style="gap:6px">Port <input id="pf-port" type="number" min="1024" max="65535" value="${c.port}" style="width:100px"></label>
         <button class="btn small primary" data-pf="save-config" ${PF.busy ? "disabled" : ""}>Save</button>
-        <span class="muted small">This setting wins over PwnForge's own "LAN access" setting. PwnForge is never published to the internet from here.</span></div>`);
+        <span class="muted small">This setting wins over PwnForge's own "LAN access" setting. All-interface mode requires a host firewall; do not forward this web port from your router.</span></div>`);
   }
 
   function labAccessCard(d) {
@@ -135,7 +135,7 @@
   const safetyCard = () => card("Isolation and safety", html`<ul class="small" style="margin:0;padding-left:18px">
     <li>Practice machines run on PwnForge's own <b>isolated</b> virtual networks; one that has outside access says so above. This page never changes that.</li>
     <li>PwnForge runs as the unprivileged user <span class="mono">pwnforge</span> (in the libvirt and kvm groups), with its unit's own hardening. No container or service here is privileged.</li>
-    <li>Nothing is published to the internet: the address is this machine, your tailnet, or (after the admin account exists, and only when you say so) your local networks.</li>
+    <li>Nodeyard does not configure router forwarding. In all-interface mode, PwnForge listens on every host interface; keep the host firewall enabled and never forward the PwnForge web port.</li>
     <li>Logs shown here hide passwords, tokens, cookies and captured flags. The dashboard never reads PwnForge's secret key or users' passwords.</li>
     <li>Only use it for training you're authorised to do: on these lab machines, not other people's systems.</li></ul>`);
 
@@ -212,7 +212,7 @@
         const bind = (document.querySelector('input[name="pf-bind"]:checked') || {}).value, port = +$("#pf-port").value;
         const body = { bind, port };
         if (bind === "lan" && PF.data.config.bind !== "lan") {
-          if (!(await confirmDlg("Open PwnForge to every network?", html`<p style="margin-top:0">Anyone on the networks this machine is on (your LAN, and your tailnet) could open PwnForge's sign-in page on port ${port}.</p><ul class="small"><li>Make sure its administrator account exists and has a strong password.</li><li>Don't use this on a machine with a public address.</li><li>The practice machines stay on their isolated networks either way.</li></ul>`, "Open it", true))) return;
+          if (!(await confirmDlg("Open PwnForge on LAN and VPN interfaces?", html`<p style="margin-top:0">PwnForge will listen on all host interfaces. Devices on your LAN, Tailscale, or a connected OpenVPN tunnel may reach its sign-in page on port ${port} when the host firewall permits it.</p><ul class="small"><li>Make sure its administrator account exists and has a strong password.</li><li>Keep the host firewall enabled and do not forward the PwnForge web port from your router.</li><li>The practice machines stay on their isolated networks either way.</li></ul>`, "Open it", true))) return;
           body.confirm_lan = true;
         }
         const r = await post("/api/pwnforge/config", body, a);

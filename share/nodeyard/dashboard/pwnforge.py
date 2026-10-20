@@ -5,8 +5,9 @@ The dashboard never needs PwnForge. Off or not installed, this page just says so
   - Install / Update gets PwnForge's code, Python packages and website and installs PwnForge's own unit file, which
     runs it as the unprivileged user "pwnforge" (pwnforge-host.sh, through systemd-run: the only step that runs as root);
   - it starts, stops and restarts the service, and turns starting at boot on or off;
-  - it sets the address: this machine only (the default), your tailnet, or every network this machine is on (only
-    after PwnForge's administrator account exists, and only when asked for in so many words). Never the internet;
+  - it sets the address: this machine only (the default), your tailnet, or all host interfaces (only after PwnForge's
+    administrator account exists, and only when asked for in so many words). The all-interface option supports LAN
+    and OpenVPN clients; keep the host firewall in place and never forward PwnForge's web port from the router;
   - it shows the service's health (/api/health), its log with anything that looks like a secret hidden, and the
     training environments through `pwnforge env` (PwnForge's own services, run as the service user), so they are
     started, stopped and removed exactly as the website would. Nothing here edits PwnForge's database.
@@ -50,7 +51,7 @@ JOB_NOISE_RE = re.compile(
 SVC_USER = "pwnforge"
 DEFAULTS = {"enabled": False, "path": "/opt/pwnforge", "data_dir": "/var/lib/pwnforge", "bind": "local", "port": 8080, "autostart": True}
 BINDS = {"local": "This machine only", "tailnet": "Your tailnet", "https": "Your tailnet, over HTTPS",
-         "lan": "Every network this machine is on"}
+         "lan": "LAN and VPN (all host interfaces)"}
 SERVE_KEPT = (443, 8443, 10000)   # the dashboard's own https:// and its public access (Tailscale Funnel)
 PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]{1,200}$")
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -280,7 +281,7 @@ class PwnForge:
             name = "pi.example.ts.net" if self.demo else tailscale_name()
             return [{"url": "https://%s:%d/" % (name, port), "note": "devices on your tailnet, over HTTPS"}] if name else []
         host = socket.gethostname()
-        out = [{"url": "http://%s:%d/" % (host, port), "note": "every network this machine is on"}]
+        out = [{"url": "http://%s:%d/" % (host, port), "note": "LAN, Tailscale and VPN interfaces when allowed by the host firewall"}]
         ip = "" if self.demo else tailscale_ip()
         if ip:
             out.append({"url": "http://%s:%d/" % (ip, port), "note": "over Tailscale"})
@@ -603,7 +604,7 @@ class PwnForge:
     def set_config(self, body):
         bind = str(body.get("bind") or self.cfg["bind"])
         if bind not in BINDS:
-            raise PFError("Pick this machine only, your tailnet (with or without HTTPS) or every network.")
+            raise PFError("Pick this machine only, your tailnet (with or without HTTPS), or LAN/VPN on all host interfaces.")
         try:
             port = int(body.get("port", self.cfg["port"]))
         except (TypeError, ValueError):
@@ -620,7 +621,7 @@ class PwnForge:
                 raise PFError("Something on this machine already listens on port %d. Pick another." % port, 409)
         if bind == "lan":
             if body.get("confirm_lan") is not True:
-                raise PFError("Opening PwnForge to every network needs your explicit OK.", 428)
+                raise PFError("Opening PwnForge on LAN/VPN and all host interfaces needs your explicit OK.", 428)
             h = self.health() if u["active"] == "active" else {"ok": False}
             if not h.get("ok") or h.get("initialised") is not True:
                 raise PFError("Start PwnForge and create its administrator account first (on this machine or over the tailnet); "

@@ -478,9 +478,13 @@ on the dashboard's machine (code in `/opt/pwnforge`, data in
 `/var/lib/pwnforge`, its own `pwnforge.service` running as the unprivileged
 user `pwnforge`) and starts, stops and updates it. **Turn hosting on** / **off**
 starts it (and at boot) or stops it. It listens on this machine only by
-default; **Your tailnet** or **Every network** can be chosen (every network
-only after its administrator account exists, and with an explicit OK). It is
-never published to the internet. The page shows its health, its log (with
+default; **Your tailnet** or **LAN and VPN (all host interfaces)** can be
+chosen (all interfaces only after its administrator account exists, and with
+an explicit OK). The all-interface setting lets connected OpenVPN users reach
+the site when the VPN is configured and the host firewall allows its web port.
+Keep the firewall enabled and never forward the PwnForge web port from the
+router; all-interface binding itself is not an internet access control. The
+page shows its health, its log (with
 secrets hidden), diagnostics and the training machines with their network
 isolation; they are started, stopped and deleted through PwnForge's own
 `pwnforge env` commands. The dashboard works the same without it.
