@@ -310,6 +310,7 @@ write_tailnet_rules() {
 set -e
 CIDR="$cidr"
 CH=PWNFORGE-TAILNET
+NAT=PWNFORGE-TAILNET-NAT
 # the host's local-network interface (main-table default route), so LAN devices can reach labs too
 LAN=\$(ip -4 route show default 2>/dev/null | awk '{for (i=1; i<NF; i++) if (\$i=="dev" && \$(i+1)!="tailscale0" && \$(i+1)!="lo") {print \$(i+1); exit}}')
 iptables -N \$CH 2>/dev/null || iptables -F \$CH
@@ -322,14 +323,29 @@ iptables -A \$CH -j RETURN
 # jump from FORWARD, first, exactly once
 while iptables -C FORWARD -j \$CH 2>/dev/null; do iptables -D FORWARD -j \$CH; done
 iptables -I FORWARD 1 -j \$CH
+# Lab guests have no default route. SNAT incoming connections to the host's bridge
+# address so guest replies return through conntrack; the filter above still
+# blocks new connections initiated by guests.
+iptables -t nat -N \$NAT 2>/dev/null || iptables -t nat -F \$NAT
+iptables -t nat -A \$NAT -d \$CIDR ! -s \$CIDR -j MASQUERADE
+while iptables -t nat -C POSTROUTING -j \$NAT 2>/dev/null; do iptables -t nat -D POSTROUTING -j \$NAT; done
+iptables -t nat -I POSTROUTING 1 -j \$NAT
 EOF
     chmod 0755 "$TAILNET_RULES"
 }
 
 clear_tailnet_rules() {
-    iptables -D FORWARD -j PWNFORGE-TAILNET 2>/dev/null || true
+    local cidr="${1:-10.200.0.0/16}"
+    while iptables -C FORWARD -j PWNFORGE-TAILNET 2>/dev/null; do iptables -D FORWARD -j PWNFORGE-TAILNET; done
     iptables -F PWNFORGE-TAILNET 2>/dev/null || true
     iptables -X PWNFORGE-TAILNET 2>/dev/null || true
+    while iptables -t nat -C POSTROUTING -j PWNFORGE-TAILNET-NAT 2>/dev/null; do iptables -t nat -D POSTROUTING -j PWNFORGE-TAILNET-NAT; done
+    iptables -t nat -F PWNFORGE-TAILNET-NAT 2>/dev/null || true
+    iptables -t nat -X PWNFORGE-TAILNET-NAT 2>/dev/null || true
+    # Remove any duplicate direct MASQUERADE rules used by an earlier helper version.
+    while iptables -t nat -C POSTROUTING -d "$cidr" ! -s "$cidr" -j MASQUERADE 2>/dev/null; do
+        iptables -t nat -D POSTROUTING -d "$cidr" ! -s "$cidr" -j MASQUERADE
+    done
     rm -f "$TAILNET_RULES"
     systemctl disable --now pwnforge-tailnet.service >/dev/null 2>&1 || true
     rm -f "$TAILNET_UNIT"
@@ -337,11 +353,13 @@ clear_tailnet_rules() {
 }
 
 cmd_tailnet_status() {
-    local cidr="$1" iface lanip advertised=no firewall=no boot=no forwarding=no route_state
+    local cidr="$1" iface lanip advertised=no firewall=no return_path_nat=no boot=no forwarding=no route_state
     if [[ -r /proc/sys/net/ipv4/ip_forward ]] && [[ $(cat /proc/sys/net/ipv4/ip_forward) == 1 ]]; then forwarding=yes; fi
     if iptables -C FORWARD -j PWNFORGE-TAILNET 2>/dev/null &&
         iptables -C PWNFORGE-TAILNET -i tailscale0 -d "$cidr" -j ACCEPT 2>/dev/null &&
         iptables -C PWNFORGE-TAILNET -s "$cidr" -j DROP 2>/dev/null; then firewall=yes; fi
+    if iptables -t nat -C POSTROUTING -j PWNFORGE-TAILNET-NAT 2>/dev/null &&
+        iptables -t nat -C PWNFORGE-TAILNET-NAT -d "$cidr" ! -s "$cidr" -j MASQUERADE 2>/dev/null; then return_path_nat=yes; fi
     if systemctl is-enabled --quiet pwnforge-tailnet.service 2>/dev/null; then boot=yes; fi
     if command -v tailscale >/dev/null 2>&1; then
         route_state="$(tailscale debug prefs 2>/dev/null | CIDR="$cidr" python3 -c 'import json,os,sys; print("yes" if os.environ["CIDR"] in (json.load(sys.stdin).get("AdvertiseRoutes") or []) else "no")' 2>/dev/null || echo no)"
@@ -353,8 +371,8 @@ cmd_tailnet_status() {
     [[ -n "$lanip" ]] || lanip=unavailable
     local client_command="unavailable"
     if [[ "$lanip" != unavailable ]]; then client_command="pwnforge install $cidr $lanip"; fi
-    printf 'cidr=%s\nipv4_forwarding=%s\nfirewall=%s\nboot_persistence=%s\ntailnet_route_advertised=%s\nlan_interface=%s\nlan_address=%s\nclient_command=%s\n' \
-        "$cidr" "$forwarding" "$firewall" "$boot" "$advertised" "$iface" "$lanip" "$client_command"
+    printf 'cidr=%s\nipv4_forwarding=%s\nfirewall=%s\nreturn_path_nat=%s\nboot_persistence=%s\ntailnet_route_advertised=%s\nlan_interface=%s\nlan_address=%s\nclient_command=%s\n' \
+        "$cidr" "$forwarding" "$firewall" "$return_path_nat" "$boot" "$advertised" "$iface" "$lanip" "$client_command"
 }
 
 cmd_tailnet_access() {
@@ -368,7 +386,7 @@ cmd_tailnet_access() {
     [[ "$action" != on ]] || command -v tailscale >/dev/null 2>&1 || fail "Tailscale isn't installed on this machine"
 
     if [[ "$action" == off ]]; then
-        clear_tailnet_rules
+        clear_tailnet_rules "$cidr"
         if command -v tailscale >/dev/null 2>&1; then
             local routes; routes="$(ts_routes del "$cidr")"
             timeout 20 tailscale set --advertise-routes="$routes" >/dev/null 2>&1 || fail "firewall is disabled, but Tailscale route withdrawal failed; remove $cidr from the device's advertised routes"
@@ -423,8 +441,11 @@ EOF
     [[ -n "$lanif" ]] || lanif=unavailable
     [[ -n "$lanip" ]] || lanip='<this-host-LAN-IP>'
     say "lab access: on (tailnet + local network)."
-    say "  Tailnet: approve route $cidr at https://login.tailscale.com/admin/machines; client devices must accept subnet routes."
-    say "  Local network: install the downloadable macOS route helper and use $lanip as the gateway."
+    say "  Tailnet: approve route $cidr at https://login.tailscale.com/admin/machines. macOS accepts approved routes automatically; Linux may need: sudo tailscale set --accept-routes=true"
+    say "  Same LAN only: use this host's LAN address ($lanip), never its 100.x Tailscale address, as the gateway."
+    say "    macOS temporary route: sudo route -n add -net $cidr $lanip"
+    say "    Linux temporary route: sudo ip route add $cidr via $lanip"
+    say "    For a persistent LAN fallback, download the Mac/Linux helper and run: pwnforge install $cidr $lanip"
     say "  LAN interface: $lanif; check with: pwnforge-host.sh tailnet-access status $cidr"
     say "  Then reach a lab target by its IP (ssh/nmap)."
     say "OK"

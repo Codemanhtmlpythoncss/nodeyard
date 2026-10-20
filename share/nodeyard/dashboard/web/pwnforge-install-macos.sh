@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-CLI_URL=${PWNFORGE_CLI_URL:-https://raw.githubusercontent.com/Codemanhtmlpythoncss/nodeyard/tailnet-lab-access/share/nodeyard/dashboard/web/pwnforge-lab-access-macos.sh}
+CLI_URL=${PWNFORGE_CLI_URL:-https://raw.githubusercontent.com/Codemanhtmlpythoncss/nodeyard/video-player/share/nodeyard/dashboard/web/pwnforge-lab-access-macos.sh}
 DEST=/usr/local/bin/pwnforge
 TMP=$(mktemp "${TMPDIR:-/tmp}/pwnforge-cli.XXXXXX")
 trap 'rm -f "$TMP"' EXIT HUP INT TERM

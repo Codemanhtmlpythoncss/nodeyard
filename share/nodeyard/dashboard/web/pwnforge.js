@@ -86,16 +86,16 @@
 
   function labAccessCard(d) {
     if (!d.installed) return "";
-    return card("Direct lab access", html`<p class="muted small" style="margin-top:0">Route directly to running lab machines by their private IP addresses from this LAN or your Tailscale network. The host keeps lab-to-internet and lab-to-lab forwarding blocked. Tailscale route approval is still required in its admin console.</p>
+    return card("Direct lab access", html`<p class="muted small" style="margin-top:0">Use a lab machine's private IP from your Tailscale devices or from another device on this server's LAN. Lab machines stay blocked from the internet and other lab networks.</p>
       <div class="row wrap" style="gap:8px">
         <label class="row small" style="gap:6px">Lab subnet <input id="pf-lab-cidr" value="10.200.0.0/16" spellcheck="false" autocapitalize="off" style="width:180px"></label>
         <button class="btn small" data-pf="lab-access-status">Check routing</button>
         <button class="btn small primary" data-pf="lab-access-on">Enable direct access</button>
         <button class="btn small" data-pf="lab-access-off">Disable direct access</button>
-        <a class="btn small" href="/pwnforge-install-macos.sh" download="pwnforge-install-macos.sh">Install macOS CLI</a>
-        <a class="btn small" href="/pwnforge-install-linux.sh" download="pwnforge-install-linux.sh">Install Linux CLI</a>
+        <a class="btn small" href="/pwnforge-install-macos.sh" download="pwnforge-install-macos.sh">Download macOS installer</a>
+        <a class="btn small" href="/pwnforge-install-linux.sh" download="pwnforge-install-linux.sh">Download Linux installer</a>
       </div>
-      <div class="muted small mt">The installer adds a <span class="mono">pwnforge</span> command. Run <span class="mono">pwnforge install 10.200.0.0/16 &lt;server-LAN-IP&gt;</span> once; then use <span class="mono">pwnforge status</span> or <span class="mono">pwnforge test &lt;lab-IP&gt; 22</span>. macOS and Linux use a persistent LAN fallback and leave approved Tailscale routes in control.</div>`);
+      <div class="muted small mt"><b>Over Tailscale:</b> enable access here, approve the subnet in the Tailscale admin console, then connect to a lab IP. macOS automatically uses approved routes. Linux may need <span class="mono">sudo tailscale set --accept-routes=true</span>.<br><b>On the same Wi-Fi/Ethernet as this server:</b> download the installer above and run <span class="mono">sh ~/Downloads/pwnforge-install-macos.sh</span> or <span class="mono">sh ~/Downloads/pwnforge-install-linux.sh</span>. Click <b>Check routing</b> for this server's LAN IP, then run <span class="mono">pwnforge install 10.200.0.0/16 &lt;server-LAN-IP&gt;</span>. Use the LAN IP here, never the server's <span class="mono">100.x</span> Tailscale IP. Check with <span class="mono">pwnforge status</span> or <span class="mono">pwnforge test &lt;lab-IP&gt; 22</span>.</div>`);
   }
 
   function envCard(d) {
@@ -183,7 +183,7 @@
       } else if (a === "lab-access-status") {
         const cidr = (($('#pf-lab-cidr') || {}).value || "10.200.0.0/16").trim();
         const r = await post("/api/pwnforge/action", { action: a, cidr }, a);
-        if (r) showDialog("PwnForge lab routing", html`${chip(r.exit === 0 ? "status checked" : "check failed", r.exit === 0 ? "good" : "warn")}<pre class="hl-pre small" style="max-height:60vh;overflow:auto">${r.output}</pre><p class="muted small">The advertised Tailscale route also needs approval in the Tailscale admin console before other devices can use it.</p>`);
+        if (r) showDialog("PwnForge lab routing", html`${chip(r.exit === 0 ? "status checked" : "check failed", r.exit === 0 ? "good" : "warn")}<pre class="hl-pre small" style="max-height:60vh;overflow:auto">${r.output}</pre><p class="muted small">Approve the advertised route in the Tailscale admin console. macOS accepts approved routes automatically; Linux may need <span class="mono">sudo tailscale set --accept-routes=true</span>. Use the LAN address above only for the optional same-network fallback.</p>`);
       } else if (a === "lab-access-on" || a === "lab-access-off") {
         const cidr = (($('#pf-lab-cidr') || {}).value || "10.200.0.0/16").trim();
         const enabling = a === "lab-access-on";

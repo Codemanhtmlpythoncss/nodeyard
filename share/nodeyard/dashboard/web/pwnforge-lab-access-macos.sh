@@ -101,23 +101,23 @@ route_field() { awk -F': *' -v key="$1" '$1 ~ key {print $2; exit}'; }
 [[ -r "$CONFIG" ]] || exit 0
 source "$CONFIG"
 PROBE="$(cut -d/ -f1 <<< "$CIDR")"
-route_info="$(/sbin/route -n get -inet "$PROBE" 2>/dev/null || true)"
+route_info="$(/sbin/route -n get "$PROBE" 2>/dev/null || true)"
 route_iface="$(route_field interface <<< "$route_info")"
 route_gateway="$(route_field gateway <<< "$route_info")"
 
 # Tailscale owns an active utun route when the approved subnet route is available.
 # Leave it alone; the launchd job adds the LAN fallback when Tailscale disconnects.
 if [[ "$route_iface" == utun* ]]; then exit 0; fi
-default_info="$(/sbin/route -n get -inet default 2>/dev/null || true)"
+default_info="$(/sbin/route -n get default 2>/dev/null || true)"
 default_gateway="$(route_field gateway <<< "$default_info")"
 default_iface="$(route_field interface <<< "$default_info")"
-host_info="$(/sbin/route -n get -inet "$GATEWAY" 2>/dev/null || true)"
+host_info="$(/sbin/route -n get "$GATEWAY" 2>/dev/null || true)"
 host_iface="$(route_field interface <<< "$host_info")"
 
 if [[ "$route_gateway" == "$GATEWAY" ]]; then
   if [[ "$host_iface" == "$default_iface" ]] && same_lan "$default_iface" && /usr/sbin/arp -n "$GATEWAY" 2>/dev/null | /usr/bin/grep -Eq ' at [[:xdigit:]]{1,2}(:[[:xdigit:]]{1,2}){5} '; then exit 0; fi
   # The Mac left that LAN; remove only our own stale route so an approved utun route can take over.
-  /sbin/route -n delete -inet -net "$CIDR" "$GATEWAY" >/dev/null 2>&1 || true
+  /sbin/route -n delete -net "$CIDR" "$GATEWAY" >/dev/null 2>&1 || true
   exit 0
 fi
 
@@ -125,7 +125,9 @@ fi
 if [[ -n "$route_gateway" && "$route_gateway" != "$default_gateway" ]]; then exit 0; fi
 if [[ -z "$default_iface" || "$host_iface" != "$default_iface" ]] || ! same_lan "$default_iface"; then exit 0; fi
 if ! /usr/sbin/arp -n "$GATEWAY" 2>/dev/null | /usr/bin/grep -Eq ' at [[:xdigit:]]{1,2}(:[[:xdigit:]]{1,2}){5} '; then exit 0; fi
-/sbin/route -n add -inet -net "$CIDR" "$GATEWAY" >/dev/null 2>&1 || true
+# macOS uses BSD route(8), not Linux's `ip route`. Its network route syntax is:
+#   route -n add -net <network>/<prefix> <gateway>
+/sbin/route -n add -net "$CIDR" "$GATEWAY" >/dev/null 2>&1 || true
 WORKER_EOF
   chown root:wheel "$WORKER"
   chmod 0755 "$WORKER"
@@ -161,7 +163,7 @@ show_status() {
   fi
   source "$CONFIG"
   cidr="$CIDR"; gateway="$GATEWAY"; probe="$(cut -d/ -f1 <<< "$CIDR")"
-  route_info="$(/sbin/route -n get -inet "$probe" 2>/dev/null || true)"
+  route_info="$(/sbin/route -n get "$probe" 2>/dev/null || true)"
   iface="$(route_field interface <<< "$route_info")"
   next_hop="$(route_field gateway <<< "$route_info")"
   [[ -n "$iface" ]] || iface=unavailable
@@ -184,9 +186,9 @@ remove_helper() {
   if [[ -r "$CONFIG" ]]; then
     source "$CONFIG"
     probe="$(cut -d/ -f1 <<< "$CIDR")"
-    route_info="$(/sbin/route -n get -inet "$probe" 2>/dev/null || true)"
+    route_info="$(/sbin/route -n get "$probe" 2>/dev/null || true)"
     if [[ "$(route_field gateway <<< "$route_info")" == "$GATEWAY" ]]; then
-      /sbin/route -n delete -inet -net "$CIDR" "$GATEWAY" >/dev/null 2>&1 || true
+      /sbin/route -n delete -net "$CIDR" "$GATEWAY" >/dev/null 2>&1 || true
     fi
   fi
   /bin/launchctl bootout system "$PLIST" >/dev/null 2>&1 || true

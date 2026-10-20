@@ -34,7 +34,25 @@
           <p>On a Mac, from the repository: <code>sh scripts/install-macos-ai-app.sh</code>. In the app, the server address is this dashboard (<code>${origin}</code>), not the model port 31435.</p>`)}
         ${step("9. Remote access to devices", html`<p><b>Terminal</b> opens a shell on this server as the terminal user (never root), only over Tailscale or your own network. <b>Commands</b> runs any nodeyard command with its options. <b>Doctor</b> checks for common problems and fixes them with one click. Kubernetes restarts and full rolling reboots are under Nodes › Devices.</p>
           <p>The dashboard has no installer for other software: install packages on a node yourself (over SSH or the Terminal page).</p>`)}
-        ${step("10. Public access", html`<p><code>sudo nodeyard public on</code> publishes the dashboard and model API through Tailscale Funnel with HTTPS; the API key is then always required. <code>public off</code> stops it.</p>`)}
+        ${step("10. Connect to PwnForge over Tailscale", html`<p>On the server, open <b>PwnForge › Direct lab access</b> and choose <b>Enable direct access</b>. Then approve the private lab subnet in the <a href="https://login.tailscale.com/admin/machines" target="_blank" rel="noopener">Tailscale admin console</a>. Lab machines stay private; they are not published to the internet.</p>
+          <p>Connect your computer to Tailscale and test a lab machine's SSH port:</p>
+          ${cmd("nc -vz 10.200.0.103 22")}
+          <p>macOS automatically accepts approved subnet routes, so no manual route command is needed. On Linux, if the route is not active, allow subnet routes:</p>
+          ${cmd("sudo tailscale set --accept-routes=true")}
+          <p>You can now connect to a lab by its private IP, for example <code>ssh user@10.200.0.103</code>.</p>`)}
+        ${step("11. Connect while on the server's local network", html`<p>This optional setup is for when your computer is on the same Wi-Fi or wired LAN as the server. In PwnForge's <b>Direct lab access</b> card, download the installer for your computer and run it in Terminal.</p>
+          <p>On macOS:</p>
+          ${cmd("sh ~/Downloads/pwnforge-install-macos.sh")}
+          <p>On Linux:</p>
+          ${cmd("sh ~/Downloads/pwnforge-install-linux.sh")}
+          <p>Then click <b>Check routing</b> for the server's LAN address and set up a persistent local fallback. Replace the example below with the LAN address shown there:</p>
+          ${cmd("pwnforge install 10.200.0.0/16 192.168.1.123")}
+          <p>It yields to Tailscale whenever its route is available. Use the server's LAN IP here; do not use its <code>100.x</code> Tailscale IP.</p>
+          <p>For a one-time macOS route instead, use macOS's <code>route</code> command (not Linux's <code>ip route</code>). Replace the example gateway with the server's LAN address:</p>
+          ${cmd("sudo route -n add -net 10.200.0.0/16 192.168.1.123")}
+          ${cmd("route -n get 10.200.0.103")}
+          <p>Remove it with <code>sudo route -n delete -net 10.200.0.0/16 192.168.1.123</code>. To check the persistent helper, run <code>pwnforge status</code> or <code>pwnforge test 10.200.0.103 22</code>.</p>`)}
+        ${step("12. Public access", html`<p><code>sudo nodeyard public on</code> publishes the dashboard and model API through Tailscale Funnel with HTTPS; the API key is then always required. <code>public off</code> stops it.</p>`)}
         ${step("Troubleshooting", html`<ul>
           <li><b>“Sign in first” everywhere</b>: the session ended or the password changed; sign in again.</li>
           <li><b>A model answers “HTTP 401”</b>: the shared key and the model's key differ: Settings › One shared API key › Use the running model's key everywhere.</li>
