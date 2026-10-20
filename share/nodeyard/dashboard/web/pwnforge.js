@@ -84,6 +84,20 @@
         <span class="muted small">This setting wins over PwnForge's own "LAN access" setting. PwnForge is never published to the internet from here.</span></div>`);
   }
 
+  function labAccessCard(d) {
+    if (!d.installed) return "";
+    return card("Direct lab access", html`<p class="muted small" style="margin-top:0">Use a lab machine's private IP from your Tailscale devices or from another device on this server's LAN. Lab machines stay blocked from the internet and other lab networks.</p>
+      <div class="row wrap" style="gap:8px">
+        <label class="row small" style="gap:6px">Lab subnet <input id="pf-lab-cidr" value="10.200.0.0/16" spellcheck="false" autocapitalize="off" style="width:180px"></label>
+        <button class="btn small" data-pf="lab-access-status">Check routing</button>
+        <button class="btn small primary" data-pf="lab-access-on">Enable direct access</button>
+        <button class="btn small" data-pf="lab-access-off">Disable direct access</button>
+        <a class="btn small" href="/pwnforge-install-macos.sh" download="pwnforge-install-macos.sh">Download macOS installer</a>
+        <a class="btn small" href="/pwnforge-install-linux.sh" download="pwnforge-install-linux.sh">Download Linux installer</a>
+      </div>
+      <div class="muted small mt"><b>Over Tailscale:</b> enable access here, approve the subnet in the Tailscale admin console, then connect to a lab IP. macOS automatically uses approved routes. Linux may need <span class="mono">sudo tailscale set --accept-routes=true</span>.<br><b>On the same Wi-Fi/Ethernet as this server:</b> download the installer above and run <span class="mono">sh ~/Downloads/pwnforge-install-macos.sh</span> or <span class="mono">sh ~/Downloads/pwnforge-install-linux.sh</span>. Click <b>Check routing</b> for this server's LAN IP, then run <span class="mono">pwnforge install 10.200.0.0/16 &lt;server-LAN-IP&gt;</span>. Use the LAN IP here, never the server's <span class="mono">100.x</span> Tailscale IP. Check with <span class="mono">pwnforge status</span> or <span class="mono">pwnforge test &lt;lab-IP&gt; 22</span>.</div>`);
+  }
+
   function envCard(d) {
     if (!d.installed) return "";
     if (d.environments_error) return card("Training environments", html`<div class="muted">${d.environments_error}</div>`);
@@ -132,7 +146,7 @@
     if (d.error) { setHTML(root, card("PwnForge", html`<div class="err">${d.error}</div>`)); return; }
     if (d.problem) { setHTML(root, card("PwnForge", empty("Not available on this machine", html`<div class="muted small">${d.problem}</div>`))); return; }
     setHTML(root, html`${d.demo ? html`<div class="banner info"><svg class="icon"><use href="#i-help"/></svg><span>Demo: nothing is installed or started; this shows what the page does.</span></div>` : ""}
-      <div class="grid g-2">${hostingCard(d)}${addressCard(d)}</div>${envCard(d)}${safetyCard()}`);
+      <div class="grid g-2">${hostingCard(d)}${addressCard(d)}</div>${labAccessCard(d)}${envCard(d)}${safetyCard()}`);
     if (d.job) refreshJobLog();
   }
   async function refreshJobLog() {
@@ -166,6 +180,20 @@
       } else if (a === "doctor") {
         const r = await post("/api/pwnforge/action", { action: "doctor" }, "doctor");
         if (r) showDialog("PwnForge diagnostics", html`${chip(r.exit === 0 ? "OK" : "problems found", r.exit === 0 ? "good" : "warn")}<pre class="hl-pre small" style="max-height:60vh;overflow:auto">${r.output}</pre>`);
+      } else if (a === "lab-access-status") {
+        const cidr = (($('#pf-lab-cidr') || {}).value || "10.200.0.0/16").trim();
+        const r = await post("/api/pwnforge/action", { action: a, cidr }, a);
+        if (r) showDialog("PwnForge lab routing", html`${chip(r.exit === 0 ? "status checked" : "check failed", r.exit === 0 ? "good" : "warn")}<pre class="hl-pre small" style="max-height:60vh;overflow:auto">${r.output}</pre><p class="muted small">Approve the advertised route in the Tailscale admin console. macOS accepts approved routes automatically; Linux may need <span class="mono">sudo tailscale set --accept-routes=true</span>. Use the LAN address above only for the optional same-network fallback.</p>`);
+      } else if (a === "lab-access-on" || a === "lab-access-off") {
+        const cidr = (($('#pf-lab-cidr') || {}).value || "10.200.0.0/16").trim();
+        const enabling = a === "lab-access-on";
+        const title = enabling ? "Enable direct lab access?" : "Disable direct lab access?";
+        const body = enabling
+          ? html`<p style="margin-top:0">Makes running lab machines in <span class="mono">${cidr}</span> reachable by IP from devices on this LAN and your Tailscale network. Other tailnet devices can reach these lab targets too. Tailscale route approval is required after setup.</p><p class="muted small">Lab machines remain blocked from starting connections to the internet or other lab networks.</p>`
+          : html`<p style="margin-top:0">Stops routing <span class="mono">${cidr}</span> through this host, withdraws its Tailscale route, and restores the previous IPv4 forwarding setting.</p>`;
+        if (!(await confirmDlg(title, body, enabling ? "Enable access" : "Disable access", !enabling))) return;
+        PF.jobLog = "";
+        await post("/api/pwnforge/action", { action: a, cidr }, a);
       } else if (a === "install") {
         const d = PF.data, upd = d.installed;
         if (!(await confirmDlg(upd ? "Update PwnForge?" : "Install PwnForge?", html`<p style="margin-top:0">${upd ? "Gets the newest PwnForge from" : "Downloads PwnForge from"} <span class="mono">${d.repo}</span> into <span class="mono">${d.config.path}</span>, installs its Python packages and builds its website, then installs its service (user <span class="mono">pwnforge</span>, data in <span class="mono">${d.config.data_dir}</span>).</p>

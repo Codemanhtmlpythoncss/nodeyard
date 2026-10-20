@@ -13,6 +13,7 @@ MIME = {
     ".svg": "image/svg+xml", ".json": "application/json", ".png": "image/png", ".ico": "image/x-icon",
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".webmanifest": "application/manifest+json",
     ".woff2": "font/woff2", ".glb": "model/gltf-binary", ".mp3": "audio/mpeg",
+    ".sh": "text/x-shellscript; charset=utf-8",
 }
 # Text worth compressing; pictures and audio are compressed already.
 COMPRESSIBLE = ("text/", "application/json", "application/javascript", "application/manifest+json", "image/svg+xml", "model/gltf")

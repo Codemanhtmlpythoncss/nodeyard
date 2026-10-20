@@ -531,7 +531,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header(k, v)
             self.end_headers()
             return None
-        self._send(200, f["body"], f["ctype"], {"ETag": f["etag"], "Cache-Control": cache}, gz=f["gzip"])
+        headers = {"ETag": f["etag"], "Cache-Control": cache}
+        if path.endswith(".sh"):
+            headers["Content-Disposition"] = 'attachment; filename="' + os.path.basename(path) + '"'
+        self._send(200, f["body"], f["ctype"], headers, gz=f["gzip"])
 
     # -- POST ----------------------------------------------------------------
 

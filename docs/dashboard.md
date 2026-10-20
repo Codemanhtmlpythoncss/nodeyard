@@ -485,6 +485,39 @@ secrets hidden), diagnostics and the training machines with their network
 isolation; they are started, stopped and deleted through PwnForge's own
 `pwnforge env` commands. The dashboard works the same without it.
 
+### Reach lab machines from another device
+
+On the PwnForge page, open **Direct lab access** and choose **Enable direct
+access**. Approve the advertised private lab subnet once in the
+[Tailscale admin console](https://login.tailscale.com/admin/machines). macOS
+automatically uses approved Tailscale subnet routes. On Linux, if the route is
+not active, enable route acceptance with
+`sudo tailscale set --accept-routes=true`. Then use the lab machine's private
+IP directly (for example, `ssh user@10.200.0.103`). `nc -vz 10.200.0.103 22`
+checks whether SSH is reachable.
+
+For devices on the same Wi-Fi or wired network as the server, the dashboard
+also provides macOS and Linux client installers. The optional `pwnforge`
+helper keeps a local-network route available as a fallback and yields to an
+active Tailscale route. Use the server's LAN address shown by **Check routing**
+as the helper's second argument; a `100.x.y.z` Tailscale address is not a LAN
+gateway. Example: `pwnforge install 10.200.0.0/16 192.168.1.123`. Check it with
+`pwnforge status` or `pwnforge test 10.200.0.103 22`.
+
+For a temporary macOS route while on that same LAN, use the built-in BSD
+`route` command, not Linux's `ip route` command:
+
+```sh
+sudo route -n add -net 10.200.0.0/16 192.168.1.123
+route -n get 10.200.0.103
+sudo route -n delete -net 10.200.0.0/16 192.168.1.123
+```
+
+Replace `192.168.1.123` with the server's actual LAN address. If a route lookup
+shows `utun…`, macOS is using Tailscale. The dashboard helper keeps the lab
+machines isolated from internet and other lab networks while allowing replies
+to reach the connecting Mac/Linux device.
+
 ## Plugins and the activity log
 
 **Settings › Plugins** lists every tool area the AI and these pages can use: what it does, which clients use it

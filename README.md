@@ -143,6 +143,80 @@ nodeyard --demo
 
 Read [getting started](docs/getting-started.md) for the full walk-through.
 
+## PwnForge lab access from a Mac or Linux client
+
+PwnForge lab machines use private IPs (for example, `10.200.0.103`). To reach
+them from your Mac or Linux computer, turn on **Direct lab access** on the
+PwnForge page in the Nodeyard dashboard, then approve the advertised lab
+subnet in the [Tailscale admin console](https://login.tailscale.com/admin/machines).
+This shares a route to the lab machines; it does not make the lab machines
+accessible from the public internet. Their outbound connections remain blocked.
+
+### Connect over Tailscale
+
+After the route is approved, connect your device to Tailscale and try a lab
+machine. macOS automatically uses approved subnet routes. On Linux, if the
+route is not accepted already, run:
+
+```sh
+sudo tailscale set --accept-routes=true
+```
+
+Check an SSH port with `nc -vz 10.200.0.103 22`, or use `ssh`/`nmap` as usual.
+You do not need to add a manual route on macOS when the approved Tailscale
+route is active.
+
+### Connect while on the server's local network
+
+The Mac/Linux helper adds a persistent local-network fallback for times when
+your device is on the same Wi-Fi or wired network as the Nodeyard server. Get
+the server's **LAN address** from **PwnForge › Direct lab access › Check
+routing**. It will look like `192.168.1.123` or `10.0.0.5`.
+
+Install the `pwnforge` command on macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Codemanhtmlpythoncss/nodeyard/video-player/share/nodeyard/dashboard/web/pwnforge-install-macos.sh | sh
+```
+
+Or on Linux (requires systemd and `iproute2`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Codemanhtmlpythoncss/nodeyard/video-player/share/nodeyard/dashboard/web/pwnforge-install-linux.sh | sh
+```
+
+Now set up the persistent local-network fallback, replacing the sample IP with
+the server's LAN address from **Check routing**:
+
+```sh
+pwnforge install 10.200.0.0/16 192.168.1.123
+pwnforge status
+pwnforge test 10.200.0.103 22
+```
+
+The helper uses Tailscale whenever its approved route is available, and only
+adds the LAN route while your computer is actually on the server's LAN. Use the
+server's **LAN IP** here; do not use its `100.x.y.z` Tailscale IP as the LAN
+gateway.
+
+For a temporary one-time macOS LAN route instead, macOS uses BSD `route(8)`
+(not Linux's `ip route`):
+
+```sh
+sudo route -n add -net 10.200.0.0/16 192.168.1.123
+route -n get 10.200.0.103
+sudo route -n delete -net 10.200.0.0/16 192.168.1.123
+```
+
+Only use that manual route while on the same LAN, and only when a Tailscale
+route is not already active. A route lookup showing `interface: utun…` uses
+Tailscale; `en0`/`en1` with the server LAN address as gateway uses the local
+network. `pwnforge remove` uninstalls the persistent client helper without
+changing Tailscale settings.
+
+The same installers are available in the dashboard's **Direct lab access**
+card.
+
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
