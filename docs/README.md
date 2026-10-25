@@ -13,6 +13,7 @@
 - [AI workloads](ai.md)
 - [The web dashboard](dashboard.md): live view, chat with plugins, running code, model loading
 - [yardcode](../yardcode/README.md): the terminal AI agent that uses your model API and can load models on the cluster
+- [Let a friend into your PwnForge labs](pwnforge-friend-vpn.md): full lab-network access from anywhere, no Tailscale on their device
 - [Health checks: doctor](doctor.md)
 - [Snapshots and backups](backups.md)
 - [Changes and undo](changes-and-undo.md)
