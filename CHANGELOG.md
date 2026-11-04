@@ -9,6 +9,8 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Remote model training (`nodeyard jobs`).** Train copies of one model in parallel across the machines on your tailnet and keep the one with the lowest validation loss. Each copy goes to the machine with the most free capacity, and a new copy starts as soon as a slot frees up. Uses key-only SSH over Tailscale, with a portable PyTorch trainer for x86_64 and arm64. See [remote training](docs/remote-training.md).
+- **Training access for the master.** `sudo nodeyard jobs access setup` adds a second SSH service on the master's Tailscale address: keys only, no passwords, no root, tailnet sources only, and port 22 left alone. `remove` undoes it.
 - **The node agent is a C program.** The same answers on the same port, for about 0.3 MB of memory per node
   instead of ~24 MB (a Python interpreter), and no Python image on each node's disk: a static program of about
   120 KB for x86, 64-bit and 32-bit Arm runs from a ConfigMap in busybox. Other CPU types keep the Python agent.

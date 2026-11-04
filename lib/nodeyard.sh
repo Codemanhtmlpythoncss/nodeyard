@@ -76,5 +76,7 @@ shopt -s lastpipe
 . "${NY_HOME}/lib/modules/config_cmd.sh"
 # shellcheck source=modules/changes.sh
 . "${NY_HOME}/lib/modules/changes.sh"
+# shellcheck source=modules/jobs.sh
+. "${NY_HOME}/lib/modules/jobs.sh"
 # shellcheck source=modules/tool.sh
 . "${NY_HOME}/lib/modules/tool.sh"
