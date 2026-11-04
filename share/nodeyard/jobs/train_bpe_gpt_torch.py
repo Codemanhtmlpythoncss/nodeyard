@@ -317,7 +317,8 @@ def train(args) -> int:
             emit(f"Step {step}/{args.steps} | train loss {value:.4f} | {step / elapsed:.2f} steps/sec | "
                  f"{step * args.batch_size * args.context / elapsed:,.0f} tokens/sec | "
                  f"total training step {total_step:,} | learning rate {rate:.8g}")
-        if step % args.eval_every == 0 or step == args.steps:
+        sync_step = bool(args.sync_every and step % args.sync_every == 0)
+        if step % args.eval_every == 0 or step == args.steps or sync_step:
             validation = evaluate(model, valid_token_tensor, valid_weight_tensor, args.context, args.batch_size, device)
             emit(f"Validation at step {step}: loss {validation:.4f} | total training step {total_step:,}")
             if validation < best_loss:
@@ -330,6 +331,30 @@ def train(args) -> int:
             new_rate = governor.observe(validation, peak, total_step, emit)
             if new_rate is not None:
                 peak = new_rate
+            if sync_step:
+                # Save at each population barrier. The runner chooses the lowest
+                # validation loss and puts that exact tensor set on every worker.
+                save_safetensors(app_data / MODEL_FILE, model.state_dict())
+                emit(f"SYNC_WAIT | {total_step} | {validation:.6f} | {peak:.8g}")
+                sync_file = app_data / f"sync_{total_step}.json"
+                deadline = time.monotonic() + args.sync_timeout
+                while not sync_file.is_file():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"Timed out waiting for the parallel weight sync at step {total_step}.")
+                    time.sleep(0.1)
+                sync_info = json.loads(sync_file.read_text(encoding="utf-8"))
+                model.load_state_dict(load_safetensors(app_data / MODEL_FILE, device), strict=True)
+                best_loss = float(sync_info["best_loss"])
+                best_step = int(sync_info["best_step"])
+                peak = float(sync_info["learning_rate"])
+                best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+                optimizer = torch.optim.AdamW(model.parameters(), lr=peak, betas=(0.9, 0.95),
+                                              weight_decay=args.weight_decay)
+                governor.best = best_loss
+                governor.stalled = 0
+                sync_file.unlink()
+                emit(f"SYNC_SELECTED | {total_step} | shared best loss {best_loss:.4f} from step {best_step}; "
+                     f"all weights synchronized, optimizer moments reset")
 
     final_validation = evaluate(model, valid_token_tensor, valid_weight_tensor, args.context, args.batch_size, device, batches=20)
     if best_state is not None and final_validation > best_loss:
@@ -427,6 +452,9 @@ def main() -> int:
     train_parser.add_argument("--resume-from", type=Path, default=None,
                               help="resume from an MLX/PyTorch BPE model directory")
     train_parser.add_argument("--result-file", default=None)
+    train_parser.add_argument("--sync-every", type=int, default=0,
+                              help="synchronize all parallel copies to the best validation weights every N steps")
+    train_parser.add_argument("--sync-timeout", type=int, default=900)
     train_parser.set_defaults(handler=train)
     generate_parser = commands.add_parser("generate")
     generate_parser.add_argument("--app-data", required=True, type=Path)

@@ -50,7 +50,7 @@ JOBS_ROOT = Path(os.environ.get("NODEYARD_JOBS_OUTPUT", "~/nodeyard-jobs")).expa
 REMOTE_ROOT = "nodeyard-jobs"
 DEFAULT_MB_PER_COPY = 900  # conservative: the 6.4M-weight model, its optimizer state, and activations
 RESERVE_MB = 1024
-POLL_SECONDS = 5
+POLL_SECONDS = 10
 LR_GOVERNOR = HERE / "lr_governor.py"
 MASTER_ACCESS_SCRIPT = HERE / "training-access.sh"
 
@@ -150,12 +150,28 @@ class SSHTransport:
         return result.returncode, result.stdout + result.stderr
 
     def put(self, local: Path, remote: str) -> None:
-        subprocess.run(["scp", "-q", *self.options, "-P", str(self.port), str(local), f"{self.target}:{remote}"],
-                       check=True)
+        last = None
+        for attempt in range(4):
+            try:
+                subprocess.run(["scp", "-q", *self.options, "-P", str(self.port), str(local), f"{self.target}:{remote}"],
+                               check=True, timeout=90)
+                return
+            except (subprocess.SubprocessError, OSError) as error:
+                last = error
+                time.sleep(min(2 ** attempt, 8))
+        raise RuntimeError(f"SCP to {self.target} failed after retries: {last}")
 
     def get(self, remote: str, local: Path) -> None:
-        subprocess.run(["scp", "-q", "-r", *self.options, "-P", str(self.port), f"{self.target}:{remote}", str(local)],
-                       check=True)
+        last = None
+        for attempt in range(4):
+            try:
+                subprocess.run(["scp", "-q", "-r", *self.options, "-P", str(self.port), f"{self.target}:{remote}", str(local)],
+                               check=True, timeout=90)
+                return
+            except (subprocess.SubprocessError, OSError) as error:
+                last = error
+                time.sleep(min(2 ** attempt, 8))
+        raise RuntimeError(f"SCP from {self.target} failed after retries: {last}")
 
 
 class LocalTransport:
@@ -274,7 +290,8 @@ def train_arguments(args, copy_index: int) -> list[str]:
             "--dim", str(args.dim), "--heads", str(args.heads), "--layers", str(args.layers),
             "--vocab-size", str(args.vocab_size), "--learning-rate", str(args.learning_rate),
             "--weight-decay", str(args.weight_decay), "--warmup", str(args.warmup),
-            "--eval-every", str(args.eval_every), "--seed", str(args.seed + copy_index)] \
+            "--eval-every", str(args.eval_every), "--sync-every", str(args.sync_every),
+            "--seed", str(args.seed + copy_index)] \
         + (["--assistant-only"] if args.assistant_only else [])
 
 
@@ -301,9 +318,80 @@ def _install_best(source: Path, destination: Path) -> None:
         temporary.replace(destination / file.name)
 
 
-def run_copy_on(host: Host, copy_index: int, args, data: Path, job_dir: Path, log) -> dict:
+class ParallelWeightSync:
+    """At each barrier, broadcast the copy with the lowest validation loss."""
+
+    def __init__(self, expected: int, job_dir: Path, log):
+        self.expected = expected
+        self.job_dir = job_dir
+        self.log = log
+        self.condition = threading.Condition()
+        self.pending: dict[int, list[dict]] = {}
+        self.completed: dict[int, dict] = {}
+        self.error: str | None = None
+
+    def abort(self, reason: str) -> None:
+        with self.condition:
+            self.error = reason
+            self.condition.notify_all()
+
+    def arrive(self, copy_index: int, step: int, loss: float, learning_rate: float,
+               host: Host, transport, remote_dir: str, model_dir: Path) -> dict:
+        checkpoint = self.job_dir / "sync" / str(step) / f"copy_{copy_index}.safetensors"
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        if host.local:
+            shutil.copy2(model_dir / "model.safetensors", checkpoint)
+        else:
+            transport.get(f"{remote_dir}/model/model.safetensors", checkpoint)
+        entry = {"copy": copy_index, "loss": loss, "learning_rate": learning_rate,
+                 "host": host, "transport": transport, "remote_dir": remote_dir,
+                 "model_dir": model_dir, "checkpoint": checkpoint}
+        with self.condition:
+            if self.error:
+                raise RuntimeError(self.error)
+            entries = self.pending.setdefault(step, [])
+            entries.append(entry)
+            if len(entries) == self.expected:
+                winner = min(entries, key=lambda item: item["loss"])
+                info = {"best_loss": winner["loss"], "best_step": step,
+                        "learning_rate": min(item["learning_rate"] for item in entries),
+                        "winner": winner["copy"]}
+                marker = json.dumps(info, separators=(",", ":"))
+                for item in entries:
+                    if item["host"].local:
+                        target = item["model_dir"] / "model.safetensors"
+                        if target.resolve() != winner["checkpoint"].resolve():
+                            shutil.copy2(winner["checkpoint"], target)
+                        (item["model_dir"] / f"sync_{step}.json").write_text(marker, encoding="utf-8")
+                    else:
+                        item["transport"].put(winner["checkpoint"],
+                                              f"{item['remote_dir']}/model/model.safetensors")
+                        code, output = item["transport"].run(
+                            f"printf %s {shlex.quote(marker)} > {shlex.quote(item['remote_dir'] + f'/model/sync_{step}.json')}",
+                            timeout=30)
+                        if code:
+                            raise RuntimeError(f"Could not release synchronized copy {item['copy']}: {output[-160:]}")
+                self.completed[step] = info
+                self.log(f"Step {step}: copy {winner['copy']} had the best validation loss ({winner['loss']:.4f}); "
+                         f"broadcasting its weights to all {self.expected} copies.")
+                self.condition.notify_all()
+            deadline = time.monotonic() + 900
+            while step not in self.completed and not self.error:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.error = f"Timed out waiting for all parallel copies at sync step {step}."
+                    self.condition.notify_all()
+                    break
+                self.condition.wait(timeout=min(remaining, 10))
+            if self.error:
+                raise RuntimeError(self.error)
+            return self.completed[step]
+
+
+def run_copy_on(host: Host, copy_index: int, args, data: Path, job_dir: Path, log,
+                sync: ParallelWeightSync | None = None) -> dict:
     if host.local:
-        return run_copy_locally(copy_index, args, data, job_dir, host.threads_per_copy, log)
+        return run_copy_locally(copy_index, args, data, job_dir, host.threads_per_copy, log, sync)
     transport = transport_for(host)
     remote_dir = f"{REMOTE_ROOT}/{args.job}/copy_{copy_index}"
     threads = host.threads_per_copy
@@ -328,16 +416,41 @@ def run_copy_on(host: Host, copy_index: int, args, data: Path, job_dir: Path, lo
     transport.run(command, timeout=20)
     log(f"copy {copy_index} started on {host.name} ({threads} thread(s))")
     seen = 0
+    poll_failures = 0
     while True:
         time.sleep(POLL_SECONDS)
-        code, out = transport.run(
-            f"cd {shlex.quote(remote_dir)} && tail -n +{seen + 1} train.log 2>/dev/null; echo __NY_STATE__; "
-            f"(test -f result.json && echo RESULT) || (kill -0 $(cat train.pid) 2>/dev/null && echo RUNNING || echo STOPPED)")
+        try:
+            code, out = transport.run(
+                f"cd {shlex.quote(remote_dir)} && tail -n +{seen + 1} train.log 2>/dev/null; echo __NY_STATE__; "
+                f"(test -f result.json && echo RESULT) || (kill -0 $(cat train.pid) 2>/dev/null && echo RUNNING || echo STOPPED)",
+                timeout=25)
+        except (subprocess.SubprocessError, OSError) as error:
+            poll_failures += 1
+            if poll_failures in (1, 3, 6):
+                log(f"copy {copy_index} on {host.name}: temporary SSH polling interruption; retry {poll_failures}/12 ({error})")
+            if poll_failures >= 12:
+                return {"copy": copy_index, "host": host.name, "ok": False,
+                        "error": "SSH polling failed repeatedly; the remote process may still be running."}
+            continue
+        if code != 0 or "__NY_STATE__" not in out:
+            poll_failures += 1
+            if poll_failures in (1, 3, 6):
+                log(f"copy {copy_index} on {host.name}: remote status check failed; retry {poll_failures}/12")
+            if poll_failures >= 12:
+                return {"copy": copy_index, "host": host.name, "ok": False, "error": out[-240:]}
+            continue
+        poll_failures = 0
         new_lines, _, state = out.partition("__NY_STATE__")
         for line in new_lines.splitlines():
             seen += 1
             if line.strip():
                 log(f"[run {copy_index}] {line.rstrip()}")
+                match = re.match(r"SYNC_WAIT \| (\d+) \| ([0-9.]+) \| ([0-9.eE+-]+)", line.strip())
+                if match and sync:
+                    selected = sync.arrive(copy_index, int(match.group(1)), float(match.group(2)), float(match.group(3)),
+                                           host, transport, remote_dir, job_dir / f"copy_{copy_index}" / "model")
+                    log(f"[run {copy_index}] SYNC_SELECTED | {match.group(1)} | shared best loss "
+                        f"{selected['best_loss']:.4f} from copy {selected['winner']}")
         state = state.strip()
         if "RESULT" in state:
             break
@@ -351,11 +464,13 @@ def run_copy_on(host: Host, copy_index: int, args, data: Path, job_dir: Path, lo
     return {"copy": copy_index, "host": host.name, "ok": True, **result}
 
 
-def run_copy_locally(copy_index: int, args, data: Path, job_dir: Path, threads: int, log) -> dict:
+def run_copy_locally(copy_index: int, args, data: Path, job_dir: Path, threads: int, log,
+                     sync: ParallelWeightSync | None = None) -> dict:
     out_dir = job_dir / f"copy_{copy_index}"
     out_dir.mkdir(parents=True, exist_ok=True)
     result_path = out_dir / "result.json"
-    command = [sys.executable, "-u", str(TRAINER), "train", "--data-file", str(data), "--app-data", str(out_dir / "model"),
+    python = os.environ.get("NYJOBS_PYTHON", sys.executable)
+    command = [python, "-u", str(TRAINER), "train", "--data-file", str(data), "--app-data", str(out_dir / "model"),
                "--threads", str(threads), "--result-file", str(result_path)] + train_arguments(args, copy_index)
     if args.resume_from:
         model_dir = out_dir / "model"
@@ -365,12 +480,22 @@ def run_copy_locally(copy_index: int, args, data: Path, job_dir: Path, threads: 
         command.append("--resume")
     log(f"copy {copy_index} started on this machine ({threads} thread(s))")
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    with (out_dir / "train.log").open("w", encoding="utf-8") as handle:
-        for line in process.stdout:
-            handle.write(line)
-            if line.strip():
-                log(f"[run {copy_index}] {line.rstrip()}")
-    process.wait()
+    try:
+        with (out_dir / "train.log").open("w", encoding="utf-8") as handle:
+            for line in process.stdout:
+                handle.write(line)
+                if line.strip():
+                    log(f"[run {copy_index}] {line.rstrip()}")
+                    match = re.match(r"SYNC_WAIT \| (\d+) \| ([0-9.]+) \| ([0-9.eE+-]+)", line.strip())
+                    if match and sync:
+                        selected = sync.arrive(copy_index, int(match.group(1)), float(match.group(2)), float(match.group(3)),
+                                               this_machine(), None, "", out_dir / "model")
+                        log(f"[run {copy_index}] SYNC_SELECTED | {match.group(1)} | shared best loss "
+                            f"{selected['best_loss']:.4f} from copy {selected['winner']}")
+        process.wait()
+    except Exception:
+        process.terminate()
+        raise
     if process.returncode != 0 or not result_path.is_file():
         log(f"copy {copy_index} failed locally; see {out_dir / 'train.log'}")
         return {"copy": copy_index, "host": "this-machine", "ok": False}
@@ -392,6 +517,14 @@ def run_job(args, hosts: list[Host]) -> int:
 
     scheduler = Scheduler(hosts)
     total_slots = sum(h.slots for h in hosts)
+    if args.sync_every > 0 and args.copies > total_slots:
+        log(f"The every-{args.sync_every}-step weight sync needs all copies to run at once: "
+            f"requested {args.copies}, but selected devices have {total_slots} total slots. "
+            "Lower copies per device or disable synchronization with --sync-every 0.")
+        return 1
+    if args.copies <= 1:
+        args.sync_every = 0
+    sync = ParallelWeightSync(args.copies, job_dir, log) if args.sync_every > 0 else None
     log(f"Job {args.job}: {args.copies} copies on {len(scheduler.hosts)} machine(s), {total_slots} slot(s) in total.")
     results = []
 
@@ -399,9 +532,11 @@ def run_job(args, hosts: list[Host]) -> int:
         host = scheduler.acquire()
         try:
             try:
-                return run_copy_on(host, copy_index, args, data, job_dir, log)
+                return run_copy_on(host, copy_index, args, data, job_dir, log, sync)
             except Exception as error:
                 log(f"copy {copy_index} on {host.name} failed to start or finish: {error}")
+                if sync:
+                    sync.abort(f"copy {copy_index} failed: {error}")
                 return {"copy": copy_index, "host": host.name, "ok": False, "error": str(error)}
         finally:
             scheduler.release(host)
@@ -770,9 +905,9 @@ def run_on_kubernetes_node(master: Host, node_name: str, script: str, deadline: 
 
 
 def setup_cluster_workers(master: Host, username: str, public_key: str, emit=print) -> None:
-    """Provision every Ready, supported-architecture Kubernetes worker through a
-    short-lived privileged helper pod. This uses the master's already-authorized
-    Kubernetes API, so the user needs no worker passwords or extra terminal steps.
+    """Provision Ready Kubernetes workers through a temporary privileged helper pod.
+    Supported 64-bit nodes receive the runtime; 32-bit nodes get key-only access
+    but remain unavailable for PyTorch training.
     """
     transport = transport_for(master)
     code, nodes_text = transport.run("sudo k3s kubectl get nodes -o json", timeout=40)
@@ -793,16 +928,11 @@ def setup_cluster_workers(master: Host, username: str, public_key: str, emit=pri
         if not ready:
             emit(f"SETUP | {name} | skipped: Kubernetes reports NotReady")
             continue
-        if arch not in ("amd64", "arm64"):
-            emit(f"SETUP | {name} | skipped: {arch or 'unknown architecture'} has no supported PyTorch CPU wheel")
-            continue
+        supported = arch in ("amd64", "arm64")
         home = f"/home/{username}"
-        host_script = f"""set -eu
-printf '%s' {shlex.quote(script_b64)} | base64 -d > /tmp/nodeyard-training-access.sh
-chmod 755 /tmp/nodeyard-training-access.sh
-if ! id {shlex.quote(username)} >/dev/null 2>&1; then useradd --create-home --shell /bin/bash {shlex.quote(username)}; fi
-if ! python3 -m venv /tmp/nodeyard-venv-check >/dev/null 2>&1; then
+        runtime_setup = f"""if ! python3 -m venv /tmp/nodeyard-venv-check >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
+    dpkg --configure -a
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv python3-pip
   else
@@ -811,15 +941,23 @@ if ! python3 -m venv /tmp/nodeyard-venv-check >/dev/null 2>&1; then
   fi
 fi
 rm -rf /tmp/nodeyard-venv-check
-bash /tmp/nodeyard-training-access.sh setup --public-key {shlex.quote(public_key)} --user {shlex.quote(username)} --port 2222
 if ! {shlex.quote(home + "/nodeyard-train/bin/python")} -c 'import torch' >/dev/null 2>&1; then rm -rf {shlex.quote(home + "/nodeyard-train")}; fi
 su - {shlex.quote(username)} -c 'nohup bash /tmp/nodeyard-training-access.sh runtime --venv {shlex.quote(home + "/nodeyard-train")} > {shlex.quote(home + "/nodeyard-runtime.log")} 2>&1 </dev/null &'
+""" if supported else "echo TRAINING_UNSUPPORTED_32BIT_ARM\n"
+        host_script = f"""set -eu
+printf '%s' {shlex.quote(script_b64)} | base64 -d > /tmp/nodeyard-training-access.sh
+chmod 755 /tmp/nodeyard-training-access.sh
+if ! id {shlex.quote(username)} >/dev/null 2>&1; then useradd --create-home --shell /bin/bash {shlex.quote(username)}; fi
+bash /tmp/nodeyard-training-access.sh setup --public-key {shlex.quote(public_key)} --user {shlex.quote(username)} --port 2222
+{runtime_setup}
 echo WORKER_SETUP_OK
 """
         try:
             output = run_on_kubernetes_node(master, name, host_script, deadline=600)
-            if "Training SSH is up" in output and "WORKER_SETUP_OK" in output:
+            if "Training SSH is up" in output and "WORKER_SETUP_OK" in output and supported:
                 emit(f"SETUP | {name} | key-only Tailscale SSH installed; PyTorch CPU runtime installing in background")
+            elif "Training SSH is up" in output and "TRAINING_UNSUPPORTED_32BIT_ARM" in output:
+                emit(f"SETUP | {name} | key-only Tailscale SSH installed; remote training unsupported on {arch}")
             else:
                 emit(f"SETUP | {name} | setup incomplete: {output[-220:]}")
         except Exception as error:
@@ -928,6 +1066,8 @@ def build_parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run")
     run.add_argument("--data", required=True)
     run.add_argument("--copies", type=int, default=1)
+    run.add_argument("--sync-every", type=int, default=10,
+                     help="every N steps, synchronize all copies to the lowest validation loss (0 disables)")
     run.add_argument("--job", default=f"job-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}")
     run.add_argument("--local", action="store_true", help="run on this machine only")
     run.add_argument("--device", action="append", default=[], metavar="NAME[:PARALLEL]",

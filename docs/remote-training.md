@@ -76,6 +76,14 @@ Each job writes to `~/nodeyard-jobs/<job>/`: one folder per copy with its log an
 model, `results.json` with every copy's validation loss, and `best/` with the copy that
 won.
 
+When more than one copy runs, the runner evaluates them every ten steps by default,
+pauses them at the same step, and broadcasts the lowest-validation-loss weights to
+every copy before continuing. This keeps the copies on the best trajectory, but transfers
+checkpoint weights between devices and therefore adds network overhead. Set
+`--sync-every 0` to disable these barriers, or choose another interval with
+`--sync-every N`. All selected copies must fit in the devices' current parallel slots so
+they can meet at each barrier.
+
 ## Security notes
 
 - The service listens only on the master's Tailscale address, so it is not reachable
