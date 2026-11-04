@@ -29,6 +29,7 @@ import torch
 from torch import nn
 
 from bpe_tokenizer import BPETokenizer
+from lr_governor import LearningRateGovernor
 from sampling import sample_token
 
 MODEL_FILE = "model.pt"
@@ -168,10 +169,12 @@ def train(args) -> int:
          f"width {args.dim}, context {args.context}.")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.95),
                                   weight_decay=args.weight_decay)
+    peak = args.learning_rate
+    governor = LearningRateGovernor(args.learning_rate)
     started = time.perf_counter()
     model.train()
     for step in range(1, args.steps + 1):
-        rate = learning_rate(step, args.steps, args.learning_rate, args.warmup)
+        rate = learning_rate(step, args.steps, peak, args.warmup)
         for group in optimizer.param_groups:
             group["lr"] = rate
         inputs, targets, target_weights = sample_windows(train_tokens, train_weights, args.context,
@@ -193,6 +196,9 @@ def train(args) -> int:
         if step % args.eval_every == 0 or step == args.steps:
             validation = evaluate(model, valid_tokens, valid_weights, args.context, args.batch_size, device)
             emit(f"Validation at step {step}: loss {validation:.4f} | total training step {total_step:,}")
+            new_rate = governor.observe(validation, peak, total_step, emit)
+            if new_rate is not None:
+                peak = new_rate
 
     final_validation = evaluate(model, valid_tokens, valid_weights, args.context, args.batch_size, device, batches=20)
     torch.save({k: v.detach().cpu() for k, v in model.state_dict().items()}, app_data / MODEL_FILE)

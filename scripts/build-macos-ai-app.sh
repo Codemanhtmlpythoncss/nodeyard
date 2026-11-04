@@ -47,6 +47,11 @@ mkdir -p "$app/Contents/MacOS"
 cp "$binary" "$app/Contents/MacOS/NodeyardAI"
 resources="$app/Contents/Resources"
 mkdir -p "$resources"
+# The remote-training runner and its files (share/nodeyard/jobs), so the app can run jobs without the repository.
+mkdir -p "$resources/jobs"
+for file in nyjobs.py training-access.sh train_bpe_gpt_torch.py bpe_tokenizer.py sampling.py lr_governor.py; do
+    cp "$repo/share/nodeyard/jobs/$file" "$resources/jobs/$file"
+done
 iconset="$resources/AppIcon.iconset"
 icon_builder="$build/build-nodeyard-ai-icon"
 swiftc -O -sdk "$sdk" -target "$arch-apple-macosx13.0" -swift-version 6 -module-cache-path "$build/ModuleCache" \

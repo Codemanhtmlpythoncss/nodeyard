@@ -213,12 +213,13 @@ remove() {
 runtime() {
     # Runs as the training user, not root: a virtual environment with the trainer's dependencies.
     local target="${VENV:-$HOME/nodeyard-train}"
-    local arch index=""
-    arch="$(uname -m)"
-    if [ "$arch" = "x86_64" ]; then
+    # Linux nodes are CPU-only, so use PyTorch's CPU wheels (x86_64 and arm64). The default
+    # Linux wheel pulls in gigabytes of CUDA libraries that these machines cannot use.
+    local index=""
+    if [ "$(uname -s)" = "Linux" ]; then
         index="--index-url https://download.pytorch.org/whl/cpu"
     fi
-    say "Creating ${target} with PyTorch (CPU build on x86_64, the default build on arm64)."
+    say "Creating ${target} with PyTorch (CPU wheels on Linux; the standard build on macOS)."
     if [ "$PRINT_ONLY" -eq 1 ]; then
         say "python3 -m venv ${target}"
         say "${target}/bin/pip install torch numpy ${index}"

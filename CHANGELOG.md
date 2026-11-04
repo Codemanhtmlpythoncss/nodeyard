@@ -9,6 +9,8 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Remote training tab in Nodeyard AI.** The AI section of the app now has Remote training: check the machines, plan placement, and start a job on your tailnet, with the output streamed into the window. The app bundles the job runner, so it needs nothing from the repository.
+- **Learning rate lowers itself when validation stalls.** Training checks validation, lowers the rate by 30% after two checks in a row without improvement, and keeps lowering while it stalls. It stops as soon as validation improves, and the learning-rate box moves to match. Applies to the word, byte, and BPE trainers, on the Mac and on remote machines.
 - **Remote model training (`nodeyard jobs`).** Train copies of one model in parallel across the machines on your tailnet and keep the one with the lowest validation loss. Each copy goes to the machine with the most free capacity, and a new copy starts as soon as a slot frees up. Uses key-only SSH over Tailscale, with a portable PyTorch trainer for x86_64 and arm64. See [remote training](docs/remote-training.md).
 - **Training access for the master.** `sudo nodeyard jobs access setup` adds a second SSH service on the master's Tailscale address: keys only, no passwords, no root, tailnet sources only, and port 22 left alone. `remove` undoes it.
 - **The node agent is a C program.** The same answers on the same port, for about 0.3 MB of memory per node

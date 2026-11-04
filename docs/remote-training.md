@@ -49,6 +49,8 @@ nodeyard jobs hosts
 
 ## Train
 
+The same runner is in Nodeyard AI: open AI > Remote training.
+
 ```sh
 nodeyard jobs plan --copies 6                      # where the copies would go
 nodeyard jobs run --data corpus.txt --copies 6 --steps 3000 --assistant-only
