@@ -33,6 +33,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -48,7 +49,9 @@ JOBS_ROOT = Path(os.environ.get("NODEYARD_JOBS_OUTPUT", "~/nodeyard-jobs")).expa
 REMOTE_ROOT = "nodeyard-jobs"
 DEFAULT_MB_PER_COPY = 900  # conservative: the 6.4M-weight model, its optimizer state, and activations
 RESERVE_MB = 1024
-POLL_SECONDS = 15
+POLL_SECONDS = 5
+LR_GOVERNOR = HERE / "lr_governor.py"
+MASTER_ACCESS_SCRIPT = HERE / "training-access.sh"
 
 
 @dataclass
@@ -123,24 +126,29 @@ def this_machine() -> Host:
 # ---------------------------------------------------------------- transport
 
 class SSHTransport:
-    """Key-only SSH over Tailscale. BatchMode stops any password prompt, so a missing key fails at once."""
+    """Key-only SSH over Tailscale. BatchMode stops any password prompt, so a missing key fails at once.
+    NYJOBS_IDENTITY, when set, is the private key to use (the Tutor app keeps its own key)."""
 
     def __init__(self, host: Host):
         self.target = f"{host.user}@{host.address}" if host.user else host.address
         self.port = host.port
+        identity = os.environ.get("NYJOBS_IDENTITY", "")
+        self.options = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
+        if identity:
+            self.options += ["-i", identity, "-o", "IdentitiesOnly=yes"]
 
-    def run(self, command: str, timeout: int = 60) -> tuple[int, str]:
-        result = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-p", str(self.port),
-                                 self.target, command], capture_output=True, text=True, timeout=timeout)
+    def run(self, command: str, timeout: int = 60, stdin_text: str | None = None) -> tuple[int, str]:
+        result = subprocess.run(["ssh", *self.options, "-p", str(self.port), self.target, command],
+                                capture_output=True, text=True, timeout=timeout, input=stdin_text)
         return result.returncode, result.stdout + result.stderr
 
     def put(self, local: Path, remote: str) -> None:
-        subprocess.run(["scp", "-q", "-o", "BatchMode=yes", "-P", str(self.port), str(local),
-                        f"{self.target}:{remote}"], check=True)
+        subprocess.run(["scp", "-q", *self.options, "-P", str(self.port), str(local), f"{self.target}:{remote}"],
+                       check=True)
 
     def get(self, remote: str, local: Path) -> None:
-        subprocess.run(["scp", "-q", "-r", "-o", "BatchMode=yes", "-P", str(self.port),
-                        f"{self.target}:{remote}", str(local)], check=True)
+        subprocess.run(["scp", "-q", "-r", *self.options, "-P", str(self.port), f"{self.target}:{remote}", str(local)],
+                       check=True)
 
 
 class LocalTransport:
@@ -153,8 +161,9 @@ class LocalTransport:
     def _path(self, remote: str) -> Path:
         return self.root / remote.lstrip("~/")
 
-    def run(self, command: str, timeout: int = 60) -> tuple[int, str]:
-        result = subprocess.run(command, shell=True, cwd=self.root, capture_output=True, text=True, timeout=timeout)
+    def run(self, command: str, timeout: int = 60, stdin_text: str | None = None) -> tuple[int, str]:
+        result = subprocess.run(command, shell=True, cwd=self.root, capture_output=True, text=True, timeout=timeout,
+                                input=stdin_text)
         return result.returncode, result.stdout + result.stderr
 
     def put(self, local: Path, remote: str) -> None:
@@ -262,32 +271,39 @@ def train_arguments(args, copy_index: int) -> list[str]:
 
 
 def run_copy_on(host: Host, copy_index: int, args, data: Path, job_dir: Path, log) -> dict:
+    if host.local:
+        return run_copy_locally(copy_index, args, data, job_dir, host.threads_per_copy, log)
     transport = transport_for(host)
     remote_dir = f"{REMOTE_ROOT}/{args.job}/copy_{copy_index}"
     threads = host.threads_per_copy
-    if host.local:
-        return run_copy_locally(copy_index, args, data, job_dir, threads, log)
+    python = os.environ.get("NYJOBS_PYTHON", host.python or "python3")
     transport.run(f"mkdir -p {shlex.quote(remote_dir)}")
     transport.put(TRAINER, f"{remote_dir}/train_bpe_gpt_torch.py")
-    for support in SUPPORT_FILES:
+    for support in SUPPORT_FILES + [LR_GOVERNOR]:
         transport.put(support, f"{remote_dir}/{support.name}")
     transport.put(data, f"{remote_dir}/data.txt")
-    python = os.environ.get("NYJOBS_PYTHON", host.python or "python3")
     command = (f"cd {shlex.quote(remote_dir)} && NODEYARD_THREADS={threads} nohup {python} -u train_bpe_gpt_torch.py train "
                f"--data-file data.txt --app-data model {' '.join(shlex.quote(a) for a in train_arguments(args, copy_index))} "
                f"--threads {threads} --result-file result.json > train.log 2>&1 & echo $! > train.pid")
     transport.run(command)
     log(f"copy {copy_index} started on {host.name} ({threads} thread(s))")
+    seen = 0
     while True:
         time.sleep(POLL_SECONDS)
-        code, out = transport.run(f"cd {shlex.quote(remote_dir)} && (test -f result.json && cat result.json) || "
-                                  f"(tail -n 1 train.log; kill -0 $(cat train.pid) 2>/dev/null && echo RUNNING || echo STOPPED)")
-        if "RUNNING" in out:
-            continue
-        if "validation_loss" in out:
+        code, out = transport.run(
+            f"cd {shlex.quote(remote_dir)} && tail -n +{seen + 1} train.log 2>/dev/null; echo __NY_STATE__; "
+            f"(test -f result.json && echo RESULT) || (kill -0 $(cat train.pid) 2>/dev/null && echo RUNNING || echo STOPPED)")
+        new_lines, _, state = out.partition("__NY_STATE__")
+        for line in new_lines.splitlines():
+            seen += 1
+            if line.strip():
+                log(f"[run {copy_index}] {line.rstrip()}")
+        state = state.strip()
+        if "RESULT" in state:
             break
-        log(f"copy {copy_index} on {host.name} stopped without a result: {out.strip()[-200:]}")
-        return {"copy": copy_index, "host": host.name, "ok": False}
+        if "STOPPED" in state:
+            log(f"copy {copy_index} on {host.name} stopped without a result.")
+            return {"copy": copy_index, "host": host.name, "ok": False}
     (job_dir / f"copy_{copy_index}").mkdir(parents=True, exist_ok=True)
     transport.get(f"{remote_dir}/model", job_dir / f"copy_{copy_index}" / "model")
     transport.get(f"{remote_dir}/result.json", job_dir / f"copy_{copy_index}" / "result.json")
@@ -302,8 +318,13 @@ def run_copy_locally(copy_index: int, args, data: Path, job_dir: Path, threads: 
     command = [sys.executable, "-u", str(TRAINER), "train", "--data-file", str(data), "--app-data", str(out_dir / "model"),
                "--threads", str(threads), "--result-file", str(result_path)] + train_arguments(args, copy_index)
     log(f"copy {copy_index} started on this machine ({threads} thread(s))")
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     with (out_dir / "train.log").open("w", encoding="utf-8") as handle:
-        process = subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT)
+        for line in process.stdout:
+            handle.write(line)
+            if line.strip():
+                log(f"[run {copy_index}] {line.rstrip()}")
+    process.wait()
     if process.returncode != 0 or not result_path.is_file():
         log(f"copy {copy_index} failed locally; see {out_dir / 'train.log'}")
         return {"copy": copy_index, "host": "this-machine", "ok": False}
@@ -380,6 +401,121 @@ def cmd_add_host(args) -> int:
     return 0
 
 
+def identity_path() -> Path:
+    configured = os.environ.get("NYJOBS_IDENTITY", "")
+    return Path(configured).expanduser() if configured else Path("~/.ssh/id_ed25519").expanduser()
+
+
+def ensure_key(key: Path) -> str:
+    """Create the Mac's key (no passphrase, so runs need no typing) if missing; return the public key."""
+    if not key.exists():
+        key.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "nodeyard-mac", "-f", str(key)],
+                       check=True)
+    return Path(str(key) + ".pub").read_text(encoding="utf-8").strip()
+
+
+def ssh_with_password(address: str, user: str, port: int, command: str, password: str, timeout: int = 90):
+    """One-time password login, used only by setup-master. The password reaches ssh through an askpass
+    helper (mode 700) that is deleted straight away, so it never appears on a command line or in a log."""
+    handle, askpass = tempfile.mkstemp(prefix="nyjobs-askpass-")
+    try:
+        with os.fdopen(handle, "w") as stream:
+            stream.write('#!/bin/sh\nprintf "%s\\n" "$NYJOBS_PASSWORD"\n')
+        os.chmod(askpass, 0o700)
+        env = dict(os.environ, SSH_ASKPASS=askpass, SSH_ASKPASS_REQUIRE="force", NYJOBS_PASSWORD=password)
+        return subprocess.run(["ssh", "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no",
+                               "-o", "NumberOfPasswordPrompts=1", "-o", "ConnectTimeout=10",
+                               "-o", "StrictHostKeyChecking=accept-new", "-p", str(port), f"{user}@{address}", command],
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout, env=env)
+    finally:
+        if os.path.exists(askpass):
+            os.remove(askpass)
+
+
+def cmd_setup_master(args) -> int:
+    """Set up the master from this Mac, in one command: key, one-time password login, key install,
+    the training SSH service (port 2222, keys only), the PyTorch runtime, and the host entry."""
+    password = ""
+    if args.password_file:
+        password_path = Path(args.password_file)
+        try:
+            password = password_path.read_text(encoding="utf-8").rstrip("\n")
+        finally:
+            if password_path.exists():
+                os.remove(password_path)
+    key = identity_path()
+    public = ensure_key(key)
+    os.environ["NYJOBS_IDENTITY"] = str(key)
+    print("SETUP | 1/5 | this Mac's key is ready", flush=True)
+
+    if password:
+        login = ssh_with_password(args.address, args.user, args.ssh_port,
+                                  "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && "
+                                  f"(grep -qxF {shlex.quote(public)} ~/.ssh/authorized_keys || echo {shlex.quote(public)} >> ~/.ssh/authorized_keys) && "
+                                  "chmod 600 ~/.ssh/authorized_keys && echo KEY_INSTALLED", password)
+        if "KEY_INSTALLED" not in login.stdout:
+            print("SETUP | failed | the password login was refused. Check the address, username and password.", flush=True)
+            return 1
+    print("SETUP | 2/5 | the key is installed on the master", flush=True)
+
+    transport = SSHTransport(Host(name=args.name, address=args.address, user=args.user, port=args.ssh_port))
+    code, out = transport.run("echo KEY_LOGIN_OK")
+    if "KEY_LOGIN_OK" not in out:
+        print(f"SETUP | failed | key login does not work yet: {out.strip()[-160:]}", flush=True)
+        return 1
+    print("SETUP | 3/5 | key login works (no password needed)", flush=True)
+
+    transport.put(MASTER_ACCESS_SCRIPT, "/tmp/nodeyard-training-access.sh")
+    sudo_password = (password + "\n") if password else None
+    code, out = transport.run(
+        f"sudo -S -p '' bash /tmp/nodeyard-training-access.sh setup --public-key {shlex.quote(public)} "
+        f"--user {shlex.quote(args.user)} --port {args.port} 2>&1 | tail -n 20", timeout=180, stdin_text=sudo_password)
+    if "Training SSH is up" not in out and "config:" not in out:
+        print(f"SETUP | failed | the master's SSH service did not start: {out.strip()[-300:]}", flush=True)
+        return 1
+    print(f"SETUP | 4/5 | the training SSH service is up on port {args.port} (keys only, tailnet only)", flush=True)
+
+    code, home = transport.run("echo $HOME")
+    home = home.strip() or f"/home/{args.user}"
+    code, torch_state = transport.run(f"{home}/nodeyard-train/bin/python -c 'import torch;print(torch.__version__)' 2>/dev/null || echo MISSING")
+    if "MISSING" in torch_state:
+        transport.run("nohup bash /tmp/nodeyard-training-access.sh runtime --venv ~/nodeyard-train > ~/nodeyard-runtime.log 2>&1 &")
+        print("SETUP | 5/5 | PyTorch is installing on the master in the background (several minutes). "
+              "Run: nyjobs runtime-status", flush=True)
+    else:
+        print(f"SETUP | 5/5 | PyTorch {torch_state.strip()} is already on the master", flush=True)
+
+    hosts = [h for h in load_hosts() if h.name != args.name]
+    entry = Host(name=args.name, address=args.address, user=args.user, port=args.port,
+                 python=f"{home}/nodeyard-train/bin/python")
+    hosts.append(entry)
+    save_hosts(hosts)
+    probed = probe_host(entry)
+    save_hosts([probed if h.name == args.name else h for h in load_hosts()])
+    if probed.probed:
+        print(f"SETUP | done | {args.name}: {probed.arch}, {probed.cpus} CPU, {probed.mem_mb} MB free, {probed.slots} slot(s)",
+              flush=True)
+    else:
+        print("SETUP | done | the master is configured; probing will retry when it is reachable", flush=True)
+    return 0
+
+
+def cmd_runtime_status(_args) -> int:
+    for host in load_hosts():
+        if host.local or not host.address:
+            continue
+        transport = transport_for(host)
+        python = host.python or "python3"
+        code, out = transport.run(f"{python} -c 'import torch;print(torch.__version__)' 2>/dev/null || echo MISSING")
+        if "MISSING" in out:
+            _, log_tail = transport.run("tail -n 2 ~/nodeyard-runtime.log 2>/dev/null || true")
+            print(f"RUNTIME | {host.name} | installing or missing: {log_tail.strip()[-160:] or 'not started'}")
+        else:
+            print(f"RUNTIME | {host.name} | ready, torch {out.strip()}")
+    return 0
+
+
 def cmd_access_key(_args) -> int:
     """Print this Mac's public key so it can be pasted into the master's training access setup."""
     for name in ("id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"):
@@ -421,6 +557,10 @@ def cmd_plan(args) -> int:
 
 
 def cmd_run(args) -> int:
+    if not args.local:
+        configured = load_hosts()
+        refreshed = [probe_host(h) if (not h.probed and not h.local) else h for h in configured]
+        save_hosts(refreshed)
     hosts = [this_machine()] if args.local else [h for h in load_hosts() if h.probed]
     if not args.local and not hosts:
         print("No probed machines. Run nyjobs probe, or use --local.", file=sys.stderr)
@@ -441,6 +581,15 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--mem-mb-per-copy", type=int, default=DEFAULT_MB_PER_COPY)
     add.set_defaults(handler=cmd_add_host)
     commands.add_parser("access-key").set_defaults(handler=cmd_access_key)
+    setup = commands.add_parser("setup-master", help="set up a master from this Mac (one command, one password)")
+    setup.add_argument("--address", required=True)
+    setup.add_argument("--user", required=True)
+    setup.add_argument("--name", default="master")
+    setup.add_argument("--ssh-port", type=int, default=22, help="the normal SSH port used for the one-time login")
+    setup.add_argument("--port", type=int, default=2222, help="the training SSH port to use from now on")
+    setup.add_argument("--password-file", default=None, help="file holding the one-time password; deleted after reading")
+    setup.set_defaults(handler=cmd_setup_master)
+    commands.add_parser("runtime-status").set_defaults(handler=cmd_runtime_status)
     remove = commands.add_parser("remove-host")
     remove.add_argument("name")
     remove.set_defaults(handler=cmd_remove_host)

@@ -96,6 +96,8 @@ X11Forwarding no
 MaxAuthTries 3
 LoginGraceTime 20
 UsePAM yes
+# File copies (scp, and the runner) use SFTP; internal-sftp needs no extra files on any distro.
+Subsystem sftp internal-sftp
 EOF
 }
 
@@ -163,7 +165,9 @@ setup() {
 
     render_unit > "$UNIT"
     systemctl daemon-reload
-    systemctl enable --now nodeyard-training-sshd.service
+    systemctl enable nodeyard-training-sshd.service
+    # restart, not just start: a re-run must pick up a changed config
+    systemctl restart nodeyard-training-sshd.service
 
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
         ufw allow in on tailscale0 to any port "$PORT" proto tcp comment "$TAG" >/dev/null
