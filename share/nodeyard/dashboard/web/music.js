@@ -39,7 +39,7 @@
   };
   const EQ_OPTIONS = '<option value="flat">Flat</option><option value="bass">Bass boost</option><option value="treble">Treble</option><option value="rock">Rock</option><option value="electronic">Electronic</option><option value="vocal">Vocal</option><option value="classical">Classical</option>';
   let audio = null, bar = null;
-  let actx = null, analyser = null, vizData = null, vizSource = null, vizRAF = 0, eqNodes = [];
+  let actx = null, analyser = null, vizData = null, vizSource = null, vizRAF = 0, eqNodes = [], gainNode = null;
 
   // ---- the persistent player bar ------------------------------------------
   function ensureBar() {
@@ -156,7 +156,17 @@
   }
 
   // ---- volume, mute and the sleep timer ------------------------------------
+  // Once startViz routes the element through the Web Audio graph, the element's own .volume no
+  // longer changes what you hear — the graph does. Mirror volume+mute onto the graph's gain node
+  // so the slider, mute button and DJ ducking keep working during playback. Before the graph
+  // exists (nothing has played yet) this is a no-op and native audio.volume applies as usual.
+  function applyGain() {
+    if (!gainNode || !actx) return;
+    const level = (audio && !audio.muted) ? audio.volume : 0;
+    try { gainNode.gain.setTargetAtTime(level, actx.currentTime, 0.015); } catch (e) { gainNode.gain.value = level; }
+  }
   function paintVolume() {
+    applyGain();
     const i = $("#ny-vol-i"); if (!i || !audio) return;
     const quiet = audio.muted || audio.volume === 0;
     i.textContent = quiet ? "🔇" : audio.volume < 0.5 ? "🔉" : "🔊";
@@ -244,7 +254,12 @@
         let previous = vizSource;
         eqNodes.forEach((filter) => { previous.connect(filter); previous = filter; });
         previous.connect(analyser);
-        analyser.connect(actx.destination);
+        // Routing the element through this graph bypasses its native .volume, so the output level
+        // is this gain node, not audio.volume. Keep it in step with the element (see applyGain).
+        gainNode = actx.createGain();
+        analyser.connect(gainNode);
+        gainNode.connect(actx.destination);
+        applyGain();
         setEqualizer(M.eq, false);
         vizData = new Uint8Array(analyser.frequencyBinCount);
         // A routed element goes silent if the context suspends (tab switch, heavy WebGL like the 3D galaxy, browser
