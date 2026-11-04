@@ -26,6 +26,7 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import base64
 import concurrent.futures
 import json
 import os
@@ -136,7 +137,10 @@ class SSHTransport:
         self.target = f"{host.user}@{host.address}" if host.user else host.address
         self.port = host.port
         identity = os.environ.get("NYJOBS_IDENTITY", "")
-        self.options = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
+        known_hosts = CONFIG_PATH.with_name("known_hosts")
+        self.options = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+                        "-o", f"UserKnownHostsFile={known_hosts}",
+                        "-o", "StrictHostKeyChecking=accept-new"]
         if identity:
             self.options += ["-i", identity, "-o", "IdentitiesOnly=yes"]
 
@@ -195,10 +199,11 @@ def probe_host(host: Host) -> Host:
     if host.local:
         return this_machine()
     transport = transport_for(host)
+    python = shlex.quote(host.python or "python3")
     code, out = transport.run(
         "echo arch=$(uname -m); echo cpus=$(nproc 2>/dev/null || sysctl -n hw.ncpu); "
         "echo mem_mb=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo $(( $(sysctl -n hw.memsize) / 1048576 ))); "
-        "echo torch=$(python3 -c 'import torch;print(torch.__version__)' 2>/dev/null || echo none)"
+        f"echo torch=$({python} -c 'import torch;print(torch.__version__)' 2>/dev/null || echo none)"
     )
     fields = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
     if code != 0 or "arch" not in fields:
@@ -209,7 +214,7 @@ def probe_host(host: Host) -> Host:
     host.cpus = int(fields.get("cpus", "0") or 0)
     host.mem_mb = int(fields.get("mem_mb", "0") or 0)
     host.torch = fields.get("torch", "none").strip()
-    host.probed = True
+    host.probed = host.torch != "none"
     return host
 
 
@@ -273,6 +278,29 @@ def train_arguments(args, copy_index: int) -> list[str]:
         + (["--assistant-only"] if args.assistant_only else [])
 
 
+def _checkpoint_files(directory: Path) -> list[Path]:
+    return [directory / name for name in ("model.safetensors", "model.json", "bpe.json")
+            if (directory / name).is_file()]
+
+
+def _install_best(source: Path, destination: Path) -> None:
+    """Archive the old current BPE model, then atomically replace its shared files."""
+    config_path = destination / "model.json"
+    if config_path.is_file() and (destination / "model.safetensors").is_file():
+        old = json.loads(config_path.read_text(encoding="utf-8"))
+        model_id = str(old.get("model_id") or uuid.uuid4().hex[:12])
+        archive = destination / "history" / f"model_{model_id}"
+        if not archive.exists():
+            archive.mkdir(parents=True, exist_ok=True)
+            for file in _checkpoint_files(destination):
+                shutil.copy2(file, archive / file.name)
+    destination.mkdir(parents=True, exist_ok=True)
+    for file in _checkpoint_files(source):
+        temporary = destination / (file.name + ".remote-tmp")
+        shutil.copy2(file, temporary)
+        temporary.replace(destination / file.name)
+
+
 def run_copy_on(host: Host, copy_index: int, args, data: Path, job_dir: Path, log) -> dict:
     if host.local:
         return run_copy_locally(copy_index, args, data, job_dir, host.threads_per_copy, log)
@@ -285,10 +313,19 @@ def run_copy_on(host: Host, copy_index: int, args, data: Path, job_dir: Path, lo
     for support in SUPPORT_FILES + [LR_GOVERNOR]:
         transport.put(support, f"{remote_dir}/{support.name}")
     transport.put(data, f"{remote_dir}/data.txt")
-    command = (f"cd {shlex.quote(remote_dir)} && NODEYARD_THREADS={threads} nohup {python} -u train_bpe_gpt_torch.py train "
-               f"--data-file data.txt --app-data model {' '.join(shlex.quote(a) for a in train_arguments(args, copy_index))} "
-               f"--threads {threads} --result-file result.json > train.log 2>&1 & echo $! > train.pid")
-    transport.run(command)
+    if args.resume_from:
+        transport.run(f"mkdir -p {shlex.quote(remote_dir)}/model")
+        for file in _checkpoint_files(Path(args.resume_from).expanduser()):
+            transport.put(file, f"{remote_dir}/model/{file.name}")
+        args_for_copy = train_arguments(args, copy_index) + ["--resume"]
+    else:
+        args_for_copy = train_arguments(args, copy_index)
+    command = (f"cd {shlex.quote(remote_dir)}; NODEYARD_THREADS={threads} nohup {python} -u train_bpe_gpt_torch.py train "
+               f"--data-file data.txt --app-data model {' '.join(shlex.quote(a) for a in args_for_copy)} "
+               f"--threads {threads} --result-file result.json </dev/null > train.log 2>&1 & echo $! > train.pid; echo STARTED")
+    # Fully detach stdin/stdout/stderr before SSH exits, or OpenSSH waits on the
+    # background child's inherited descriptors until the client times out.
+    transport.run(command, timeout=20)
     log(f"copy {copy_index} started on {host.name} ({threads} thread(s))")
     seen = 0
     while True:
@@ -320,6 +357,12 @@ def run_copy_locally(copy_index: int, args, data: Path, job_dir: Path, threads: 
     result_path = out_dir / "result.json"
     command = [sys.executable, "-u", str(TRAINER), "train", "--data-file", str(data), "--app-data", str(out_dir / "model"),
                "--threads", str(threads), "--result-file", str(result_path)] + train_arguments(args, copy_index)
+    if args.resume_from:
+        model_dir = out_dir / "model"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        for file in _checkpoint_files(Path(args.resume_from).expanduser()):
+            shutil.copy2(file, model_dir / file.name)
+        command.append("--resume")
     log(f"copy {copy_index} started on this machine ({threads} thread(s))")
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     with (out_dir / "train.log").open("w", encoding="utf-8") as handle:
@@ -355,7 +398,11 @@ def run_job(args, hosts: list[Host]) -> int:
     def one(copy_index: int) -> dict:
         host = scheduler.acquire()
         try:
-            return run_copy_on(host, copy_index, args, data, job_dir, log)
+            try:
+                return run_copy_on(host, copy_index, args, data, job_dir, log)
+            except Exception as error:
+                log(f"copy {copy_index} on {host.name} failed to start or finish: {error}")
+                return {"copy": copy_index, "host": host.name, "ok": False, "error": str(error)}
         finally:
             scheduler.release(host)
 
@@ -372,6 +419,9 @@ def run_job(args, hosts: list[Host]) -> int:
     best = min(successful, key=lambda r: r["validation_loss"])
     best_dir = job_dir / f"copy_{best['copy']}" / "model"
     shutil.copytree(best_dir, job_dir / "best", dirs_exist_ok=True)
+    if args.install_best_to:
+        _install_best(job_dir / "best", Path(args.install_best_to).expanduser())
+        log(f"Installed the winning checkpoint into {Path(args.install_best_to).expanduser()}")
     for r in results:
         line = (f"copy {r['copy']} on {r['host']}: validation loss {r['validation_loss']:.4f}"
                 if r.get("ok") else f"copy {r['copy']} on {r['host']}: failed")
@@ -489,6 +539,10 @@ def cmd_setup_master(args) -> int:
     else:
         print(f"SETUP | 5/5 | PyTorch {torch_state.strip()} is already on the master", flush=True)
 
+    print("SETUP | workers | configuring Ready amd64/arm64 nodes through the master's Kubernetes API", flush=True)
+    setup_cluster_workers(Host(name=args.name, address=args.address, user=args.user, port=args.port),
+                         args.user, public, emit=lambda line: print(line, flush=True))
+
     hosts = [h for h in load_hosts() if h.name != args.name]
     entry = Host(name=args.name, address=args.address, user=args.user, port=args.port,
                  python=f"{home}/nodeyard-train/bin/python")
@@ -505,6 +559,10 @@ def cmd_setup_master(args) -> int:
 
 
 def cmd_runtime_status(_args) -> int:
+    try:
+        discover_cluster_devices()
+    except Exception as error:
+        print(f"RUNTIME | cluster discovery failed: {error}")
     for host in load_hosts():
         if host.local or not host.address:
             continue
@@ -554,7 +612,226 @@ def cmd_probe(_args) -> int:
 
 def device_line(host: Host) -> str:
     return (f"DEVICE | {host.name} | {host.address or 'this machine'} | {host.arch or '?'} | {host.cpus} | "
-            f"{host.mem_mb} | {host.slots} | {1 if host.probed else 0}")
+            f"{host.mem_mb} | {host.slots} | {1 if host.probed and host.slots else 0} | ready")
+
+
+def _quantity_mb(value: str) -> int:
+    match = re.fullmatch(r"([0-9.]+)(Ki|Mi|Gi|Ti)?", str(value))
+    if not match:
+        return 0
+    amount = float(match.group(1))
+    unit = match.group(2) or ""
+    return int(amount * {"": 1 / (1024 * 1024), "Ki": 1 / 1024, "Mi": 1, "Gi": 1024, "Ti": 1024 * 1024}[unit])
+
+
+def discover_cluster_devices() -> list[dict]:
+    """Read Kubernetes nodes and Tailscale peers from the configured master.
+
+    A Kubernetes node is displayed even when offline or not yet provisioned for
+    training. It is selectable only after its tailnet SSH service and PyTorch
+    runtime are reachable.
+    """
+    hosts = load_hosts()
+    master = next((h for h in hosts if h.name in ("master", "k8s-control")), None)
+    if master is None:
+        raise RuntimeError("No master configured. Run `nyjobs setup-master` first.")
+    transport = transport_for(master)
+    code, nodes_text = transport.run("sudo k3s kubectl get nodes -o json 2>/dev/null", timeout=40)
+    if code != 0:
+        raise RuntimeError(f"Could not read Kubernetes nodes from the master: {nodes_text.strip()[-300:]}")
+    code, tailscale_text = transport.run("tailscale status --json 2>/dev/null", timeout=20)
+    if code != 0:
+        raise RuntimeError(f"Could not read the master's Tailscale peers: {tailscale_text.strip()[-200:]}")
+
+    node_items = json.loads(nodes_text).get("items", [])
+    tailnet = json.loads(tailscale_text)
+    peers = []
+    self_peer = tailnet.get("Self", {})
+    if self_peer:
+        peers.append(self_peer)
+    peers.extend((tailnet.get("Peer") or {}).values())
+    devices = []
+
+    for item in node_items:
+        metadata = item.get("metadata", {})
+        status = item.get("status", {})
+        name = metadata.get("name", "unknown")
+        addresses = {entry.get("type"): entry.get("address", "") for entry in status.get("addresses", [])}
+        internal_ip = addresses.get("InternalIP", "")
+        peer = None
+        if name in ("k8s-control", master.name):
+            peer = self_peer
+        else:
+            candidates = [p for p in peers if str(p.get("HostName", "")).lower() == name.lower()]
+            if not candidates:
+                candidates = [p for p in peers if str(p.get("HostName", "")).lower().startswith(name.lower() + "-")]
+            peer = next((p for p in candidates if p.get("Online")), candidates[0] if candidates else None)
+        online = bool(peer and peer.get("Online"))
+        tailnet_ip = (peer.get("TailscaleIPs") or [""])[0] if peer else ""
+        if name in ("k8s-control", master.name):
+            tailnet_ip = master.address
+            online = True
+
+        conditions = {condition.get("type"): condition.get("status") for condition in status.get("conditions", [])}
+        node_ready = conditions.get("Ready") == "True"
+        allocatable = status.get("allocatable", {})
+        cpu_text = str(allocatable.get("cpu", "0"))
+        cpus = int(float(cpu_text[:-1]) / 1000) if cpu_text.endswith("m") else int(float(cpu_text or 0))
+        mem_mb = _quantity_mb(allocatable.get("memory", "0"))
+        arch = (metadata.get("labels") or {}).get("kubernetes.io/arch", "?")
+
+        device = Host(name=name, address=tailnet_ip, user=master.user, port=master.port,
+                      python=master.python or f"/home/{master.user}/nodeyard-train/bin/python",
+                      cpus=cpus, mem_mb=mem_mb, arch=arch, probed=False,
+                      mb_per_copy=master.mb_per_copy)
+        if node_ready and online and tailnet_ip:
+            tested = probe_host(device)
+            # probe_host also checks that PyTorch imports, so this is the actual selectable state.
+            if tested.probed:
+                device = tested
+            else:
+                # Keep the Kubernetes inventory facts visible even if this node
+                # has not yet received its training SSH service/runtime.
+                device.arch = arch
+                device.cpus = cpus
+                device.mem_mb = mem_mb
+        if not node_ready:
+            reason = "Kubernetes NotReady"
+        elif not online or not tailnet_ip:
+            reason = "not connected to Tailscale"
+        elif arch not in ("amd64", "arm64"):
+            reason = f"unsupported {arch or 'unknown architecture'} (CPU PyTorch wheel unavailable)"
+        elif not device.probed:
+            reason = f"training access/runtime not ready on port {master.port}"
+        elif not device.slots:
+            reason = "no free capacity"
+        else:
+            reason = "ready"
+        devices.append({"host": device, "state": reason, "internal_ip": internal_ip,
+                        "online": online, "node_ready": node_ready})
+
+    # Persist only nodes that can currently train; retain any manual non-cluster hosts.
+    cluster_names = {device["host"].name for device in devices}
+    configured = [h for h in hosts if h.name not in cluster_names and h.name not in ("master", "k8s-control")]
+    configured.extend(device["host"] for device in devices if device["host"].probed and device["host"].slots > 0)
+    save_hosts(configured)
+    return devices
+
+
+def run_on_kubernetes_node(master: Host, node_name: str, script: str, deadline: int = 90) -> str:
+    """Run a short root-level host probe through the same privileged helper-pod
+    pattern nodeyard uses for its Hardware and Memory pages. The pod is pinned
+    to one node, deleted immediately afterwards, and does not expose a service.
+    """
+    transport = transport_for(master)
+    transport.run("sudo k3s kubectl create namespace nodeyard-shell --dry-run=client -o yaml | sudo k3s kubectl apply -f -",
+                   timeout=40)
+    pod = "nodeyard-training-probe-" + re.sub(r"[^a-z0-9-]+", "-", node_name.lower()).strip("-")[:32] + "-" + uuid.uuid4().hex[:6]
+    wrapper = ('out=$(nsenter -t 1 -m -u -i -n -p -- sh -c "$0" 2>&1); rc=$?; '
+               'printf "%s\\n" "$out" > /dev/termination-log; printf "%s\\n" "$out"; exit $rc')
+    pod_spec = {
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": pod, "namespace": "nodeyard-shell", "labels": {"app": "nodeyard-training-probe"}},
+        "spec": {"nodeName": node_name, "hostPID": True, "restartPolicy": "Never",
+                 "activeDeadlineSeconds": deadline, "automountServiceAccountToken": False,
+                 "terminationGracePeriodSeconds": 0,
+                 "tolerations": [{"operator": "Exists"}],
+                 "containers": [{"name": "probe", "image": "busybox:1.36", "imagePullPolicy": "IfNotPresent",
+                                 "command": ["sh", "-c", wrapper, script],
+                                 "resources": {"requests": {"cpu": "50m", "memory": "32Mi"},
+                                               "limits": {"memory": "512Mi"}},
+                                 "securityContext": {"privileged": True}}]}}
+    try:
+        code, out = transport.run("sudo k3s kubectl apply -f -", timeout=40, stdin_text=json.dumps(pod_spec))
+        if code:
+            raise RuntimeError(f"Could not start the nodeyard helper on {node_name}: {out.strip()[-240:]}")
+        end = time.time() + deadline + 20
+        while time.time() < end:
+            time.sleep(2)
+            code, out = transport.run(f"sudo k3s kubectl -n nodeyard-shell get pod {shlex.quote(pod)} -o json", timeout=30)
+            if code:
+                continue
+            pod_status = json.loads(out).get("status", {})
+            if pod_status.get("phase") in ("Succeeded", "Failed"):
+                statuses = pod_status.get("containerStatuses") or []
+                terminated = ((statuses[0].get("state") or {}).get("terminated") or {}) if statuses else {}
+                message = terminated.get("message", "")
+                if not message or terminated.get("exitCode", 0):
+                    _, logs = transport.run(f"sudo k3s kubectl -n nodeyard-shell logs {shlex.quote(pod)}", timeout=20)
+                    if logs.strip():
+                        message = (message + "\n" + logs).strip()
+                if terminated.get("exitCode", 0):
+                    raise RuntimeError(message.strip()[-300:] or f"The helper failed on {node_name}.")
+                return message.strip()
+        raise RuntimeError(f"The nodeyard helper did not finish on {node_name} within {deadline}s.")
+    finally:
+        transport.run(f"sudo k3s kubectl -n nodeyard-shell delete pod {shlex.quote(pod)} --ignore-not-found --wait=false",
+                      timeout=20)
+
+
+def setup_cluster_workers(master: Host, username: str, public_key: str, emit=print) -> None:
+    """Provision every Ready, supported-architecture Kubernetes worker through a
+    short-lived privileged helper pod. This uses the master's already-authorized
+    Kubernetes API, so the user needs no worker passwords or extra terminal steps.
+    """
+    transport = transport_for(master)
+    code, nodes_text = transport.run("sudo k3s kubectl get nodes -o json", timeout=40)
+    if code:
+        emit(f"SETUP | workers | couldn't read cluster nodes: {nodes_text.strip()[-180:]}")
+        return
+    script_b64 = base64.b64encode(MASTER_ACCESS_SCRIPT.read_bytes()).decode("ascii")
+    nodes = json.loads(nodes_text).get("items", [])
+    for node in nodes:
+        metadata = node.get("metadata", {})
+        name = metadata.get("name", "")
+        if not name or name in ("k8s-control", master.name):
+            continue
+        status = node.get("status", {})
+        ready = any(c.get("type") == "Ready" and c.get("status") == "True"
+                    for c in status.get("conditions", []))
+        arch = (metadata.get("labels") or {}).get("kubernetes.io/arch", "")
+        if not ready:
+            emit(f"SETUP | {name} | skipped: Kubernetes reports NotReady")
+            continue
+        if arch not in ("amd64", "arm64"):
+            emit(f"SETUP | {name} | skipped: {arch or 'unknown architecture'} has no supported PyTorch CPU wheel")
+            continue
+        home = f"/home/{username}"
+        host_script = f"""set -eu
+printf '%s' {shlex.quote(script_b64)} | base64 -d > /tmp/nodeyard-training-access.sh
+chmod 755 /tmp/nodeyard-training-access.sh
+if ! id {shlex.quote(username)} >/dev/null 2>&1; then useradd --create-home --shell /bin/bash {shlex.quote(username)}; fi
+if ! python3 -m venv /tmp/nodeyard-venv-check >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv python3-pip
+  else
+    echo 'Python venv support is missing and this node has no apt-get.'
+    exit 1
+  fi
+fi
+rm -rf /tmp/nodeyard-venv-check
+bash /tmp/nodeyard-training-access.sh setup --public-key {shlex.quote(public_key)} --user {shlex.quote(username)} --port 2222
+if ! {shlex.quote(home + "/nodeyard-train/bin/python")} -c 'import torch' >/dev/null 2>&1; then rm -rf {shlex.quote(home + "/nodeyard-train")}; fi
+su - {shlex.quote(username)} -c 'nohup bash /tmp/nodeyard-training-access.sh runtime --venv {shlex.quote(home + "/nodeyard-train")} > {shlex.quote(home + "/nodeyard-runtime.log")} 2>&1 </dev/null &'
+echo WORKER_SETUP_OK
+"""
+        try:
+            output = run_on_kubernetes_node(master, name, host_script, deadline=600)
+            if "Training SSH is up" in output and "WORKER_SETUP_OK" in output:
+                emit(f"SETUP | {name} | key-only Tailscale SSH installed; PyTorch CPU runtime installing in background")
+            else:
+                emit(f"SETUP | {name} | setup incomplete: {output[-220:]}")
+        except Exception as error:
+            emit(f"SETUP | {name} | setup failed: {error}")
+
+
+def cmd_discover(_args) -> int:
+    for entry in discover_cluster_devices():
+        host = entry["host"]
+        print(f"DEVICE | {host.name} | {host.address or entry['internal_ip']} | {host.arch} | {host.cpus} | "
+              f"{host.mem_mb} | {host.slots} | {1 if host.probed and host.slots else 0} | {entry['state']}")
+    return 0
 
 
 UNLOAD_SCRIPT = r'''if command -v ollama >/dev/null 2>&1; then n=0; for m in $(ollama ps 2>/dev/null | awk 'NR>1 {print $1}'); do ollama stop "$m" >/dev/null 2>&1 && n=$((n+1)); done; echo "UNLOADED $n"; else echo "UNLOADED 0 (no Ollama installed)"; fi'''
@@ -587,6 +864,13 @@ def cmd_run(args) -> int:
         save_hosts(configured)
         hosts = [h for h in configured if h.probed]
         if args.device:
+            try:
+                discovered = discover_cluster_devices()
+                hosts = [entry["host"] for entry in discovered
+                         if entry["host"].probed and entry["host"].slots > 0]
+            except Exception as error:
+                print(f"Cluster discovery failed: {error}", file=sys.stderr)
+                return 1
             chosen: dict[str, int] = {}
             for item in args.device:
                 name, _, count = item.partition(":")
@@ -636,6 +920,7 @@ def build_parser() -> argparse.ArgumentParser:
     remove.add_argument("name")
     remove.set_defaults(handler=cmd_remove_host)
     commands.add_parser("probe").set_defaults(handler=cmd_probe)
+    commands.add_parser("discover", help="list Kubernetes nodes and their tailnet/training availability").set_defaults(handler=cmd_discover)
     plan_parser = commands.add_parser("plan")
     plan_parser.add_argument("--copies", type=int, required=True)
     plan_parser.add_argument("--local", action="store_true")
@@ -648,6 +933,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--device", action="append", default=[], metavar="NAME[:PARALLEL]",
                      help="use only this device, with this many parallel copies (repeat for more devices)")
     run.add_argument("--keep-models", action="store_true", help="do not unload AI models before training")
+    run.add_argument("--resume-from", type=Path, default=None,
+                     help="continue from a local BPE checkpoint directory (MLX or PyTorch)")
+    run.add_argument("--install-best-to", type=Path, default=None,
+                     help="install the winning checkpoint into this local model directory after success")
     run.add_argument("--steps", type=int, default=3000)
     run.add_argument("--batch-size", type=int, default=64)
     run.add_argument("--context", type=int, default=128)

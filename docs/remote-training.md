@@ -4,7 +4,8 @@ nodeyard can train one model on several machines at once and keep the best copy.
 machines talk to each other over Tailscale. Each training copy runs as a separate
 process, starts on the machine with the most free capacity, and a new copy starts as
 soon as a slot frees up. When every copy has finished, the copy with the lowest
-validation loss is kept.
+validation loss is kept. The dashboard's Kubernetes inventory is the device list;
+offline or unsupported nodes are shown but never scheduled.
 
 Two pieces make this work:
 
@@ -15,16 +16,23 @@ Two pieces make this work:
 - **This Mac** (or any other client) uses a key pair to connect, and the runner
   (`nyjobs`) places the copies.
 
-## Set up the master (once)
+## Set up from the Mac
 
-On the master, as root:
+The Nodeyard AI app's **AI → Remote training → Set up remote training** does these steps
+for you. From a terminal, the equivalent one-time setup is:
 
 ```sh
-sudo nodeyard jobs access setup --public-key "ssh-ed25519 AAAA... you@mac" --user YOUR_USER
-sudo nodeyard jobs access status
+nodeyard jobs setup-master --address MASTER_TAILSCALE_IP --user TRAINING_USER
 ```
 
-Check first without changing anything:
+It creates a dedicated app key, uses the password only for the initial login (if needed),
+sets up the key-only training service on the master, installs CPU PyTorch, and uses the
+master's Kubernetes API to set up every Ready x86_64/arm64 worker. It does not write the
+password to disk or change port 22. The helper skips offline nodes and 32-bit Arm nodes
+that do not have a compatible PyTorch CPU wheel. In the app, enter the password in its
+one-time field; it is discarded immediately after setup.
+
+To preview the master service config without changing it:
 
 ```sh
 nodeyard jobs access setup --print --public-key "..." --tailscale-ip 100.x.y.z --user YOUR_USER
@@ -52,9 +60,13 @@ nodeyard jobs hosts
 The same runner is in Nodeyard AI: open AI > Remote training.
 
 ```sh
-nodeyard jobs plan --copies 6                      # where the copies would go
+nodeyard jobs discover                           # every Kubernetes node and readiness
+nodeyard jobs plan --copies 6                     # where copies would go
 nodeyard jobs run --data corpus.txt --copies 6 --steps 3000 --assistant-only
-nodeyard jobs run --data corpus.txt --copies 2 --local    # this Mac only
+nodeyard jobs run --data corpus.txt --device debian-1:3 --device k8s-control:2 --steps 3000
+nodeyard jobs run --data corpus.txt --copies 2 --local  # this Mac only
+nodeyard jobs run --data corpus.txt --device debian-1:2 --resume-from ~/.../BPEFromScratch \
+    --install-best-to ~/.../BPEFromScratch --steps 1000  # continue the Mac's BPE weights remotely
 
 `NODEYARD_JOBS_PYTHON` picks the Python with torch and numpy, for example
 `NODEYARD_JOBS_PYTHON=$HOME/nodeyard-train/bin/python nodeyard jobs run ...`.
@@ -78,6 +90,9 @@ won.
 
 - Each copy uses one thread per free CPU, so copies on CPU-only machines are slower
   than on this Mac's GPU. More copies give a better best-of-N, not a faster single run.
+- Remote continuation shares BPE model weights and tokenizer exactly; AdamW moment state
+  starts fresh on the worker. The best returned weights replace the local current model,
+  and the prior local checkpoint is archived.
 - The remote trainer is the PyTorch BPE GPT (`train_bpe_gpt_torch.py`). It uses the
   same recipe and log format as the app's MLX trainer, and the two share a tokenizer.
 - Only text files are supported; SQLite sources are not.

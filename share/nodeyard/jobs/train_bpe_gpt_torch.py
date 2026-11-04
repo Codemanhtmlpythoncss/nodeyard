@@ -20,6 +20,7 @@ import json
 import math
 import os
 import random
+import struct
 import time
 import uuid
 from pathlib import Path
@@ -32,7 +33,8 @@ from bpe_tokenizer import BPETokenizer
 from lr_governor import LearningRateGovernor
 from sampling import sample_token
 
-MODEL_FILE = "model.pt"
+MODEL_FILE = "model.safetensors"
+LEGACY_MODEL_FILE = "model.pt"
 CONFIG_FILE = "model.json"
 TOKENIZER_FILE = "bpe.json"
 RESULT_FILE = "result.json"
@@ -42,27 +44,121 @@ def emit(message: str) -> None:
     print(message, flush=True)
 
 
+class MultiHeadAttention(nn.Module):
+    """Parameter layout intentionally matches MLX MultiHeadAttention for portable resume."""
+
+    def __init__(self, dim: int, heads: int):
+        super().__init__()
+        if dim % heads:
+            raise ValueError("Embedding width must be divisible by the attention-head count.")
+        self.heads = heads
+        self.head_dim = dim // heads
+        self.query_proj = nn.Linear(dim, dim, bias=False)
+        self.key_proj = nn.Linear(dim, dim, bias=False)
+        self.value_proj = nn.Linear(dim, dim, bias=False)
+        self.out_proj = nn.Linear(dim, dim, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch, length, dim = x.shape
+        def split(layer):
+            return layer(x).view(batch, length, self.heads, self.head_dim).transpose(1, 2)
+        q, k, v = split(self.query_proj), split(self.key_proj), split(self.value_proj)
+        # PyTorch dispatches this to its fused/Flash-SDPA kernel when the device supports it.
+        attended = nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=0.0)
+        attended = attended.transpose(1, 2).contiguous().view(batch, length, dim)
+        return self.out_proj(attended)
+
+
+class TransformerEncoderLayer(nn.Module):
+    """Pre-norm ReLU block matching mlx.nn.TransformerEncoderLayer defaults."""
+
+    def __init__(self, dim: int, heads: int):
+        super().__init__()
+        self.attention = MultiHeadAttention(dim, heads)
+        self.ln1 = nn.LayerNorm(dim, eps=1e-5)
+        self.ln2 = nn.LayerNorm(dim, eps=1e-5)
+        self.linear1 = nn.Linear(dim, 4 * dim)
+        self.linear2 = nn.Linear(4 * dim, dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.attention(self.ln1(x))
+        return x + self.linear2(torch.relu(self.linear1(self.ln2(x))))
+
+
+class TransformerEncoder(nn.Module):
+    def __init__(self, dim: int, heads: int, layers: int):
+        super().__init__()
+        self.layers = nn.ModuleList([TransformerEncoderLayer(dim, heads) for _ in range(layers)])
+        self.ln = nn.LayerNorm(dim, eps=1e-5)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            x = layer(x)
+        return self.ln(x)
+
+
 class GPT(nn.Module):
     def __init__(self, vocab_size: int, context: int, dim: int, heads: int, layers: int):
         super().__init__()
         self.token_embedding = nn.Embedding(vocab_size, dim)
         self.position_embedding = nn.Embedding(context, dim)
-        block = nn.TransformerEncoderLayer(dim, heads, dim_feedforward=4 * dim, dropout=0.0,
-                                           activation="gelu", batch_first=True, norm_first=True)
-        self.blocks = nn.TransformerEncoder(block, num_layers=layers, enable_nested_tensor=False)
-        self.norm = nn.LayerNorm(dim)
+        self.blocks = TransformerEncoder(dim, heads, layers)
+        self.norm = nn.LayerNorm(dim, eps=1e-5)
         self.head = nn.Linear(dim, vocab_size)
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         length = tokens.shape[1]
         positions = torch.arange(length, device=tokens.device)
         hidden = self.token_embedding(tokens) + self.position_embedding(positions)
-        mask = torch.triu(torch.full((length, length), float("-inf"), device=tokens.device), diagonal=1)
-        hidden = self.blocks(hidden, mask=mask, is_causal=True)
+        hidden = self.blocks(hidden)
         return self.head(self.norm(hidden))
 
 
+def load_safetensors(path: Path, device: torch.device) -> dict[str, torch.Tensor]:
+    """Read standard F32/F16 safetensors without requiring an extra package."""
+    raw = path.read_bytes()
+    header_length = struct.unpack("<Q", raw[:8])[0]
+    header = json.loads(raw[8:8 + header_length])
+    data = memoryview(raw)[8 + header_length:]
+    numpy_dtypes = {"F32": np.float32, "F16": np.float16, "I64": np.int64, "I32": np.int32}
+    tensors = {}
+    for name, metadata in header.items():
+        if name == "__metadata__":
+            continue
+        dtype = numpy_dtypes.get(metadata["dtype"])
+        if dtype is None:
+            raise ValueError(f"Unsupported checkpoint tensor dtype: {metadata['dtype']}")
+        start, end = metadata["data_offsets"]
+        array = np.frombuffer(data[start:end], dtype=dtype).reshape(metadata["shape"]).copy()
+        tensors[name] = torch.from_numpy(array).to(device)
+    return tensors
+
+
+def save_safetensors(path: Path, tensors: dict[str, torch.Tensor]) -> None:
+    """Write F32/F16 PyTorch weights in the safetensors format used by the Mac app."""
+    header, chunks, offset = {}, [], 0
+    dtype_names = {torch.float32: "F32", torch.float16: "F16", torch.int64: "I64", torch.int32: "I32"}
+    for name, tensor in tensors.items():
+        cpu = tensor.detach().cpu().contiguous()
+        if cpu.dtype not in dtype_names:
+            raise ValueError(f"Unsupported checkpoint tensor dtype: {cpu.dtype}")
+        chunk = cpu.numpy().tobytes(order="C")
+        header[name] = {"dtype": dtype_names[cpu.dtype], "shape": list(cpu.shape),
+                        "data_offsets": [offset, offset + len(chunk)]}
+        chunks.append(chunk)
+        offset += len(chunk)
+    encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    encoded += b" " * ((8 - len(encoded) % 8) % 8)
+    with path.open("wb") as stream:
+        stream.write(struct.pack("<Q", len(encoded)))
+        stream.write(encoded)
+        for chunk in chunks:
+            stream.write(chunk)
+
+
 def pick_device(requested: str) -> torch.device:
+    if requested == "gpu":
+        requested = "auto"
     if requested != "auto":
         return torch.device(requested)
     if torch.cuda.is_available():
@@ -90,9 +186,10 @@ def encode_with_roles(tokenizer: BPETokenizer, text: str, assistant_only: bool):
 
 def sample_windows(tokens, weights, context, batch, rng, device):
     starts = np.array([rng.randrange(0, len(tokens) - context - 1) for _ in range(batch)])
-    offsets = np.arange(context + 1)[None, :]
-    block = torch.as_tensor(tokens[starts[:, None] + offsets], device=device)
-    target_weights = torch.as_tensor(weights[starts[:, None] + offsets][:, 1:], device=device)
+    offsets = torch.arange(context + 1, device=device)[None, :]
+    starts_tensor = torch.as_tensor(starts, device=device)[:, None]
+    block = tokens[starts_tensor + offsets]
+    target_weights = weights[starts_tensor + offsets][:, 1:]
     return block[:, :-1], block[:, 1:], target_weights
 
 
@@ -143,11 +240,25 @@ def train(args) -> int:
 
     previous_steps = 0
     tokenizer_path = app_data / TOKENIZER_FILE
-    if args.resume:
-        if not ((app_data / MODEL_FILE).is_file() and tokenizer_path.is_file()):
-            raise FileNotFoundError("There is no saved BPE model to continue. Train a new model first.")
-        tokenizer = BPETokenizer.load(tokenizer_path)
-        previous_steps = int(json.loads((app_data / CONFIG_FILE).read_text(encoding="utf-8")).get("trained_steps", 0))
+    source_dir = Path(args.resume_from).expanduser() if args.resume_from else app_data
+    continuing = args.resume or bool(args.resume_from)
+    source_config = source_dir / CONFIG_FILE
+    source_tokenizer = source_dir / TOKENIZER_FILE
+    source_weights = source_dir / MODEL_FILE
+    if not source_weights.is_file() and (source_dir / LEGACY_MODEL_FILE).is_file():
+        source_weights = source_dir / LEGACY_MODEL_FILE
+    if continuing:
+        if not (source_config.is_file() and source_tokenizer.is_file() and source_weights.is_file()):
+            raise FileNotFoundError(f"Saved BPE checkpoint is incomplete: {source_dir}")
+        config = json.loads(source_config.read_text(encoding="utf-8"))
+        tokenizer = BPETokenizer.load(source_tokenizer)
+        # The checkpoint's tokenizer and architecture are authoritative across backends.
+        args.context = int(config["context"])
+        args.dim = int(config.get("width", config.get("dim")))
+        args.heads = int(config["heads"])
+        args.layers = int(config["layers"])
+        args.vocab_size = int(config.get("vocabulary", config.get("vocab_size")))
+        previous_steps = int(config.get("trained_steps", config.get("steps", 0)))
         emit(f"Continuing from the saved model after {previous_steps:,} training steps (fresh optimizer state).")
     else:
         emit(f"Learning a {args.vocab_size:,}-token BPE vocabulary from {len(text):,} characters...")
@@ -162,51 +273,86 @@ def train(args) -> int:
          f"{len(train_tokens):,} to train, {len(valid_tokens):,} to validate.")
 
     model = GPT(tokenizer.vocab_size, args.context, args.dim, args.heads, args.layers).to(device)
-    if args.resume:
-        model.load_state_dict(torch.load(app_data / MODEL_FILE, map_location=device))
+    if continuing:
+        if source_weights.suffix == ".safetensors":
+            model.load_state_dict(load_safetensors(source_weights, device), strict=True)
+        else:
+            model.load_state_dict(torch.load(source_weights, map_location=device, weights_only=True), strict=True)
     parameters = sum(p.numel() for p in model.parameters())
     emit(f"Model initialized: {parameters:,} trainable parameters; {args.layers} blocks, {args.heads} attention heads, "
          f"width {args.dim}, context {args.context}.")
+    train_token_tensor = torch.as_tensor(train_tokens, dtype=torch.long, device=device)
+    train_weight_tensor = torch.as_tensor(train_weights, dtype=torch.float32, device=device)
+    valid_token_tensor = torch.as_tensor(valid_tokens, dtype=torch.long, device=device)
+    valid_weight_tensor = torch.as_tensor(valid_weights, dtype=torch.float32, device=device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.95),
                                   weight_decay=args.weight_decay)
     peak = args.learning_rate
     governor = LearningRateGovernor(args.learning_rate)
     started = time.perf_counter()
     model.train()
+    best_state = None
+    best_loss = math.inf
+    best_step = 0
+    worst_state = None
+    worst_loss = -math.inf
+    worst_step = 0
     for step in range(1, args.steps + 1):
         rate = learning_rate(step, args.steps, peak, args.warmup)
         for group in optimizer.param_groups:
             group["lr"] = rate
-        inputs, targets, target_weights = sample_windows(train_tokens, train_weights, args.context,
+        inputs, targets, target_weights = sample_windows(train_token_tensor, train_weight_tensor, args.context,
                                                          args.batch_size, rng, device)
         loss = loss_fn(model, inputs, targets, target_weights)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
-        value = float(loss.item())
-        if not math.isfinite(value):
-            raise RuntimeError(f"Training diverged at step {step} (loss {value}). Nothing was saved.")
         total_step = previous_steps + step
         if step % 10 == 0 or step == args.steps:
+            value = float(loss.item())
+            if not math.isfinite(value):
+                raise RuntimeError(f"Training diverged at step {step} (loss {value}). Nothing was saved.")
             elapsed = max(1e-9, time.perf_counter() - started)
             emit(f"Step {step}/{args.steps} | train loss {value:.4f} | {step / elapsed:.2f} steps/sec | "
                  f"{step * args.batch_size * args.context / elapsed:,.0f} tokens/sec | "
                  f"total training step {total_step:,} | learning rate {rate:.8g}")
         if step % args.eval_every == 0 or step == args.steps:
-            validation = evaluate(model, valid_tokens, valid_weights, args.context, args.batch_size, device)
+            validation = evaluate(model, valid_token_tensor, valid_weight_tensor, args.context, args.batch_size, device)
             emit(f"Validation at step {step}: loss {validation:.4f} | total training step {total_step:,}")
+            if validation < best_loss:
+                best_loss, best_step = validation, total_step
+                best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+                emit(f"Best validation snapshot: {best_loss:.4f} at step {best_step}.")
+            elif validation > worst_loss:
+                worst_loss, worst_step = validation, total_step
+                worst_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
             new_rate = governor.observe(validation, peak, total_step, emit)
             if new_rate is not None:
                 peak = new_rate
 
-    final_validation = evaluate(model, valid_tokens, valid_weights, args.context, args.batch_size, device, batches=20)
-    torch.save({k: v.detach().cpu() for k, v in model.state_dict().items()}, app_data / MODEL_FILE)
+    final_validation = evaluate(model, valid_token_tensor, valid_weight_tensor, args.context, args.batch_size, device, batches=20)
+    if best_state is not None and final_validation > best_loss:
+        model.load_state_dict(best_state, strict=True)
+        emit(f"Restored the best validation weights from step {best_step} ({best_loss:.4f}) instead of regressed final weights.")
+        final_validation = best_loss
+    save_safetensors(app_data / MODEL_FILE, model.state_dict())
+    records_dir = app_data / "records"
+    records_dir.mkdir(parents=True, exist_ok=True)
+    if best_state is not None:
+        save_safetensors(records_dir / "best_params.safetensors", best_state)
+    if worst_state is not None:
+        save_safetensors(records_dir / "worst_params.safetensors", worst_state)
+    (records_dir / "records.json").write_text(json.dumps({
+        "best": {"loss": best_loss, "step": best_step},
+        "worst": {"loss": worst_loss, "step": worst_step} if worst_state is not None else None,
+        "learning_rate_reductions": governor.reductions,
+    }, indent=2), encoding="utf-8")
     model_id = uuid.uuid4().hex[:12]
     config = {
-        "name": "BPE-token GPT (PyTorch, portable)", "model_id": model_id,
+        "name": "BPE-token GPT (portable)", "model_id": model_id,
         "model_name": f"BPE-token GPT · model {model_id[:8]}", "tokenizer": "bpe",
-        "backend": "torch", "optimizer": "AdamW", "precision": "float32",
+        "backend": "portable", "optimizer": "AdamW", "precision": "float32",
         "parameters": parameters, "vocabulary": tokenizer.vocab_size, "layers": args.layers,
         "width": args.dim, "heads": args.heads, "context": args.context, "batch_size": args.batch_size,
         "learning_rate": args.learning_rate, "weight_decay": args.weight_decay,
@@ -229,7 +375,10 @@ def generate(args) -> int:
     device = pick_device(args.device)
     tokenizer = BPETokenizer.load(app_data / TOKENIZER_FILE)
     model = GPT(config["vocabulary"], config["context"], config["width"], config["heads"], config["layers"]).to(device)
-    model.load_state_dict(torch.load(app_data / MODEL_FILE, map_location=device))
+    weights = app_data / MODEL_FILE
+    state = load_safetensors(weights, device) if weights.suffix == ".safetensors" else \
+        torch.load(weights, map_location=device, weights_only=True)
+    model.load_state_dict(state, strict=True)
     model.eval()
     rng = np.random.default_rng(args.seed)
     prompt_ids = tokenizer.encode(args.prompt) or [ord("\n")]
@@ -275,6 +424,8 @@ def main() -> int:
     train_parser.add_argument("--threads", type=int, default=int(os.environ.get("NODEYARD_THREADS", "0")))
     train_parser.add_argument("--assistant-only", action="store_true")
     train_parser.add_argument("--resume", action="store_true")
+    train_parser.add_argument("--resume-from", type=Path, default=None,
+                              help="resume from an MLX/PyTorch BPE model directory")
     train_parser.add_argument("--result-file", default=None)
     train_parser.set_defaults(handler=train)
     generate_parser = commands.add_parser("generate")
