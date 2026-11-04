@@ -84,6 +84,27 @@ checkpoint weights between devices and therefore adds network overhead. Set
 `--sync-every N`. All selected copies must fit in the devices' current parallel slots so
 they can meet at each barrier.
 
+To split **one** training run across the selected devices instead of training separate
+copies, add `--split`:
+
+```sh
+nodeyard jobs run --data corpus.jsonl --device debian-1:2 --device debian-worker:1 \
+    --split --steps 3000 --assistant-only
+```
+
+The count after each device is its rank count. On a device with CUDA, the first rank
+uses its GPU and remaining ranks use its CPUs. Ranks average gradients every optimizer
+step over Gloo/Tailscale. This increases the effective batch; link latency and bandwidth
+can make a remote rank slower than using the GPU alone. Discovery records latency and
+observed tokens/sec; placement prefers faster, lower-latency devices, and the app shows
+the per-device estimates. Only select remote ranks that are close enough for gradient
+synchronization to help.
+
+The Remote training tab's **Pause and save** sends a checkpoint request to every rank.
+They finish the current step, save, and exit. `nodeyard jobs pause --job JOB_ID` is the
+CLI equivalent. Set a validation-loss stopping target in the trainer UI to save and stop
+automatically when held-out loss reaches that threshold.
+
 ## Security notes
 
 - The service listens only on the master's Tailscale address, so it is not reachable

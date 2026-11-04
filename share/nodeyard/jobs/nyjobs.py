@@ -28,29 +28,31 @@ from __future__ import annotations
 import argparse
 import base64
 import concurrent.futures
+import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import sys
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TRAINER = HERE / "train_bpe_gpt_torch.py"
-SUPPORT_FILES = [HERE / "bpe_tokenizer.py", HERE / "sampling.py"]
+SUPPORT_FILES = [HERE / "bpe_tokenizer.py", HERE / "sampling.py", HERE / "training_data.py"]
 CONFIG_PATH = Path(os.environ.get("NODEYARD_JOBS_CONFIG", "~/.config/nodeyard/jobs.json")).expanduser()
 JOBS_ROOT = Path(os.environ.get("NODEYARD_JOBS_OUTPUT", "~/nodeyard-jobs")).expanduser()
 REMOTE_ROOT = "nodeyard-jobs"
 DEFAULT_MB_PER_COPY = 900  # conservative: the 6.4M-weight model, its optimizer state, and activations
 RESERVE_MB = 1024
-POLL_SECONDS = 10
+POLL_SECONDS = 2
 LR_GOVERNOR = HERE / "lr_governor.py"
 MASTER_ACCESS_SCRIPT = HERE / "training-access.sh"
 
@@ -67,6 +69,11 @@ class Host:
     mem_mb: int = 0
     arch: str = ""
     torch: str = ""
+    gpu_count: int = 0
+    gpu_name: str = ""
+    cuda_ready: bool = False
+    latency_ms: float = 0.0
+    tokens_per_second: float = 0.0
     mb_per_copy: int = DEFAULT_MB_PER_COPY
     probed: bool = False
     limit: int = 0  # parallel copies chosen for this device; 0 = automatic
@@ -79,7 +86,7 @@ class Host:
             return 0
         cpu_slots = self.cpus - 1 if self.cpus > 2 else self.cpus
         mem_slots = max(0, (self.mem_mb - RESERVE_MB) // self.mb_per_copy)
-        return max(0, min(cpu_slots, mem_slots))
+        return max(0, min(cpu_slots + (self.gpu_count if self.cuda_ready else 0), mem_slots))
 
     @property
     def threads_per_copy(self) -> int:
@@ -99,6 +106,10 @@ def load_hosts() -> list[Host]:
                           mb_per_copy=int(entry.get("mb_per_copy", DEFAULT_MB_PER_COPY)),
                           cpus=int(entry.get("cpus", 0)), mem_mb=int(entry.get("mem_mb", 0)),
                           arch=entry.get("arch", ""), torch=entry.get("torch", ""),
+                          gpu_count=int(entry.get("gpu_count", 0)), gpu_name=entry.get("gpu_name", ""),
+                          cuda_ready=bool(entry.get("cuda_ready", False)),
+                          latency_ms=float(entry.get("latency_ms", 0.0)),
+                          tokens_per_second=float(entry.get("tokens_per_second", 0.0)),
                           probed=bool(entry.get("probed", False)), limit=int(entry.get("limit", 0))))
     return hosts
 
@@ -108,8 +119,18 @@ def save_hosts(hosts: list[Host]) -> None:
     payload = {"hosts": [{"name": h.name, "address": h.address, "user": h.user, "port": h.port, "python": h.python,
                           "mb_per_copy": h.mb_per_copy,
                           "cpus": h.cpus, "mem_mb": h.mem_mb, "arch": h.arch, "torch": h.torch,
+                          "gpu_count": h.gpu_count, "gpu_name": h.gpu_name,
+                          "cuda_ready": h.cuda_ready,
+                          "latency_ms": h.latency_ms, "tokens_per_second": h.tokens_per_second,
                           "probed": h.probed, "limit": h.limit} for h in hosts]}
     CONFIG_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def merge_hosts(updated_hosts: list[Host]) -> None:
+    """Persist refreshed device facts without dropping the master discovery alias."""
+    merged = {host.name: host for host in load_hosts()}
+    merged.update({host.name: host for host in updated_hosts})
+    save_hosts(list(merged.values()))
 
 
 def this_machine() -> Host:
@@ -123,7 +144,19 @@ def this_machine() -> Host:
     if not mem_mb and Path("/proc/meminfo").exists():
         match = re.search(r"MemAvailable:\s+(\d+)", Path("/proc/meminfo").read_text())
         mem_mb = int(match.group(1)) // 1024 if match else 0
-    host = Host(name="this-machine", local=True, cpus=cpus, mem_mb=mem_mb, arch=os.uname().machine, probed=True)
+    gpu_count, gpu_name, device = 0, "", "cpu"
+    python = os.environ.get("NYJOBS_PYTHON", sys.executable)
+    try:
+        result = subprocess.run([python, "-c", "import torch; "
+                                "print('mps' if getattr(torch.backends,'mps',None) and torch.backends.mps.is_available() else ('cuda' if torch.cuda.is_available() else 'cpu'))"],
+                               capture_output=True, text=True, timeout=8)
+        device = result.stdout.strip()
+        if device in ("mps", "cuda"):
+            gpu_count, gpu_name = 1, ("Apple MPS" if device == "mps" else "CUDA")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    host = Host(name="this-machine", local=True, cpus=cpus, mem_mb=mem_mb, arch=os.uname().machine,
+                gpu_count=gpu_count, gpu_name=gpu_name, cuda_ready=gpu_count > 0, probed=True)
     return host
 
 
@@ -219,7 +252,10 @@ def probe_host(host: Host) -> Host:
     code, out = transport.run(
         "echo arch=$(uname -m); echo cpus=$(nproc 2>/dev/null || sysctl -n hw.ncpu); "
         "echo mem_mb=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo $(( $(sysctl -n hw.memsize) / 1048576 ))); "
+        "echo gpu_count=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ' || echo 0); "
+        "echo gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n 1 || echo none); "
         f"echo torch=$({python} -c 'import torch;print(torch.__version__)' 2>/dev/null || echo none)"
+        f"; echo cuda=$({python} -c 'import torch;print(int(torch.cuda.is_available()))' 2>/dev/null || echo 0)"
     )
     fields = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
     if code != 0 or "arch" not in fields:
@@ -230,6 +266,16 @@ def probe_host(host: Host) -> Host:
     host.cpus = int(fields.get("cpus", "0") or 0)
     host.mem_mb = int(fields.get("mem_mb", "0") or 0)
     host.torch = fields.get("torch", "none").strip()
+    host.gpu_count = int(fields.get("gpu_count", "0") or 0)
+    host.gpu_name = fields.get("gpu_name", "none").strip()
+    host.cuda_ready = fields.get("cuda", "0").strip() == "1"
+    try:
+        started = time.perf_counter()
+        ping = subprocess.run(["ping", "-c", "1", host.address], capture_output=True, text=True, timeout=4, check=False)
+        match = re.search(r"time[=<]([0-9.]+)\s*ms", ping.stdout + ping.stderr)
+        host.latency_ms = float(match.group(1)) if match else (time.perf_counter() - started) * 1000.0
+    except (OSError, subprocess.SubprocessError):
+        host.latency_ms = 0.0
     host.probed = host.torch != "none"
     return host
 
@@ -248,24 +294,36 @@ class Scheduler:
     def __init__(self, hosts: list[Host]):
         self.hosts = [h for h in hosts if h.slots > 0]
         self.free = {h.name: h.slots for h in self.hosts}
+        self.free_gpus = {h.name: h.gpu_count if h.cuda_ready else 0 for h in self.hosts}
         self.lock = threading.Lock()
         self.changed = threading.Condition(self.lock)
 
-    def acquire(self) -> Host:
+    def acquire(self) -> tuple[Host, str]:
         with self.changed:
             while True:
                 candidates = [h for h in self.hosts if self.free[h.name] > 0]
                 if candidates:
-                    host = max(candidates, key=lambda h: (self.free[h.name], h.slots))
+                    host = max(candidates, key=lambda h: (
+                        (h.tokens_per_second or (12000 if h.gpu_count and h.cuda_ready else h.cpus * 500)) /
+                        (1.0 + max(0.0, h.latency_ms) / 50.0),
+                        self.free[h.name], h.slots))
                     self.free[host.name] -= 1
-                    return host
+                    if host.local and self.free_gpus[host.name] > 0:
+                        self.free_gpus[host.name] -= 1
+                        return host, "mps" if host.gpu_name == "Apple MPS" else "cuda:0"
+                    if self.free_gpus[host.name] > 0:
+                        self.free_gpus[host.name] -= 1
+                        return host, "cuda:0"
+                    return host, "cpu"
                 if not self.hosts:
                     raise RuntimeError("No machine has capacity. Run `nyjobs probe` or add a machine.")
                 self.changed.wait()
 
-    def release(self, host: Host) -> None:
+    def release(self, host: Host, device: str) -> None:
         with self.changed:
             self.free[host.name] += 1
+            if device != "cpu":
+                self.free_gpus[host.name] += 1
             self.changed.notify_all()
 
 
@@ -277,7 +335,9 @@ def plan(hosts: list[Host], copies: int) -> list[Assignment]:
         candidates = [h for h in scheduler.hosts if scheduler.free[h.name] > 0]
         if not candidates:
             break
-        host = max(candidates, key=lambda h: (scheduler.free[h.name], h.slots))
+        host = max(candidates, key=lambda h: (
+            (h.tokens_per_second or (12000 if h.cuda_ready else h.cpus * 500)) /
+            (1.0 + max(0.0, h.latency_ms) / 50.0), scheduler.free[h.name], h.slots))
         scheduler.free[host.name] -= 1
         assignments.append(Assignment(copy=index, host=host))
     return assignments
@@ -285,14 +345,16 @@ def plan(hosts: list[Host], copies: int) -> list[Assignment]:
 
 # ---------------------------------------------------------------- running copies
 
-def train_arguments(args, copy_index: int) -> list[str]:
+def train_arguments(args, copy_index: int, device: str = "auto") -> list[str]:
     return ["--steps", str(args.steps), "--batch-size", str(args.batch_size), "--context", str(args.context),
             "--dim", str(args.dim), "--heads", str(args.heads), "--layers", str(args.layers),
             "--vocab-size", str(args.vocab_size), "--learning-rate", str(args.learning_rate),
             "--weight-decay", str(args.weight_decay), "--warmup", str(args.warmup),
             "--eval-every", str(args.eval_every), "--sync-every", str(args.sync_every),
+            "--target-validation-loss", str(args.target_validation_loss), "--device", device,
             "--seed", str(args.seed + copy_index)] \
-        + (["--assistant-only"] if args.assistant_only else [])
+        + (["--assistant-only"] if args.assistant_only else []) \
+        + (["--rollback-on-regression"] if args.rollback_on_regression else [])
 
 
 def _checkpoint_files(directory: Path) -> list[Path]:
@@ -321,10 +383,11 @@ def _install_best(source: Path, destination: Path) -> None:
 class ParallelWeightSync:
     """At each barrier, broadcast the copy with the lowest validation loss."""
 
-    def __init__(self, expected: int, job_dir: Path, log):
+    def __init__(self, expected: int, job_dir: Path, log, target_loss: float = 0.0):
         self.expected = expected
         self.job_dir = job_dir
         self.log = log
+        self.target_loss = target_loss
         self.condition = threading.Condition()
         self.pending: dict[int, list[dict]] = {}
         self.completed: dict[int, dict] = {}
@@ -355,7 +418,8 @@ class ParallelWeightSync:
                 winner = min(entries, key=lambda item: item["loss"])
                 info = {"best_loss": winner["loss"], "best_step": step,
                         "learning_rate": min(item["learning_rate"] for item in entries),
-                        "winner": winner["copy"]}
+                        "winner": winner["copy"],
+                        "stop": bool(self.target_loss > 0 and winner["loss"] <= self.target_loss)}
                 marker = json.dumps(info, separators=(",", ":"))
                 for item in entries:
                     if item["host"].local:
@@ -389,9 +453,9 @@ class ParallelWeightSync:
 
 
 def run_copy_on(host: Host, copy_index: int, args, data: Path, job_dir: Path, log,
-                sync: ParallelWeightSync | None = None) -> dict:
+                sync: ParallelWeightSync | None = None, device: str = "cpu") -> dict:
     if host.local:
-        return run_copy_locally(copy_index, args, data, job_dir, host.threads_per_copy, log, sync)
+        return run_copy_locally(copy_index, args, data, job_dir, host.threads_per_copy, log, sync, device)
     transport = transport_for(host)
     remote_dir = f"{REMOTE_ROOT}/{args.job}/copy_{copy_index}"
     threads = host.threads_per_copy
@@ -405,9 +469,9 @@ def run_copy_on(host: Host, copy_index: int, args, data: Path, job_dir: Path, lo
         transport.run(f"mkdir -p {shlex.quote(remote_dir)}/model")
         for file in _checkpoint_files(Path(args.resume_from).expanduser()):
             transport.put(file, f"{remote_dir}/model/{file.name}")
-        args_for_copy = train_arguments(args, copy_index) + ["--resume"]
+        args_for_copy = train_arguments(args, copy_index, device) + ["--resume"]
     else:
-        args_for_copy = train_arguments(args, copy_index)
+        args_for_copy = train_arguments(args, copy_index, device)
     command = (f"cd {shlex.quote(remote_dir)}; NODEYARD_THREADS={threads} nohup {python} -u train_bpe_gpt_torch.py train "
                f"--data-file data.txt --app-data model {' '.join(shlex.quote(a) for a in args_for_copy)} "
                f"--threads {threads} --result-file result.json </dev/null > train.log 2>&1 & echo $! > train.pid; echo STARTED")
@@ -445,6 +509,9 @@ def run_copy_on(host: Host, copy_index: int, args, data: Path, job_dir: Path, lo
             seen += 1
             if line.strip():
                 log(f"[run {copy_index}] {line.rstrip()}")
+                speed = re.search(r"([\d,]+) tokens/sec", line)
+                if speed:
+                    host.tokens_per_second = float(speed.group(1).replace(",", ""))
                 match = re.match(r"SYNC_WAIT \| (\d+) \| ([0-9.]+) \| ([0-9.eE+-]+)", line.strip())
                 if match and sync:
                     selected = sync.arrive(copy_index, int(match.group(1)), float(match.group(2)), float(match.group(3)),
@@ -465,13 +532,13 @@ def run_copy_on(host: Host, copy_index: int, args, data: Path, job_dir: Path, lo
 
 
 def run_copy_locally(copy_index: int, args, data: Path, job_dir: Path, threads: int, log,
-                     sync: ParallelWeightSync | None = None) -> dict:
+                     sync: ParallelWeightSync | None = None, device: str = "auto") -> dict:
     out_dir = job_dir / f"copy_{copy_index}"
     out_dir.mkdir(parents=True, exist_ok=True)
     result_path = out_dir / "result.json"
     python = os.environ.get("NYJOBS_PYTHON", sys.executable)
     command = [python, "-u", str(TRAINER), "train", "--data-file", str(data), "--app-data", str(out_dir / "model"),
-               "--threads", str(threads), "--result-file", str(result_path)] + train_arguments(args, copy_index)
+               "--threads", str(threads), "--result-file", str(result_path)] + train_arguments(args, copy_index, device)
     if args.resume_from:
         model_dir = out_dir / "model"
         model_dir.mkdir(parents=True, exist_ok=True)
@@ -480,12 +547,16 @@ def run_copy_locally(copy_index: int, args, data: Path, job_dir: Path, threads: 
         command.append("--resume")
     log(f"copy {copy_index} started on this machine ({threads} thread(s))")
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    (out_dir / "train.pid").write_text(str(process.pid), encoding="utf-8")
     try:
         with (out_dir / "train.log").open("w", encoding="utf-8") as handle:
             for line in process.stdout:
                 handle.write(line)
                 if line.strip():
                     log(f"[run {copy_index}] {line.rstrip()}")
+                    speed = re.search(r"([\d,]+) tokens/sec", line)
+                    if speed:
+                        this_machine().tokens_per_second = float(speed.group(1).replace(",", ""))
                     match = re.match(r"SYNC_WAIT \| (\d+) \| ([0-9.]+) \| ([0-9.eE+-]+)", line.strip())
                     if match and sync:
                         selected = sync.arrive(copy_index, int(match.group(1)), float(match.group(2)), float(match.group(3)),
@@ -510,6 +581,13 @@ def run_job(args, hosts: list[Host]) -> int:
     job_dir = JOBS_ROOT / args.job
     job_dir.mkdir(parents=True, exist_ok=True)
     lock = threading.Lock()
+    manifest_lock = threading.Lock()
+    manifest_entries: dict[str, dict] = {}
+
+    def save_manifest() -> None:
+        temporary = job_dir / "manifest.json.tmp"
+        temporary.write_text(json.dumps({"job": args.job, "copies": manifest_entries}, indent=2), encoding="utf-8")
+        temporary.replace(job_dir / "manifest.json")
 
     def log(message: str) -> None:
         with lock:
@@ -524,22 +602,29 @@ def run_job(args, hosts: list[Host]) -> int:
         return 1
     if args.copies <= 1:
         args.sync_every = 0
-    sync = ParallelWeightSync(args.copies, job_dir, log) if args.sync_every > 0 else None
+    sync = ParallelWeightSync(args.copies, job_dir, log, args.target_validation_loss) if args.sync_every > 0 else None
     log(f"Job {args.job}: {args.copies} copies on {len(scheduler.hosts)} machine(s), {total_slots} slot(s) in total.")
     results = []
 
     def one(copy_index: int) -> dict:
-        host = scheduler.acquire()
+        host, device = scheduler.acquire()
         try:
+            with manifest_lock:
+                manifest_entries[str(copy_index)] = {
+                    "host": host.name, "address": host.address, "user": host.user, "port": host.port,
+                    "local": host.local, "remote_dir": f"{REMOTE_ROOT}/{args.job}/copy_{copy_index}",
+                    "local_dir": str(job_dir / f"copy_{copy_index}"), "pid_file": "train.pid",
+                }
+                save_manifest()
             try:
-                return run_copy_on(host, copy_index, args, data, job_dir, log, sync)
+                return run_copy_on(host, copy_index, args, data, job_dir, log, sync, device)
             except Exception as error:
                 log(f"copy {copy_index} on {host.name} failed to start or finish: {error}")
                 if sync:
                     sync.abort(f"copy {copy_index} failed: {error}")
                 return {"copy": copy_index, "host": host.name, "ok": False, "error": str(error)}
         finally:
-            scheduler.release(host)
+            scheduler.release(host, device)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, total_slots)) as pool:
         futures = [pool.submit(one, index) for index in range(1, args.copies + 1)]
@@ -547,6 +632,7 @@ def run_job(args, hosts: list[Host]) -> int:
             results.append(future.result())
     results.sort(key=lambda r: r["copy"])
     successful = [r for r in results if r.get("ok")]
+    merge_hosts(hosts)
     (job_dir / "results.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
     if not successful:
         log("Every copy failed. Nothing was kept.")
@@ -815,12 +901,19 @@ def discover_cluster_devices() -> list[dict]:
         mem_mb = _quantity_mb(allocatable.get("memory", "0"))
         arch = (metadata.get("labels") or {}).get("kubernetes.io/arch", "?")
 
+        cpu_python = f"/home/{master.user}/nodeyard-train/bin/python"
+        cuda_python = f"/home/{master.user}/nodeyard-train-cuda/bin/python"
         device = Host(name=name, address=tailnet_ip, user=master.user, port=master.port,
-                      python=master.python or f"/home/{master.user}/nodeyard-train/bin/python",
+                      python=cpu_python,
                       cpus=cpus, mem_mb=mem_mb, arch=arch, probed=False,
                       mb_per_copy=master.mb_per_copy)
         if node_ready and online and tailnet_ip:
             tested = probe_host(device)
+            # Use the CUDA environment only after verifying its driver/runtime.
+            if tested.gpu_count:
+                cuda_test = probe_host(replace(tested, python=cuda_python))
+                if cuda_test.cuda_ready:
+                    tested = cuda_test
             # probe_host also checks that PyTorch imports, so this is the actual selectable state.
             if tested.probed:
                 device = tested
@@ -840,14 +933,25 @@ def discover_cluster_devices() -> list[dict]:
             reason = f"training access/runtime not ready on port {master.port}"
         elif not device.slots:
             reason = "no free capacity"
+        elif device.gpu_count and device.cuda_ready:
+            reason = f"ready · {device.gpu_name} CUDA plus CPU"
+        elif device.gpu_count:
+            reason = f"CPU ready · {device.gpu_name} CUDA runtime unavailable"
         else:
-            reason = "ready"
+            reason = "ready · CPU"
+        if device.probed and device.latency_ms:
+            reason += f" · {device.latency_ms:.0f} ms RTT"
+        if device.tokens_per_second:
+            reason += f" · previous {device.tokens_per_second:,.0f} tokens/sec"
         devices.append({"host": device, "state": reason, "internal_ip": internal_ip,
                         "online": online, "node_ready": node_ready})
 
-    # Persist only nodes that can currently train; retain any manual non-cluster hosts.
+    # Keep a stable control-plane alias: discovery itself needs the master connection.
     cluster_names = {device["host"].name for device in devices}
     configured = [h for h in hosts if h.name not in cluster_names and h.name not in ("master", "k8s-control")]
+    control = next((h for h in hosts if h.name in ("master", "k8s-control")), None)
+    if control:
+        configured.append(replace(control, name="master"))
     configured.extend(device["host"] for device in devices if device["host"].probed and device["host"].slots > 0)
     save_hosts(configured)
     return devices
@@ -941,8 +1045,18 @@ def setup_cluster_workers(master: Host, username: str, public_key: str, emit=pri
   fi
 fi
 rm -rf /tmp/nodeyard-venv-check
-if ! {shlex.quote(home + "/nodeyard-train/bin/python")} -c 'import torch' >/dev/null 2>&1; then rm -rf {shlex.quote(home + "/nodeyard-train")}; fi
-su - {shlex.quote(username)} -c 'nohup bash /tmp/nodeyard-training-access.sh runtime --venv {shlex.quote(home + "/nodeyard-train")} > {shlex.quote(home + "/nodeyard-runtime.log")} 2>&1 </dev/null &'
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+  TRAIN_VENV={shlex.quote(home + "/nodeyard-train-cuda")}
+  if "$TRAIN_VENV/bin/python" -c 'import torch; assert torch.cuda.is_available()' >/dev/null 2>&1; then NEED_RUNTIME=0; else rm -rf "$TRAIN_VENV"; NEED_RUNTIME=1; fi
+else
+  TRAIN_VENV={shlex.quote(home + "/nodeyard-train")}
+  if "$TRAIN_VENV/bin/python" -c 'import torch' >/dev/null 2>&1; then NEED_RUNTIME=0; else rm -rf "$TRAIN_VENV"; NEED_RUNTIME=1; fi
+fi
+if [ "$NEED_RUNTIME" = 1 ]; then
+  su - {shlex.quote(username)} -c "nohup bash /tmp/nodeyard-training-access.sh runtime --venv '$TRAIN_VENV' > {shlex.quote(home + "/nodeyard-runtime.log")} 2>&1 </dev/null &"
+else
+  echo TRAINING_RUNTIME_READY
+fi
 """ if supported else "echo TRAINING_UNSUPPORTED_32BIT_ARM\n"
         host_script = f"""set -eu
 printf '%s' {shlex.quote(script_b64)} | base64 -d > /tmp/nodeyard-training-access.sh
@@ -995,7 +1109,239 @@ def cmd_plan(args) -> int:
     return 0
 
 
+def cmd_pause(args) -> int:
+    """Ask every running copy/rank in a job to save at its next step boundary."""
+    manifest_path = JOBS_ROOT / args.job / "manifest.json"
+    if not manifest_path.is_file():
+        print(f"No active job manifest for {args.job}.", file=sys.stderr)
+        return 1
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entries = manifest.get("copies", {})
+    sent = 0
+    for _key, entry in entries.items():
+        pid_path = entry.get("pid_file", "train.pid")
+        if entry.get("local"):
+            pid_file = Path(entry.get("local_dir", "")) / pid_path
+            try:
+                (Path(entry.get("local_dir", "")) / "model" / "pause.sync").touch()
+                os.kill(int(pid_file.read_text(encoding="utf-8").strip()), signal.SIGUSR1)
+                sent += 1
+                print(f"PAUSE | {entry.get('host')} | requested a checkpoint")
+            except (OSError, ValueError, FileNotFoundError) as error:
+                print(f"PAUSE | {entry.get('host')} | not running: {error}")
+        else:
+            host = Host(name=entry["host"], address=entry["address"], user=entry.get("user", ""),
+                        port=int(entry.get("port", 22)))
+            remote_pid = f"{entry['remote_dir']}/{pid_path}"
+            code, output = transport_for(host).run(
+                f"touch {shlex.quote(entry['remote_dir'] + '/model/pause.sync')} && "
+                f"pid=$(cat {shlex.quote(remote_pid)} 2>/dev/null) && kill -USR1 $pid && echo PAUSE_SENT",
+                timeout=20)
+            if code == 0 and "PAUSE_SENT" in output:
+                sent += 1
+                print(f"PAUSE | {entry['host']} | requested a checkpoint")
+            else:
+                print(f"PAUSE | {entry['host']} | not running: {output.strip()[-160:]}")
+    print(f"Requested checkpoints from {sent}/{len(entries)} process(es). They finish the current step, save, then exit.")
+    return 0 if sent else 1
+
+
+def run_distributed_job(args, hosts: list[Host]) -> int:
+    """Train one shared model with one rank per selected CPU/GPU worker.
+
+    Gloo averages flattened gradients every step. A CUDA rank is assigned before
+    CPU ranks on a device, so `debian-1:2` means one GTX rank plus one CPU rank.
+    """
+    data = Path(args.data).expanduser().resolve()
+    if not data.is_file():
+        raise FileNotFoundError(f"Training text does not exist: {data}")
+    rank_hosts = []
+    remaining = args.copies
+    ordered_hosts = sorted(hosts, key=lambda h: (
+        bool(h.cuda_ready),
+        (h.tokens_per_second or (12000 if h.cuda_ready else h.cpus * 500)) /
+        (1.0 + max(0.0, h.latency_ms) / 50.0),
+    ), reverse=True)
+    for host in ordered_hosts:
+        count = min(remaining, host.limit if host.limit > 0 else host.slots)
+        if count <= 0:
+            continue
+        gpu_ranks = min(count, host.gpu_count if host.cuda_ready else 0)
+        for index in range(gpu_ranks):
+            rank_hosts.append({"host": host, "device": f"cuda:{index}", "gpu": True})
+        for _ in range(count - gpu_ranks):
+            rank_hosts.append({"host": host, "device": "cpu", "gpu": False})
+        remaining -= count
+        if remaining == 0:
+            break
+    if remaining:
+        raise RuntimeError(f"Selected devices have too few slots for {args.copies} distributed ranks.")
+    world_size = len(rank_hosts)
+    if world_size < 2:
+        print("Split training needs at least two selected CPU/GPU ranks.", file=sys.stderr)
+        return 1
+
+    # Rendezvous on the best measured/accelerated selected node.
+    master_rank_index = max(range(world_size), key=lambda i: (
+        rank_hosts[i]["gpu"],
+        (rank_hosts[i]["host"].tokens_per_second or (12000 if rank_hosts[i]["gpu"] else rank_hosts[i]["host"].cpus * 500)) /
+        (1.0 + max(0.0, rank_hosts[i]["host"].latency_ms) / 50.0),
+    ))
+    if master_rank_index != 0:
+        rank_hosts[0], rank_hosts[master_rank_index] = rank_hosts[master_rank_index], rank_hosts[0]
+    rendezvous_host = rank_hosts[0]["host"]
+    master_addr = rendezvous_host.address
+    master_port = 29500 + int(hashlib.sha256(args.job.encode()).hexdigest()[:4], 16) % 100
+
+    job_dir = JOBS_ROOT / args.job / "distributed"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = job_dir.parent / "manifest.json"
+    manifest_entries: dict[str, dict] = {}
+    manifest_lock = threading.Lock()
+
+    def save_manifest() -> None:
+        temporary = manifest_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps({"job": args.job, "mode": "split", "copies": manifest_entries}, indent=2),
+                             encoding="utf-8")
+        temporary.replace(manifest_path)
+
+    lock = threading.Lock()
+
+    def log(message: str) -> None:
+        with lock:
+            print(message, flush=True)
+
+    log(f"Distributed job {args.job}: one model, {world_size} ranks, rendezvous {rendezvous_host.name}:{master_port}.")
+    log("Each update averages gradients from every rank; CUDA and CPU ranks use Gloo over the tailnet.")
+    launched = []
+    try:
+        # Launch rank 0 first; its TCP store waits for the remaining ranks.
+        for rank, assignment in enumerate(rank_hosts):
+            host = assignment["host"]
+            transport = transport_for(host)
+            rank_dir = f"{REMOTE_ROOT}/{args.job}/distributed/rank_{rank}"
+            transport.run(f"mkdir -p {shlex.quote(rank_dir)}/model")
+            transport.put(TRAINER, f"{rank_dir}/train_bpe_gpt_torch.py")
+            for support in SUPPORT_FILES + [LR_GOVERNOR]:
+                transport.put(support, f"{rank_dir}/{support.name}")
+            transport.put(data, f"{rank_dir}/data.txt")
+            if args.resume_from:
+                source_checkpoint = Path(args.resume_from).expanduser()
+                files = _checkpoint_files(source_checkpoint)
+                if len(files) != 3:
+                    raise FileNotFoundError(f"The resume model is incomplete: {source_checkpoint}")
+                for file in files:
+                    transport.put(file, f"{rank_dir}/model/{file.name}")
+            local_cpus = max(1, host.cpus - 1 if host.cpus > 2 else host.cpus)
+            ranks_on_host = sum(entry["host"].name == host.name for entry in rank_hosts)
+            threads = max(1, local_cpus // max(1, ranks_on_host))
+            rank_args = train_arguments(args, 0, assignment["device"]) + [
+                "--rank", str(rank), "--world-size", str(world_size),
+                "--master-addr", master_addr, "--master-port", str(master_port),
+                "--distributed-timeout", str(args.distributed_timeout), "--sync-every", "0",
+            ]
+            if args.resume_from:
+                rank_args.append("--resume")
+            python = host.python or os.environ.get("NYJOBS_PYTHON", "python3")
+            command = (f"cd {shlex.quote(rank_dir)}; GLOO_SOCKET_IFNAME=tailscale0 NODEYARD_THREADS={threads} "
+                       f"nohup {shlex.quote(python)} -u train_bpe_gpt_torch.py train --data-file data.txt "
+                       f"--app-data model {' '.join(shlex.quote(value) for value in rank_args)} "
+                       f"--threads {threads} --result-file result.json </dev/null > train.log 2>&1 & "
+                       f"echo $! > train.pid; echo STARTED")
+            transport.run(command, timeout=20)
+            launched.append({"rank": rank, "host": host, "transport": transport, "rank_dir": rank_dir,
+                             "local_dir": job_dir / f"rank_{rank}", "seen": 0})
+            with manifest_lock:
+                manifest_entries[str(rank)] = {"host": host.name, "address": host.address, "user": host.user,
+                                               "port": host.port, "local": False, "remote_dir": rank_dir,
+                                               "pid_file": "train.pid"}
+                save_manifest()
+            log(f"rank {rank} started on {host.name} ({assignment['device']}, {threads} CPU thread(s))")
+
+        def monitor(item: dict) -> tuple[dict, dict | None]:
+            rank = item["rank"]
+            done_file = "result.json" if rank == 0 else f"model/rank_{rank}.done.json"
+            failures = 0
+            while True:
+                time.sleep(POLL_SECONDS)
+                try:
+                    code, output = item["transport"].run(
+                        f"cd {shlex.quote(item['rank_dir'])} && tail -n +{item['seen'] + 1} train.log 2>/dev/null; "
+                        f"echo __NY_STATE__; (test -f {shlex.quote(done_file)} && echo DONE) || "
+                        f"(kill -0 $(cat train.pid) 2>/dev/null && echo RUNNING || echo STOPPED)", timeout=25)
+                except (subprocess.SubprocessError, OSError) as error:
+                    failures += 1
+                    if failures in (1, 3, 6):
+                        log(f"rank {rank} on {item['host'].name}: temporary SSH interruption; retry {failures}/12")
+                    if failures >= 12:
+                        raise RuntimeError(f"rank {rank} SSH polling failed repeatedly: {error}")
+                    continue
+                if code or "__NY_STATE__" not in output:
+                    failures += 1
+                    if failures >= 12:
+                        raise RuntimeError(f"rank {rank} status check failed repeatedly: {output[-200:]}")
+                    continue
+                failures = 0
+                log_text, _, state = output.partition("__NY_STATE__")
+                for line in log_text.splitlines():
+                    item["seen"] += 1
+                    if not line.strip():
+                        continue
+                    if rank == 0:
+                        log(f"[run 1] {line.rstrip()}")
+                        speed = re.search(r"([\d,]+) tokens/sec", line)
+                        if speed:
+                            item["host"].tokens_per_second = float(speed.group(1).replace(",", ""))
+                    elif "ERROR:" in line or "Traceback" in line:
+                        log(f"[rank {rank}] {line.rstrip()}")
+                state = state.strip()
+                if "DONE" in state:
+                    rank_result = None
+                    if rank == 0:
+                        code, result_text = item["transport"].run(
+                            f"cat {shlex.quote(item['rank_dir'] + '/result.json')}", timeout=20)
+                        if code == 0:
+                            rank_result = json.loads(result_text)
+                    return item, rank_result
+                if "STOPPED" in state:
+                    raise RuntimeError(f"distributed rank {rank} on {item['host'].name} stopped without a checkpoint")
+
+        errors = []
+        rank_zero_result = None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=world_size) as pool:
+            futures = [pool.submit(monitor, item) for item in launched]
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    item, result = future.result()
+                    if item["rank"] == 0:
+                        rank_zero_result = result
+                except Exception as error:
+                    errors.append(str(error))
+        if errors or not rank_zero_result:
+            raise RuntimeError("Distributed training failed: " + "; ".join(errors or ["rank 0 produced no result"]))
+
+        rank0 = launched[0]
+        (job_dir / "best").mkdir(parents=True, exist_ok=True)
+        rank0["transport"].get(f"{rank0['rank_dir']}/model", job_dir / "best")
+        if args.install_best_to:
+            _install_best(job_dir / "best", Path(args.install_best_to).expanduser())
+            log(f"Installed the distributed model into {Path(args.install_best_to).expanduser()}")
+        result = {"validation_loss": rank_zero_result["validation_loss"], "world_size": world_size,
+                  "total_steps": rank_zero_result["total_steps"]}
+        (job_dir / "results.json").write_text(json.dumps([result], indent=2), encoding="utf-8")
+        log(f"Distributed model saved to {job_dir / 'best'} with validation loss {result['validation_loss']:.4f}.")
+        return 0
+    except Exception as error:
+        log(f"Distributed training failed: {error}; stopping its ranks.")
+        for item in launched:
+            item["transport"].run(f"kill -TERM $(cat {shlex.quote(item['rank_dir'] + '/train.pid')}) 2>/dev/null || true",
+                                  timeout=15)
+        return 1
+
+
 def cmd_run(args) -> int:
+    if args.rollback_on_regression:
+        args.eval_every = min(args.eval_every, 10)
     configured = load_hosts()
     if not args.local:
         configured = [probe_host(h) if (not h.probed and not h.local) else h for h in configured]
@@ -1029,6 +1375,8 @@ def cmd_run(args) -> int:
     if not args.keep_models:
         for host in hosts:
             unload_models(host)
+    if args.split:
+        return run_distributed_job(args, hosts)
     return run_job(args, hosts)
 
 
@@ -1059,6 +1407,9 @@ def build_parser() -> argparse.ArgumentParser:
     remove.set_defaults(handler=cmd_remove_host)
     commands.add_parser("probe").set_defaults(handler=cmd_probe)
     commands.add_parser("discover", help="list Kubernetes nodes and their tailnet/training availability").set_defaults(handler=cmd_discover)
+    pause = commands.add_parser("pause", help="save and stop all copies/ranks in an active job")
+    pause.add_argument("--job", required=True)
+    pause.set_defaults(handler=cmd_pause)
     plan_parser = commands.add_parser("plan")
     plan_parser.add_argument("--copies", type=int, required=True)
     plan_parser.add_argument("--local", action="store_true")
@@ -1066,8 +1417,14 @@ def build_parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run")
     run.add_argument("--data", required=True)
     run.add_argument("--copies", type=int, default=1)
+    run.add_argument("--split", action="store_true",
+                     help="train one shared model with synchronized gradients across selected CPU/GPU devices")
+    run.add_argument("--distributed-timeout", type=int, default=900,
+                     help="seconds to wait for distributed ranks to rendezvous")
     run.add_argument("--sync-every", type=int, default=10,
                      help="every N steps, synchronize all copies to the lowest validation loss (0 disables)")
+    run.add_argument("--target-validation-loss", type=float, default=0.0,
+                     help="save and stop when held-out loss reaches this value (0 disables)")
     run.add_argument("--job", default=f"job-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}")
     run.add_argument("--local", action="store_true", help="run on this machine only")
     run.add_argument("--device", action="append", default=[], metavar="NAME[:PARALLEL]",
@@ -1090,6 +1447,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--eval-every", type=int, default=250)
     run.add_argument("--seed", type=int, default=17)
     run.add_argument("--assistant-only", action="store_true")
+    run.add_argument("--rollback-on-regression", action="store_true",
+                     help="restore the best validation weights whenever the next validation does not improve")
     run.set_defaults(handler=cmd_run)
     return parser
 

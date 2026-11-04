@@ -49,7 +49,7 @@ resources="$app/Contents/Resources"
 mkdir -p "$resources"
 # The remote-training runner and its files (share/nodeyard/jobs), so the app can run jobs without the repository.
 mkdir -p "$resources/jobs"
-for file in nyjobs.py training-access.sh train_bpe_gpt_torch.py bpe_tokenizer.py sampling.py lr_governor.py; do
+for file in nyjobs.py training-access.sh train_bpe_gpt_torch.py bpe_tokenizer.py sampling.py lr_governor.py training_data.py; do
     cp "$repo/share/nodeyard/jobs/$file" "$resources/jobs/$file"
 done
 iconset="$resources/AppIcon.iconset"

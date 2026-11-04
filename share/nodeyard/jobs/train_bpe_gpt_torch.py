@@ -20,28 +20,39 @@ import json
 import math
 import os
 import random
+import signal
+import shutil
 import struct
 import time
 import uuid
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch import nn
 
 from bpe_tokenizer import BPETokenizer
 from lr_governor import LearningRateGovernor
 from sampling import sample_token
+from training_data import iter_training_text
 
 MODEL_FILE = "model.safetensors"
 LEGACY_MODEL_FILE = "model.pt"
 CONFIG_FILE = "model.json"
 TOKENIZER_FILE = "bpe.json"
 RESULT_FILE = "result.json"
+_PAUSE_REQUESTED = False
 
 
 def emit(message: str) -> None:
     print(message, flush=True)
+
+
+def _request_pause(_signum, _frame) -> None:
+    global _PAUSE_REQUESTED
+    _PAUSE_REQUESTED = True
 
 
 class MultiHeadAttention(nn.Module):
@@ -200,6 +211,25 @@ def loss_fn(model, inputs, targets, weights):
     return (per_token * weights).sum() / torch.clamp(weights.sum(), min=1.0)
 
 
+def allreduce_gradients(model: nn.Module, world_size: int) -> None:
+    """Average one flattened CPU gradient buffer across heterogeneous CPU/CUDA ranks."""
+    parameters = [parameter for parameter in model.parameters() if parameter.grad is not None]
+    flat = torch.cat([parameter.grad.detach().to("cpu").contiguous().view(-1) for parameter in parameters])
+    dist.all_reduce(flat, op=dist.ReduceOp.SUM)
+    flat.div_(world_size)
+    offset = 0
+    for parameter in parameters:
+        count = parameter.numel()
+        parameter.grad.copy_(flat[offset:offset + count].view_as(parameter).to(parameter.device))
+        offset += count
+
+
+def allreduce_scalar(value: float, device: torch.device, world_size: int) -> float:
+    tensor = torch.tensor([value], dtype=torch.float64, device="cpu")
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    return float(tensor.item() / world_size)
+
+
 def learning_rate(step: int, total: int, peak: float, warmup: int) -> float:
     if step <= warmup:
         return peak * step / max(1, warmup)
@@ -208,8 +238,8 @@ def learning_rate(step: int, total: int, peak: float, warmup: int) -> float:
 
 
 @torch.no_grad()
-def evaluate(model, tokens, weights, context, batch, device, batches=10) -> float:
-    rng = random.Random(1234)
+def evaluate(model, tokens, weights, context, batch, device, batches=10, seed=1234) -> float:
+    rng = random.Random(seed)
     model.eval()
     total = 0.0
     for _ in range(batches):
@@ -219,24 +249,59 @@ def evaluate(model, tokens, weights, context, batch, device, batches=10) -> floa
     return total / batches
 
 
+def archive_existing(app_data: Path) -> None:
+    """Keep the previous current BPE model in its history folder before a fresh run."""
+    config_path = app_data / CONFIG_FILE
+    if not (app_data / MODEL_FILE).is_file() or not config_path.is_file():
+        return
+    old = json.loads(config_path.read_text(encoding="utf-8"))
+    model_id = str(old.get("model_id") or uuid.uuid4().hex[:12])
+    archive = app_data / "history" / f"model_{model_id}"
+    if archive.exists():
+        return
+    archive.mkdir(parents=True, exist_ok=True)
+    for name in (MODEL_FILE, CONFIG_FILE, TOKENIZER_FILE):
+        if (app_data / name).is_file():
+            shutil.copy2(app_data / name, archive / name)
+
+
 def train(args) -> int:
+    global _PAUSE_REQUESTED
+    _PAUSE_REQUESTED = False
+    signal.signal(signal.SIGUSR1, _request_pause)
+    rank = int(os.environ.get("RANK", args.rank))
+    world_size = int(os.environ.get("WORLD_SIZE", args.world_size))
+    args.master_addr = os.environ.get("MASTER_ADDR", args.master_addr)
+    args.master_port = int(os.environ.get("MASTER_PORT", args.master_port))
+    distributed = world_size > 1
+    if distributed:
+        args.sync_every = 0  # distributed ranks synchronize gradients every update
+        dist.init_process_group(backend="gloo", init_method=f"tcp://{args.master_addr}:{args.master_port}",
+                               rank=rank, world_size=world_size,
+                               timeout=timedelta(seconds=args.distributed_timeout))
+    report = emit if rank == 0 else (lambda _message: None)
     torch.manual_seed(args.seed)
     if args.threads:
         torch.set_num_threads(args.threads)
     device = pick_device(args.device)
-    rng = random.Random(args.seed)
+    rng = random.Random(args.seed + rank)
     texts = []
     for path in args.data_files:
         path = Path(path).expanduser()
         if not path.is_file():
             raise FileNotFoundError(f"Training text does not exist: {path}")
-        texts.append(path.read_text(encoding="utf-8", errors="ignore"))
+        # BPE must learn and train on the record content, not JSON keys/braces.
+        if path.suffix.lower() == ".jsonl":
+            report(f"Normalizing JSONL records from {path.name}: extracting speaker/text and chat content before BPE.")
+        texts.append("".join(iter_training_text(path)))
     text = "\n\n".join(texts)
     if len(text) < 1000:
         raise ValueError("Please choose text with at least 1,000 characters.")
     app_data = args.app_data.expanduser()
     app_data.mkdir(parents=True, exist_ok=True)
-    emit(f"Device: {device} · threads: {torch.get_num_threads()} · PyTorch {torch.__version__}")
+    report(f"Device: {device} · threads: {torch.get_num_threads()} · PyTorch {torch.__version__}")
+    if distributed and rank == 0:
+        report(f"Distributed training: {world_size} ranks, Gloo all-reduce over Tailscale; per-rank batch {args.batch_size}.")
 
     previous_steps = 0
     tokenizer_path = app_data / TOKENIZER_FILE
@@ -259,9 +324,10 @@ def train(args) -> int:
         args.layers = int(config["layers"])
         args.vocab_size = int(config.get("vocabulary", config.get("vocab_size")))
         previous_steps = int(config.get("trained_steps", config.get("steps", 0)))
-        emit(f"Continuing from the saved model after {previous_steps:,} training steps (fresh optimizer state).")
+        report(f"Continuing from the saved model after {previous_steps:,} training steps (fresh optimizer state).")
     else:
-        emit(f"Learning a {args.vocab_size:,}-token BPE vocabulary from {len(text):,} characters...")
+        report(f"Learning a {args.vocab_size:,}-token BPE vocabulary from {len(text):,} characters...")
+        archive_existing(app_data)
         tokenizer = BPETokenizer.train(text, args.vocab_size)
         tokenizer.save(tokenizer_path)
 
@@ -269,8 +335,8 @@ def train(args) -> int:
     split = int(len(tokens) * 0.95)
     train_tokens, valid_tokens = tokens[:split], tokens[split:]
     train_weights, valid_weights = weights[:split], weights[split:]
-    emit(f"Tokens: {len(tokens):,} ({len(text) / len(tokens):.2f} characters per token); "
-         f"{len(train_tokens):,} to train, {len(valid_tokens):,} to validate.")
+    report(f"Tokens: {len(tokens):,} ({len(text) / len(tokens):.2f} characters per token); "
+           f"{len(train_tokens):,} to train, {len(valid_tokens):,} to validate.")
 
     model = GPT(tokenizer.vocab_size, args.context, args.dim, args.heads, args.layers).to(device)
     if continuing:
@@ -279,8 +345,8 @@ def train(args) -> int:
         else:
             model.load_state_dict(torch.load(source_weights, map_location=device, weights_only=True), strict=True)
     parameters = sum(p.numel() for p in model.parameters())
-    emit(f"Model initialized: {parameters:,} trainable parameters; {args.layers} blocks, {args.heads} attention heads, "
-         f"width {args.dim}, context {args.context}.")
+    report(f"Model initialized: {parameters:,} trainable parameters; {args.layers} blocks, {args.heads} attention heads, "
+           f"width {args.dim}, context {args.context}.")
     train_token_tensor = torch.as_tensor(train_tokens, dtype=torch.long, device=device)
     train_weight_tensor = torch.as_tensor(train_weights, dtype=torch.float32, device=device)
     valid_token_tensor = torch.as_tensor(valid_tokens, dtype=torch.long, device=device)
@@ -297,6 +363,9 @@ def train(args) -> int:
     worst_state = None
     worst_loss = -math.inf
     worst_step = 0
+    completed_steps = 0
+    paused = False
+    reached_target = False
     for step in range(1, args.steps + 1):
         rate = learning_rate(step, args.steps, peak, args.warmup)
         for group in optimizer.param_groups:
@@ -306,90 +375,149 @@ def train(args) -> int:
         loss = loss_fn(model, inputs, targets, target_weights)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        if distributed:
+            allreduce_gradients(model, world_size)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         total_step = previous_steps + step
-        if step % 10 == 0 or step == args.steps:
-            value = float(loss.item())
-            if not math.isfinite(value):
-                raise RuntimeError(f"Training diverged at step {step} (loss {value}). Nothing was saved.")
-            elapsed = max(1e-9, time.perf_counter() - started)
-            emit(f"Step {step}/{args.steps} | train loss {value:.4f} | {step / elapsed:.2f} steps/sec | "
-                 f"{step * args.batch_size * args.context / elapsed:,.0f} tokens/sec | "
-                 f"total training step {total_step:,} | learning rate {rate:.8g}")
+        value = float(loss.detach().cpu())
+        if distributed:
+            value = allreduce_scalar(value, device, world_size)
+        if not math.isfinite(value):
+            raise RuntimeError(f"Training diverged at step {step} (loss {value}). Nothing was saved.")
+        elapsed = max(1e-9, time.perf_counter() - started)
+        report(f"Step {step}/{args.steps} | train loss {value:.4f} | {step / elapsed:.2f} steps/sec | "
+               f"{step * args.batch_size * args.context * world_size / elapsed:,.0f} tokens/sec | "
+               f"total training step {total_step:,} | learning rate {rate:.8g}")
         sync_step = bool(args.sync_every and step % args.sync_every == 0)
         if step % args.eval_every == 0 or step == args.steps or sync_step:
-            validation = evaluate(model, valid_token_tensor, valid_weight_tensor, args.context, args.batch_size, device)
-            emit(f"Validation at step {step}: loss {validation:.4f} | total training step {total_step:,}")
+            validation = evaluate(model, valid_token_tensor, valid_weight_tensor, args.context, args.batch_size,
+                                  device, batches=(2 if (args.rollback_on_regression or sync_step) else 10),
+                                  seed=1234 + rank)
+            if distributed:
+                validation = allreduce_scalar(validation, device, world_size)
+            report(f"Validation at step {step}: loss {validation:.4f} | total training step {total_step:,}")
             if validation < best_loss:
                 best_loss, best_step = validation, total_step
                 best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
-                emit(f"Best validation snapshot: {best_loss:.4f} at step {best_step}.")
+                report(f"Best validation snapshot: {best_loss:.4f} at step {best_step}.")
             elif validation > worst_loss:
                 worst_loss, worst_step = validation, total_step
                 worst_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
-            new_rate = governor.observe(validation, peak, total_step, emit)
+            if args.rollback_on_regression and best_state is not None and validation >= best_loss:
+                # Validation is the held-out progress signal. On any non-improving
+                # check, undo the step window and restart AdamW's moments at a lower rate.
+                if validation > best_loss or total_step > best_step:
+                    model.load_state_dict(best_state, strict=True)
+                    mx_rate = max(args.learning_rate * 0.02, peak * 0.7)
+                    peak = mx_rate
+                    optimizer = torch.optim.AdamW(model.parameters(), lr=peak, betas=(0.9, 0.95),
+                                                  weight_decay=args.weight_decay)
+                    report(f"ROLLBACK | {total_step} | validation did not improve; restored step {best_step}, "
+                           f"reset AdamW and lowered learning rate to {peak:.8g}")
+            if args.target_validation_loss > 0 and validation <= args.target_validation_loss:
+                reached_target = True
+                report(f"TARGET_LOSS_REACHED | {total_step} | validation {validation:.4f} <= "
+                       f"target {args.target_validation_loss:.4f}; saving this model and stopping.")
+            new_rate = governor.observe(validation, peak, total_step, report)
             if new_rate is not None:
                 peak = new_rate
-            if sync_step:
+        if sync_step:
+            pause_sync_file = app_data / "pause.sync"
+            if pause_sync_file.exists():
+                _PAUSE_REQUESTED = True
+                pause_sync_file.unlink(missing_ok=True)
+            else:
                 # Save at each population barrier. The runner chooses the lowest
                 # validation loss and puts that exact tensor set on every worker.
                 save_safetensors(app_data / MODEL_FILE, model.state_dict())
-                emit(f"SYNC_WAIT | {total_step} | {validation:.6f} | {peak:.8g}")
+                report(f"SYNC_WAIT | {total_step} | {validation:.6f} | {peak:.8g}")
                 sync_file = app_data / f"sync_{total_step}.json"
                 deadline = time.monotonic() + args.sync_timeout
-                while not sync_file.is_file():
+                while not sync_file.is_file() and not pause_sync_file.is_file():
                     if time.monotonic() >= deadline:
                         raise TimeoutError(f"Timed out waiting for the parallel weight sync at step {total_step}.")
                     time.sleep(0.1)
-                sync_info = json.loads(sync_file.read_text(encoding="utf-8"))
-                model.load_state_dict(load_safetensors(app_data / MODEL_FILE, device), strict=True)
-                best_loss = float(sync_info["best_loss"])
-                best_step = int(sync_info["best_step"])
-                peak = float(sync_info["learning_rate"])
-                best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
-                optimizer = torch.optim.AdamW(model.parameters(), lr=peak, betas=(0.9, 0.95),
-                                              weight_decay=args.weight_decay)
-                governor.best = best_loss
-                governor.stalled = 0
-                sync_file.unlink()
-                emit(f"SYNC_SELECTED | {total_step} | shared best loss {best_loss:.4f} from step {best_step}; "
-                     f"all weights synchronized, optimizer moments reset")
+                if pause_sync_file.is_file():
+                    _PAUSE_REQUESTED = True
+                    pause_sync_file.unlink(missing_ok=True)
+                else:
+                    sync_info = json.loads(sync_file.read_text(encoding="utf-8"))
+                    model.load_state_dict(load_safetensors(app_data / MODEL_FILE, device), strict=True)
+                    best_loss = float(sync_info["best_loss"])
+                    best_step = int(sync_info["best_step"])
+                    peak = float(sync_info["learning_rate"])
+                    best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+                    optimizer = torch.optim.AdamW(model.parameters(), lr=peak, betas=(0.9, 0.95),
+                                                  weight_decay=args.weight_decay)
+                    governor.best = best_loss
+                    governor.stalled = 0
+                    sync_file.unlink()
+                    reached_target = bool(sync_info.get("stop", False))
+                    report(f"SYNC_SELECTED | {total_step} | shared best loss {best_loss:.4f} from step {best_step}; "
+                           f"all weights synchronized, optimizer moments reset")
+        completed_steps = step
+        pause = _PAUSE_REQUESTED
+        if distributed:
+            pause_tensor = torch.tensor([1 if pause else 0], dtype=torch.int32)
+            dist.all_reduce(pause_tensor, op=dist.ReduceOp.MAX)
+            pause = bool(pause_tensor.item())
+        if pause:
+            paused = True
+            report(f"Pause requested; checkpointing after step {total_step}.")
+            break
+        if reached_target:
+            break
 
-    final_validation = evaluate(model, valid_token_tensor, valid_weight_tensor, args.context, args.batch_size, device, batches=20)
+    final_validation = evaluate(model, valid_token_tensor, valid_weight_tensor, args.context, args.batch_size,
+                               device, batches=20, seed=9000 + rank)
+    if distributed:
+        final_validation = allreduce_scalar(final_validation, device, world_size)
     if best_state is not None and final_validation > best_loss:
         model.load_state_dict(best_state, strict=True)
-        emit(f"Restored the best validation weights from step {best_step} ({best_loss:.4f}) instead of regressed final weights.")
+        report(f"Restored the best validation weights from step {best_step} ({best_loss:.4f}) instead of regressed final weights.")
         final_validation = best_loss
-    save_safetensors(app_data / MODEL_FILE, model.state_dict())
-    records_dir = app_data / "records"
-    records_dir.mkdir(parents=True, exist_ok=True)
-    if best_state is not None:
-        save_safetensors(records_dir / "best_params.safetensors", best_state)
-    if worst_state is not None:
-        save_safetensors(records_dir / "worst_params.safetensors", worst_state)
-    (records_dir / "records.json").write_text(json.dumps({
-        "best": {"loss": best_loss, "step": best_step},
-        "worst": {"loss": worst_loss, "step": worst_step} if worst_state is not None else None,
-        "learning_rate_reductions": governor.reductions,
-    }, indent=2), encoding="utf-8")
-    model_id = uuid.uuid4().hex[:12]
-    config = {
-        "name": "BPE-token GPT (portable)", "model_id": model_id,
-        "model_name": f"BPE-token GPT · model {model_id[:8]}", "tokenizer": "bpe",
-        "backend": "portable", "optimizer": "AdamW", "precision": "float32",
-        "parameters": parameters, "vocabulary": tokenizer.vocab_size, "layers": args.layers,
-        "width": args.dim, "heads": args.heads, "context": args.context, "batch_size": args.batch_size,
-        "learning_rate": args.learning_rate, "weight_decay": args.weight_decay,
-        "assistant_only": bool(args.assistant_only), "trained_steps": previous_steps + args.steps,
-        "validation_loss": final_validation, "compute_device": str(device),
-    }
-    (app_data / CONFIG_FILE).write_text(json.dumps(config, indent=2), encoding="utf-8")
-    if args.result_file:
-        Path(args.result_file).write_text(json.dumps({"validation_loss": final_validation,
-                                                      "total_steps": previous_steps + args.steps}), encoding="utf-8")
-    emit(f"Saved checkpoint after {previous_steps + args.steps:,} total training steps to {app_data / MODEL_FILE}")
-    emit(f"Training finished. Final validation loss {final_validation:.4f}.")
+    if distributed:
+        dist.barrier()
+    if rank == 0:
+        save_safetensors(app_data / MODEL_FILE, model.state_dict())
+        records_dir = app_data / "records"
+        records_dir.mkdir(parents=True, exist_ok=True)
+        if best_state is not None:
+            save_safetensors(records_dir / "best_params.safetensors", best_state)
+        if worst_state is not None:
+            save_safetensors(records_dir / "worst_params.safetensors", worst_state)
+        (records_dir / "records.json").write_text(json.dumps({
+            "best": {"loss": best_loss, "step": best_step},
+            "worst": {"loss": worst_loss, "step": worst_step} if worst_state is not None else None,
+            "learning_rate_reductions": governor.reductions,
+            "distributed_world_size": world_size,
+        }, indent=2), encoding="utf-8")
+        model_id = uuid.uuid4().hex[:12]
+        config = {
+            "name": "BPE-token GPT (portable)", "model_id": model_id,
+            "model_name": f"BPE-token GPT · model {model_id[:8]}", "tokenizer": "bpe",
+            "backend": "portable", "optimizer": "AdamW", "precision": "float32",
+            "parameters": parameters, "vocabulary": tokenizer.vocab_size, "layers": args.layers,
+            "width": args.dim, "heads": args.heads, "context": args.context, "batch_size": args.batch_size,
+            "learning_rate": peak, "weight_decay": args.weight_decay,
+            "assistant_only": bool(args.assistant_only), "trained_steps": previous_steps + completed_steps,
+            "training_data_format": "JSONL normalized to role-prefixed text" if any(Path(p).suffix.lower() == ".jsonl" for p in args.data_files) else "plain text",
+            "validation_loss": final_validation, "compute_device": str(device),
+            "distributed_world_size": world_size,
+        }
+        (app_data / CONFIG_FILE).write_text(json.dumps(config, indent=2), encoding="utf-8")
+        if args.result_file:
+            Path(args.result_file).write_text(json.dumps({"validation_loss": final_validation,
+                                                          "total_steps": previous_steps + completed_steps}), encoding="utf-8")
+        report(f"Saved checkpoint after {previous_steps + completed_steps:,} total training steps to {app_data / MODEL_FILE}")
+        report((f"Training paused. Checkpoint saved at step {previous_steps + completed_steps}."
+                if paused else f"Training finished. Final validation loss {final_validation:.4f}."))
+    else:
+        (app_data / f"rank_{rank}.done.json").write_text(json.dumps({"rank": rank, "steps": completed_steps}), encoding="utf-8")
+    if distributed:
+        dist.barrier()
+        dist.destroy_process_group()
     return 0
 
 
@@ -416,6 +544,8 @@ def generate(args) -> int:
         if args.chat_mode and step % 16 == 0 and "\nUser:" in tokenizer.decode(generated):
             break
     reply = tokenizer.decode(generated).split("\nUser:")[0].rstrip()
+    if reply.startswith("Assistant:"):
+        reply = reply[len("Assistant:"):].lstrip()
     if args.chat_mode:
         emit("CHAT_REPLY_BEGIN")
         emit(reply)
@@ -447,7 +577,14 @@ def main() -> int:
     train_parser.add_argument("--seed", type=int, default=17)
     train_parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or mps")
     train_parser.add_argument("--threads", type=int, default=int(os.environ.get("NODEYARD_THREADS", "0")))
+    train_parser.add_argument("--rank", type=int, default=0)
+    train_parser.add_argument("--world-size", type=int, default=1)
+    train_parser.add_argument("--master-addr", default="127.0.0.1")
+    train_parser.add_argument("--master-port", type=int, default=29500)
+    train_parser.add_argument("--distributed-timeout", type=int, default=900)
     train_parser.add_argument("--assistant-only", action="store_true")
+    train_parser.add_argument("--rollback-on-regression", action="store_true",
+                              help="restore the best validation weights whenever the next validation does not improve")
     train_parser.add_argument("--resume", action="store_true")
     train_parser.add_argument("--resume-from", type=Path, default=None,
                               help="resume from an MLX/PyTorch BPE model directory")
@@ -455,6 +592,8 @@ def main() -> int:
     train_parser.add_argument("--sync-every", type=int, default=0,
                               help="synchronize all parallel copies to the best validation weights every N steps")
     train_parser.add_argument("--sync-timeout", type=int, default=900)
+    train_parser.add_argument("--target-validation-loss", type=float, default=0.0,
+                              help="save and stop once held-out loss reaches this value (0 disables)")
     train_parser.set_defaults(handler=train)
     generate_parser = commands.add_parser("generate")
     generate_parser.add_argument("--app-data", required=True, type=Path)

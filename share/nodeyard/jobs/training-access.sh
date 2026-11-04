@@ -171,6 +171,9 @@ setup() {
 
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
         ufw allow in on tailscale0 to any port "$PORT" proto tcp comment "$TAG" >/dev/null
+        # Gloo distributed training rendezvous; the runner binds the selected port
+        # to the master tailnet address and removes temporary rules after a job.
+        ufw allow in on tailscale0 to any port 29500:29600 proto tcp comment "${TAG}-gloo" >/dev/null
         say "ufw: allowed port ${PORT} on tailscale0 only."
     else
         say "ufw is not active; the service listens only on ${ts_ip}, which is reachable from the tailnet."
@@ -210,30 +213,32 @@ remove() {
     fi
     if command -v ufw >/dev/null 2>&1; then
         ufw delete allow in on tailscale0 to any port "$PORT" proto tcp >/dev/null 2>&1 || true
+        ufw delete allow in on tailscale0 to any port 29500:29600 proto tcp >/dev/null 2>&1 || true
     fi
     say "Training SSH removed. Port 22 was never changed."
 }
 
 runtime() {
     # Runs as the training user, not root: a virtual environment with the trainer's dependencies.
-    local target="${VENV:-$HOME/nodeyard-train}"
-    # Linux nodes are CPU-only, so use PyTorch's CPU wheels (x86_64 and arm64). The default
-    # Linux wheel pulls in gigabytes of CUDA libraries that these machines cannot use.
-    local index=""
-    if [ "$(uname -s)" = "Linux" ]; then
+    local target="${VENV:-$HOME/nodeyard-train}" index="" package="torch"
+    if [ "$(uname -s)" = "Linux" ] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+        target="${VENV:-$HOME/nodeyard-train-cuda}"
+        index="--index-url https://download.pytorch.org/whl/cu124"
+        package="torch==2.6.0"
+    elif [ "$(uname -s)" = "Linux" ]; then
         index="--index-url https://download.pytorch.org/whl/cpu"
     fi
-    say "Creating ${target} with PyTorch (CPU wheels on Linux; the standard build on macOS)."
+    say "Creating ${target} with ${package} ${index:+($index)}."
     if [ "$PRINT_ONLY" -eq 1 ]; then
         say "python3 -m venv ${target}"
-        say "${target}/bin/pip install torch numpy ${index}"
+        say "${target}/bin/pip install ${package} numpy ${index}"
         return 0
     fi
     python3 -m venv "$target"
     # shellcheck disable=SC2086
     "${target}/bin/pip" install --upgrade pip >/dev/null
     # shellcheck disable=SC2086
-    "${target}/bin/pip" install torch numpy ${index}
+    "${target}/bin/pip" install "$package" numpy ${index}
     say "Runtime ready: ${target}/bin/python"
 }
 
