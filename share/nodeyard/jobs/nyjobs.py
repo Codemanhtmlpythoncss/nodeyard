@@ -68,9 +68,12 @@ class Host:
     torch: str = ""
     mb_per_copy: int = DEFAULT_MB_PER_COPY
     probed: bool = False
+    limit: int = 0  # parallel copies chosen for this device; 0 = automatic
 
     @property
     def slots(self) -> int:
+        if self.limit > 0:
+            return self.limit
         if not self.probed or self.cpus <= 0:
             return 0
         cpu_slots = self.cpus - 1 if self.cpus > 2 else self.cpus
@@ -95,7 +98,7 @@ def load_hosts() -> list[Host]:
                           mb_per_copy=int(entry.get("mb_per_copy", DEFAULT_MB_PER_COPY)),
                           cpus=int(entry.get("cpus", 0)), mem_mb=int(entry.get("mem_mb", 0)),
                           arch=entry.get("arch", ""), torch=entry.get("torch", ""),
-                          probed=bool(entry.get("probed", False))))
+                          probed=bool(entry.get("probed", False)), limit=int(entry.get("limit", 0))))
     return hosts
 
 
@@ -104,7 +107,7 @@ def save_hosts(hosts: list[Host]) -> None:
     payload = {"hosts": [{"name": h.name, "address": h.address, "user": h.user, "port": h.port, "python": h.python,
                           "mb_per_copy": h.mb_per_copy,
                           "cpus": h.cpus, "mem_mb": h.mem_mb, "arch": h.arch, "torch": h.torch,
-                          "probed": h.probed} for h in hosts]}
+                          "probed": h.probed, "limit": h.limit} for h in hosts]}
     CONFIG_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
@@ -544,7 +547,28 @@ def cmd_probe(_args) -> int:
         state = f"{host.arch}, {host.cpus} CPU, {host.mem_mb} MB free, slots {host.slots}" if host.probed \
             else "unreachable (check SSH key access and that the machine is online)"
         print(f"{host.name:<16} {state}")
+    for host in probed:
+        print(device_line(host))
     return 0
+
+
+def device_line(host: Host) -> str:
+    return (f"DEVICE | {host.name} | {host.address or 'this machine'} | {host.arch or '?'} | {host.cpus} | "
+            f"{host.mem_mb} | {host.slots} | {1 if host.probed else 0}")
+
+
+UNLOAD_SCRIPT = r'''if command -v ollama >/dev/null 2>&1; then n=0; for m in $(ollama ps 2>/dev/null | awk 'NR>1 {print $1}'); do ollama stop "$m" >/dev/null 2>&1 && n=$((n+1)); done; echo "UNLOADED $n"; else echo "UNLOADED 0 (no Ollama installed)"; fi'''
+
+
+def unload_models(host: Host) -> None:
+    """Stop any AI models loaded on the device so training gets the memory and CPU."""
+    if host.local:
+        output = subprocess.run(["sh", "-c", UNLOAD_SCRIPT], capture_output=True, text=True).stdout
+    else:
+        output = transport_for(host).run(UNLOAD_SCRIPT, timeout=180)[1]
+    match = re.search(r"UNLOADED (\d+)", output)
+    detail = match.group(1) if match else "unknown"
+    print(f"UNLOAD | {host.name} | stopped {detail} model(s)", flush=True)
 
 
 def cmd_plan(args) -> int:
@@ -557,14 +581,32 @@ def cmd_plan(args) -> int:
 
 
 def cmd_run(args) -> int:
+    configured = load_hosts()
     if not args.local:
-        configured = load_hosts()
-        refreshed = [probe_host(h) if (not h.probed and not h.local) else h for h in configured]
-        save_hosts(refreshed)
-    hosts = [this_machine()] if args.local else [h for h in load_hosts() if h.probed]
-    if not args.local and not hosts:
-        print("No probed machines. Run nyjobs probe, or use --local.", file=sys.stderr)
-        return 1
+        configured = [probe_host(h) if (not h.probed and not h.local) else h for h in configured]
+        save_hosts(configured)
+        hosts = [h for h in configured if h.probed]
+        if args.device:
+            chosen: dict[str, int] = {}
+            for item in args.device:
+                name, _, count = item.partition(":")
+                chosen[name] = int(count) if count else 0
+            known = {h.name for h in hosts}
+            missing = [name for name in chosen if name not in known]
+            if missing:
+                print(f"No probed device named {', '.join(missing)}. Run nyjobs probe first.", file=sys.stderr)
+                return 1
+            hosts = [h for h in hosts if h.name in chosen]
+            for host in hosts:
+                host.limit = chosen[host.name]
+        if not hosts:
+            print("No probed devices. Run nyjobs probe, or use --local.", file=sys.stderr)
+            return 1
+    else:
+        hosts = [this_machine()]
+    if not args.keep_models:
+        for host in hosts:
+            unload_models(host)
     return run_job(args, hosts)
 
 
@@ -603,6 +645,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--copies", type=int, default=1)
     run.add_argument("--job", default=f"job-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}")
     run.add_argument("--local", action="store_true", help="run on this machine only")
+    run.add_argument("--device", action="append", default=[], metavar="NAME[:PARALLEL]",
+                     help="use only this device, with this many parallel copies (repeat for more devices)")
+    run.add_argument("--keep-models", action="store_true", help="do not unload AI models before training")
     run.add_argument("--steps", type=int, default=3000)
     run.add_argument("--batch-size", type=int, default=64)
     run.add_argument("--context", type=int, default=128)
