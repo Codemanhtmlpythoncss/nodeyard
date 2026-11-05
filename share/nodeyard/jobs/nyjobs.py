@@ -374,11 +374,23 @@ def _install_best(source: Path, destination: Path) -> None:
             archive.mkdir(parents=True, exist_ok=True)
             for file in _checkpoint_files(destination):
                 shutil.copy2(file, archive / file.name)
+            if (destination / "records").is_dir():
+                shutil.copytree(destination / "records", archive / "records", dirs_exist_ok=True)
     destination.mkdir(parents=True, exist_ok=True)
     for file in _checkpoint_files(source):
         temporary = destination / (file.name + ".remote-tmp")
         shutil.copy2(file, temporary)
         temporary.replace(destination / file.name)
+    source_records = source / "records"
+    if source_records.is_dir():
+        temporary_records = destination / "records.remote-tmp"
+        if temporary_records.exists():
+            shutil.rmtree(temporary_records)
+        shutil.copytree(source_records, temporary_records)
+        destination_records = destination / "records"
+        if destination_records.exists():
+            shutil.rmtree(destination_records)
+        temporary_records.replace(destination_records)
 
 
 class ParallelWeightSync:
@@ -1324,10 +1336,20 @@ def run_distributed_job(args, hosts: list[Host]) -> int:
             raise RuntimeError("Distributed training failed: " + "; ".join(errors or ["rank 0 produced no result"]))
 
         rank0 = launched[0]
-        (job_dir / "best").mkdir(parents=True, exist_ok=True)
-        rank0["transport"].get(f"{rank0['rank_dir']}/model", job_dir / "best")
+        best_dir = job_dir / "best"
+        best_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("model.safetensors", "model.json", "bpe.json"):
+            rank0["transport"].get(f"{rank0['rank_dir']}/model/{name}", best_dir / name)
+        for name in ("best_params.safetensors", "worst_params.safetensors", "records.json"):
+            remote_record = f"{rank0['rank_dir']}/model/records/{name}"
+            local_record_dir = best_dir / "records"
+            local_record_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                rank0["transport"].get(remote_record, local_record_dir / name)
+            except (subprocess.SubprocessError, OSError, RuntimeError):
+                pass
         if args.install_best_to:
-            _install_best(job_dir / "best", Path(args.install_best_to).expanduser())
+            _install_best(best_dir, Path(args.install_best_to).expanduser())
             log(f"Installed the distributed model into {Path(args.install_best_to).expanduser()}")
         result = {"validation_loss": rank_zero_result["validation_loss"], "world_size": world_size,
                   "total_steps": rank_zero_result["total_steps"]}
