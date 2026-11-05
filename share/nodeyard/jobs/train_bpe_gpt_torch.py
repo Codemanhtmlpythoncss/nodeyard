@@ -37,7 +37,7 @@ from torch import nn
 from bpe_tokenizer import BPETokenizer
 from lr_governor import LearningRateGovernor
 from sampling import sample_token
-from training_data import is_jsonl_file, iter_training_text
+from training_data import is_jsonl_file, iter_training_text, training_data_version
 
 MODEL_FILE = "model.safetensors"
 LEGACY_MODEL_FILE = "model.pt"
@@ -557,6 +557,7 @@ def train(args) -> int:
             "learning_rate": peak, "weight_decay": args.weight_decay,
             "assistant_only": bool(args.assistant_only), "trained_steps": previous_steps + completed_steps,
             "training_data_format": "JSONL normalized to role-prefixed text" if any(is_jsonl_file(Path(p).expanduser()) for p in args.data_files) else "plain text",
+            "training_data_version": training_data_version(args.data_files),
             "validation_loss": final_validation, "compute_device": str(device),
             "distributed_world_size": world_size,
         }
