@@ -171,7 +171,8 @@ def save_safetensors(path: Path, tensors: dict[str, torch.Tensor]) -> None:
 def format_jsonl_reply(text: str) -> str:
     """Render accidental raw JSON-shaped generations as readable speaker/text lines."""
     if not re.search(r'"(?:speaker|text)"\s*:', text):
-        return text.strip()
+        lines = [re.sub(r"^\s*Assistant:\s*", "", line).rstrip() for line in text.splitlines()]
+        return "\n".join(line for line in lines if line.strip()).strip()
     lines = []
     for line in text.splitlines():
         value = line.strip()
@@ -191,6 +192,7 @@ def format_jsonl_reply(text: str) -> str:
         value = re.sub(r'(?i)"(?:speaker|text)"\s*:\s*', "", value)
         value = value.translate(str.maketrans({"{": "", "}": "", '"': ""}))
         value = re.sub(r"(?i)\b(?:speaker|text)\b\s*:?", "", value)
+        value = re.sub(r"^\s*Assistant:\s*", "", value)
         value = re.sub(r"\s+", " ", value).strip(" ,:;|")
         if value and not re.fullmatch(r"[A-Z]{1,3}", value):
             lines.append(value)
