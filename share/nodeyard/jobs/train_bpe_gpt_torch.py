@@ -592,7 +592,7 @@ def main() -> int:
     train_parser.add_argument("--sync-every", type=int, default=0,
                               help="synchronize all parallel copies to the best validation weights every N steps")
     train_parser.add_argument("--sync-timeout", type=int, default=900)
-    train_parser.add_argument("--target-validation-loss", type=float, default=0.0,
+    train_parser.add_argument("--target-validation-loss", type=float, default=3.5,
                               help="save and stop once held-out loss reaches this value (0 disables)")
     train_parser.set_defaults(handler=train)
     generate_parser = commands.add_parser("generate")

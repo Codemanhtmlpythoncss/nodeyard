@@ -1423,7 +1423,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="seconds to wait for distributed ranks to rendezvous")
     run.add_argument("--sync-every", type=int, default=10,
                      help="every N steps, synchronize all copies to the lowest validation loss (0 disables)")
-    run.add_argument("--target-validation-loss", type=float, default=0.0,
+    run.add_argument("--target-validation-loss", type=float, default=3.5,
                      help="save and stop when held-out loss reaches this value (0 disables)")
     run.add_argument("--job", default=f"job-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}")
     run.add_argument("--local", action="store_true", help="run on this machine only")

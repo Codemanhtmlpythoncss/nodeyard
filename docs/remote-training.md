@@ -84,6 +84,10 @@ checkpoint weights between devices and therefore adds network overhead. Set
 `--sync-every N`. All selected copies must fit in the devices' current parallel slots so
 they can meet at each barrier.
 
+The default held-out stopping target is validation loss `3.5`; override with
+`--target-validation-loss N`, or use `0` to disable automatic target stopping. A target
+is a loss threshold, not a guarantee of conversational quality.
+
 To split **one** training run across the selected devices instead of training separate
 copies, add `--split`:
 
