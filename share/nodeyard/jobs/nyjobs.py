@@ -1344,7 +1344,7 @@ def run_distributed_job(args, hosts: list[Host]) -> int:
 
 def cmd_run(args) -> int:
     if args.rollback_on_regression or args.rollback_step or args.target_validation_loss > 0:
-        args.eval_every = min(args.eval_every, 10)
+        args.eval_every = min(args.eval_every, 50)
     configured = load_hosts()
     if not args.local:
         configured = [probe_host(h) if (not h.probed and not h.local) else h for h in configured]

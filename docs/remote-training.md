@@ -90,10 +90,11 @@ is a loss threshold, not a guarantee of conversational quality.
 
 JSONL `speaker`/`text` records are normalized to readable role-prefixed lines before
 BPE training, so the trainer does not learn raw JSON field names and braces. The
-Tutor's **Undo a regressing training step** option compares the same batch before and
-after an update; if loss rises, it restores the previous weights, resets AdamW moments,
-and lowers the rate. This is opt-in because the extra forward pass costs time and a
-single batch can be noisy.
+Tutor defaults to **Undo a validation regression**: every 50 steps, it restores the
+best held-out checkpoint and lowers the rate if validation loss did not improve. The
+CLI also has optional `--rollback-step`, which compares the same training batch before
+and after an update and restores it if that individual update increased loss. That mode
+adds a forward pass per step and can be slower/noisier, so it is not the Tutor default.
 
 To split **one** training run across the selected devices instead of training separate
 copies, add `--split`:
