@@ -443,7 +443,8 @@ def train(args) -> int:
         sync_step = bool(args.sync_every and step % args.sync_every == 0)
         if step % args.eval_every == 0 or step == args.steps or sync_step:
             validation = evaluate(model, valid_token_tensor, valid_weight_tensor, args.context, args.batch_size,
-                                  device, batches=(2 if (args.rollback_on_regression or sync_step) else 10),
+                                  device, batches=(2 if (args.rollback_on_regression or args.rollback_step or
+                                                        args.target_validation_loss > 0 or sync_step) else 10),
                                   seed=1234 + rank)
             if distributed:
                 validation = allreduce_scalar(validation, device, world_size)

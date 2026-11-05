@@ -84,10 +84,28 @@ def _record_text(record: object, path: Path, line_number: int) -> str:
     )
 
 
+def is_jsonl_file(path: Path) -> bool:
+    """Detect JSONL by extension or first record, including remote data.txt copies."""
+    if path.suffix.lower() in {".jsonl", ".ndjson"}:
+        return True
+    try:
+        with path.open("r", encoding="utf-8-sig", errors="strict") as source:
+            for line in source:
+                if not line.strip():
+                    continue
+                try:
+                    return isinstance(json.loads(line), (dict, list))
+                except json.JSONDecodeError:
+                    return False
+    except (OSError, UnicodeDecodeError):
+        return False
+    return False
+
+
 def iter_training_text(path: Path) -> Iterator[str]:
     """Yield text chunks, formatting JSONL records as readable role-prefixed text."""
     path = path.expanduser()
-    if path.suffix.lower() != ".jsonl":
+    if not is_jsonl_file(path):
         with path.open("r", encoding="utf-8", errors="replace", newline=None) as source:
             yield from source
         return
