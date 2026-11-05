@@ -20,6 +20,7 @@ import json
 import math
 import os
 import random
+import re
 import signal
 import shutil
 import struct
@@ -165,6 +166,35 @@ def save_safetensors(path: Path, tensors: dict[str, torch.Tensor]) -> None:
         stream.write(encoded)
         for chunk in chunks:
             stream.write(chunk)
+
+
+def format_jsonl_reply(text: str) -> str:
+    """Render accidental raw JSON-shaped generations as readable speaker/text lines."""
+    if not re.search(r'"(?:speaker|text)"\s*:', text):
+        return text.strip()
+    lines = []
+    for line in text.splitlines():
+        value = line.strip()
+        if not value:
+            continue
+        try:
+            record = json.loads(value)
+        except json.JSONDecodeError:
+            record = None
+        if isinstance(record, dict):
+            speaker = record.get("speaker")
+            content = record.get("text", record.get("content", ""))
+            if isinstance(content, str) and content.strip():
+                lines.append(f"{speaker}: {content.strip()}" if isinstance(speaker, str) and speaker else content.strip())
+                continue
+        value = re.sub(r'(?i)\{\s*"speaker"\s*:\s*"text"\s*:\s*', "", value)
+        value = re.sub(r'(?i)"(?:speaker|text)"\s*:\s*', "", value)
+        value = value.translate(str.maketrans({"{": "", "}": "", '"': ""}))
+        value = re.sub(r"(?i)\b(?:speaker|text)\b\s*:?", "", value)
+        value = re.sub(r"\s+", " ", value).strip(" ,:;|")
+        if value and not re.fullmatch(r"[A-Z]{1,3}", value):
+            lines.append(value)
+    return "\n".join(lines).strip()
 
 
 def pick_device(requested: str) -> torch.device:
@@ -373,14 +403,35 @@ def train(args) -> int:
         inputs, targets, target_weights = sample_windows(train_token_tensor, train_weight_tensor, args.context,
                                                          args.batch_size, rng, device)
         loss = loss_fn(model, inputs, targets, target_weights)
+        loss_before = float(loss.detach().cpu())
+        before_weights = [parameter.detach().clone() for parameter in model.parameters()] if args.rollback_step else None
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         if distributed:
             allreduce_gradients(model, world_size)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
+        value = loss_before
+        if args.rollback_step:
+            with torch.no_grad():
+                loss_after = float(loss_fn(model, inputs, targets, target_weights).detach().cpu())
+            regressed = loss_after > loss_before
+            if distributed:
+                regression_flag = torch.tensor([1 if regressed else 0], dtype=torch.int32)
+                dist.all_reduce(regression_flag, op=dist.ReduceOp.MAX)
+                regressed = bool(regression_flag.item())
+            if regressed:
+                with torch.no_grad():
+                    for parameter, saved in zip(model.parameters(), before_weights):
+                        parameter.copy_(saved)
+                peak = max(args.learning_rate * 0.02, peak * 0.7)
+                optimizer = torch.optim.AdamW(model.parameters(), lr=peak, betas=(0.9, 0.95),
+                                              weight_decay=args.weight_decay)
+                report(f"STEP_ROLLBACK | {step} | same-batch loss rose to {loss_after:.4f}; "
+                       f"weights restored and next learning rate lowered to {peak:.8g}")
+            else:
+                value = loss_after
         total_step = previous_steps + step
-        value = float(loss.detach().cpu())
         if distributed:
             value = allreduce_scalar(value, device, world_size)
         if not math.isfinite(value):
@@ -546,6 +597,7 @@ def generate(args) -> int:
     reply = tokenizer.decode(generated).split("\nUser:")[0].rstrip()
     if reply.startswith("Assistant:"):
         reply = reply[len("Assistant:"):].lstrip()
+    reply = format_jsonl_reply(reply)
     if args.chat_mode:
         emit("CHAT_REPLY_BEGIN")
         emit(reply)
@@ -585,6 +637,8 @@ def main() -> int:
     train_parser.add_argument("--assistant-only", action="store_true")
     train_parser.add_argument("--rollback-on-regression", action="store_true",
                               help="restore the best validation weights whenever the next validation does not improve")
+    train_parser.add_argument("--rollback-step", action="store_true",
+                              help="undo an optimizer step if loss on that same batch increases after the update")
     train_parser.add_argument("--resume", action="store_true")
     train_parser.add_argument("--resume-from", type=Path, default=None,
                               help="resume from an MLX/PyTorch BPE model directory")

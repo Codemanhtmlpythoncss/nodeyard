@@ -354,7 +354,8 @@ def train_arguments(args, copy_index: int, device: str = "auto") -> list[str]:
             "--target-validation-loss", str(args.target_validation_loss), "--device", device,
             "--seed", str(args.seed + copy_index)] \
         + (["--assistant-only"] if args.assistant_only else []) \
-        + (["--rollback-on-regression"] if args.rollback_on_regression else [])
+        + (["--rollback-on-regression"] if args.rollback_on_regression else []) \
+        + (["--rollback-step"] if args.rollback_step else [])
 
 
 def _checkpoint_files(directory: Path) -> list[Path]:
@@ -1449,6 +1450,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--assistant-only", action="store_true")
     run.add_argument("--rollback-on-regression", action="store_true",
                      help="restore the best validation weights whenever the next validation does not improve")
+    run.add_argument("--rollback-step", action="store_true",
+                     help="undo a training step if loss on that same batch increases after the update")
     run.set_defaults(handler=cmd_run)
     return parser
 

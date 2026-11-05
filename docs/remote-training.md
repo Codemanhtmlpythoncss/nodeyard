@@ -88,6 +88,13 @@ The default held-out stopping target is validation loss `3.5`; override with
 `--target-validation-loss N`, or use `0` to disable automatic target stopping. A target
 is a loss threshold, not a guarantee of conversational quality.
 
+JSONL `speaker`/`text` records are normalized to readable role-prefixed lines before
+BPE training, so the trainer does not learn raw JSON field names and braces. The
+Tutor's **Undo a regressing training step** option compares the same batch before and
+after an update; if loss rises, it restores the previous weights, resets AdamW moments,
+and lowers the rate. This is opt-in because the extra forward pass costs time and a
+single batch can be noisy.
+
 To split **one** training run across the selected devices instead of training separate
 copies, add `--split`:
 
