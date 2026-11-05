@@ -461,11 +461,12 @@ def run_copy_on(host: Host, copy_index: int, args, data: Path, job_dir: Path, lo
     remote_dir = f"{REMOTE_ROOT}/{args.job}/copy_{copy_index}"
     threads = host.threads_per_copy
     python = os.environ.get("NYJOBS_PYTHON", host.python or "python3")
+    remote_data = "data" + (data.suffix or ".txt")
     transport.run(f"mkdir -p {shlex.quote(remote_dir)}")
     transport.put(TRAINER, f"{remote_dir}/train_bpe_gpt_torch.py")
     for support in SUPPORT_FILES + [LR_GOVERNOR]:
         transport.put(support, f"{remote_dir}/{support.name}")
-    transport.put(data, f"{remote_dir}/data.txt")
+    transport.put(data, f"{remote_dir}/{remote_data}")
     if args.resume_from:
         transport.run(f"mkdir -p {shlex.quote(remote_dir)}/model")
         for file in _checkpoint_files(Path(args.resume_from).expanduser()):
@@ -474,7 +475,7 @@ def run_copy_on(host: Host, copy_index: int, args, data: Path, job_dir: Path, lo
     else:
         args_for_copy = train_arguments(args, copy_index, device)
     command = (f"cd {shlex.quote(remote_dir)}; NODEYARD_THREADS={threads} nohup {python} -u train_bpe_gpt_torch.py train "
-               f"--data-file data.txt --app-data model {' '.join(shlex.quote(a) for a in args_for_copy)} "
+               f"--data-file {shlex.quote(remote_data)} --app-data model {' '.join(shlex.quote(a) for a in args_for_copy)} "
                f"--threads {threads} --result-file result.json </dev/null > train.log 2>&1 & echo $! > train.pid; echo STARTED")
     # Fully detach stdin/stdout/stderr before SSH exits, or OpenSSH waits on the
     # background child's inherited descriptors until the client times out.
@@ -1221,11 +1222,12 @@ def run_distributed_job(args, hosts: list[Host]) -> int:
             host = assignment["host"]
             transport = transport_for(host)
             rank_dir = f"{REMOTE_ROOT}/{args.job}/distributed/rank_{rank}"
+            remote_data = "data" + (data.suffix or ".txt")
             transport.run(f"mkdir -p {shlex.quote(rank_dir)}/model")
             transport.put(TRAINER, f"{rank_dir}/train_bpe_gpt_torch.py")
             for support in SUPPORT_FILES + [LR_GOVERNOR]:
                 transport.put(support, f"{rank_dir}/{support.name}")
-            transport.put(data, f"{rank_dir}/data.txt")
+            transport.put(data, f"{rank_dir}/{remote_data}")
             if args.resume_from:
                 source_checkpoint = Path(args.resume_from).expanduser()
                 files = _checkpoint_files(source_checkpoint)
@@ -1245,7 +1247,7 @@ def run_distributed_job(args, hosts: list[Host]) -> int:
                 rank_args.append("--resume")
             python = host.python or os.environ.get("NYJOBS_PYTHON", "python3")
             command = (f"cd {shlex.quote(rank_dir)}; GLOO_SOCKET_IFNAME=tailscale0 NODEYARD_THREADS={threads} "
-                       f"nohup {shlex.quote(python)} -u train_bpe_gpt_torch.py train --data-file data.txt "
+                       f"nohup {shlex.quote(python)} -u train_bpe_gpt_torch.py train --data-file {shlex.quote(remote_data)} "
                        f"--app-data model {' '.join(shlex.quote(value) for value in rank_args)} "
                        f"--threads {threads} --result-file result.json </dev/null > train.log 2>&1 & "
                        f"echo $! > train.pid; echo STARTED")

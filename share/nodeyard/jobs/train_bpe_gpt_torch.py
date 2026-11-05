@@ -37,7 +37,7 @@ from torch import nn
 from bpe_tokenizer import BPETokenizer
 from lr_governor import LearningRateGovernor
 from sampling import sample_token
-from training_data import iter_training_text
+from training_data import is_jsonl_file, iter_training_text
 
 MODEL_FILE = "model.safetensors"
 LEGACY_MODEL_FILE = "model.pt"
@@ -321,7 +321,7 @@ def train(args) -> int:
         if not path.is_file():
             raise FileNotFoundError(f"Training text does not exist: {path}")
         # BPE must learn and train on the record content, not JSON keys/braces.
-        if path.suffix.lower() == ".jsonl":
+        if is_jsonl_file(path):
             report(f"Normalizing JSONL records from {path.name}: extracting speaker/text and chat content before BPE.")
         texts.append("".join(iter_training_text(path)))
     text = "\n\n".join(texts)
@@ -553,7 +553,7 @@ def train(args) -> int:
             "width": args.dim, "heads": args.heads, "context": args.context, "batch_size": args.batch_size,
             "learning_rate": peak, "weight_decay": args.weight_decay,
             "assistant_only": bool(args.assistant_only), "trained_steps": previous_steps + completed_steps,
-            "training_data_format": "JSONL normalized to role-prefixed text" if any(Path(p).suffix.lower() == ".jsonl" for p in args.data_files) else "plain text",
+            "training_data_format": "JSONL normalized to role-prefixed text" if any(is_jsonl_file(Path(p).expanduser()) for p in args.data_files) else "plain text",
             "validation_loss": final_validation, "compute_device": str(device),
             "distributed_world_size": world_size,
         }
