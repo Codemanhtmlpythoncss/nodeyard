@@ -728,6 +728,8 @@ def main():
         updateapi.register(ctx, a)
     import settings
     settings.register(ctx, a)
+    import setupapi     # the one-host wizard: verify SSH host fingerprints before adding a device
+    setupapi.register(ctx, a)
     import connections
     connections.register(ctx, a)
     if getattr(ctx, "ai", None) is not None:

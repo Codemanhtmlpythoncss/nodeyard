@@ -48,6 +48,35 @@ DEMO_DOCTOR = {"ok": True, "issues": 1, "warnings": 2, "fixed": 0, "checks": [
 ]}
 
 
+def parse_host_addresses(raw):
+    """Keep only usable private IPv4 addresses from `ip -j -4 address show`."""
+    try:
+        interfaces = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(interfaces, list):
+        return []
+    tailnet = ipaddress.ip_network("100.64.0.0/10")
+    out = []
+    for interface in interfaces:
+        if not isinstance(interface, dict) or interface.get("operstate") == "DOWN":
+            continue
+        name = str(interface.get("ifname") or "")
+        for info in interface.get("addr_info") or []:
+            if not isinstance(info, dict) or info.get("family") != "inet":
+                continue
+            try:
+                address = ipaddress.ip_address(info.get("local", ""))
+            except (TypeError, ValueError):
+                continue
+            if address.version != 4 or address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified:
+                continue
+            kind = "tailnet" if address in tailnet else "lan" if address.is_private else ""
+            if kind:
+                out.append({"interface": name, "address": str(address), "kind": kind})
+    return sorted(out, key=lambda item: (item["kind"], item["address"], item["interface"]))
+
+
 def image_kind(data):
     """The picture's type from its first bytes (never from its name)."""
     if data[:8] == b"\x89PNG\r\n\x1a\n":
@@ -75,6 +104,24 @@ class SettingsError(Exception):
     def __init__(self, message, code=400):
         super().__init__(message)
         self.code = code
+
+
+def network_scope_listen(scope, addresses):
+    """Translate a user-facing network choice into explicit, safe listener addresses."""
+    scope = str(scope or "").strip()
+    if scope == "local":
+        return "local"
+    if scope == "tailnet":
+        return "tailscale"
+    if scope != "lan-tailnet":
+        raise SettingsError("Choose local only, this device + Tailscale, or LAN + Tailscale.")
+    lan = sorted({item["address"] for item in addresses if item.get("kind") == "lan"})
+    tail = sorted({item["address"] for item in addresses if item.get("kind") == "tailnet"})
+    if not tail:
+        raise SettingsError("No Tailscale address was found on this device. Connect it to Tailscale first.")
+    if not lan:
+        raise SettingsError("No private LAN address was found on this device.")
+    return ",".join(["local"] + tail + lan)
 
 
 class Settings:
@@ -254,6 +301,8 @@ class Settings:
             "chat_defaults": self.chat_defaults(p),
             "public": self.public_state(),
             "https": {"url": tsserve.https_url(getattr(self.args, "port", 9092) or 9092, max_age=10), "tailscale": bool(shutil.which("tailscale"))},
+            "listen_addrs": list(getattr(self.ctx, "listen_addrs", []) or []),
+            "network_addresses": self.host_network_addresses(),
             "weak_password": self.weak_ok(),
             "nodes": [{"name": n["name"], "disk_limit": n.get("disk_limit")} for n in st.get("nodes", [])],
         }
@@ -408,6 +457,24 @@ class Settings:
         except (OSError, subprocess.SubprocessError) as e:
             raise SettingsError("Couldn't hand the change to systemd: %s" % e, 500)
         return {"restarting": True, "port": port}
+
+    def host_network_addresses(self):
+        """Private host addresses only: no loopback, link-local or public interfaces."""
+        if self.demo:
+            return []
+        try:
+            result = subprocess.run(["ip", "-j", "-4", "address", "show"], capture_output=True, text=True,
+                                   timeout=5, env=ENV)
+        except (OSError, subprocess.SubprocessError):
+            return []
+        return parse_host_addresses(result.stdout) if result.returncode == 0 else []
+
+    def apply_network_scope(self, body):
+        """Bind the same dashboard/control API to a named set of trusted private interfaces."""
+        listen = network_scope_listen(body.get("scope"), self.host_network_addresses())
+        return self.apply_service({"listen": listen,
+                                   "port": getattr(self.args, "port", 9092) or 9092,
+                                   "interval": int(getattr(self.ctx.store, "interval", 5))})
 
     # -- public access (Tailscale Funnel) -----------------------------------------------------
 
@@ -811,6 +878,7 @@ def register(ctx, args):
         "/api/settings/adopt-model-key": wrap(lambda h, b: s.adopt_model_key()),
         "/api/settings/hf-token": wrap(lambda h, b: s.set_hf_token(b)),
         "/api/settings/service": wrap(lambda h, b: s.apply_service(b)),
+        "/api/settings/network-scope": wrap(lambda h, b: s.apply_network_scope(b)),
         "/api/settings/background": wrap(lambda h, b: {"background": s.set_background(b)}),
         "/api/settings/background-style": wrap(lambda h, b: {"background": s.background_style(b)}),
         "/api/settings/background-remove": wrap(lambda h, b: s.remove_background()),
