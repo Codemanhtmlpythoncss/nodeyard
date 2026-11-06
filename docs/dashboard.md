@@ -235,6 +235,14 @@ The dashboard's browser sign-in password remains a separate web-session credenti
 without sending a bearer key, while external clients use the shared server API key. Deleting models, running commands and changing settings are not
 available in the control API: those actions need a signed-in dashboard session.
 
+### Hermes Agent and OpenAI-compatible clients
+
+In Hermes, choose an OpenAI-compatible provider and use the dashboard origin plus `/api/v1` as the **base URL** (for example,
+`https://nodeyard.example/api/v1`), with the shared server API key. Do not use `/api/v1/models` as the base URL. `GET /api/v1/models`
+now returns the OpenAI `object: "list"` and `data` fields Hermes expects, while retaining Nodeyard's `models` and `downloads` fields for
+existing clients. The OpenAI list contains only ready chat targets; use each returned `id` as the model name. Chat requests go to
+`POST /api/v1/chat/completions` and are streamed as OpenAI-compatible server-sent events.
+
 ```sh
 KEY=...   # the server API key
 curl -H "Authorization: Bearer $KEY" http://DASHBOARD:9092/api/v1/status
@@ -249,7 +257,7 @@ curl -H "Authorization: Bearer $KEY" 'http://DASHBOARD:9092/api/v1/jobs?id=ab12.
 | `GET /api/v1/status` | what is loaded and whether it is ready |
 | `GET /api/v1/targets` | model targets that can receive chat requests |
 | `POST /api/v1/chat/completions` | streamed OpenAI-compatible chat through the selected target |
-| `GET /api/v1/models` | downloaded models and Ollama's, which is loaded, running downloads |
+| `GET /api/v1/models` | OpenAI-compatible `data` list of ready chat targets, plus Nodeyard's downloaded-model inventory and running downloads |
 | `POST /api/v1/models/load` `{"model": "file.gguf"}` | switch to a downloaded model (old files are kept) |
 | `POST /api/v1/models/unload` | free the cluster's memory |
 | `POST /api/v1/models/download` `{"repo": "owner/name", "file": "x.gguf"}` | download a GGUF file |

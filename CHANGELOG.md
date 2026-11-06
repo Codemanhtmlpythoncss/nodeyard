@@ -45,6 +45,8 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Fixed
 
+- **Hermes/OpenAI model discovery:** the key-protected `/api/v1/models` endpoint now includes the standard OpenAI `object: "list"` and `data` fields for ready chat targets while preserving Nodeyard's inventory response.
+
 - Opening Music could knock the dashboard offline ("Lost contact"): new-song lookups ran up to eight yt-dlp
   processes inside its memory limit. Now two at a time, at low priority, killed first if memory runs out; the
   in-RAM audio cache is 40 MB, and the unit uses MemoryHigh/MemoryMax.
