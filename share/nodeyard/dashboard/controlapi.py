@@ -7,7 +7,7 @@ Endpoints (all JSON):
   GET  /api/v1/status                    what is loaded and whether it is ready
   GET  /api/v1/targets                   chat-ready split and Ollama models
   POST /api/v1/chat/completions          streamed OpenAI-compatible chat through a model target
-  GET  /api/v1/models                    downloaded models (and Ollama's), which one is loaded, running downloads
+  GET  /api/v1/models                    OpenAI-compatible ready targets plus downloaded inventory and downloads
   POST /api/v1/models/load     {"model": "file.gguf" | "ollama-name", "ctx": 8192}   -> {"job": id}
   POST /api/v1/models/unload   {"model": optional name}                              -> {"job": id}
   POST /api/v1/models/download {"repo": "owner/name", "file": "x.gguf"}              -> {"job": id}
@@ -165,7 +165,23 @@ def register(ctx, args):
             rows, downloads = describe(backend)
         except aiapi.AIError as e:
             return fail(h, e)
-        h._json({"ok": True, "models": rows, "downloads": downloads})
+        try:
+            available = backend.targets().get("targets", [])
+        except aiapi.AIError:
+            available = []
+        model_ids = []
+        for target in available:
+            if not isinstance(target, dict) or not target.get("ready"):
+                continue
+            model_id = target.get("id")
+            if isinstance(model_id, str) and model_id and model_id not in model_ids:
+                model_ids.append(model_id)
+        openai_models = [{"id": model_id, "object": "model", "created": 0, "owned_by": "nodeyard"}
+                         for model_id in model_ids]
+        # Keep Nodeyard's inventory fields for existing clients while also satisfying
+        # OpenAI-compatible clients (including Hermes) that read /models -> data[].
+        h._json({"ok": True, "models": rows, "downloads": downloads,
+                 "object": "list", "data": openai_models})
 
     def find(rows, wanted):
         wanted = str(wanted or "").strip()
