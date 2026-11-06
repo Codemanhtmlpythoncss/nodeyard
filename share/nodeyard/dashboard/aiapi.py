@@ -247,6 +247,8 @@ def pump_stream(turn, conn, resp, why_cut):
             continue
         if _finished(data):
             finished = True
+            if data == b"[DONE]" and getattr(turn, "kind", "") == "api":
+                continue
         elif not writing and b'"content"' in data:
             writing = True
             try:

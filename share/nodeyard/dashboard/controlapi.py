@@ -6,8 +6,8 @@
 Endpoints (all JSON):
   GET  /api/v1/status                    what is loaded and whether it is ready
   GET  /api/v1/targets                   chat-ready split and Ollama models
-  POST /api/v1/chat/completions          streamed OpenAI-compatible chat through a model target
-  GET  /api/v1/models                    OpenAI-compatible ready targets plus downloaded inventory and downloads
+  GET  /api/v1/models                    OpenAI-compatible catalog, including unloaded installed models
+  POST /api/v1/chat/completions          OpenAI-compatible chat; unloaded models load on demand
   POST /api/v1/models/load     {"model": "file.gguf" | "ollama-name", "ctx": 8192}   -> {"job": id}
   POST /api/v1/models/unload   {"model": optional name}                              -> {"job": id}
   POST /api/v1/models/download {"repo": "owner/name", "file": "x.gguf"}              -> {"job": id}
@@ -133,6 +133,162 @@ def describe(backend):
     return models, downloads
 
 
+def prepare_chat_target(backend, target, body, rows):
+    """Start an unloaded split target, or switch a downloaded split file into service.
+
+    Ollama targets are returned unchanged: Ollama loads an installed model when its
+    OpenAI chat endpoint receives the request.
+    """
+    sp = split_state(backend) or {}
+    if target == "split":
+        if not sp:
+            raise aiapi.AIError("No split model is deployed.", 404)
+        if sp.get("ready") and not sp.get("stale"):
+            return "split", ""
+        if sp.get("loaded") and not sp.get("stale"):
+            return "split", ""  # deployment is already loading; follow its live state
+        if sp.get("stale"):
+            file = str(sp.get("model") or "")
+            if not file:
+                raise aiapi.AIError("The split model needs reloading, but its file name is unknown.", 503)
+            params = {"local": True, "file": file, "ctx": sp.get("ctx") or 8192, "keep_old": True}
+            return "split", backend.run("switch", params)
+        return "split", backend.run("split-load", {})
+
+    if target.startswith("split:"):
+        row = next((item for item in rows if item.get("id") == target and item.get("kind") == "split"), None)
+        if row is None:
+            raise aiapi.AIError("No downloaded split model matches %r." % target, 404)
+        file = row["file"]
+        if sp and sp.get("model") == file:
+            if sp.get("ready") and not sp.get("stale"):
+                return "split", ""
+            if sp.get("loaded") and not sp.get("stale"):
+                return "split", ""  # an in-progress load already owns the model slot
+            if not sp.get("stale"):
+                return "split", backend.run("split-load", {})
+        ctx = body.get("ctx") or body.get("context_length") or (sp.get("ctx") if sp else None) or 8192
+        return "split", backend.run("switch", {"local": True, "file": file, "ctx": ctx, "keep_old": True})
+    return target, ""
+
+
+LOAD_UPDATE_SECONDS = 30
+
+
+def estimate_eta(samples, now, pct):
+    """Estimate seconds remaining only from recent, increasing measured progress."""
+    fresh = [(at, value) for at, value in samples if 0 <= now - at <= 120]
+    if pct is None or len(fresh) < 2:
+        return None
+    start, first = fresh[0]
+    elapsed = now - start
+    rate = (float(pct) - float(first)) / elapsed if elapsed > 0 else 0.0
+    if rate <= 0.001:
+        return None
+    return max(0, round((100.0 - float(pct)) / rate))
+
+
+def loading_chunk(turn_id, model_id, backend, phase, pct, eta):
+    """OpenAI-compatible empty delta with Nodeyard loading telemetry in an extension field."""
+    return {"id": turn_id, "object": "chat.completion.chunk", "created": int(time.time()), "model": model_id,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+            "nodeyard": {"backend": backend, "stage": phase, "progress_pct": pct, "eta_seconds": eta,
+                         "update_interval_seconds": LOAD_UPDATE_SECONDS}}
+
+
+def wait_for_split_load(backend, model_id, job_id, turn, client_gone=lambda: False, timeout=1800,
+                        clock=time.monotonic, pause=time.sleep):
+    """Follow a split model load, emitting live OpenAI-shaped telemetry every 30 seconds."""
+    started = clock()
+    next_update = started
+    samples = []
+    while True:
+        if client_gone():
+            return False
+        now = clock()
+        state = (backend.store.snapshot().get("state") or {})
+        sp = (state.get("ai") or {}).get("split") or {}
+        if sp.get("ready") and not sp.get("stale"):
+            turn.push(loading_chunk(turn.id, model_id, "clustered", "ready", 100, 0))
+            return True
+        if sp.get("stale"):
+            raise aiapi.AIError("The split model needs reloading: %s." % sp["stale"].get("why", "a node lost its model share"), 503)
+        if job_id:
+            job = backend.job(job_id, 0)
+            if job is None:
+                raise aiapi.AIError("The split model load task disappeared before it was ready.", 502)
+            if job.get("status") in ("failed", "cancelled"):
+                detail = (job.get("lines") or ["The load task failed."])[-1]
+                raise aiapi.AIError("The split model didn't load: %s" % detail, 502)
+        load = sp.get("load") or {}
+        raw_pct = load.get("pct")
+        pct = float(raw_pct) if isinstance(raw_pct, (int, float)) and not isinstance(raw_pct, bool) else None
+        if pct is not None and (not samples or pct != samples[-1][1]):
+            samples.append((now, pct))
+            samples = [(at, value) for at, value in samples if now - at <= 120]
+        if now >= next_update:
+            turn.push(loading_chunk(turn.id, model_id, "clustered", load.get("phase") or "starting",
+                                    pct, estimate_eta(samples, now, pct)))
+            next_update = now + LOAD_UPDATE_SECONDS
+        if now - started >= timeout:
+            raise aiapi.AIError("Timed out waiting for the split model to load.", 504)
+        pause(1)
+
+
+_OLLAMA_LOAD_HISTORY = {}
+_OLLAMA_LOAD_HISTORY_LOCK = threading.Lock()
+
+
+def ollama_loaded(backend, target):
+    """Whether this installed Ollama target is in memory; None means status is unknown."""
+    match = re.match(r"^ollama:([a-z0-9-]+):(.+)$", target or "")
+    if not match:
+        return None
+    pod, name = match.groups()
+    try:
+        entries = backend.ollama_overview()
+    except Exception:  # noqa: BLE001 -- status telemetry must not block a chat request
+        return None
+    entry = next((item for item in entries if item.get("pod") == pod), None)
+    if entry is None:
+        return None
+    model = next((item for item in entry.get("models", []) if item.get("name") == name), None)
+    return bool(model.get("loaded")) if model else None
+
+
+def _ollama_eta(target, elapsed):
+    with _OLLAMA_LOAD_HISTORY_LOCK:
+        samples = list(_OLLAMA_LOAD_HISTORY.get(target, []))
+    if not samples:
+        return None
+    return max(0, round(sum(samples) / len(samples) - elapsed))
+
+
+def _remember_ollama_load(target, seconds):
+    with _OLLAMA_LOAD_HISTORY_LOCK:
+        samples = _OLLAMA_LOAD_HISTORY.setdefault(target, [])
+        samples.append(max(0.0, seconds))
+        del samples[:-5]
+
+
+def watch_ollama_load(backend, target, turn, stop, clock=time.monotonic):
+    """Report observable Ollama load state, with a learned ETA only after real samples."""
+    started = clock()
+    next_update = started
+    while not stop.is_set():
+        now = clock()
+        loaded = ollama_loaded(backend, target)
+        if loaded is True:
+            _remember_ollama_load(target, now - started)
+            turn.push(loading_chunk(turn.id, target, "ollama", "ready", 100, 0))
+            return
+        if now >= next_update:
+            turn.push(loading_chunk(turn.id, target, "ollama", "loading" if loaded is False else "starting",
+                                    None, _ollama_eta(target, now - started)))
+            next_update = now + LOAD_UPDATE_SECONDS
+        stop.wait(min(3, max(0.1, next_update - now)))
+
+
 def register(ctx, args):
     backend = getattr(ctx, "ai", None)
     if backend is None:
@@ -169,15 +325,42 @@ def register(ctx, args):
             available = backend.targets().get("targets", [])
         except aiapi.AIError:
             available = []
-        model_ids = []
+        target_by_id = {}
+        deployed_files = set()
         for target in available:
-            if not isinstance(target, dict) or not target.get("ready"):
+            if not isinstance(target, dict):
                 continue
             model_id = target.get("id")
-            if isinstance(model_id, str) and model_id and model_id not in model_ids:
-                model_ids.append(model_id)
-        openai_models = [{"id": model_id, "object": "model", "created": 0, "owned_by": "nodeyard"}
-                         for model_id in model_ids]
+            if not isinstance(model_id, str) or not model_id:
+                continue
+            target_by_id.setdefault(model_id, target)
+            if target.get("kind") == "split" and target.get("model"):
+                deployed_files.add(target["model"])
+        for row in rows:
+            if row.get("kind") != "split" or row.get("file") in deployed_files:
+                continue
+            model_id = row.get("id")
+            if isinstance(model_id, str) and model_id:
+                target_by_id.setdefault(model_id, {"kind": "clustered", "ready": bool(row.get("ready")), "model": row.get("file", "")})
+        ollama_inventory = {row.get("name"): row for row in rows if row.get("kind") == "ollama"}
+        split = split_state(backend) or {}
+        openai_models = []
+        for model_id, target in target_by_id.items():
+            kind = target.get("kind", "")
+            if kind == "split":
+                loaded = bool(split.get("loaded"))
+                state = "stale" if target.get("stale") else "ready" if target.get("ready") else "loading" if loaded else "unloaded"
+                backend_name = "clustered"
+            elif kind == "ollama":
+                inventory = ollama_inventory.get(target.get("name"))
+                loaded = bool(inventory.get("loaded")) if inventory else None
+                state = "loaded" if loaded else "unloaded" if inventory else "available"
+                backend_name = "ollama"
+            else:  # downloaded split files that are not the active deployment
+                loaded, state, backend_name = False, "unloaded", "clustered"
+            openai_models.append({"id": model_id, "object": "model", "created": 0, "owned_by": "nodeyard",
+                                  "nodeyard": {"backend": backend_name, "ready": bool(target.get("ready")),
+                                               "loaded": loaded, "state": state}})
         # Keep Nodeyard's inventory fields for existing clients while also satisfying
         # OpenAI-compatible clients (including Hermes) that read /models -> data[].
         h._json({"ok": True, "models": rows, "downloads": downloads,
@@ -288,6 +471,17 @@ def register(ctx, args):
         search_ok = aisearch.allowed(ctx, body)
         if not search_ok:
             clean = aisearch.with_note(clean)
+        requested_model = target
+        load_job = ""
+        wait_for_split = False
+        if target == "split" or target.startswith("split:"):
+            try:
+                rows, _ = describe(backend)
+                target, load_job = prepare_chat_target(backend, target, body, rows)
+                split = split_state(backend) or {}
+                wait_for_split = not (split.get("ready") and not split.get("stale"))
+            except aiapi.AIError as e:
+                return fail(h, e)
         payload = {"messages": clean, "temperature": temp, "stream": True}
         if body.get("return_progress") is True and target == "split":
             payload["return_progress"] = True   # llama.cpp's prompt-reading progress, for clients that ask
@@ -323,7 +517,16 @@ def register(ctx, args):
 
         def work():
             conn = None
+            ollama_stop = None
             try:
+                if wait_for_split and not wait_for_split_load(backend, requested_model, load_job, turn,
+                                                               client_gone=lambda: box.get("gone", False)):
+                    turn.finish("stopped", "The client left while the model was loading.")
+                    return
+                if target.startswith("ollama:") and ollama_loaded(backend, target) is not True:
+                    ollama_stop = threading.Event()
+                    threading.Thread(target=watch_ollama_load, args=(backend, target, turn, ollama_stop),
+                                     name="ollama-load-progress", daemon=True).start()
                 conn, resp = backend.open_chat(target, payload)
                 box["conn"] = conn
                 if box.get("gone"):
@@ -337,6 +540,8 @@ def register(ctx, args):
                 turn.push({"error": {"message": "The dashboard hit an error while answering: %s" % e, "type": "server"}})
                 turn.finish("error", repr(e))
             finally:
+                if ollama_stop is not None:
+                    ollama_stop.set()
                 if conn is not None:
                     conn.close()
 

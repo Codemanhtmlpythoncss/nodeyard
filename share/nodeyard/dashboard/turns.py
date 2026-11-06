@@ -64,10 +64,15 @@ class Turn:
         with self.cond:
             if self.result:
                 return
-            end = {"type": "turn_end", "result": result}
-            if detail:
-                end["detail"] = detail
-            self.frames.append(json.dumps(end).encode("utf-8"))
+            if self.kind == "api":
+                # OpenAI-compatible clients expect the stream terminator, not the
+                # dashboard's internal turn_end event.
+                self.frames.append(b"[DONE]")
+            else:
+                end = {"type": "turn_end", "result": result}
+                if detail:
+                    end["detail"] = detail
+                self.frames.append(json.dumps(end).encode("utf-8"))
             self.result = result
             self.ended_at = time.time()
             self.cond.notify_all()
