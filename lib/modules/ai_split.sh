@@ -622,12 +622,12 @@ split_fetch_header() {
     tmp="$(mktemp "${TMPDIR:-/tmp}/ny-gguf.XXXXXX" 2>/dev/null)" || return 0
     if [[ "${SPLIT_LOCAL:-0}" -eq 1 ]]; then
         [[ -n "${PLAN_NAMES[0]:-}" ]] || { rm -f "$tmp"; return 0; }
-        raw="$(split_on_nodes ro "dd if='/m/${SPLIT_FILE}' bs=65536 count=32 2>/dev/null | base64" "${PLAN_NAMES[0]}" 2>/dev/null | sed '1d')"
-        [[ -n "$raw" ]] && printf '%s' "$raw" | base64 -d >"$tmp" 2>/dev/null
+        raw="$(split_on_nodes ro "dd if='/m/${SPLIT_FILE}' bs=65536 count=96 2>/dev/null | base64" "${PLAN_NAMES[0]}" 2>/dev/null | sed '1d')" || raw=""
+        [[ -n "$raw" ]] && { printf '%s' "$raw" | base64 -d >"$tmp" 2>/dev/null || true; }
     else
         local -a auth=()
         mapfile -t auth < <(split_hf_curl_args)
-        curl -fsSL --max-time 30 -r 0-2097151 "${auth[@]}" "$SPLIT_URL" -o "$tmp" 2>/dev/null
+        curl -fsSL --max-time 30 -r 0-6291455 "${auth[@]}" "$SPLIT_URL" -o "$tmp" 2>/dev/null || true
     fi
     if [[ -s "$tmp" ]]; then SPLIT_HDR_FILE="$tmp"; else rm -f "$tmp"; fi
     return 0
@@ -644,7 +644,7 @@ split_node_kv_budgets() {
     for i in "${!PLAN_SHARE[@]}"; do total=$((total + PLAN_SHARE[i])); done
     total=$((total + ${PLAN_GPU_SHARE:-0}))
     ((total > 0)) || return 1
-    cram="$(split_cram)"
+    cram="$(split_cram)" || cram=0
     for i in "${!PLAN_NAMES[@]}"; do
         if [[ $i -eq 0 ]]; then
             budget=$((PLAN_FREE[0] - PLAN_SHARE[0] - SPLIT_WORK - cram))
@@ -652,14 +652,14 @@ split_node_kv_budgets() {
             budget=$((PLAN_FREE[i] - PLAN_SHARE[i] - SPLIT_WORK))
         fi
         ((budget < 0)) && budget=0
-        share="$(awk -v s="${PLAN_SHARE[i]}" -v t="$total" 'BEGIN{printf "%.6f", s/t}')"
+        share="$(awk -v s="${PLAN_SHARE[i]}" -v t="$total" 'BEGIN{printf "%.6f", s/t}')" || share="0"
         out+="${out:+,}${budget}:${share}"
         shares+="${shares:+,}${share}"
     done
     if ((${PLAN_GPU_SHARE:-0} > 0)); then
         budget=$((SPLIT_GPU_RESERVE - 256))
         ((budget < 0)) && budget=0
-        share="$(awk -v s="${PLAN_GPU_SHARE}" -v t="$total" 'BEGIN{printf "%.6f", s/t}')"
+        share="$(awk -v s="${PLAN_GPU_SHARE}" -v t="$total" 'BEGIN{printf "%.6f", s/t}')" || share="0"
         out+=",${budget}:${share}"
     fi
     SPLIT_SHARES="$shares"
@@ -667,59 +667,37 @@ split_node_kv_budgets() {
     return 0
 }
 
-# split_size_ctx -- run after the plan.  When --ctx was "max", set SPLIT_CTX to
-# the largest context the free RAM fits; always work out the per-node cache for
-# the table, and warn if a fixed context looks too big for a node.
+# split_size_ctx -- run after the plan. Only does anything for "--ctx max": it
+# sizes SPLIT_CTX to the most the free RAM fits and records the per-node cache for
+# the table. A fixed context returns at once, so an ordinary deploy never reads a
+# header or calls ctxplan. Every step is guarded so a failed read or parse can only
+# fall back to a safe default -- it must never abort the deploy (set -e + ERR trap).
 split_size_ctx() {
     SPLIT_CTX_PER_NODE=""
+    [[ "${SPLIT_CTX_MODE:-fixed}" == max ]] || return 0
     local small="Couldn't read the model's shape to size the context to the RAM"
-    split_fetch_header
-    if [[ -z "$SPLIT_HDR_FILE" ]]; then
-        if [[ "${SPLIT_CTX_MODE:-fixed}" == max ]]; then
-            SPLIT_CTX=16384
-            ny_warn "${small}; using ${SPLIT_CTX}. Set a number with --ctx N."
-        fi
-        return 0
+    split_fetch_header || true
+    local kv_per_tok="" budgets="" got=""
+    if [[ -n "$SPLIT_HDR_FILE" ]]; then
+        kv_per_tok="$(ctxplan_py kvpertok --header "$SPLIT_HDR_FILE" --kv "$SPLIT_KV" 2>/dev/null)" || kv_per_tok=""
     fi
-    local kv_per_tok nctx budgets
-    kv_per_tok="$(ctxplan_py kvpertok --header "$SPLIT_HDR_FILE" --kv "$SPLIT_KV" 2>/dev/null)"
-    nctx="$(ctxplan_py params --header "$SPLIT_HDR_FILE" 2>/dev/null | python3 -c 'import json,sys
-try: print(json.load(sys.stdin).get("n_ctx_train") or 0)
-except Exception: print(0)' 2>/dev/null)"
-    if ! [[ "$kv_per_tok" =~ ^[0-9]+$ ]] || ((kv_per_tok <= 0)) || ! budgets="$(split_node_kv_budgets)"; then
-        rm -f "$SPLIT_HDR_FILE"; SPLIT_HDR_FILE=""
-        if [[ "${SPLIT_CTX_MODE:-fixed}" == max ]]; then
-            SPLIT_CTX=16384
-            ny_warn "${small}; using ${SPLIT_CTX}. Set a number with --ctx N."
-        fi
-        return 0
-    fi
-    SPLIT_KV_PER_TOK="$kv_per_tok"
-    SPLIT_NCTX_TRAIN="$nctx"
-    if [[ "${SPLIT_CTX_MODE:-fixed}" == max ]]; then
-        local got
-        got="$(ctxplan_py maxctx --header "$SPLIT_HDR_FILE" --kv "$SPLIT_KV" --nodes "$budgets" --headroom "$SPLIT_CTX_HEADROOM" ${nctx:+--cap-ctx "$nctx"} 2>/dev/null)"
+    if [[ "$kv_per_tok" =~ ^[0-9]+$ ]] && ((kv_per_tok > 0)) && budgets="$(split_node_kv_budgets)" && [[ -n "$budgets" ]]; then
+        SPLIT_KV_PER_TOK="$kv_per_tok"
+        got="$(ctxplan_py maxctx --header "$SPLIT_HDR_FILE" --kv "$SPLIT_KV" --nodes "$budgets" --headroom "$SPLIT_CTX_HEADROOM" 2>/dev/null)" || got=""
         if [[ "$got" =~ ^[0-9]+$ ]] && ((got >= 512)); then
             SPLIT_CTX="$got"
-            ny_ok "Context set to ${SPLIT_CTX} tokens: the most this model's ${SPLIT_KV} KV cache fits in the free RAM across ${#PLAN_NAMES[@]} node$([[ ${#PLAN_NAMES[@]} -ne 1 ]] && echo s)$([[ -n "$nctx" && "$nctx" -gt 0 && "$SPLIT_CTX" -ge "$nctx" ]] && echo " (the model's trained limit)")."
+            ny_ok "Context set to ${SPLIT_CTX} tokens: the most this model's ${SPLIT_KV} KV cache fits in the free RAM across ${#PLAN_NAMES[@]} node$([[ ${#PLAN_NAMES[@]} -ne 1 ]] && echo s)."
+            SPLIT_CTX_PER_NODE="$(ctxplan_py pernodekv --header "$SPLIT_HDR_FILE" --kv "$SPLIT_KV" --ctx "$SPLIT_CTX" --shares "$SPLIT_SHARES" 2>/dev/null)" || SPLIT_CTX_PER_NODE=""
         else
             SPLIT_CTX=4096
             ny_warn "The free RAM only leaves room for a small context; using ${SPLIT_CTX}. Add a node, free memory, or try --kv-cache q8_0."
         fi
+    else
+        SPLIT_CTX=16384
+        ny_warn "${small}; using ${SPLIT_CTX}. Set a number with --ctx N."
     fi
-    SPLIT_CTX_PER_NODE="$(ctxplan_py pernodekv --header "$SPLIT_HDR_FILE" --kv "$SPLIT_KV" --ctx "$SPLIT_CTX" --shares "$SPLIT_SHARES" 2>/dev/null)"
-    if [[ "${SPLIT_CTX_MODE:-fixed}" != max && -n "$SPLIT_CTX_PER_NODE" ]]; then
-        local idx=0 kvm budget over="" cram
-        cram="$(split_cram)"
-        for kvm in $SPLIT_CTX_PER_NODE; do
-            if [[ $idx -eq 0 ]]; then budget=$((PLAN_FREE[0] - PLAN_SHARE[0] - SPLIT_WORK - cram)); else budget=$((PLAN_FREE[idx] - PLAN_SHARE[idx] - SPLIT_WORK)); fi
-            ((budget < 0)) && budget=0
-            if awk -v k="$kvm" -v b="$budget" 'BEGIN{exit !(k > b)}'; then over+="${over:+, }${PLAN_NAMES[idx]}"; fi
-            idx=$((idx + 1))
-        done
-        [[ -z "$over" ]] || ny_warn "A ${SPLIT_CTX}-token context may not fit the free RAM on: ${over}. Lower --ctx, use '--ctx max', or --kv-cache q8_0."
-    fi
-    rm -f "$SPLIT_HDR_FILE"; SPLIT_HDR_FILE=""
+    [[ -n "$SPLIT_HDR_FILE" ]] && { rm -f "$SPLIT_HDR_FILE" 2>/dev/null || true; }
+    SPLIT_HDR_FILE=""
     return 0
 }
 
