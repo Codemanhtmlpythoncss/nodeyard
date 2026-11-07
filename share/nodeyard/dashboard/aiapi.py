@@ -576,12 +576,16 @@ def build_command(action, p, nodes, key_path):
             if ".." in file or file.startswith("/"):
                 raise AIError("Bad file name.")
             spec = "%s:%s" % (repo, file)
-        try:
-            ctx = int(p.get("ctx", 8192))
-        except (TypeError, ValueError):
-            raise AIError("Bad context length.")
-        if not 512 <= ctx <= 131072:
-            raise AIError("The context length must be between 512 and 131072.")
+        raw_ctx = p.get("ctx", 8192)
+        if isinstance(raw_ctx, str) and raw_ctx.lower() in ("max", "auto"):
+            ctx = "max"   # size the context to the free RAM across the nodes (ai_split.sh works it out)
+        else:
+            try:
+                ctx = int(raw_ctx)
+            except (TypeError, ValueError):
+                raise AIError("Bad context length.")
+            if not 512 <= ctx <= 131072:
+                raise AIError("The context length must be between 512 and 131072, or \"max\".")
         argv = ["ai", "split", action, "--model", spec, "--ctx", str(ctx)] + list(EXTRA_SPLIT_ARGS())   # (per-node threads/reserve from Tuning)
         if action == "switch" and p.get("keep_old") is True:
             argv.append("--keep-old")

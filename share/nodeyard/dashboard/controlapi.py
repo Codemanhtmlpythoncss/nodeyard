@@ -641,9 +641,20 @@ def register(ctx, args):
             else:  # downloaded split files that are not the active deployment
                 loaded, state, backend_name = False, "unloaded", "clustered"
             display_id = model_display_id(model_id, kind, target.get("name"), target.get("model"))
-            openai_models.append({"id": display_id, "object": "model", "created": 0, "owned_by": "nodeyard",
-                                  "nodeyard": {"backend": backend_name, "ready": bool(target.get("ready")),
-                                               "loaded": loaded, "state": state, "target": model_id}})
+            meta = {"backend": backend_name, "ready": bool(target.get("ready")),
+                    "loaded": loaded, "state": state, "target": model_id}
+            entry = {"id": display_id, "object": "model", "created": 0, "owned_by": "nodeyard", "nodeyard": meta}
+            # Advertise the loaded context so OpenAI clients (e.g. Hermes) can budget the
+            # conversation and compress before they overflow it, instead of dead-ending.
+            if kind == "split" and state in ("ready", "loading", "stale"):
+                try:
+                    ctx = int(split.get("ctx") or 0)
+                except (TypeError, ValueError):
+                    ctx = 0
+                if ctx:
+                    meta["context_length"] = ctx
+                    entry["context_length"] = ctx
+            openai_models.append(entry)
         # Keep Nodeyard's inventory fields for existing clients while also satisfying
         # OpenAI-compatible clients (including Hermes) that read /models -> data[].
         h._json({"ok": True, "models": rows, "downloads": downloads,
