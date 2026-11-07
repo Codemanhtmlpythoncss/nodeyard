@@ -181,6 +181,9 @@ class DemoAI:
         live = [st for st in list(getattr(self, "streams", [])) if not st.done and not st.stopped and not (st.cut_after is not None and st.n >= st.cut_after)]
         return {"processing": bool(live), "task": self.task, "decoded": sum(st.n for st in live), "n_ctx": 8192}
 
+    def warm_ping(self):
+        return True  # (demo) nothing to keep warm
+
     def ollama_keep_alive(self, pod, model, keep_alive):
         if (pod, model) not in {(e["pod"], m["name"]) for e in self.ollama_overview() for m in e["models"]}:
             raise aiapi.AIError("No such model on that Ollama.", 404)

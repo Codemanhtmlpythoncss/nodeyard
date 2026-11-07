@@ -832,6 +832,26 @@ class Live:
         n_ctx = max([int(s.get("n_ctx") or 0) for s in slots if isinstance(s, dict)] or [0])
         return {"processing": bool(busy), "task": max(tasks) if tasks else None, "decoded": decoded, "n_ctx": n_ctx}
 
+    def warm_ping(self):
+        """Keep the loaded split model hot: a one-token decode so its weights stay
+        resident (small nodes reclaim idle pages, often to zram, which makes the first
+        reply after a quiet spell a slow cold start) and its server stays responsive.
+        Tiny, uncached and never streamed, so it barely touches a conversation."""
+        host, port, headers, model = self._resolve("split")
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        try:
+            conn.connect()
+            conn.sock.settimeout(120)
+            body = {"model": model, "messages": [{"role": "user", "content": "."}], "max_tokens": 1,
+                    "temperature": 0, "stream": False, "cache_prompt": False}
+            conn.request("POST", "/v1/chat/completions", body=json.dumps(body),
+                         headers=dict(headers, **{"Content-Type": "application/json", "User-Agent": UA}))
+            resp = conn.getresponse()
+            resp.read(4096)
+            return resp.status == 200
+        finally:
+            conn.close()
+
     def ollama_keep_alive(self, pod_name, model, keep_alive):
         """Set how long Ollama keeps a model loaded after its last use (-1 = until unloaded, 0 = unload now)."""
         if not MODEL_RE.match(model or ""):
