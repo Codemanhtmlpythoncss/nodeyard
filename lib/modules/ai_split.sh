@@ -52,7 +52,8 @@ Options:
   --no-gpu                 Don't use the main node's NVIDIA GPU (see: nodeyard ai gpu)
   --model-dir /path        Where the main node keeps the model file
   --no-cache a,b           Don't cache weights on these nodes (slow disks)
-  --ctx N                  Context length (default 16384)       [deploy]
+  --ctx N|max              Context length, or 'max' to fit the free RAM
+                           (spreads the cache across the nodes; default 16384) [deploy]
   --kv-cache f16|q8_0|q4_0 Conversation memory precision: q8_0 halves it with practically
                            the same answers, q4_0 quarters it (default f16) [deploy]
   --think on|off           Allow reasoning output (default off) [deploy]
@@ -593,6 +594,135 @@ split_cram() {
     return 0
 }
 
+# ---- Size the context (KV cache) to the RAM, spread across the nodes ---------
+# The KV cache that holds a context lives, layer by layer, on whatever node holds
+# that layer, so a model split by free memory already spreads its cache across
+# the cluster.  What was missing was the arithmetic.  These helpers read the
+# model's shape from its GGUF header and work out, via ctxplan.py, how much cache
+# a context needs on each node -- so "--ctx max" can use the most the pooled RAM
+# allows and a fixed context can be checked for fit.  All of it is fail-open: if
+# the shape can't be read, the default context is kept and nothing breaks.
+
+SPLIT_CTX_HEADROOM="${NODEYARD_SPLIT_CTX_HEADROOM:-0.9}"  # keep a tenth of each node's free RAM spare
+SPLIT_KV_PER_TOK=""    # bytes of KV cache per token for the whole model (empty: unknown)
+SPLIT_NCTX_TRAIN=""    # the model's trained context length, an upper bound, when known
+SPLIT_CTX_PER_NODE=""  # "MiB MiB ..." the context's cache on each plan node, for the table
+SPLIT_HDR_FILE=""
+
+ctxplan_py() { python3 "${NY_SHARE}/dashboard/ctxplan.py" "$@"; }
+
+# split_fetch_header -- leave the model's GGUF header in $SPLIT_HDR_FILE (empty
+# on any trouble).  Remote models: a range request for the first 2 MiB; local
+# ones: read off the node that holds the file, through a short-lived helper pod.
+split_fetch_header() {
+    SPLIT_HDR_FILE=""
+    command -v python3 >/dev/null 2>&1 || return 0
+    [[ -r "${NY_SHARE}/dashboard/ctxplan.py" ]] || return 0
+    local tmp raw
+    tmp="$(mktemp "${TMPDIR:-/tmp}/ny-gguf.XXXXXX" 2>/dev/null)" || return 0
+    if [[ "${SPLIT_LOCAL:-0}" -eq 1 ]]; then
+        [[ -n "${PLAN_NAMES[0]:-}" ]] || { rm -f "$tmp"; return 0; }
+        raw="$(split_on_nodes ro "dd if='/m/${SPLIT_FILE}' bs=65536 count=32 2>/dev/null | base64" "${PLAN_NAMES[0]}" 2>/dev/null | sed '1d')"
+        [[ -n "$raw" ]] && printf '%s' "$raw" | base64 -d >"$tmp" 2>/dev/null
+    else
+        local -a auth=()
+        mapfile -t auth < <(split_hf_curl_args)
+        curl -fsSL --max-time 30 -r 0-2097151 "${auth[@]}" "$SPLIT_URL" -o "$tmp" 2>/dev/null
+    fi
+    if [[ -s "$tmp" ]]; then SPLIT_HDR_FILE="$tmp"; else rm -f "$tmp"; fi
+    return 0
+}
+
+# split_node_kv_budgets -- echo "budgetMiB:share" per plan node (then the GPU, if
+# it holds a share), where budget is the RAM a node can spend on KV cache and
+# share is its fraction of the layers.  Also sets SPLIT_SHARES to "s1,s2,..." for
+# the plan nodes (no GPU), aligned with PLAN_NAMES.
+SPLIT_SHARES=""
+split_node_kv_budgets() {
+    SPLIT_SHARES=""
+    local total=0 i cram budget share out="" shares=""
+    for i in "${!PLAN_SHARE[@]}"; do total=$((total + PLAN_SHARE[i])); done
+    total=$((total + ${PLAN_GPU_SHARE:-0}))
+    ((total > 0)) || return 1
+    cram="$(split_cram)"
+    for i in "${!PLAN_NAMES[@]}"; do
+        if [[ $i -eq 0 ]]; then
+            budget=$((PLAN_FREE[0] - PLAN_SHARE[0] - SPLIT_WORK - cram))
+        else
+            budget=$((PLAN_FREE[i] - PLAN_SHARE[i] - SPLIT_WORK))
+        fi
+        ((budget < 0)) && budget=0
+        share="$(awk -v s="${PLAN_SHARE[i]}" -v t="$total" 'BEGIN{printf "%.6f", s/t}')"
+        out+="${out:+,}${budget}:${share}"
+        shares+="${shares:+,}${share}"
+    done
+    if ((${PLAN_GPU_SHARE:-0} > 0)); then
+        budget=$((SPLIT_GPU_RESERVE - 256))
+        ((budget < 0)) && budget=0
+        share="$(awk -v s="${PLAN_GPU_SHARE}" -v t="$total" 'BEGIN{printf "%.6f", s/t}')"
+        out+=",${budget}:${share}"
+    fi
+    SPLIT_SHARES="$shares"
+    printf '%s\n' "$out"
+    return 0
+}
+
+# split_size_ctx -- run after the plan.  When --ctx was "max", set SPLIT_CTX to
+# the largest context the free RAM fits; always work out the per-node cache for
+# the table, and warn if a fixed context looks too big for a node.
+split_size_ctx() {
+    SPLIT_CTX_PER_NODE=""
+    local small="Couldn't read the model's shape to size the context to the RAM"
+    split_fetch_header
+    if [[ -z "$SPLIT_HDR_FILE" ]]; then
+        if [[ "${SPLIT_CTX_MODE:-fixed}" == max ]]; then
+            SPLIT_CTX=16384
+            ny_warn "${small}; using ${SPLIT_CTX}. Set a number with --ctx N."
+        fi
+        return 0
+    fi
+    local kv_per_tok nctx budgets
+    kv_per_tok="$(ctxplan_py kvpertok --header "$SPLIT_HDR_FILE" --kv "$SPLIT_KV" 2>/dev/null)"
+    nctx="$(ctxplan_py params --header "$SPLIT_HDR_FILE" 2>/dev/null | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("n_ctx_train") or 0)
+except Exception: print(0)' 2>/dev/null)"
+    if ! [[ "$kv_per_tok" =~ ^[0-9]+$ ]] || ((kv_per_tok <= 0)) || ! budgets="$(split_node_kv_budgets)"; then
+        rm -f "$SPLIT_HDR_FILE"; SPLIT_HDR_FILE=""
+        if [[ "${SPLIT_CTX_MODE:-fixed}" == max ]]; then
+            SPLIT_CTX=16384
+            ny_warn "${small}; using ${SPLIT_CTX}. Set a number with --ctx N."
+        fi
+        return 0
+    fi
+    SPLIT_KV_PER_TOK="$kv_per_tok"
+    SPLIT_NCTX_TRAIN="$nctx"
+    if [[ "${SPLIT_CTX_MODE:-fixed}" == max ]]; then
+        local got
+        got="$(ctxplan_py maxctx --header "$SPLIT_HDR_FILE" --kv "$SPLIT_KV" --nodes "$budgets" --headroom "$SPLIT_CTX_HEADROOM" ${nctx:+--cap-ctx "$nctx"} 2>/dev/null)"
+        if [[ "$got" =~ ^[0-9]+$ ]] && ((got >= 512)); then
+            SPLIT_CTX="$got"
+            ny_ok "Context set to ${SPLIT_CTX} tokens: the most this model's ${SPLIT_KV} KV cache fits in the free RAM across ${#PLAN_NAMES[@]} node$([[ ${#PLAN_NAMES[@]} -ne 1 ]] && echo s)$([[ -n "$nctx" && "$nctx" -gt 0 && "$SPLIT_CTX" -ge "$nctx" ]] && echo " (the model's trained limit)")."
+        else
+            SPLIT_CTX=4096
+            ny_warn "The free RAM only leaves room for a small context; using ${SPLIT_CTX}. Add a node, free memory, or try --kv-cache q8_0."
+        fi
+    fi
+    SPLIT_CTX_PER_NODE="$(ctxplan_py pernodekv --header "$SPLIT_HDR_FILE" --kv "$SPLIT_KV" --ctx "$SPLIT_CTX" --shares "$SPLIT_SHARES" 2>/dev/null)"
+    if [[ "${SPLIT_CTX_MODE:-fixed}" != max && -n "$SPLIT_CTX_PER_NODE" ]]; then
+        local idx=0 kvm budget over="" cram
+        cram="$(split_cram)"
+        for kvm in $SPLIT_CTX_PER_NODE; do
+            if [[ $idx -eq 0 ]]; then budget=$((PLAN_FREE[0] - PLAN_SHARE[0] - SPLIT_WORK - cram)); else budget=$((PLAN_FREE[idx] - PLAN_SHARE[idx] - SPLIT_WORK)); fi
+            ((budget < 0)) && budget=0
+            if awk -v k="$kvm" -v b="$budget" 'BEGIN{exit !(k > b)}'; then over+="${over:+, }${PLAN_NAMES[idx]}"; fi
+            idx=$((idx + 1))
+        done
+        [[ -z "$over" ]] || ny_warn "A ${SPLIT_CTX}-token context may not fit the free RAM on: ${over}. Lower --ctx, use '--ctx max', or --kv-cache q8_0."
+    fi
+    rm -f "$SPLIT_HDR_FILE"; SPLIT_HDR_FILE=""
+    return 0
+}
+
 split_print_plan() {
     local size_gib i threads left extra
     size_gib=$(awk -v b="$SPLIT_SIZE" 'BEGIN{printf "%.1f", b/1073741824}')
@@ -634,6 +764,18 @@ split_print_plan() {
     fi
     if [[ "${#PLAN_NAMES[@]}" -gt 1 ]]; then
         echo "All ${#PLAN_NAMES[@]} nodes take part in every token, so keep them all switched on while the model runs."
+    fi
+    if [[ -n "${SPLIT_CTX_PER_NODE:-}" ]]; then
+        echo
+        echo "Context: ${SPLIT_CTX} tokens, ${SPLIT_KV} KV cache spread across the nodes:"
+        local idx=0 kvm
+        for kvm in $SPLIT_CTX_PER_NODE; do
+            printf '  %-18s %6.2f GiB of cache\n' "${PLAN_NAMES[idx]}" "$(awk -v m="$kvm" 'BEGIN{print m/1024}')"
+            idx=$((idx + 1))
+        done
+        if [[ "${SPLIT_CTX_MODE:-fixed}" == max ]]; then
+            echo "  (the most the free RAM allows; set a fixed size with --ctx N)"
+        fi
     fi
     echo "To keep extra memory free on a node you also use day to day: --reserve NODE=GiB"
     return 0
@@ -1044,6 +1186,7 @@ split_parse_flags() {
     SPLIT_NODES=()
     SPLIT_NODEPORT=31435
     SPLIT_CTX=16384
+    SPLIT_CTX_MODE="fixed"   # 'max' sizes the context to the free RAM after the plan
     SPLIT_KV="f16"
     SPLIT_THINK="off"
     SPLIT_API_KEY=""
@@ -1104,8 +1247,14 @@ split_parse_flags() {
                 shift 2
                 ;;
             --ctx)
-                [[ $# -ge 2 ]] || ny_usage_error "--ctx needs a number of tokens"
-                SPLIT_CTX="$2"
+                [[ $# -ge 2 ]] || ny_usage_error "--ctx needs a number of tokens, or 'max'"
+                if [[ "$2" == max || "$2" == auto ]]; then
+                    SPLIT_CTX_MODE="max"
+                    SPLIT_CTX=16384   # a safe fallback until the plan sizes it
+                else
+                    SPLIT_CTX_MODE="fixed"
+                    SPLIT_CTX="$2"
+                fi
                 shift 2
                 ;;
             --kv-cache)
@@ -1162,7 +1311,7 @@ split_parse_flags() {
         esac
     done
     [[ "$SPLIT_NODEPORT" == 0 ]] || ny_valid_int "$SPLIT_NODEPORT" 30000 32767 || ny_usage_error "--nodeport must be 0 or between 30000 and 32767."
-    ny_valid_int "$SPLIT_CTX" 512 1048576 || ny_usage_error "--ctx: ${NY_VALID_MSG}"
+    [[ "$SPLIT_CTX_MODE" == max ]] || ny_valid_int "$SPLIT_CTX" 512 1048576 || ny_usage_error "--ctx: ${NY_VALID_MSG}"
     # the main node's extra reserve is mostly the KV cache: a smaller cache needs less of it
     case "${SPLIT_KV:-f16}" in q8_0) SPLIT_RES_MAIN=640 ;; q4_0) SPLIT_RES_MAIN=448 ;; esac
     ny_valid_enum "$SPLIT_THINK" on off || ny_usage_error "--think: ${NY_VALID_MSG}"
@@ -1223,6 +1372,7 @@ split_pick_model() {
         split_model_info
     fi
     split_plan
+    split_size_ctx   # sets SPLIT_CTX for "--ctx max" and works out the per-node cache
     if [[ -z "$SPLIT_ALIAS" ]]; then SPLIT_ALIAS="${SPLIT_FILE%.gguf}"; fi
     return 0
 }

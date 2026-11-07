@@ -77,7 +77,7 @@ no single machine could.
 nodeyard ai split plan [--model auto|owner/repo:file.gguf] [--main NODE] [--nodes a,b,c]
                        [--reserve NODE=GiB]... [--threads NODE=N]... [--main-only]
                        [--model-dir /path] [--no-cache a,b]
-nodeyard ai split deploy [same options] [--ctx 16384] [--think on|off]
+nodeyard ai split deploy [same options] [--ctx 16384 | --ctx max] [--think on|off]
                          [--nodeport 31435 | --nodeport 0] [--api-key-file PATH] [--alias NAME]
 nodeyard ai split status
 nodeyard ai split test [--prompt TEXT] [--api-key-file PATH]
@@ -85,6 +85,15 @@ nodeyard ai split switch --model owner/repo:file.gguf [--keep-old] [deploy optio
 nodeyard ai split unload | load
 nodeyard ai split undeploy [--force] [--purge]
 ```
+
+**Context size.** `--ctx N` sets how much the model can remember (its KV cache).
+That cache is held layer by layer on whichever machine holds that layer, so it is
+already spread across the cluster. `--ctx max` sizes it to the most the free
+memory across those machines allows — it reads the model's shape, works out the
+cache each machine would hold, and picks the largest context that fits every one
+(leaving a little headroom, and never past the model's trained limit). A smaller
+`--kv-cache` (q8_0 or q4_0) makes the cache fit more context in the same memory.
+The dashboard exposes the same choice as **Max for RAM** when you load a model.
 
 **NVIDIA graphics cards** speed it up. On the machine with the card (its
 NVIDIA driver must already work: `nvidia-smi`), run `sudo nodeyard ai gpu

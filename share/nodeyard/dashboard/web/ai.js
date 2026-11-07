@@ -1787,6 +1787,7 @@
       ${sp && !old ? html`<p style="color:var(--warn)">This restarts the running model with these settings.</p>` : ""}
       <label class="field-l">Name for the API<input class="input" data-v="alias" value="${alias}" spellcheck="false"></label>
       <label class="field-l">Context length (how much text it can remember: attached files count)<input class="input" data-v="ctx" type="number" min="512" max="131072" step="512" value="${(sp && sp.model === file && +sp.ctx) || chatDefaults().context_length}"></label>
+      <label class="check" style="margin-top:6px"><input type="checkbox" data-v="ctxmax"> <span><b>Max for RAM</b> — use the largest context the free memory fits, its cache spread across the machines (ignores the number above)</span></label>
       <label class="field-l">Conversation memory (KV cache)<select class="select" data-v="kv">
         <option value="f16">Full precision</option>
         <option value="q8_0" ${fit && fit.need > fit.free ? "selected" : ""}>Half the memory (q8_0): practically the same answers</option>
@@ -1802,7 +1803,7 @@
     const chosen = vals.auto ? [] : nodes.filter((n) => vals["n-" + n.name]).map((n) => n.name);
     if (!vals.auto && !chosen.length) { toast("Pick at least one machine."); return; }
     // Deleting the old model's file is opt-in: a switch must never cost you a download you didn't ask to lose.
-    startJob(sp ? "switch" : "deploy", Object.assign(localNode || localFile ? { local: true } : { repo }, { file, ctx: +vals.ctx || 8192, alias: vals.alias, nodes: chosen, keep_old: !vals.purge, kv_cache: vals.kv || "f16" }),
+    startJob(sp ? "switch" : "deploy", Object.assign(localNode || localFile ? { local: true } : { repo }, { file, ctx: vals.ctxmax ? "max" : +vals.ctx || 8192, alias: vals.alias, nodes: chosen, keep_old: !vals.purge, kv_cache: vals.kv || "f16" }),
       (job) => { loadTargets(true); if (job.status === "ok" && old && vals.purge) forgetSavedModel(old); loadDisk(true, true); });
   }
 
