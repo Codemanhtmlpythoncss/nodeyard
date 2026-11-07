@@ -13,6 +13,7 @@
 - [AI workloads](ai.md)
 - [The web dashboard](dashboard.md): live view, chat with plugins, running code, model loading
 - [yardcode](../yardcode/README.md): the terminal AI agent that uses your model API and can load models on the cluster
+- [Connect Hermes Desktop](connect-hermes.md): use your cluster's models from Hermes Desktop (or any OpenAI client) — base URL, key, config and troubleshooting
 - [Let a friend into your PwnForge labs](pwnforge-friend-vpn.md): full lab-network access from anywhere, no Tailscale on their device
 - [Health checks: doctor](doctor.md)
 - [Snapshots and backups](backups.md)
