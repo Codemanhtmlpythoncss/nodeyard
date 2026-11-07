@@ -17,6 +17,7 @@
     { id: "workloads", label: "Workloads", icon: "workloads", sub: "Deployments, daemon sets, stateful sets, jobs and cron jobs" },
     { id: "cleanup", label: "Cleanup", icon: "reset", sub: "Pods nobody has used for a while, removed by a policy you control" },
     { id: "network", label: "Network", icon: "network", sub: "IP addresses, ports and how to reach things" },
+    { id: "access", label: "Network access", icon: "network", sub: "Tailnet, LAN and secure tunnels for this dashboard and API" },
     { id: "storage", label: "Storage", icon: "storage", sub: "Disks and volumes" },
     { id: "hardware", label: "Hardware", icon: "hardware", sub: "What every machine is made of, and how fast it really is" },
     { id: "ai", label: "AI", icon: "ai", sub: "Models running on your cluster" },
@@ -36,6 +37,8 @@
     { id: "settings", label: "Settings", icon: "settings", sub: "Passwords, keys, the dashboard itself and how it looks" },
     { id: "desk", label: "Desk", icon: "desk", sub: "Your wallpaper, clock and widgets" },
     { id: "guide", label: "Setup guide", icon: "help", sub: "Setting up and using this dashboard, step by step" },
+    { id: "setup", label: "Add devices", icon: "terminal", sub: "Set up another worker from this host" },
+    { id: "tour", label: "Guided tour", icon: "help", sub: "Learn the dashboard without changing anything" },
   ];
 
   const S = {

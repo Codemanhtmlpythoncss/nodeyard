@@ -4,10 +4,32 @@ nodeyard runs [Ollama](https://ollama.com) on your machines, either on one
 node or across the cluster, and can split one large model across several
 nodes (experimental).
 
-> Coming in 0.7: GPU driver setup, a single OpenAI-compatible endpoint that
-> sends each request to a node that has the model loaded and has capacity,
-> API keys with usage limits, model placement, a chat web interface, and
-> benchmarks. What's below works today.
+## Shared OpenAI-compatible API
+
+The dashboard exposes a key-protected gateway at `/api/v1`. Use it as the
+OpenAI-compatible base URL (for example, in Hermes: `https://<dashboard-host>/api/v1`)
+and use the shared server API key as the API key.
+
+- `GET /api/v1/models` returns an OpenAI model list in `data[]`, plus Nodeyard's
+  existing `models` and `downloads` inventory fields. Installed Ollama models
+  and downloaded split GGUFs remain listed while unloaded; `data[].nodeyard`
+  reports the backend and readiness state.
+- `POST /api/v1/chat/completions` routes to Ollama or the clustered split model.
+  It returns a standard JSON completion when `stream` is omitted or false, and
+  OpenAI Server-Sent Events when `stream` is true. An installed Ollama model
+  loads on its first request; an unloaded split model is loaded or switched
+  into service before the chat begins. Common sampling fields, JSON response
+  format, and client-defined function tools are forwarded to the model; `n` is
+  limited to 1, and token log-probability fields are not supported.
+- Streaming responses terminate with `data: [DONE]`. Nodeyard adds optional
+  `nodeyard` metadata chunks during a load, with progress and an ETA only when
+  the backend provides enough real measurements to estimate them. Older
+  Nodeyard API clients that relied on omitted `stream` selecting SSE must now
+  send `stream: true`.
+
+The gateway is separate from the direct model endpoint on port 31435. Both
+use the same model backends, but the gateway provides the shared key and the
+OpenAI model catalog.
 
 ## One machine
 

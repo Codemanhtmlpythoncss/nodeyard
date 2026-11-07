@@ -325,6 +325,21 @@ def iface_ipv4(name):
         return ""
 
 
+def iface_link_state(sys_root, name):
+    """Report the driver's current link state from sysfs without changing NIC or switch settings."""
+    base = os.path.join(sys_root, "class/net", name)
+    carrier_raw = read(os.path.join(base, "carrier")).strip()
+    if carrier_raw not in ("0", "1"):
+        return {"carrier": None, "duplex": "unknown", "speed_mbps": None}
+    carrier = carrier_raw == "1"
+    if not carrier:
+        return {"carrier": False, "duplex": "down", "speed_mbps": None}
+    duplex = read(os.path.join(base, "duplex")).strip().lower()
+    speed = read(os.path.join(base, "speed")).strip()
+    return {"carrier": True, "duplex": duplex if duplex in ("full", "half") else "unknown",
+            "speed_mbps": int(speed) if speed.isdigit() and int(speed) > 0 else None}
+
+
 def size_text(t):
     """'32K' / '6144K' / '8M' (sysfs cache sizes) -> bytes"""
     m = re.match(r"^(\d+)\s*([KMG]?)", t.strip())
@@ -428,11 +443,14 @@ def read_hardware(proc, sys_root):
             ip4 = iface_ipv4(name)
             drv = os.path.basename(os.path.realpath(os.path.join(d, "device/driver")))
             maxs = iface_max_mbps(name)
+            link = iface_link_state(sys_root, name)
+            usb = "/usb" in os.path.realpath(os.path.join(d, "device")).lower()
             if maxs is None and drv in ("smsc95xx",):  # Raspberry Pi 1-3B: 100 Mbit/s hardware
                 maxs = 100
             nics.append({"name": name, "ipv4": ip4, "cluster": bool(ip4) and ip4 == os.environ.get("NODE_IP", ""),
                          "max_mbps": maxs, "driver": drv if drv != "driver" else "", "wireless": os.path.isdir(os.path.join(d, "wireless")) or name.startswith("wl"),
                          "speed_mbps": int(sp) if re.match(r"^\d+$", sp) and int(sp) > 0 else None,
+                         "carrier": link["carrier"], "duplex": link["duplex"], "usb": usb,
                          "up": read(os.path.join(d, "operstate")).strip() in ("up", "unknown"), "mtu": int(read(os.path.join(d, "mtu")).strip() or 0)})
     except OSError:
         pass

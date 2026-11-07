@@ -83,11 +83,11 @@ It needs `python3` (3.8 or newer; nodeyard offers to install it).
   book** of every node, service, ingress and pod IP in one searchable table),
   **Storage**, **Events** and **Alerts** (a node not ready, hot, out of memory
   or disk, a crashing or stuck pod, a workload with missing replicas...).
-- **Hardware**: what every machine is made of and how fast it is, plus
-  **Maintenance**, **Cooling** and **Laptop lid** tabs (see "Looking after the
-  hardware" below).
-- **Cleanup**: pods nobody has used for a while, removed by a policy you
-  control (see below).
+- **Hardware**: what every machine is made of and how fast it is. Network cards show current speed, link state, driver-reported duplex, and USB attachment when the driver reports them. The **Network access** page warns on half-duplex links; it never changes speed or duplex automatically. Also includes **Maintenance**, **Cooling** and **Laptop lid** tabs (see "Looking after the hardware" below).
+- **Network access**: choose local access, this device plus Tailscale, or a trusted LAN plus Tailscale for the dashboard and the same key-protected `/api/v1` gateway. Tailscale Serve stays tailnet-only; Funnel is a separate public endpoint with its own confirmation. No router port-forward is needed for Tailscale.
+- **Add devices**: from the dashboard host, probe a worker's SSH public-key fingerprint, verify it out of band, then let Nodeyard install and join it over existing SSH keys. The web flow does not ask for passwords; it requires non-interactive admin access on the target.
+- **Guided tour**: a short walkthrough of the dashboard with links to the relevant pages. It makes no changes.
+- **Cleanup**: pods nobody has used for a while, removed by a policy you control (see below).
 - **PwnForge**: host the PwnForge cybersecurity training platform on the
   dashboard's machine, if you want it (see below).
 - **Desk**: quotes you can click through and edit (the built-in ones list

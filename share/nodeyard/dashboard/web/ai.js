@@ -235,7 +235,8 @@
   function lifecycleCard() {
     const L = A.life;
     if (!L) return card("Model lifecycle", A.lifeErr ? html`<div class="empty"><b>Couldn't read this setting</b><div class="muted small">${A.lifeErr}</div></div>` : html`<div class="empty"><div class="spin"></div>Reading the setting…</div>`);
-    const on = L.settings.enabled, idle = L.settings.idle_seconds, preset = L.presets.includes(idle) && !A.lifeCustom;
+    const keep = L.settings.keep_loaded !== false, on = L.settings.enabled && !keep, reloadOn = L.settings.auto_reload && !keep;
+    const idle = L.settings.idle_seconds, preset = L.presets.includes(idle) && !A.lifeCustom;
     const sp = L.split, busy = A.lifeSaving;
     const stateText = !sp ? "No split model is deployed." : {
       none: "", loading: "The split model is loading; idle time starts once it is ready.",
@@ -249,7 +250,7 @@
       unload_failed: "The last automatic unload failed: " + (sp.error || "unknown error") + (sp.retry_at ? " Retrying " + (sp.retry_at * 1000 > Date.now() ? "in " + dur(sp.retry_at - Date.now() / 1000) : "soon") + "." : ""),
       activity_unknown: "Nodeyard can't see whether the split model is busy" + (sp.activity_error ? " (" + sp.activity_error + ")" : "") + ", so it never unloads it automatically.",
     }[sp.state] || "";
-    const reloadText = !L.settings.auto_reload ? "Hourly reload is off." : !sp ? "It starts one hour after the split model is loaded." : ({
+    const reloadText = keep ? "Paused while Keep the model loaded is on." : !L.settings.auto_reload ? "Hourly reload is off." : !sp ? "It starts one hour after the split model is loaded." : ({
       off: "Hourly reload is off.",
       waiting_for_model: "Hourly reload starts after the split model is loaded and ready.",
       scheduled: "Next reload in " + dur(sp.reload_in == null ? 3600 : sp.reload_in) + "; it waits for the model to be idle.",
@@ -262,17 +263,18 @@
     const tone = !sp ? "" : sp.state === "unload_failed" || sp.state === "activity_unknown" ? "warn" : sp.state === "processing" || sp.state === "idle" ? "good" : "";
     const options = L.presets.map((v) => '<option value="' + v + '"' + (preset && v === idle ? " selected" : "") + ">" + esc(dur(v)) + "</option>").join("") + '<option value="custom"' + (preset ? "" : " selected") + ">Custom…</option>";
     return card("Model lifecycle", html`
-      <label class="check"><input type="checkbox" id="lc-enabled" ${on ? raw("checked") : ""} ${busy ? raw("disabled") : ""}> <span><b>Automatically unload idle models</b><br><span class="muted small">Automatically unload models from memory after they have not been used for a specified period.</span></span></label>
-      <label class="check mt"><input type="checkbox" id="lc-auto-reload" ${L.settings.auto_reload ? raw("checked") : ""} ${busy ? raw("disabled") : ""}> <span><b>Automatically reload the split model every hour</b><br><span class="muted small">Refreshes the model when idle. An active reply is allowed to finish first.</span></span></label>
+      <label class="check"><input type="checkbox" id="lc-keep-loaded" ${keep ? raw("checked") : ""} ${busy ? raw("disabled") : ""}> <span><b>Keep the model loaded between chats</b><br><span class="muted small">Preloads the active split model after dashboard start and gives Ollama models used by chat an unlimited keep-alive. This uses memory while idle.</span></span></label>
+      <label class="check mt"><input type="checkbox" id="lc-enabled" ${L.settings.enabled ? raw("checked") : ""} ${busy || keep ? raw("disabled") : ""}> <span><b>Automatically unload idle models</b><br><span class="muted small">${keep ? "Paused while Keep the model loaded is on. " : ""}Automatically unload models from memory after they have not been used for a specified period.</span></span></label>
+      <label class="check mt"><input type="checkbox" id="lc-auto-reload" ${L.settings.auto_reload ? raw("checked") : ""} ${busy || keep ? raw("disabled") : ""}> <span><b>Automatically reload the split model every hour</b><br><span class="muted small">${keep ? "Paused while Keep the model loaded is on. " : ""}Refreshes the model when idle. An active reply is allowed to finish first.</span></span></label>
       <div class="row wrap mt" style="gap:8px;align-items:center"><label for="lc-idle" class="muted small">Unload after</label>
-        ${raw('<select class="input" id="lc-idle" aria-label="Idle time before unloading"' + (busy ? " disabled" : "") + ">" + options + "</select>")}
-        ${preset ? "" : html`<input class="input" id="lc-custom" type="number" min="${L.min_idle / 60}" max="${L.max_idle / 60}" step="1" style="width:110px" value="${Math.round(idle / 60)}" aria-label="Custom idle time in minutes"><span class="muted small">minutes</span><button class="btn small" data-ai="lc-custom" ${busy ? raw("disabled") : ""}>Apply</button>`}
-        <span class="muted small">Now: <b>${dur(idle)}</b>${on ? "" : " (off)"}</span>${A.lifeMsg ? html`<span class="small">${A.lifeMsg}</span>` : ""}</div>
+        ${raw('<select class="input" id="lc-idle" aria-label="Idle time before unloading"' + (busy || keep ? " disabled" : "") + ">" + options + "</select>")}
+        ${preset ? "" : html`<input class="input" id="lc-custom" type="number" min="${L.min_idle / 60}" max="${L.max_idle / 60}" step="1" style="width:110px" value="${Math.round(idle / 60)}" aria-label="Custom idle time in minutes"><span class="muted small">minutes</span><button class="btn small" data-ai="lc-custom" ${busy || keep ? raw("disabled") : ""}>Apply</button>`}
+        <span class="muted small">Now: <b>${dur(idle)}</b>${on ? "" : keep ? " (paused)" : " (off)"}</span>${A.lifeMsg ? html`<span class="small">${A.lifeMsg}</span>` : ""}</div>
       ${sp ? html`<div class="note small mt ${tone}"><b>${sp.alias || sp.model}</b>: ${stateText}<div class="mt ${reloadTone}"><b>Hourly refresh:</b> ${reloadText}${sp.reload_error ? html`<div class="muted">Last issue: ${sp.reload_error}; Nodeyard will retry.</div>` : ""}</div>${sp.machines && sp.machines.length ? html`<div class="faint mt">Runs on ${sp.machines.join(", ")}; unloading stops all of them together.</div>` : ""}</div>` : html`<p class="muted small mt">${stateText} ${reloadText}</p>`}
-      ${L.ollama.length ? html`<div class="mt"><div class="muted small">Ollama models in memory</div>${L.ollama.map((m) => html`<div class="row small" style="gap:8px"><span class="mono">${m.model}</span><span class="faint">${m.node}</span><span class="grow"></span><span class="muted">${m.busy ? "answering now" : on ? (m.expires ? "unloads around " + new Date(m.expires).toLocaleTimeString() + " unless used" : "unloads after " + dur(idle) + " idle") : m.pinned ? "stays loaded (loaded from this page)" : (m.expires ? "Ollama's own timer: " + new Date(m.expires).toLocaleTimeString() : "Ollama's own timer")}</span></div>`)}</div>` : ""}
+      ${L.ollama.length ? html`<div class="mt"><div class="muted small">Ollama models in memory</div>${L.ollama.map((m) => html`<div class="row small" style="gap:8px"><span class="mono">${m.model}</span><span class="faint">${m.node}</span><span class="grow"></span><span class="muted">${m.busy ? "answering now" : keep ? "stays loaded while Keep the model loaded is on" : on ? (m.expires ? "unloads around " + new Date(m.expires).toLocaleTimeString() + " unless used" : "unloads after " + dur(idle) + " idle") : m.pinned ? "stays loaded (loaded from this page)" : (m.expires ? "Ollama's own timer: " + new Date(m.expires).toLocaleTimeString() : "Ollama's own timer")}</span></div>`)}</div>` : ""}
       ${L.events.length ? html`<details class="mt"><summary class="muted small">Recent activity (${L.events.length})</summary>${L.events.slice(0, 10).map((e) => html`<div class="row small" style="gap:8px"><span class="faint">${new Date(e.time * 1000).toLocaleTimeString()}</span>${e.ok === false ? chip("failed", "bad") : e.ok === true ? chip("done", "good") : chip("started")}<span>${e.message}</span></div>`)}</details>` : ""}
-      <p class="muted small" style="margin:10px 0 0">Hourly refresh applies to the split model. Nodeyard checks llama.cpp activity before it restarts the model; yardcode and other programs count as use. Ollama models use Ollama's own keep-alive timer.</p>`,
-      on || L.settings.auto_reload ? chip("active", "good") : chip("off"));
+      <p class="muted small" style="margin:10px 0 0">When Keep the model loaded is on, Nodeyard preloads the active split model after dashboard start, keeps split models in memory between chats, and gives Ollama models used by chat an unlimited keep-alive. Turn it off to use the idle-unload and hourly-refresh controls above.</p>`,
+      keep ? chip("keep loaded", "good") : on || reloadOn ? chip("active", "good") : chip("off"));
   }
   const targetList = () => (A.targets && A.targets.targets) || [];
   const findTarget = (id) => targetList().find((t) => t.id === id);
@@ -454,8 +456,24 @@
       loadDisk();
       selectTab(A.tab);
     },
-    update() { loadRemoteChats(); loadTargets(); if (A.tab === "models" || A.tab === "search") { loadOllama(); loadDisk(); } refreshTab(); },
+    update() { loadRemoteChats(); loadTargets(); if (A.tab === "models" || A.tab === "search") { loadOllama(); loadDisk(); } maybeOpenConsoleOnReady(); refreshTab(); },
   };
+  // When the split model comes up on its own — the "Keep the model loaded" preload after startup, or
+  // an automatic reload — open the chat console and focus the message box so you can type to it right
+  // away. Fires once per load, on the false->true edge, and never steals focus mid-answer or when a
+  // console is already focused. (Scoped to the AI page being open.)
+  function maybeOpenConsoleOnReady() {
+    const sp = S.d && S.d.ai && S.d.ai.split;
+    const ready = !!(sp && sp.ready && sp.loaded !== false);
+    const was = A.splitReadyWas;
+    A.splitReadyWas = ready;
+    if (!ready || was !== false) return;                 // only a genuine not-ready -> ready transition
+    const keepOn = !(A.life && A.life.settings) || A.life.settings.keep_loaded !== false;   // keep-loaded is the default
+    if (!keepOn || S.view !== "ai" || A.stream) return;  // only an automatic preload, on the page, not mid-answer
+    if (A.tab === "chat" && document.activeElement && document.activeElement.id === "prompt") return;
+    if (A.tab !== "chat") selectTab("chat");
+    const ta = $("#prompt"); if (ta) { try { ta.focus(); } catch (e) { /* focus is best-effort */ } }
+  }
   function selectTab(t) {
     A.tab = t; store.set("ai.tab", t);
     $$("#ai-tabs button").forEach((b) => b.classList.toggle("on", b.dataset.aiTab === t));
@@ -2211,6 +2229,7 @@
     else if (e.target.id === "cs-voice-auto") setAutoRead(e.target.checked);
     else if (e.target.id === "cs-voice") { VOICE.voice = e.target.value; saveVoice(); }
     else if (e.target.id === "cs-rate") { VOICE.rate = +e.target.value || 1; saveVoice(); }
+    else if (e.target.id === "lc-keep-loaded") saveLifecycle({ keep_loaded: e.target.checked });
     else if (e.target.id === "lc-enabled") saveLifecycle({ enabled: e.target.checked });
     else if (e.target.id === "lc-auto-reload") saveLifecycle({ auto_reload: e.target.checked });
     else if (e.target.id === "lc-idle") { if (e.target.value === "custom") { A.lifeCustom = true; U.queueRender(); } else saveLifecycle({ idle_seconds: +e.target.value }); }
