@@ -15,12 +15,17 @@ and use the shared server API key as the API key.
   and downloaded split GGUFs remain listed while unloaded; `data[].nodeyard`
   reports the backend and readiness state.
 - `POST /api/v1/chat/completions` routes to Ollama or the clustered split model.
-  An installed Ollama model loads on its first request; an unloaded split model
-  is loaded or switched into service before the chat begins.
-- Streaming responses use OpenAI Server-Sent Events and terminate with
-  `data: [DONE]`. Nodeyard adds optional `nodeyard` metadata chunks during a
-  load, with progress and an ETA only when the backend provides enough real
-  measurements to estimate them.
+  It returns a standard JSON completion when `stream` is omitted or false, and
+  OpenAI Server-Sent Events when `stream` is true. An installed Ollama model
+  loads on its first request; an unloaded split model is loaded or switched
+  into service before the chat begins. Common sampling fields, JSON response
+  format, and client-defined function tools are forwarded to the model; `n` is
+  limited to 1, and token log-probability fields are not supported.
+- Streaming responses terminate with `data: [DONE]`. Nodeyard adds optional
+  `nodeyard` metadata chunks during a load, with progress and an ETA only when
+  the backend provides enough real measurements to estimate them. Older
+  Nodeyard API clients that relied on omitted `stream` selecting SSE must now
+  send `stream: true`.
 
 The gateway is separate from the direct model endpoint on port 31435. Both
 use the same model backends, but the gateway provides the shared key and the

@@ -8,7 +8,7 @@ The server API added for the app is:
 
 - `GET /api/v1/models` returns an OpenAI-compatible model list (`object: "list"`, `data[]`) and retains Nodeyard inventory fields. Unloaded installed models stay visible.
 - `GET /api/v1/targets` lists Nodeyard model targets and readiness.
-- `POST /api/v1/chat/completions` accepts `model`, `messages`, `temperature` and `max_tokens`, and returns OpenAI Server-Sent Events. An unloaded split model is loaded before the answer; Ollama loads an installed model when the request reaches it.
+- `POST /api/v1/chat/completions` accepts `model`, `messages`, sampling fields and function tools. It returns a JSON completion by default, or OpenAI Server-Sent Events when `stream: true`. An unloaded split model is loaded before the answer; Ollama loads an installed model when the request reaches it.
 
 For Hermes and other OpenAI-compatible clients, set the base URL to `https://<dashboard-host>/api/v1` and use the shared server API key. Loading events may include Nodeyard's optional progress and ETA metadata; unknown progress stays unknown.
 

@@ -50,9 +50,12 @@ class ControlAPIOpenAIModelsTests(unittest.TestCase):
         ctx.get_routes["/api/v1/models"](handler, {})
 
         self.assertEqual(handler.payload["object"], "list")
-        self.assertEqual([model["id"] for model in handler.payload["data"]], ["split", "ollama:pod-1:loading", "ollama:pod-1:qwen"])
+        # The split model is advertised by its real name (its alias), not the bare "split" sentinel,
+        # so an OpenAI client like Hermes shows and can pick it; the internal target is kept alongside.
+        self.assertEqual([model["id"] for model in handler.payload["data"]], ["sample", "ollama:pod-1:loading", "ollama:pod-1:qwen"])
         self.assertTrue(all(model["object"] == "model" for model in handler.payload["data"]))
-        split = next(model for model in handler.payload["data"] if model["id"] == "split")
+        split = next(model for model in handler.payload["data"] if model["id"] == "sample")
+        self.assertEqual(split["nodeyard"]["target"], "split")
         self.assertEqual(split["nodeyard"]["state"], "unloaded")
         self.assertFalse(split["nodeyard"]["loaded"])
         self.assertEqual(handler.payload["models"][0]["file"], "sample.gguf")
@@ -73,7 +76,10 @@ class ControlAPIOpenAIModelsTests(unittest.TestCase):
             controlapi.register(ctx, SimpleNamespace())
         ctx.get_routes["/api/v1/models"](handler, {})
 
-        split = next(model for model in handler.payload["data"] if model["id"] == "split:sample.gguf")
+        # A downloaded-but-not-deployed split model also shows by its real name (the file base name),
+        # while keeping its internal "split:<file>" target for routing.
+        split = next(model for model in handler.payload["data"] if model["id"] == "sample")
+        self.assertEqual(split["nodeyard"]["target"], "split:sample.gguf")
         self.assertEqual(split["nodeyard"]["backend"], "clustered")
         self.assertFalse(split["nodeyard"]["ready"])
 
@@ -97,6 +103,19 @@ class ControlAPIOpenAIModelsTests(unittest.TestCase):
         self.assertEqual(target, "split")
         self.assertEqual(job_id, "load-job-1")
         self.assertEqual(backend.started, [("split-load", {})])
+
+    def test_resolve_model_id_maps_real_names_back_to_internal_targets(self):
+        # What /v1/models advertises must route back when the client sends it in a chat request.
+        backend = FakeBackend()
+        self.assertEqual(controlapi.resolve_model_id(backend, "sample"), "split")          # deployed alias
+        self.assertEqual(controlapi.resolve_model_id(backend, "split"), "split")            # sentinel passthrough
+        self.assertEqual(controlapi.resolve_model_id(backend, "ollama:pod-1:qwen"), "ollama:pod-1:qwen")
+        self.assertEqual(controlapi.resolve_model_id(backend, ""), "")
+
+        class Undeployed(FakeBackend):
+            store = SimpleNamespace(snapshot=lambda: {"state": {"ai": {}}})
+        # No deployment: the downloaded file's base name resolves to its "split:<file>" target.
+        self.assertEqual(controlapi.resolve_model_id(Undeployed(), "sample"), "split:sample.gguf")
 
     def test_loading_event_is_an_openai_chunk_with_30_second_eta_updates(self):
         event = controlapi.loading_chunk("turn-1", "split:sample.gguf", "clustered", "loading", 30, 70)
@@ -195,7 +214,7 @@ class ControlAPIOpenAIModelsTests(unittest.TestCase):
                     b"data: [DONE]\n",
                 ]
 
-            def readline(self):
+            def readline(self, size=-1):
                 return self.lines.pop(0) if self.lines else b""
 
         class Backend(FakeBackend):
@@ -242,7 +261,7 @@ class ControlAPIOpenAIModelsTests(unittest.TestCase):
         with patch.dict(sys.modules, {"webtools": fake_webtools}):
             controlapi.register(ctx, SimpleNamespace())
         ctx.post_routes["/api/v1/chat/completions"](handler, {
-            "model": "split", "messages": [{"role": "user", "content": "hello"}],
+            "model": "split", "stream": True, "messages": [{"role": "user", "content": "hello"}],
         })
 
         self.assertEqual(backend.started, [("split-load", {})])

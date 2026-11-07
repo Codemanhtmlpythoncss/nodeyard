@@ -53,11 +53,16 @@ CHAT_TOOL_NAMES = frozenset(("browser_search", "browser_open", "computer_read_sc
                             "computer_set_text", "computer_press_key", "computer_open_app",
                             "page_open", "page_read", "page_click", "page_type", "page_back", "page_console", "page_snapshot"))
 CHAT_TOOL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
+CHAT_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 NOT_REACHED_RE = re.compile(r"^\s+([a-z0-9][-a-z0-9.]*): not reached\b")
 
 
-def clean_chat_messages(messages):
-    """Validate text and inline image parts before forwarding chat to a model."""
+def clean_chat_messages(messages, allow_custom_tools=False):
+    """Validate text and inline image parts before forwarding chat to a model.
+
+    Custom OpenAI function names are enabled only for the control API, which returns
+    tool calls to the client instead of executing them inside Nodeyard.
+    """
     clean, text_chars, image_bytes, image_count = [], 0, 0, 0
     for message in messages:
         if not isinstance(message, dict) or message.get("role") not in ("system", "user", "assistant", "tool"):
@@ -65,11 +70,15 @@ def clean_chat_messages(messages):
         role, content = message["role"], message.get("content")
         if role == "tool":
             tool_id, name = message.get("tool_call_id"), message.get("name")
+            name_ok = (name is None or isinstance(name, str) and bool(CHAT_TOOL_NAME_RE.fullmatch(name))) if allow_custom_tools else isinstance(name, str) and name in CHAT_TOOL_NAMES
             if (not isinstance(content, str) or not isinstance(tool_id, str) or not CHAT_TOOL_ID_RE.fullmatch(tool_id)
-                    or not isinstance(name, str) or name not in CHAT_TOOL_NAMES):
+                    or not name_ok):
                 raise ValueError("That tool result isn't valid.")
             text_chars += len(content)
-            clean.append({"role": "tool", "tool_call_id": tool_id, "name": name, "content": content})
+            item = {"role": "tool", "tool_call_id": tool_id, "content": content}
+            if name is not None:
+                item["name"] = name
+            clean.append(item)
             continue
         calls = message.get("tool_calls")
         if calls is not None:
@@ -82,7 +91,7 @@ def clean_chat_messages(messages):
                 fn = call.get("function")
                 cid, name, args = call.get("id"), fn.get("name") if isinstance(fn, dict) else None, fn.get("arguments") if isinstance(fn, dict) else None
                 if (call.get("type") != "function" or not isinstance(cid, str) or not CHAT_TOOL_ID_RE.fullmatch(cid)
-                        or not isinstance(name, str) or name not in CHAT_TOOL_NAMES or not isinstance(args, str) or len(args) > 20000):
+                        or not isinstance(name, str) or (not CHAT_TOOL_NAME_RE.fullmatch(name) if allow_custom_tools else name not in CHAT_TOOL_NAMES) or not isinstance(args, str) or len(args) > 20000):
                     raise ValueError("That model tool request isn't valid.")
                 try:
                     parsed = json.loads(args)
@@ -1134,6 +1143,9 @@ class Live:
             on_conn(conn)  # so Stop can cut it, even while the model still reads the prompt
         try:
             conn.connect()
+            if getattr(conn, "nodeyard_stopped", False):
+                conn.close()
+                raise AIError("The request was cancelled before it reached the model.", 499)
             if conn.sock is not None:
                 conn.sock.settimeout(900)
             conn.request("POST", "/v1/chat/completions", body=json.dumps(body), headers=headers)
