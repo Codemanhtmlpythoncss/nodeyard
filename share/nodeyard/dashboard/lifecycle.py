@@ -2,7 +2,7 @@
 
 Automatic unloading is off by default; keep-loaded is on by default. Settings live in the dashboard's prefs.json (one place for the page, the control API and the Mac app).
 
-When keep-loaded is on, the active split model is loaded after dashboard startup, idle unloading and hourly refresh are paused, and Ollama models used by Nodeyard receive an unlimited keep-alive. This uses memory while idle.
+When keep-loaded is on, the active split model is loaded after dashboard startup, idle unloading and hourly refresh are paused, and Ollama models used by Nodeyard receive an unlimited keep-alive. This uses memory while idle. Keep-warm (on by default with keep-loaded) also sends the loaded split model a tiny decode every few minutes while it is idle, so its weights stay resident -- on small nodes the kernel reclaims idle pages (often to zram), which makes the first reply after a quiet spell slow (cold). The ping keeps it warm.
 
 When keep-loaded is off, the page can unload idle split models or refresh them hourly. Ollama receives the selected idle timeout after each request; manually loaded Ollama models remain pinned when automatic unloading is off. A model answering or with queued work is never unloaded, and if Nodeyard cannot read llama.cpp's /slots it will not unload the split model.
 """
@@ -13,9 +13,10 @@ import time
 PRESETS = (300, 600, 900, 1800, 2700, 3600, 7200)
 MIN_IDLE, MAX_IDLE = 60, 7 * 24 * 3600
 RELOAD_SECONDS = 3600
-DEFAULTS = {"enabled": False, "idle_seconds": 1800, "auto_reload": True, "keep_loaded": True}
+DEFAULTS = {"enabled": False, "idle_seconds": 1800, "auto_reload": True, "keep_loaded": True, "keep_warm": True}
 PREF_KEY = "model_lifecycle"
 POLL_SECONDS = 15
+WARM_SECONDS = 150                   # keep-warm: ping the idle, loaded split model this often so it stays hot
 SLOTS_STALE = 3 * POLL_SECONDS       # a /slots answer older than this doesn't prove the model is idle
 UNLOADED_SETTLE = 60                 # the cluster view may still say "loaded" this long after an unload
 RETRY_BASE, RETRY_MAX = 300, 3600    # a failed unload is retried after 5, 10, 20... minutes, at most hourly
@@ -45,6 +46,10 @@ def clean_settings(value, current=None):
         if not isinstance(value["keep_loaded"], bool):
             raise LifecycleError("Keep loaded must be on or off.")
         out["keep_loaded"] = value["keep_loaded"]
+    if "keep_warm" in value:
+        if not isinstance(value["keep_warm"], bool):
+            raise LifecycleError("Keep warm must be on or off.")
+        out["keep_warm"] = value["keep_warm"]
     if "idle_seconds" in value:
         raw = value["idle_seconds"]
         if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw != int(raw):
@@ -87,6 +92,9 @@ class Lifecycle:
         self.preload_model = ""
         self.preload_job = None
         self.preload_retry_at = 0.0
+        self.last_warm_at = 0.0
+        self.warm_inflight = False
+        self.warm_error = ""
         self.stop_event = threading.Event()
         self.thread = None
 
@@ -117,6 +125,8 @@ class Lifecycle:
                 changes.append("hourly model reload %s" % ("on" if after["auto_reload"] else "off"))
             if after["keep_loaded"] != before["keep_loaded"]:
                 changes.append("keep models loaded %s" % ("on" if after["keep_loaded"] else "off"))
+            if after["keep_warm"] != before["keep_warm"]:
+                changes.append("keep the model warm %s" % ("on" if after["keep_warm"] else "off"))
             if after["idle_seconds"] != before["idle_seconds"] and after["enabled"] == before["enabled"] and after["enabled"]:
                 changes.append("unload time set to %s" % describe_seconds(after["idle_seconds"]))
             if changes:
@@ -339,6 +349,54 @@ class Lifecycle:
         self._event("warm", "Preloading %s so it is ready for chat." % model, ok=None, model=model)
         return job
 
+    def _should_warm(self, now, sp, settings):
+        """True when the loaded split model is idle and due for a keep-warm ping."""
+        if not settings.get("keep_warm", True):
+            return False
+        if not sp or not sp.get("loaded") or not sp.get("ready"):
+            return False
+        with self.lock:
+            s = self.split
+            if self.warm_inflight or now - self.last_warm_at < WARM_SECONDS:
+                return False
+            if self.inflight.get("split") or s["processing"]:
+                return False
+            # Only when we can actually see it is idle: a stale or failed /slots read
+            # means something else (yardcode, the control API) may be using it.
+            if s["observed_at"] is None or now - s["observed_at"] > SLOTS_STALE or s["observe_error"]:
+                return False
+        return True
+
+    def _keep_warm(self, now, sp, settings):
+        """Send the idle, loaded split model a tiny decode so its weights stay resident
+        (idle pages get reclaimed to zram on small nodes) and the first reply after a
+        quiet spell isn't a cold start. Runs off the loop thread so it can't stall it."""
+        warm_ping = getattr(self.backend, "warm_ping", None)
+        if warm_ping is None or not self._should_warm(now, sp, settings):
+            return
+        try:
+            if self.backend.jobs_running():
+                return   # never ping across a load, switch or unload
+        except Exception:  # noqa: BLE001
+            return
+        with self.lock:
+            self.warm_inflight = True
+            self.last_warm_at = now     # space the pings even if this one is slow
+
+        def run_ping():
+            error = ""
+            try:
+                warm_ping()
+            except Exception as e:  # noqa: BLE001 -- keep-warm is best-effort, never fatal
+                error = str(e)[:200]
+            with self.lock:
+                self.warm_inflight = False
+                self.warm_error = error    # last_warm_at was set at dispatch, so pings stay spaced
+            if error:
+                self._event("warm", "Keep-warm ping failed: %s." % error, ok=False)
+
+        threading.Thread(target=run_ping, name="nodeyard-keep-warm", daemon=True).start()
+
     def tick(self, now=None):
         """One round: observe, then apply the model residency policy."""
         now = self.clock() if now is None else now
@@ -354,6 +412,7 @@ class Lifecycle:
         self._apply_ollama_policy(settings)
         if settings["keep_loaded"]:
             self._preload_split(now, sp)
+            self._keep_warm(now, sp, settings)
             return None
         with self.lock:
             last = self.split["last_used"]

@@ -264,6 +264,7 @@
     const options = L.presets.map((v) => '<option value="' + v + '"' + (preset && v === idle ? " selected" : "") + ">" + esc(dur(v)) + "</option>").join("") + '<option value="custom"' + (preset ? "" : " selected") + ">Custom…</option>";
     return card("Model lifecycle", html`
       <label class="check"><input type="checkbox" id="lc-keep-loaded" ${keep ? raw("checked") : ""} ${busy ? raw("disabled") : ""}> <span><b>Keep the model loaded between chats</b><br><span class="muted small">Preloads the active split model after dashboard start and gives Ollama models used by chat an unlimited keep-alive. This uses memory while idle.</span></span></label>
+      <label class="check mt" style="margin-left:22px"><input type="checkbox" id="lc-keep-warm" ${L.settings.keep_warm !== false ? raw("checked") : ""} ${busy || !keep ? raw("disabled") : ""}> <span><b>Keep it warm</b><br><span class="muted small">${keep ? "" : "Turn on Keep the model loaded first. "}Sends the loaded model a tiny request every few minutes while idle, so its memory stays resident and the first reply after a quiet spell isn't a slow cold start.</span></span></label>
       <label class="check mt"><input type="checkbox" id="lc-enabled" ${L.settings.enabled ? raw("checked") : ""} ${busy || keep ? raw("disabled") : ""}> <span><b>Automatically unload idle models</b><br><span class="muted small">${keep ? "Paused while Keep the model loaded is on. " : ""}Automatically unload models from memory after they have not been used for a specified period.</span></span></label>
       <label class="check mt"><input type="checkbox" id="lc-auto-reload" ${L.settings.auto_reload ? raw("checked") : ""} ${busy || keep ? raw("disabled") : ""}> <span><b>Automatically reload the split model every hour</b><br><span class="muted small">${keep ? "Paused while Keep the model loaded is on. " : ""}Refreshes the model when idle. An active reply is allowed to finish first.</span></span></label>
       <div class="row wrap mt" style="gap:8px;align-items:center"><label for="lc-idle" class="muted small">Unload after</label>
@@ -2238,6 +2239,7 @@
     else if (e.target.id === "cs-rate") { VOICE.rate = +e.target.value || 1; saveVoice(); }
     else if (e.target.id === "lc-keep-loaded") saveLifecycle({ keep_loaded: e.target.checked });
     else if (e.target.id === "lc-enabled") saveLifecycle({ enabled: e.target.checked });
+    else if (e.target.id === "lc-keep-warm") saveLifecycle({ keep_warm: e.target.checked });
     else if (e.target.id === "lc-auto-reload") saveLifecycle({ auto_reload: e.target.checked });
     else if (e.target.id === "lc-idle") { if (e.target.value === "custom") { A.lifeCustom = true; U.queueRender(); } else saveLifecycle({ idle_seconds: +e.target.value }); }
   });
