@@ -407,14 +407,15 @@
     NY.freshHTML(host, card("Open a terminal", html`
       <form id="t-open" class="row wrap" style="gap:8px;align-items:flex-end;margin-bottom:6px" onsubmit="return false"><label class="field-l grow" style="margin:0">Dashboard password, once more (then not again for 10 minutes)
         <input class="input" type="password" id="t-pw" autocomplete="current-password" value="${T.pw}"></label>
-        <button class="btn small" type="button" data-term="refresh">Refresh list</button></form>
+        <button class="btn small" type="button" data-term="refresh">Refresh list</button>
+        <button class="btn small" type="button" data-term="authorize-ssh" title="Install this server's SSH key on every Ready node's root account, so SSH to any node needs no password — even when the node is NotReady.">${T.busy === "authorize" ? "Setting up…" : "Set up password-free SSH"}</button></form>
       ${T.error ? html`<p class="small" style="color:var(--bad);margin:6px 0">${T.error}</p>` : ""}
       ${tg.old ? html`<p class="dev-note" style="margin:8px 0">The dashboard program on the server is older than this page (it was updated but hasn't restarted), so only the server's own shell is listed. Open it and run <span class="mono">sudo systemctl restart nodeyard-dashboard</span>, then reload: every node and Tailscale device appears here.</p>` : ""}
       ${intentBox(list)}
       ${group("This server", me, "")}
       ${group("Cluster nodes", nodes, "No nodes yet.")}
       ${group("Tailscale devices", net, tg.tailnet_error || "No other devices on your tailnet.")}
-      <p class="faint small" style="margin-bottom:0"><b>Shell</b> and <b>Root shell</b> on a node go through a short-lived Kubernetes helper pod, so they work without SSH keys while the node's kubelet runs; <b>Checks</b> runs read-only checks for a node that drops out, then leaves you in a root shell. <b>SSH</b> goes from the server as the user you type (default ${(tg && tg.user) || "your user"}), over Tailscale when the device has it: use it when a node isn't Ready. Idle terminals close after 30 minutes; copy and paste with your browser's usual shortcuts (Ctrl+Shift+C / V on Windows and Linux).</p>`));
+      <p class="faint small" style="margin-bottom:0"><b>Shell</b> and <b>Root shell</b> on a node go through a short-lived Kubernetes helper pod, so they work without SSH keys while the node's kubelet runs; <b>Checks</b> runs read-only checks for a node that drops out, then leaves you in a root shell. <b>SSH</b> works even when a node isn't Ready (it doesn't go through the kubelet). Click <b>Set up password-free SSH</b> once, while the nodes are Ready, to install this server's key on each node's <span class="mono">root</span> account; after that <b>SSH</b> to a node opens as root with no password — including when the node is NotReady. Idle terminals close after 30 minutes; copy and paste with your browser's usual shortcuts (Ctrl+Shift+C / V on Windows and Linux).</p>`));
   }
   function paintPage() {
     const host = $("#term-body"); if (!host) return;
@@ -497,7 +498,20 @@
     else if (a === "again") { const tg = T.sess.target || {}; forget(T.sess); show(null); openTerminal(tg.id || "local", tg.method || "local"); }
     else if (a === "devices") { show(null); loadTargets(); }
     else if (a === "refresh") { T.error = ""; loadTargets(); }
+    else if (a === "authorize-ssh") authorizeSsh();
     else if (a === "full") { document.body.classList.toggle("term-full"); paintBar(); setTimeout(fit, 50); }
   });
+
+  async function authorizeSsh() {
+    const pwEl = $("#t-pw"); if (pwEl) T.pw = pwEl.value;
+    T.error = ""; T.busy = "authorize"; paintDevices();
+    let r;
+    try { r = await postJSON("/api/term/authorize-ssh", { password: T.pw }); }
+    catch (e) { r = { ok: false, error: "The dashboard didn't answer." }; }
+    T.busy = "";
+    if (!r.ok) { T.error = r.error || "Couldn't set up password-free SSH."; if (/password/i.test(r.error || "")) { T.pw = ""; if (T.info) T.info.unlocked = false; } paintDevices(); return; }
+    toast(r.message || "Set up password-free SSH on the nodes.");
+    loadTargets();
+  }
   NY.Term = Term; // for tests
 })();

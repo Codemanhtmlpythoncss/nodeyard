@@ -329,6 +329,44 @@ def pod_manifest(pod, node, sid):
     }, separators=(",", ":"))
 
 
+# Installs one public key into the host root's authorized_keys, idempotently. The key comes in as an
+# argument (never pasted into the script), and the directory is overridable so the script can be tested.
+AUTHORIZE_SCRIPT = r'''key=$1
+d=${NY_SSH_DIR:-/root/.ssh}
+mkdir -p "$d" && chmod 700 "$d" || { echo "NODEYARD_SSH_ERR cannot make $d"; exit 1; }
+f="$d/authorized_keys"
+touch "$f" && chmod 600 "$f" || { echo "NODEYARD_SSH_ERR cannot write $f"; exit 1; }
+grep -qxF "$key" "$f" 2>/dev/null || printf '%s\n' "$key" >> "$f"
+echo NODEYARD_SSH_OK'''
+
+# Public keys to look for (and the order to prefer them), newest/strongest first.
+PUBKEY_NAMES = ("id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub")
+
+
+def pick_pubkey(home, exists=os.path.exists):
+    """The path of the terminal user's preferred existing public key under ``home``, or ''."""
+    for name in PUBKEY_NAMES:
+        path = os.path.join(home, ".ssh", name)
+        if exists(path):
+            return path
+    return ""
+
+
+def authorize_pod_manifest(pod, node, pubkey):
+    """A one-shot privileged pod that enters the host and installs ``pubkey`` into root's keys."""
+    command = ["nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "sh", "-c", AUTHORIZE_SCRIPT, "sh", pubkey]
+    return json.dumps({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": pod, "namespace": SHELL_NS, "labels": {"app": "nodeyard-shell", "nodeyard/authorize": "1"}},
+        "spec": {
+            "nodeName": node, "hostPID": True, "restartPolicy": "Never", "terminationGracePeriodSeconds": 0,
+            "activeDeadlineSeconds": 60, "automountServiceAccountToken": False, "tolerations": [{"operator": "Exists"}],
+            "containers": [{"name": "authorize", "image": SHELL_IMAGE, "imagePullPolicy": "IfNotPresent", "command": command,
+                            "securityContext": {"privileged": True}, "resources": {"requests": {"cpu": "10m", "memory": "8Mi"}}}],
+        },
+    }, separators=(",", ":"))
+
+
 def enter_host(mode, user):
     """What `kubectl exec` runs in the helper pod: the machine's own namespaces, then a shell."""
     base = ["nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "env", "TERM=xterm-256color"]
@@ -486,6 +524,131 @@ class Terminals:
         except (OSError, subprocess.SubprocessError):
             pass
 
+    # -- password-free SSH to the nodes -------------------------------------------------------------
+    # Install the terminal user's SSH public key into each node's root authorized_keys (through the
+    # same privileged helper pod the node shells use). Afterwards `ssh root@<node>` from this server
+    # needs no password -- including when the node is NotReady, since SSH doesn't go through the
+    # kubelet. A node must be Ready to receive the key (the pod has to schedule there), so NotReady
+    # nodes are reported and picked up next time they are up.
+
+    def _kubectl(self, args, timeout, inp=None):
+        kbin, ksub = self.kubectl
+        cmd = [kbin] + ([ksub] if ksub else []) + ["--kubeconfig", self.kubeconfig] + list(args)
+        return subprocess.run(cmd, input=inp, capture_output=True, text=True, timeout=timeout, check=False)
+
+    def _terminal_home(self):
+        user = self.user or ""
+        try:
+            import pwd
+            return pwd.getpwnam(user).pw_dir if user else os.path.expanduser("~")
+        except (KeyError, ImportError):
+            return os.path.expanduser("~" + user) if user else os.path.expanduser("~")
+
+    def _generate_key(self, home):
+        """Best effort: make an ed25519 key owned by the terminal user, so its ssh can use it."""
+        try:
+            if self.user and hasattr(os, "geteuid") and os.geteuid() == 0:
+                subprocess.run(["su", "-s", "/bin/sh", self.user, "-c",
+                                "mkdir -p ~/.ssh && chmod 700 ~/.ssh && ssh-keygen -t ed25519 -N '' -q -f ~/.ssh/id_ed25519 </dev/null"],
+                               capture_output=True, timeout=30, check=False)
+            else:
+                sshdir = os.path.join(home, ".ssh")
+                os.makedirs(sshdir, mode=0o700, exist_ok=True)
+                subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-q", "-f", os.path.join(sshdir, "id_ed25519")],
+                               stdin=subprocess.DEVNULL, capture_output=True, timeout=30, check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    def _terminal_pubkey(self):
+        home = self._terminal_home()
+        path = pick_pubkey(home)
+        if not path:
+            self._generate_key(home)
+            path = pick_pubkey(home)
+        if not path:
+            raise TermError("No SSH key for %s, and one couldn't be created. Make one on this server with: "
+                            "ssh-keygen -t ed25519" % (self.user or "the dashboard user"), 500)
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                key = fh.read().strip()
+        except OSError as e:
+            raise TermError("Couldn't read %s: %s" % (path, e), 500)
+        if not key.startswith(("ssh-", "ecdsa-", "sk-")):
+            raise TermError("The public key at %s doesn't look valid." % path, 500)
+        return key.splitlines()[0].strip()
+
+    def _ready_nodes(self):
+        r = self._kubectl(["get", "nodes", "-o", 'jsonpath={range .items[*]}{.metadata.name}{" "}'
+                           '{.status.conditions[?(@.type=="Ready")].status}{"\\n"}{end}'], timeout=15)
+        ready, down = [], []
+        for line in (r.stdout or "").splitlines():
+            parts = line.split()
+            if len(parts) == 2:
+                (ready if parts[1] == "True" else down).append(parts[0])
+        return ready, down
+
+    def _authorize_node(self, node, pubkey):
+        pod = "nyauth-" + secrets.token_hex(6)
+        try:
+            r = self._kubectl(["apply", "-f", "-"], timeout=20, inp=authorize_pod_manifest(pod, node, pubkey))
+            if r.returncode != 0:
+                return False, (r.stderr or "Kubernetes refused the helper pod").strip().splitlines()[-1][:200]
+            phase = ""
+            deadline = time.time() + 70
+            while time.time() < deadline:
+                g = self._kubectl(["-n", SHELL_NS, "get", "pod", pod, "-o", "jsonpath={.status.phase}"], timeout=10)
+                phase = (g.stdout or "").strip()
+                if phase in ("Succeeded", "Failed"):
+                    break
+                time.sleep(2)
+            logs = (self._kubectl(["-n", SHELL_NS, "logs", pod], timeout=15).stdout or "")
+            if "NODEYARD_SSH_OK" in logs:
+                return True, ""
+            tail = logs.strip().splitlines()[-1][:200] if logs.strip() else ("timed out" if phase not in ("Succeeded", "Failed") else "the pod %s" % (phase or "didn't run"))
+            return False, tail
+        finally:
+            self._delete_pod(pod)
+
+    def authorize_ssh(self, handler, body):
+        if handler._forwarded() is not None:
+            raise TermError("This only works over Tailscale or your own network.", 403)
+        ok, why = self.available()
+        if not ok:
+            raise TermError(why, 503)
+        if not self.kubectl or not os.path.exists(self.kubeconfig):
+            raise TermError("Kubernetes isn't reachable from here, so the nodes can't be set up.", 503)
+        auth = self.ctx.auth
+        owner = handler._token() or "local"
+        if auth is not None and not self.is_unlocked(owner):
+            ip = handler.client_address[0]
+            wait = auth.retry_after(ip)
+            if wait:
+                raise TermError("Too many wrong passwords. Try again in %d seconds." % wait, 429)
+            if not str(body.get("password", "")):
+                raise TermError("Type the dashboard password first.", 401)
+            if auth.login(ip, str(body.get("password", ""))[:200]) is None:
+                time.sleep(0.4)
+                raise TermError("That isn't the right password.", 401)
+        with self.lock:
+            self.unlocked[owner] = time.time() + UNLOCK_SECONDS
+        pubkey = self._terminal_pubkey()
+        self._kubectl(["create", "namespace", SHELL_NS], timeout=10)
+        self._kubectl(["label", "namespace", SHELL_NS, "pod-security.kubernetes.io/enforce=privileged", "--overwrite"], timeout=10)
+        ready, down = self._ready_nodes()
+        results = []
+        for node in ready:
+            try:
+                good, detail = self._authorize_node(node, pubkey)
+            except (OSError, subprocess.SubprocessError, ValueError) as e:
+                good, detail = False, str(e)[:200]
+            results.append({"node": node, "ok": good, "detail": detail})
+        done = [r["node"] for r in results if r["ok"]]
+        return {"ok": True, "login": "root", "authorized": done,
+                "results": results + [{"node": n, "ok": False, "detail": "NotReady: set it up when it is up again"} for n in down],
+                "message": ("Installed the key on %d of %d Ready node%s. Open any node with SSH as “root” — no password, even when it is NotReady."
+                            % (len(done), len(ready), "" if len(ready) == 1 else "s")) if ready
+                           else "No Ready nodes right now. Run this again when a node is up to set it up."}
+
     def _demo_argv(self, target, mode):
         how = {"local": "a shell on this server", "kube": "a shell on %s through Kubernetes" % target["name"],
                "root": "a root shell on %s through Kubernetes" % target["name"],
@@ -522,7 +685,9 @@ class Terminals:
             raise TermError("That device isn't in the list any more. Refresh the page.", 404)
         if mode not in target["methods"]:
             raise TermError(target.get("note") or "%s can't be opened that way." % target["name"], 409)
-        login = str(body.get("login") or self.user or "")[:32]
+        # Cluster-node SSH defaults to root: that's where "authorize SSH" installs the key, so it's
+        # password-free. (Falls back to a password prompt if the key isn't set up yet.)
+        login = str(body.get("login") or ("root" if target.get("kind") == "node" else self.user) or "")[:32]
         if mode == "ssh" and not USER_RE.match(login):
             raise TermError("That isn't a valid user name.")
         auth = self.ctx.auth
@@ -677,4 +842,5 @@ def register(ctx, args):
         "/api/term/input": wrap(t.input),
         "/api/term/resize": wrap(t.resize),
         "/api/term/close": wrap(t.close),
+        "/api/term/authorize-ssh": wrap(t.authorize_ssh),
     })
