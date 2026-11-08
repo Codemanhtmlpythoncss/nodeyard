@@ -1210,13 +1210,26 @@ class Live:
 
     # -- what is on each node's disk ------------------------------------------------
 
+    def _split_loading(self):
+        """True while the split model is loading into memory (loaded, not yet ready)."""
+        try:
+            sp = ((self.store.snapshot().get("state") or {}).get("ai") or {}).get("split") or {}
+        except Exception:  # noqa: BLE001 -- never let a status read break the disk view
+            return False
+        return bool(sp.get("loaded") and not sp.get("ready"))
+
     def disk_models(self, force=False):
         """Return the last inventory immediately; refresh cluster disks in the background."""
         now = time.time()
+        # While the split model is loading, don't spawn the per-node disk scan. Its `du` of the
+        # weight caches competes for disk I/O with the model read on the loading node; on a small
+        # node that can lapse the kubelet's heartbeat and flip the node NotReady mid-load. The
+        # inventory isn't changing meaningfully meanwhile, so serve the last one until the load ends.
+        loading = self._split_loading()
         with self.models_lock:
             cache = self.models_cache
             stale = self.models_dirty or not cache or now - cache[0] >= self.MODEL_CACHE_TTL
-            start = (force or stale) and not self.models_refreshing
+            start = (force or stale) and not self.models_refreshing and not loading
             if start:
                 self.models_refreshing = True
                 generation = self.models_generation
@@ -1233,15 +1246,15 @@ class Live:
                 error = self.models_error
         downloads = self._downloads()
         if not cache:
-            if not refreshing:
+            if not refreshing and not loading:
                 raise AIError(error or "Couldn't look at the nodes' disks.", 502)
-            data = {"ok": True, "nodes": [], "in_use": ""}
+            data = {"ok": True, "nodes": [], "in_use": ""}   # loading or scanning: no inventory yet is fine
         else:
             data = dict(cache[1])
         with self.models_lock:
             deleted = [{"file": f, "at": at, "kept_on": kept} for f, (at, kept) in self.models_deleted.items()]
         data.update({"downloads": downloads, "scanning": refreshing, "updated": cache[0] if cache else None,
-                     "inventory_stale": bool(stale or refreshing), "deleted": deleted})
+                     "inventory_stale": bool(stale or refreshing), "deleted": deleted, "scan_paused": bool(loading)})
         if error:
             data["scan_error"] = error
         return data
