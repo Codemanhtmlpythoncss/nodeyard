@@ -1622,7 +1622,8 @@ def register(ctx, args):
         return h._json({"ok": ok, "error": error, "tracks": tracks}, 200 if ok else 400)
 
     def _playback_get(h, q):
-        return h._json({"ok": True, "playback": music.playback()})
+        # likes come along so the bar's heart is right even before the Music page is opened
+        return h._json({"ok": True, "playback": music.playback(), "likes": music.sc_likes()})
 
     def _playback_post(h, body):
         ok, error, state = music.set_playback(body)
