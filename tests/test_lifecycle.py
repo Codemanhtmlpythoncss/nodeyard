@@ -86,18 +86,30 @@ class ModelWarmthTests(unittest.TestCase):
     def test_keep_warm_is_on_by_default(self):
         self.assertTrue(lifecycle.stored_settings({})["keep_warm"])
 
-    def test_should_warm_only_when_idle_loaded_and_due(self):
+    def test_warms_immediately_when_ready_after_a_load(self):
+        # Fresh load: it should warm at once -- no cadence wait, and even with no /slots read yet.
         backend = Backend(split={"model": "sample.gguf", "loaded": True, "ready": True, "stale": None, "shares": []})
         lc = self.make_lifecycle(backend)
-        lc.observe(2000)   # populates observed_at so idleness is known
         settings, sp = lc.settings(), lc._split_state()
-        self.assertTrue(lc._should_warm(2000, sp, settings))
-        lc.last_warm_at = 1990
-        self.assertFalse(lc._should_warm(2000, sp, settings))        # pinged too recently
-        lc.last_warm_at = 0.0
-        self.assertFalse(lc._should_warm(2000, sp, dict(settings, keep_warm=False)))  # turned off
+        lc.last_warm_at = 9999  # would block a cadence ping, but the first-after-load warm ignores it
+        self.assertTrue(lc._should_warm(10000, sp, settings))
+        self.assertFalse(lc._should_warm(10000, sp, dict(settings, keep_warm=False)))
+
+    def test_cadence_and_gating_after_the_first_warm(self):
+        backend = Backend(split={"model": "sample.gguf", "loaded": True, "ready": True, "stale": None, "shares": []})
+        lc = self.make_lifecycle(backend)
+        lc.observe(2000)
+        settings, sp = lc.settings(), lc._split_state()
+        lc.warm_loaded_model = "sample.gguf"   # pretend we've already warmed this load
+        lc.last_warm_at = 2000 - lifecycle.WARM_SECONDS + 1
+        self.assertFalse(lc._should_warm(2000, sp, settings))   # not due yet
+        lc.last_warm_at = 2000 - lifecycle.WARM_SECONDS - 1
+        self.assertTrue(lc._should_warm(2000, sp, settings))    # due
+        lc.split["processing"] = True
+        self.assertFalse(lc._should_warm(2000, sp, settings))   # it is busy answering
+        lc.split["processing"] = False
         lc.warm_inflight = True
-        self.assertFalse(lc._should_warm(2000, sp, settings))        # one already in flight
+        self.assertFalse(lc._should_warm(2000, sp, settings))   # one already in flight
 
     def test_keep_warm_pings_the_idle_loaded_model(self):
         backend = Backend(split={"model": "sample.gguf", "loaded": True, "ready": True, "stale": None, "shares": []})

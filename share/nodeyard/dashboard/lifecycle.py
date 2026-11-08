@@ -2,7 +2,7 @@
 
 Automatic unloading is off by default; keep-loaded is on by default. Settings live in the dashboard's prefs.json (one place for the page, the control API and the Mac app).
 
-When keep-loaded is on, the active split model is loaded after dashboard startup, idle unloading and hourly refresh are paused, and Ollama models used by Nodeyard receive an unlimited keep-alive. This uses memory while idle. Keep-warm (on by default with keep-loaded) also sends the loaded split model a tiny decode every few minutes while it is idle, so its weights stay resident -- on small nodes the kernel reclaims idle pages (often to zram), which makes the first reply after a quiet spell slow (cold). The ping keeps it warm.
+When keep-loaded is on, the active split model is loaded after dashboard startup, idle unloading and hourly refresh are paused, and Ollama models used by Nodeyard receive an unlimited keep-alive. This uses memory while idle. Keep-warm (on by default with keep-loaded) sends the loaded split model a tiny decode -- once as soon as it becomes ready after a (re)load, then about once a minute while it is idle -- so its weights stay resident. On small nodes the kernel reclaims idle pages (often to zram), which makes the first reply after a load or a quiet spell slow (cold); the ping keeps it warm from the start. It is best-effort: a momentarily unreadable /slots (common while a node flaps) does not stop it, and a failed ping is only logged.
 
 When keep-loaded is off, the page can unload idle split models or refresh them hourly. Ollama receives the selected idle timeout after each request; manually loaded Ollama models remain pinned when automatic unloading is off. A model answering or with queued work is never unloaded, and if Nodeyard cannot read llama.cpp's /slots it will not unload the split model.
 """
@@ -16,7 +16,7 @@ RELOAD_SECONDS = 3600
 DEFAULTS = {"enabled": False, "idle_seconds": 1800, "auto_reload": True, "keep_loaded": True, "keep_warm": True}
 PREF_KEY = "model_lifecycle"
 POLL_SECONDS = 15
-WARM_SECONDS = 150                   # keep-warm: ping the idle, loaded split model this often so it stays hot
+WARM_SECONDS = 60                    # keep-warm: ping the idle, loaded split model this often so it stays hot
 SLOTS_STALE = 3 * POLL_SECONDS       # a /slots answer older than this doesn't prove the model is idle
 UNLOADED_SETTLE = 60                 # the cluster view may still say "loaded" this long after an unload
 RETRY_BASE, RETRY_MAX = 300, 3600    # a failed unload is retried after 5, 10, 20... minutes, at most hourly
@@ -95,6 +95,7 @@ class Lifecycle:
         self.last_warm_at = 0.0
         self.warm_inflight = False
         self.warm_error = ""
+        self.warm_loaded_model = ""   # the model we've already warmed since it last loaded
         self.stop_event = threading.Event()
         self.thread = None
 
@@ -279,6 +280,7 @@ class Lifecycle:
                 s["loaded_seen"] = False
                 s["processing"] = False
                 s["task"] = None
+                self.warm_loaded_model = ""   # so the next load gets warmed from the start
                 if s["reload_phase"] is None:
                     s["reload_due_at"] = None
                 return
@@ -350,27 +352,31 @@ class Lifecycle:
         return job
 
     def _should_warm(self, now, sp, settings):
-        """True when the loaded split model is idle and due for a keep-warm ping."""
+        """True when the loaded split model should get a keep-warm ping: at once when it
+        has just become ready after a (re)load (so the first real reply isn't cold), then
+        on a cadence while it is idle. Kept deliberately loose -- a ping is harmless, so a
+        momentarily unreadable /slots (common while a node flaps) must not stop warming."""
         if not settings.get("keep_warm", True):
             return False
         if not sp or not sp.get("loaded") or not sp.get("ready"):
             return False
+        model = str(sp.get("model") or "")
         with self.lock:
             s = self.split
-            if self.warm_inflight or now - self.last_warm_at < WARM_SECONDS:
+            if self.warm_inflight:
                 return False
             if self.inflight.get("split") or s["processing"]:
-                return False
-            # Only when we can actually see it is idle: a stale or failed /slots read
-            # means something else (yardcode, the control API) may be using it.
-            if s["observed_at"] is None or now - s["observed_at"] > SLOTS_STALE or s["observe_error"]:
+                return False     # a request we can see is already keeping it warm
+            if self.warm_loaded_model != model:
+                return True       # just became ready after a load: warm it now
+            if now - self.last_warm_at < WARM_SECONDS:
                 return False
         return True
 
     def _keep_warm(self, now, sp, settings):
-        """Send the idle, loaded split model a tiny decode so its weights stay resident
-        (idle pages get reclaimed to zram on small nodes) and the first reply after a
-        quiet spell isn't a cold start. Runs off the loop thread so it can't stall it."""
+        """Send the loaded split model a tiny decode so its weights stay resident (idle
+        pages get reclaimed, often to zram, on small nodes) and neither a fresh load nor a
+        quiet spell leaves it cold. Runs off the loop thread so it can't stall it."""
         warm_ping = getattr(self.backend, "warm_ping", None)
         if warm_ping is None or not self._should_warm(now, sp, settings):
             return
@@ -379,9 +385,11 @@ class Lifecycle:
                 return   # never ping across a load, switch or unload
         except Exception:  # noqa: BLE001
             return
+        model = str((sp or {}).get("model") or "")
         with self.lock:
             self.warm_inflight = True
-            self.last_warm_at = now     # space the pings even if this one is slow
+            self.last_warm_at = now           # space the pings even if this one is slow
+            self.warm_loaded_model = model    # we've now warmed this load; next ones ride the cadence
 
         def run_ping():
             error = ""
