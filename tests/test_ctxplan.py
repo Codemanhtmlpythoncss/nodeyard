@@ -26,6 +26,14 @@ def _kv_u32_array(key, values):
     return struct.pack("<Q", len(key)) + key.encode() + struct.pack("<I", 9) + body
 
 
+def _kv_str_array(key, values):
+    body = struct.pack("<I", 8) + struct.pack("<Q", len(values))
+    for v in values:
+        raw = v.encode()
+        body += struct.pack("<Q", len(raw)) + raw
+    return struct.pack("<Q", len(key)) + key.encode() + struct.pack("<I", 9) + body
+
+
 def make_gguf(pairs):
     """Build a GGUF v3 header holding the given (encoder, ...) metadata bytes."""
     header = b"GGUF" + struct.pack("<I", 3) + struct.pack("<Q", 0) + struct.pack("<Q", len(pairs))
@@ -81,6 +89,51 @@ class ParseTests(unittest.TestCase):
     def test_bad_magic_raises(self):
         with self.assertRaises(ctxplan.GGUFError):
             ctxplan.gguf_params(b"NOPE" + b"\x00" * 64)
+
+    def test_skips_a_huge_array_before_the_arch_keys(self):
+        # A big tokenizer-like array must not stop us reaching the shape keys after it.
+        g = make_gguf([
+            _kv_str_array("tokenizer.ggml.tokens", ["tok%d" % i for i in range(5000)]),
+            _kv_u32_array("tokenizer.ggml.token_type", list(range(5000))),
+            _kv_string("general.architecture", "gpt-oss"),
+            _kv_u32("gpt-oss.block_count", 24),
+            _kv_u32("gpt-oss.attention.head_count", 64),
+            _kv_u32("gpt-oss.attention.head_count_kv", 8),
+            _kv_u32("gpt-oss.attention.key_length", 64),
+            _kv_u32("gpt-oss.attention.value_length", 64),
+            _kv_u32("gpt-oss.context_length", 131072),
+        ])
+        p = ctxplan.gguf_params(g)
+        self.assertEqual((p["n_layer"], p["n_head_kv"], p["key_length"], p["n_ctx_train"]), (24, 8, 64, 131072))
+
+    def test_tolerates_truncation_after_the_shape_keys(self):
+        # Header cut partway through a trailing array: the shape keys came first, so it still parses.
+        full = make_gguf([
+            _kv_string("general.architecture", "llama"),
+            _kv_u32("llama.block_count", 32),
+            _kv_u32("llama.attention.head_count", 32),
+            _kv_u32("llama.attention.head_count_kv", 8),
+            _kv_u32("llama.attention.key_length", 128),
+            _kv_u32("llama.attention.value_length", 128),
+            _kv_u32("llama.context_length", 32768),
+            _kv_str_array("tokenizer.ggml.tokens", ["tok%d" % i for i in range(5000)]),
+        ])
+        p = ctxplan.gguf_params(full[: len(full) - 40000])   # chop deep into the token array
+        self.assertEqual(p["n_layer"], 32)
+        self.assertEqual(ctxplan.kv_bytes_per_token(p, "f16"), 131072)
+
+    def test_truncation_before_arch_keys_raises(self):
+        g = make_gguf([
+            _kv_str_array("tokenizer.ggml.tokens", ["tok%d" % i for i in range(5000)]),
+            _kv_string("general.architecture", "llama"),
+            _kv_u32("llama.block_count", 32),
+        ])
+        with self.assertRaises(ctxplan.GGUFError):
+            ctxplan.gguf_params(g[:200])   # cut inside the token array, before the arch keys
+
+    def test_garbage_raises_not_crashes(self):
+        with self.assertRaises(ctxplan.GGUFError):
+            ctxplan.gguf_params(b"GGUF" + struct.pack("<I", 3) + b"\xff" * 200)
 
 
 class KvMathTests(unittest.TestCase):

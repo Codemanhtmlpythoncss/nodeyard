@@ -79,11 +79,36 @@ def _read_value(buf, off, vtype):
     return value, off + size
 
 
-def gguf_metadata(header):
-    """Parse a GGUF header (bytes) into a ``{key: value}`` metadata dict.
+def _skip_value(buf, off, vtype):
+    """Advance past a GGUF value without materializing it -- so a huge tokenizer
+    array (megabytes) costs nothing and parsing still reaches the architecture keys."""
+    if vtype == 8:  # string
+        (length,) = struct.unpack_from("<Q", buf, off)
+        return off + 8 + length
+    if vtype == 9:  # array
+        (elem_type,) = struct.unpack_from("<I", buf, off)
+        (count,) = struct.unpack_from("<Q", buf, off + 4)
+        off += 12
+        if elem_type in (8, 9):            # arrays of strings or arrays: skip one at a time
+            for _ in range(count):
+                off = _skip_value(buf, off, elem_type)
+            return off
+        return off + _GGUF_SCALAR[elem_type][1] * count
+    return off + _GGUF_SCALAR[vtype][1]
 
-    Only the leading metadata block is needed, so a prefix of the file (a megabyte
-    or two) is enough; tensor data that follows is ignored.
+
+# The architecture keys we need for KV sizing (matched by suffix, after the arch prefix).
+_WANTED = ("block_count", "attention.head_count", "attention.head_count_kv",
+           "attention.key_length", "attention.value_length", "embedding_length", "context_length")
+
+
+def gguf_metadata(header):
+    """Parse a GGUF header's metadata, keeping only general.architecture and the
+    attention-shape keys and skipping everything else (tokenizers, etc.).
+
+    Only the leading metadata block is needed, so a prefix of the file is enough.
+    Tolerant of a truncated prefix: it returns whatever it read before the cut, so
+    a short read still works when the wanted keys came early.
     """
     if header[:4] != b"GGUF":
         raise GGUFError("not a GGUF file (bad magic)")
@@ -94,15 +119,21 @@ def gguf_metadata(header):
     _tensor_count, n_kv = struct.unpack_from("<QQ", header, 8)
     off = 24
     meta = {}
-    for _ in range(n_kv):
-        (klen,) = struct.unpack_from("<Q", header, off)
-        off += 8
-        key = header[off:off + klen].decode("utf-8", "replace")
-        off += klen
-        (vtype,) = struct.unpack_from("<I", header, off)
-        off += 4
-        value, off = _read_value(header, off, vtype)
-        meta[key] = value
+    try:
+        for _ in range(n_kv):
+            (klen,) = struct.unpack_from("<Q", header, off)
+            off += 8
+            key = header[off:off + klen].decode("utf-8", "replace")
+            off += klen
+            (vtype,) = struct.unpack_from("<I", header, off)
+            off += 4
+            if key == "general.architecture" or any(key.endswith("." + s) for s in _WANTED):
+                value, off = _read_value(header, off, vtype)
+                meta[key] = value
+            else:
+                off = _skip_value(header, off, vtype)
+    except (struct.error, IndexError, UnicodeError, OverflowError, ValueError):
+        pass  # the header was cut short or malformed; use whatever we collected before the cut
     return meta
 
 
@@ -280,6 +311,8 @@ def main(argv):
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
-    except (GGUFError, ValueError, OSError) as exc:
+    except SystemExit:
+        raise
+    except BaseException as exc:  # noqa: BLE001 -- a shape we can't read must exit 1, never crash the caller
         sys.stderr.write("ctxplan: %s\n" % exc)
         sys.exit(1)
