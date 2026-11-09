@@ -1182,7 +1182,56 @@
       if (left <= 0) { clearInterval(S.fullTimer); location.reload(); }
     }, 1000);
   }
-  function closeModals() { $("#palette").classList.remove("on"); $("#helpm").classList.remove("on"); $("#jobm").classList.remove("on"); $("#fullm").classList.remove("on"); clearInterval(S.fullTimer); clearInterval(jobTimer); if (!S.drawer) $("#scrim").classList.remove("on"); }
+  function closeModals() { $("#palette").classList.remove("on"); $("#helpm").classList.remove("on"); $("#jobm").classList.remove("on"); $("#fullm").classList.remove("on"); $("#fixm").classList.remove("on"); clearInterval(S.fullTimer); clearInterval(jobTimer); if (!S.drawer) $("#scrim").classList.remove("on"); }
+
+  // ---- Fix: one place to diagnose and repair common cluster problems.
+  // Diagnostics = nodeyard's own Doctor checks + node readiness + device reachability (all real reads).
+  // Repairs reuse Doctor's per-check fixes (the safe ones) as streamed jobs, then re-check to verify.
+  // Disruptive cluster actions (restart/reboot/remove a node) are deliberately NOT run from here.
+  const FIX = { running: false, doctor: null, reach: {}, error: "", started: 0 };
+  function openFix() { closeModals(); $("#scrim").classList.add("on"); $("#fixm").classList.add("on"); $("#fixm").focus(); runFixDiagnostics(); }
+  async function runFixDiagnostics() {
+    FIX.running = true; FIX.error = ""; renderFix();
+    try {
+      const [doc, rec] = await Promise.all([
+        getJSON("/api/doctor?fresh=1").catch(() => null),
+        postJSON("/api/devices/recheck", {}).catch(() => null),
+      ]);
+      FIX.doctor = doc && doc.doctor ? doc.doctor : null;
+      if (!FIX.doctor) FIX.error = "Couldn't run the diagnostics (is this the control node?).";
+      FIX.reach = {};
+      if (rec && rec.ok) (rec.devices || []).forEach((d) => { if (d && d.name) FIX.reach[String(d.name).toLowerCase()] = d.status; });
+    } catch (e) { FIX.error = "Couldn't reach the dashboard."; }
+    FIX.running = false; FIX.started = Date.now(); renderFix();
+  }
+  function renderFix() {
+    const body = $("#fixbody"); if (!body) return;
+    const stat = $("#fixstatus");
+    if (FIX.running) { if (stat) stat.textContent = "Checking…"; setHTML(body, html`<div class="empty" style="padding:30px"><div class="spin"></div>Running diagnostics: cluster health, services and device reachability…</div>`); return; }
+    if (stat) stat.textContent = FIX.started ? "Checked " + fmt.dur((Date.now() - FIX.started) / 1000) + " ago" : "";
+    const nodes = S.d ? S.d.nodes : [];
+    const notReady = nodes.filter((n) => !n.ready);
+    const checks = (FIX.doctor && FIX.doctor.checks) || [];
+    const problems = checks.filter((c) => c.status === "fail" || c.status === "warn");
+    const fixable = problems.filter((c) => c.fix);
+    const reachText = (name) => { const r = FIX.reach[String(name).toLowerCase()]; return (r === "both" || r === "lan" || r === "tailscale") ? "answers (online)" : r === "partial" ? "up, agent not answering" : r === "unreachable" ? "no answer (offline)" : "not tested"; };
+    const nodeRow = (n) => { const st = nodeState(n); return html`<div class="fix-row"><div class="grow"><b>${n.name} — ${st.label}</b>
+      <div class="muted small">Reachability: ${reachText(n.name)}.</div>
+      <div class="faint small">${st.unknown ? "The control plane hasn't heard from it. If it answers above, it's a control-plane/network issue, not a dead node — try Restart Kubernetes (Devices) or check its link." : "The node itself reports NotReady — open it for the exact condition (memory, disk, kubelet)."}</div></div>
+      ${chip(st.label, st.cls)}</div>`; };
+    const checkRow = (c) => html`<div class="fix-row"><div class="grow"><b>${c.status === "fail" ? "✗ " : "⚠ "}${c.title}</b>${c.detail ? html`<div class="muted small">${c.detail}</div>` : ""}
+      ${c.fix ? html`<div class="faint small">Fix: ${c.fix}</div>` : html`<div class="faint small">Needs a manual change — no automatic fix.</div>`}</div>
+      ${chip(c.status === "fail" ? "problem" : "warning", c.status === "fail" ? "bad" : "warn")}
+      ${c.fix ? html`<button class="btn small" data-fix="one" data-id="${c.id}">Fix</button>` : ""}</div>`;
+    setHTML(body, html`${FIX.error ? html`<div class="note bad">${FIX.error}</div>` : ""}
+      <div class="fix-summary"><span class="${notReady.length ? "bad" : "good"}">${nodes.length - notReady.length}/${nodes.length} nodes ready</span>
+        <span class="${problems.length ? "warn" : "good"}">${problems.length} problem${problems.length === 1 ? "" : "s"} found</span>
+        <span>${fixable.length} auto-fixable</span></div>
+      <div class="row wrap" style="gap:8px;margin:10px 0">${fixable.length ? html`<button class="btn primary" data-fix="all">Fix all ${fixable.length} safe problem${fixable.length === 1 ? "" : "s"}</button>` : ""}<button class="btn" data-fix="rerun">Re-check</button></div>
+      ${notReady.length ? html`<div class="section-title">Nodes needing attention</div>${notReady.map(nodeRow)}` : ""}
+      ${problems.length ? html`<div class="section-title">Checks</div>${problems.map(checkRow)}` : html`<div class="note good" style="margin-top:10px">The checks found no problems.</div>`}
+      <p class="faint small" style="margin-top:14px"><b>Fix</b> runs nodeyard's own repair for that check, then re-checks to confirm. Disruptive cluster actions (restart or reboot the cluster, remove a node) are not run from here — use <b>Devices</b> or the node's page, which confirm first.</p>`);
+  }
   function runPalette(i) { const it = pItems[i]; if (!it) return; closeModals(); it.run(); }
 
   // ---- misc actions
@@ -1380,6 +1429,15 @@
     if (rm && !rm.disabled) { removeNode(rm.dataset.nodeRemove); return; }
     const lg = t.closest("[data-logs]");
     if (lg) { if (lg.dataset.logs === "refresh") loadDiag(); return; }
+    const fx = t.closest("[data-fix]");
+    if (fx) {
+      const act = fx.dataset.fix;
+      if (act === "close") { closeModals(); }
+      else if (act === "rerun") { runFixDiagnostics(); }
+      else if (act === "one") { startJob("doctor-fix", { only: fx.dataset.id }, () => openFix()); }
+      else if (act === "all") { if (window.confirm("Apply nodeyard's safe fixes for every auto-fixable problem?\n\nEach is a per-machine repair (enable a service, a sysctl, etc.), re-checked afterwards. Disruptive cluster actions are not included.")) startJob("doctor-fix", {}, () => openFix()); }
+      return;
+    }
     const fa = t.closest("[data-act^=full-]");
     if (fa) {
       const act = fa.dataset.act;
@@ -1459,6 +1517,7 @@
   $("#searchbtn").addEventListener("click", openPalette);
   $("#refresh").addEventListener("click", () => load(true));
   $("#fullrefresh").addEventListener("click", fullRefresh);
+  $("#fixbtn").addEventListener("click", openFix);
   $("#theme").addEventListener("click", cycleTheme);
   $("#helpbtn").addEventListener("click", () => { closeModals(); $("#scrim").classList.add("on"); $("#helpm").classList.add("on"); $("#helpm").focus(); });
   $("#live").addEventListener("click", () => setLive(!S.live));

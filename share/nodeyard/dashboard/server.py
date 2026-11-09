@@ -575,8 +575,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True}, extra={"Set-Cookie": clear})
         fn = srv.post_routes.get(path)
         if fn is None:
+            self._drain_body()   # answer without reading the body -> drain it, or the next keep-alive request is corrupted
             return self._json({"ok": False, "error": "Nothing here accepts that kind of request."}, 405, {"Allow": "GET, HEAD"})
         if not (getattr(self, "v1_bearer", False) or self._csrf_ok()):   # (a key in the header can't be forged by another site)
+            self._drain_body()
             return
         body = self._body(srv.post_limits.get(path, MAX_BODY))
         if body is None:
@@ -587,6 +589,29 @@ class Handler(BaseHTTPRequestHandler):
             return None
         except Exception as e:
             return self._json({"ok": False, "error": str(e)}, 500)
+
+    def _drain_body(self):
+        """Read and discard a POST body we're about to answer without consuming (405, CSRF reject), so its
+        bytes don't stay in the socket and get read as the start of the next keep-alive request."""
+        try:
+            n = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            self.close_connection = True
+            return
+        if n <= 0:
+            return
+        if n > MAX_BODY:          # don't read an unbounded body: just close the connection
+            self.close_connection = True
+            return
+        try:
+            remaining = n
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 65536))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except OSError:
+            self.close_connection = True
 
     def _login(self):
         srv = self.ctx

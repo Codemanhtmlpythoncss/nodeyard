@@ -86,6 +86,7 @@
       <div class="spacer"></div>
       <button class="search" id="searchbtn" aria-label="Search"><svg class="icon"><use href="#i-search"/></svg><span class="label">Search nodes, pods, IPs…</span><span class="kbd">Ctrl K</span></button>
       <button class="btn device-toggle" id="devsbtn" aria-label="Toggle device monitoring" aria-pressed="true" title="Toggle device monitoring (D)"><svg class="icon"><use href="#i-hardware"/></svg><span>Devices</span></button>
+      <button class="btn fix-btn" id="fixbtn" aria-label="Diagnose and fix cluster problems" title="Diagnose the cluster and fix common problems"><svg class="icon"><use href="#i-doctor"/></svg><span>Fix</span></button>
       <span class="pill" id="status" role="status" aria-live="polite" aria-atomic="true"><i class="dot"></i><span>Connecting…</span></span>
       <button class="btn icon-only" id="refresh" aria-label="Refresh now" title="Refresh now (r)"><svg class="icon"><use href="#i-refresh"/></svg></button>
       <button class="btn icon-only" id="fullrefresh" aria-label="Full refresh" title="Full refresh (Shift+R): clear the dashboard's caches, re-check every node and the AI model (reloading it if it's broken), then reload the page"><svg class="icon"><use href="#i-reset"/></svg></button>
@@ -138,6 +139,10 @@
 <div class="modal" id="fullm" role="dialog" aria-label="Full refresh" tabindex="-1">
   <div class="modal-head"><b>Full refresh</b><span class="spacer"></span><button class="btn small" data-act="full-close">Close</button></div>
   <div class="modal-body" id="fullbody"></div>
+</div>
+<div class="modal wide" id="fixm" role="dialog" aria-label="Fix cluster problems" tabindex="-1">
+  <div class="modal-head"><b>Fix cluster problems</b><span id="fixstatus" class="faint small"></span><span class="spacer"></span><button class="btn small" id="fixrerun" data-fix="rerun">Re-check</button><button class="btn small" data-fix="close">Close</button></div>
+  <div class="modal-body" id="fixbody"></div>
 </div>
 <div class="modal wide" id="jobm" role="dialog" aria-label="Task">
   <div class="modal-head"><b id="jobtitle">Task</b><span id="jobstatus"></span><span class="spacer"></span><button class="btn small danger hide" id="jobcancel" data-act="job-cancel">Cancel</button><button class="btn small" data-act="job-close">Close</button></div>
