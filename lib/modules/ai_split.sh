@@ -56,6 +56,13 @@ Options:
                            (spreads the cache across the nodes; default 16384) [deploy]
   --kv-cache f16|q8_0|q4_0 Conversation memory precision: q8_0 halves it with practically
                            the same answers, q4_0 quarters it (default f16) [deploy]
+  --ubatch N               Micro-batch size (16-2048, default 512). Smaller keeps the
+                           compute buffer bounded so a big context can't OOM and
+                           reload-loop; larger speeds up long-prompt reads [deploy]
+  --moe-cpu all|N          Mixture-of-experts models only: keep the expert weights in
+                           CPU RAM (all) or for the top N layers, so the GPU holds the
+                           attention/dense layers run for every token. Frees VRAM for
+                           the hot path; often faster on a small GPU (experimental) [deploy]
   --think on|off           Allow reasoning output (default off) [deploy]
   --nodeport PORT|0        Chat page + API NodePort (default 31435; 0 = cluster only) [deploy]
   --api-key-file PATH      Require this API key (read from a file) [deploy]
@@ -610,6 +617,7 @@ SPLIT_CTX_HEADROOM="${NODEYARD_SPLIT_CTX_HEADROOM:-0.9}"  # keep a tenth of each
 SPLIT_KV_PER_TOK=""    # bytes of KV cache per token for the whole model (empty: unknown)
 SPLIT_NCTX_TRAIN=""    # the model's trained context length, an upper bound, when known
 SPLIT_CTX_PER_NODE=""  # "MiB MiB ..." the context's cache on each plan node, for the table
+SPLIT_CTX_MAX=""       # the most a context could physically be (KV-only ceiling), for the message
 SPLIT_HDR_FILE=""
 
 ctxplan_py() { python3 "${NY_SHARE}/dashboard/ctxplan.py" "$@"; }
@@ -677,27 +685,51 @@ split_node_kv_budgets() {
 # fall back to a safe default -- it must never abort the deploy (set -e + ERR trap).
 split_size_ctx() {
     SPLIT_CTX_PER_NODE=""
+    SPLIT_CTX_MAX=""
     [[ "${SPLIT_CTX_MODE:-fixed}" == max ]] || return 0
     local small="Couldn't read the model's shape to size the context to the RAM"
     split_fetch_header || true
-    local kv_per_tok="" budgets="" got=""
+    local kv_per_tok="" budgets="" plan="" rec="" mx=""
     if [[ -n "$SPLIT_HDR_FILE" ]]; then
         kv_per_tok="$(ctxplan_py kvpertok --header "$SPLIT_HDR_FILE" --kv "$SPLIT_KV" 2>/dev/null)" || kv_per_tok=""
     fi
     if [[ "$kv_per_tok" =~ ^[0-9]+$ ]] && ((kv_per_tok > 0)) && budgets="$(split_node_kv_budgets)" && [[ -n "$budgets" ]]; then
         SPLIT_KV_PER_TOK="$kv_per_tok"
-        got="$(ctxplan_py maxctx --header "$SPLIT_HDR_FILE" --kv "$SPLIT_KV" --nodes "$budgets" --headroom "$SPLIT_CTX_HEADROOM" 2>/dev/null)" || got=""
-        if [[ "$got" =~ ^[0-9]+$ ]] && ((got >= 512)); then
-            SPLIT_CTX="$got"
-            ny_ok "Context set to ${SPLIT_CTX} tokens: the most this model's ${SPLIT_KV} KV cache fits in the free RAM across ${#PLAN_NAMES[@]} node$([[ ${#PLAN_NAMES[@]} -ne 1 ]] && echo s)."
+        # Ask for both the ceiling (KV-only) and the recommended size, which keeps
+        # the compute buffer free so the model doesn't OOM on warm-up and reload
+        # in a loop.  We deploy the recommended size and report the ceiling too.
+        plan="$(ctxplan_py plan --header "$SPLIT_HDR_FILE" --kv "$SPLIT_KV" --nodes "$budgets" \
+            --headroom "$SPLIT_CTX_HEADROOM" --ubatch "$SPLIT_UBATCH" 2>/dev/null)" || plan=""
+        if [[ -n "$plan" ]]; then
+            rec="$(printf '%s' "$plan" | python3 -c 'import sys,json;print(int(json.load(sys.stdin)["recommended"]))' 2>/dev/null)" || rec=""
+            mx="$(printf '%s' "$plan" | python3 -c 'import sys,json;print(int(json.load(sys.stdin)["max"]))' 2>/dev/null)" || mx=""
+        fi
+        if [[ "$rec" =~ ^[0-9]+$ ]] && ((rec >= 512)); then
+            SPLIT_CTX="$rec"
+            [[ "$mx" =~ ^[0-9]+$ ]] && SPLIT_CTX_MAX="$mx"
+            if [[ -n "$SPLIT_CTX_MAX" ]] && ((SPLIT_CTX_MAX > SPLIT_CTX)); then
+                ny_ok "Context set to ${SPLIT_CTX} tokens (the RAM could hold up to ${SPLIT_CTX_MAX}): the lower figure leaves each node room for the compute buffer, so the model loads once instead of running out of memory and reloading."
+            else
+                ny_ok "Context set to ${SPLIT_CTX} tokens: the most this model's ${SPLIT_KV} KV cache safely fits in the free RAM across ${#PLAN_NAMES[@]} node$([[ ${#PLAN_NAMES[@]} -ne 1 ]] && echo s)."
+            fi
             SPLIT_CTX_PER_NODE="$(ctxplan_py pernodekv --header "$SPLIT_HDR_FILE" --kv "$SPLIT_KV" --ctx "$SPLIT_CTX" --shares "$SPLIT_SHARES" 2>/dev/null)" || SPLIT_CTX_PER_NODE=""
         else
             SPLIT_CTX=4096
-            ny_warn "The free RAM only leaves room for a small context; using ${SPLIT_CTX}. Add a node, free memory, or try --kv-cache q8_0."
+            ny_warn "The free RAM only leaves room for a small context; using ${SPLIT_CTX}. Add a node, free memory, or try --kv-cache q8_0 or a smaller --ubatch."
         fi
     else
         SPLIT_CTX=16384
         ny_warn "${small}; using ${SPLIT_CTX}. Set a number with --ctx N."
+    fi
+    # While we have the header, notice a mixture-of-experts model and, if it isn't
+    # already set, suggest keeping its experts on CPU so the GPU holds the hot path.
+    if [[ -z "$SPLIT_MOE_CPU" && "${PLAN_GPU_SHARE:-0}" -gt 0 && -n "$SPLIT_HDR_FILE" ]]; then
+        local n_expert
+        n_expert="$(ctxplan_py params --header "$SPLIT_HDR_FILE" 2>/dev/null \
+            | python3 -c 'import sys,json;print(int(json.load(sys.stdin).get("n_expert",0)))' 2>/dev/null)" || n_expert=""
+        if [[ "$n_expert" =~ ^[0-9]+$ ]] && ((n_expert > 0)); then
+            ny_hint "This is a mixture-of-experts model (${n_expert} experts). To put more of the hot path on the GPU, redeploy with --moe-cpu all (keeps the expert weights in CPU RAM, attention/dense on the GPU) -- often faster on a small GPU. Tune with --moe-cpu N if VRAM allows."
+        fi
     fi
     [[ -n "$SPLIT_HDR_FILE" ]] && { rm -f "$SPLIT_HDR_FILE" 2>/dev/null || true; }
     SPLIT_HDR_FILE=""
@@ -740,6 +772,13 @@ split_print_plan() {
     if [[ "${PLAN_GPU_SHARE:-0}" -gt 0 ]]; then
         echo "GPU: $(awk -v m="$PLAN_GPU_SHARE" 'BEGIN{printf "%.1f", m/1024}') GiB of the model on ${PLAN_NAMES[0]}'s NVIDIA GPU (the fastest part)."
     fi
+    if [[ -n "${SPLIT_MOE_CPU:-}" ]]; then
+        if [[ "${PLAN_GPU_SHARE:-0}" -gt 0 ]]; then
+            echo "MoE experts: kept in CPU RAM (--moe-cpu ${SPLIT_MOE_CPU}), so the GPU holds the attention/dense layers that run every token."
+        else
+            echo "MoE experts: --moe-cpu ${SPLIT_MOE_CPU} is set but there's no GPU in this plan, so it only moves memory around without the speed-up. It helps when the main node has an NVIDIA GPU."
+        fi
+    fi
     if [[ -n "${PLAN_TOKS:-}" ]]; then
         echo "Estimated speed: about ${PLAN_TOKS} tokens/s (${PLAN_WHY})"
     fi
@@ -755,7 +794,11 @@ split_print_plan() {
             idx=$((idx + 1))
         done
         if [[ "${SPLIT_CTX_MODE:-fixed}" == max ]]; then
-            echo "  (the most the free RAM allows; set a fixed size with --ctx N)"
+            if [[ -n "${SPLIT_CTX_MAX:-}" ]] && ((SPLIT_CTX_MAX > SPLIT_CTX)); then
+                echo "  (recommended; the RAM could hold up to ${SPLIT_CTX_MAX} but the rest is kept free for the compute buffer so the model doesn't reload-loop. Set a fixed size with --ctx N)"
+            else
+                echo "  (the most the free RAM safely allows; set a fixed size with --ctx N)"
+            fi
         fi
     fi
     echo "To keep extra memory free on a node you also use day to day: --reserve NODE=GiB"
@@ -1037,13 +1080,21 @@ spec: {selector: {app: ${n}}, ports: [{port: 50052, targetPort: 50052}]}
 YAML
         done
 
-        local think_args="" key_args="" kv_args="" svc_type="NodePort" np_line="    nodePort: ${SPLIT_NODEPORT}"
+        local think_args="" key_args="" kv_args="" moe_args="" svc_type="NodePort" np_line="    nodePort: ${SPLIT_NODEPORT}"
         # a quantized KV cache (the conversation's memory) needs flash attention; it halves (q8_0) or quarters (q4_0) it.
         # With an f16 cache, still enable flash attention (default "auto": faster, and off automatically where the GPU can't).
         if [[ "${SPLIT_KV:-f16}" != "f16" ]]; then
             kv_args=$'\n        - --flash-attn\n        - "on"\n        - -ctk\n        - "'"${SPLIT_KV}"$'"\n        - -ctv\n        - "'"${SPLIT_KV}"'"'
         elif [[ "$SPLIT_FLASH_ATTN" != "off" ]]; then
             kv_args=$'\n        - --flash-attn\n        - "'"${SPLIT_FLASH_ATTN}"'"'
+        fi
+        # Mixture-of-experts: keep the big, rarely-used expert weights in CPU RAM so the
+        # GPU holds only the attention/dense layers that run for every token (the Betelgeuse
+        # idea in stock llama.cpp). Frees VRAM to put more of the hot path on the GPU.
+        if [[ "$SPLIT_MOE_CPU" == "all" ]]; then
+            moe_args=$'\n        - --cpu-moe'
+        elif [[ "$SPLIT_MOE_CPU" =~ ^[0-9]+$ ]]; then
+            moe_args=$'\n        - --n-cpu-moe\n        - "'"${SPLIT_MOE_CPU}"'"'
         fi
         if [[ "$SPLIT_THINK" != "on" ]]; then think_args=$'\n        - --reasoning-budget\n        - "0"'; fi
         if [[ -n "$SPLIT_API_KEY" ]]; then key_args=$'\n        - --api-key-file\n        - /secrets/api-key'; fi
@@ -1119,12 +1170,16 @@ ${main_fetch}
         - "${ts_list}$([[ "${PLAN_GPU_SHARE:-0}" -gt 0 ]] && printf ',%s' "$PLAN_GPU_SHARE" || true)"
         - -c
         - "${SPLIT_CTX}"
+        # micro-batch: smaller keeps the compute buffer bounded (the Betelgeuse
+        # lever) so a big context doesn't OOM the node on warm-up and reload-loop
+        - -ub
+        - "${SPLIT_UBATCH}"
         - -np
         - "1"
         - -t
         - "2"
         - -cram
-        - "$(split_cram)"${kv_args}
+        - "$(split_cram)"${kv_args}${moe_args}
         # reuse the conversation's cached tokens when its start shifts (a trimmed chat history, an agent's moving
         # window) instead of reading the whole prompt again
         - --cache-reuse
@@ -1173,6 +1228,8 @@ split_parse_flags() {
     SPLIT_NODEPORT=31435
     SPLIT_CTX=16384
     SPLIT_CTX_MODE="fixed"   # 'max' sizes the context to the free RAM after the plan
+    SPLIT_UBATCH="${NODEYARD_SPLIT_UBATCH:-512}"  # micro-batch (-ub); smaller = smaller compute buffer
+    SPLIT_MOE_CPU="${NODEYARD_SPLIT_MOE_CPU:-}"    # "" off, "all" --cpu-moe, N --n-cpu-moe N (MoE models only)
     SPLIT_KV="f16"
     SPLIT_THINK="off"
     SPLIT_API_KEY=""
@@ -1248,6 +1305,16 @@ split_parse_flags() {
                 SPLIT_KV="$2"
                 shift 2
                 ;;
+            --ubatch)
+                [[ $# -ge 2 ]] && ny_valid_int "$2" 16 2048 || ny_usage_error "--ubatch needs a micro-batch size (16-2048)"
+                SPLIT_UBATCH="$2"
+                shift 2
+                ;;
+            --moe-cpu)
+                [[ $# -ge 2 && ( "$2" == all || "$2" =~ ^[0-9]+$ ) ]] || ny_usage_error "--moe-cpu needs 'all' or a number of layers (MoE models only)"
+                SPLIT_MOE_CPU="$2"
+                shift 2
+                ;;
             --think)
                 [[ $# -ge 2 ]] || ny_usage_error "--think needs on|off"
                 SPLIT_THINK="$2"
@@ -1298,6 +1365,8 @@ split_parse_flags() {
     done
     [[ "$SPLIT_NODEPORT" == 0 ]] || ny_valid_int "$SPLIT_NODEPORT" 30000 32767 || ny_usage_error "--nodeport must be 0 or between 30000 and 32767."
     [[ "$SPLIT_CTX_MODE" == max ]] || ny_valid_int "$SPLIT_CTX" 512 1048576 || ny_usage_error "--ctx: ${NY_VALID_MSG}"
+    ny_valid_int "$SPLIT_UBATCH" 16 2048 || ny_usage_error "--ubatch (or NODEYARD_SPLIT_UBATCH): ${NY_VALID_MSG}"
+    [[ -z "$SPLIT_MOE_CPU" || "$SPLIT_MOE_CPU" == all || "$SPLIT_MOE_CPU" =~ ^[0-9]+$ ]] || ny_usage_error "--moe-cpu (or NODEYARD_SPLIT_MOE_CPU) must be 'all' or a number of layers"
     # the main node's extra reserve is mostly the KV cache: a smaller cache needs less of it
     case "${SPLIT_KV:-f16}" in q8_0) SPLIT_RES_MAIN=640 ;; q4_0) SPLIT_RES_MAIN=448 ;; esac
     ny_valid_enum "$SPLIT_THINK" on off || ny_usage_error "--think: ${NY_VALID_MSG}"
