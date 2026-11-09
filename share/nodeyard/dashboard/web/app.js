@@ -74,14 +74,25 @@
   const plural = (n, w) => n + " " + w + (n === 1 ? "" : "s");
 
   // ---------------------------------------------------------------- data
+  // A 401 on one request must not throw the whole page back to /login (losing your place, reloading, and
+  // stopping the music) when the session is actually still valid — e.g. a request the browser didn't send
+  // the cookie on, or an endpoint that 401s for another reason. Confirm with /api/auth (which honours the
+  // month-long "remember" too) and only leave when we're genuinely signed out.
+  let authCheck = null;
+  async function onUnauthorized() {
+    if (!authCheck) authCheck = fetch("/api/auth", { cache: "no-store" }).then((r) => r.json()).catch(() => null)
+      .finally(() => { setTimeout(() => { authCheck = null; }, 2000); });
+    const a = await authCheck;
+    if (a && a.enabled && a.authenticated === false) location.href = "/login";
+  }
   async function getJSON(url) {
     const r = await fetch(url, { cache: "no-store" });
-    if (r.status === 401) { location.href = "/login"; throw new Error("sign in"); }
+    if (r.status === 401) { await onUnauthorized(); throw new Error("sign in"); }
     return r.json();
   }
   async function postJSON(url, body) {
     const r = await fetch(url, { method: "POST", cache: "no-store", headers: { "Content-Type": "application/json", "X-Nodeyard": "1" }, body: JSON.stringify(body || {}) });
-    if (r.status === 401) { location.href = "/login"; throw new Error("sign in"); }
+    if (r.status === 401) { await onUnauthorized(); throw new Error("sign in"); }
     return r.json();
   }
   function derive() {

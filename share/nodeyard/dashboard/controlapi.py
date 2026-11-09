@@ -85,8 +85,8 @@ class KeyGate:
             time.sleep(0.3)
             h._json({"ok": False, "error": "That isn't this server's API key. It is under Settings > Server API key (not the dashboard password). If it works with the running model, choose Settings > Server API key > Use the running model's key to make it the shared key."}, 401)
             return False
-        if ctx.auth.valid(h._token()):   # the dashboard's own page, signed in
-            return True
+        if h._authed():   # the dashboard's own page: a signed-in session, or a browser remembered for the
+            return True   # month (matches the normal gate, so /api/v1/* doesn't 401 after the session expires)
         h._json({"ok": False, "error": "Send the server's API key: Authorization: Bearer KEY (see Settings > Server API key)."}, 401, {"WWW-Authenticate": "Bearer"})
         return False
 
