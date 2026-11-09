@@ -216,7 +216,7 @@ def prepare_chat_target(backend, target, body, rows):
     return target, ""
 
 
-LOAD_UPDATE_SECONDS = 30
+LOAD_UPDATE_SECONDS = 10   # how often a loading model streams a visible progress line to the client
 
 
 def estimate_eta(samples, now, pct):
@@ -232,10 +232,22 @@ def estimate_eta(samples, now, pct):
     return max(0, round((100.0 - float(pct)) / rate))
 
 
-def loading_chunk(turn_id, model_id, backend, phase, pct, eta):
-    """OpenAI-compatible empty delta with Nodeyard loading telemetry in an extension field."""
+def loading_line(phase, pct, eta):
+    """A short, human-readable progress line for clients that only show message text (e.g. Hermes)."""
+    where = {"ready": "ready", "starting": "starting up", "loading": "loading"}.get(phase, phase or "loading")
+    if phase == "ready":
+        return "✅ Model ready.\n"
+    pctstr = ("%d%%" % int(pct)) if isinstance(pct, (int, float)) and not isinstance(pct, bool) else "…"
+    etastr = (", ~%ds left" % int(eta)) if eta else ""
+    return "⏳ Loading model (%s, %s%s)…\n" % (where, pctstr, etastr)
+
+
+def loading_chunk(turn_id, model_id, backend, phase, pct, eta, text=""):
+    """OpenAI-compatible delta carrying Nodeyard loading telemetry in an extension field, and — so a plain
+    client that ignores the extension still sees it's working — a short visible progress line in the content."""
+    delta = {"content": text} if text else {}
     return {"id": turn_id, "object": "chat.completion.chunk", "created": int(time.time()), "model": model_id,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+            "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
             "nodeyard": {"backend": backend, "stage": phase, "progress_pct": pct, "eta_seconds": eta,
                          "update_interval_seconds": LOAD_UPDATE_SECONDS}}
 
@@ -382,7 +394,7 @@ def wait_for_split_load(backend, model_id, job_id, turn, client_gone=lambda: Fal
         state = (backend.store.snapshot().get("state") or {})
         sp = (state.get("ai") or {}).get("split") or {}
         if sp.get("ready") and not sp.get("stale"):
-            turn.push(loading_chunk(turn.id, model_id, "clustered", "ready", 100, 0))
+            turn.push(loading_chunk(turn.id, model_id, "clustered", "ready", 100, 0, text=loading_line("ready", 100, 0)))
             return True
         if sp.get("stale"):
             raise aiapi.AIError("The split model needs reloading: %s." % sp["stale"].get("why", "a node lost its model share"), 503)
@@ -400,8 +412,9 @@ def wait_for_split_load(backend, model_id, job_id, turn, client_gone=lambda: Fal
             samples.append((now, pct))
             samples = [(at, value) for at, value in samples if now - at <= 120]
         if now >= next_update:
-            turn.push(loading_chunk(turn.id, model_id, "clustered", load.get("phase") or "starting",
-                                    pct, estimate_eta(samples, now, pct)))
+            phase = load.get("phase") or "starting"
+            eta = estimate_eta(samples, now, pct)
+            turn.push(loading_chunk(turn.id, model_id, "clustered", phase, pct, eta, text=loading_line(phase, pct, eta)))
             next_update = now + LOAD_UPDATE_SECONDS
         if now - started >= timeout:
             raise aiapi.AIError("Timed out waiting for the split model to load.", 504)
@@ -562,11 +575,12 @@ def watch_ollama_load(backend, target, turn, stop, clock=time.monotonic):
         loaded = ollama_loaded(backend, target)
         if loaded is True:
             _remember_ollama_load(target, now - started)
-            turn.push(loading_chunk(turn.id, target, "ollama", "ready", 100, 0))
+            turn.push(loading_chunk(turn.id, target, "ollama", "ready", 100, 0, text=loading_line("ready", 100, 0)))
             return
         if now >= next_update:
-            turn.push(loading_chunk(turn.id, target, "ollama", "loading" if loaded is False else "starting",
-                                    None, _ollama_eta(target, now - started)))
+            phase = "loading" if loaded is False else "starting"
+            eta = _ollama_eta(target, now - started)
+            turn.push(loading_chunk(turn.id, target, "ollama", phase, None, eta, text=loading_line(phase, None, eta)))
             next_update = now + LOAD_UPDATE_SECONDS
         stop.wait(min(3, max(0.1, next_update - now)))
 
