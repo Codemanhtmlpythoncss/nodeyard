@@ -202,5 +202,70 @@ class PerNodeKvTests(unittest.TestCase):
         self.assertEqual(vals, [1024.0])
 
 
+class ComputeReserveTests(unittest.TestCase):
+    def test_params_expose_embedding_width(self):
+        self.assertEqual(ctxplan.gguf_params(LLAMA)["n_embd"], 4096)
+
+    def test_embedding_width_falls_back_to_heads_times_head_dim(self):
+        g = make_gguf([
+            _kv_string("general.architecture", "llama"),
+            _kv_u32("llama.block_count", 32),
+            _kv_u32("llama.attention.head_count", 32),
+            _kv_u32("llama.attention.head_count_kv", 8),
+            _kv_u32("llama.attention.key_length", 128),
+            _kv_u32("llama.attention.value_length", 128),
+            _kv_u32("llama.context_length", 32768),
+        ])  # no embedding_length -> 32 heads * 128 = 4096
+        self.assertEqual(ctxplan.gguf_params(g)["n_embd"], 4096)
+
+    def test_reserve_never_below_the_floor(self):
+        params = ctxplan.gguf_params(LLAMA)
+        self.assertEqual(ctxplan.compute_reserve_mib(params, 512), ctxplan.COMPUTE_FLOOR_MIB)
+
+    def test_reserve_grows_with_a_bigger_microbatch_and_width(self):
+        wide = {"n_embd": 8192}
+        small_ub = ctxplan.compute_reserve_mib(wide, 512)
+        big_ub = ctxplan.compute_reserve_mib(wide, 2048)
+        self.assertGreaterEqual(big_ub, small_ub)
+        self.assertGreater(big_ub, ctxplan.COMPUTE_FLOOR_MIB)  # wide + large batch clears the floor
+
+
+class CtxPlanTests(unittest.TestCase):
+    def setUp(self):
+        self.params = ctxplan.gguf_params(LLAMA)
+        self.kv = ctxplan.kv_bytes_per_token(self.params, "f16")  # 131072
+
+    def test_recommended_never_exceeds_max(self):
+        nodes = [(1536, 0.4), (8192, 0.6)]
+        plan = ctxplan.ctx_plan(nodes, self.kv, params=self.params, n_ubatch=512, headroom=0.9)
+        self.assertLessEqual(plan["recommended"], plan["max"])
+        self.assertGreaterEqual(plan["recommended"], 512)
+
+    def test_recommended_leaves_room_on_a_tight_node(self):
+        # A node whose KV fills nearly all its RAM must get a lower recommended ctx,
+        # so the compute buffer still fits and the model doesn't OOM-reload-loop.
+        nodes = [(1536, 0.4), (8192, 0.6)]
+        plan = ctxplan.ctx_plan(nodes, self.kv, params=self.params, n_ubatch=512, headroom=0.9)
+        self.assertLess(plan["recommended"], plan["max"])
+        self.assertEqual(plan["compute_mib"], ctxplan.COMPUTE_FLOOR_MIB)
+
+    def test_roomy_nodes_reach_the_trained_cap_for_both(self):
+        nodes = [(99999, 0.5), (99999, 0.5)]
+        plan = ctxplan.ctx_plan(nodes, self.kv, params=self.params, n_ubatch=512, headroom=0.9)
+        self.assertEqual(plan["max"], 32768)
+        self.assertEqual(plan["recommended"], 32768)
+
+    def test_never_advertises_more_than_the_trained_context(self):
+        nodes = [(99999, 1.0)]
+        plan = ctxplan.ctx_plan(nodes, self.kv, params=self.params, n_ubatch=512, headroom=1.0)
+        self.assertLessEqual(plan["max"], self.params["n_ctx_train"])
+
+    def test_recommended_ctx_matches_max_ctx_with_the_buffer_reserved(self):
+        nodes = [(1536, 0.4), (8192, 0.6)]
+        rec = ctxplan.recommended_ctx(nodes, self.kv, headroom=0.9, compute_mib=512)
+        same = ctxplan.max_ctx(nodes, self.kv, headroom=0.9, reserve_mib=512)
+        self.assertEqual(rec, same)
+
+
 if __name__ == "__main__":
     unittest.main()

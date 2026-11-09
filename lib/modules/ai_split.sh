@@ -56,6 +56,9 @@ Options:
                            (spreads the cache across the nodes; default 16384) [deploy]
   --kv-cache f16|q8_0|q4_0 Conversation memory precision: q8_0 halves it with practically
                            the same answers, q4_0 quarters it (default f16) [deploy]
+  --ubatch N               Micro-batch size (16-2048, default 512). Smaller keeps the
+                           compute buffer bounded so a big context can't OOM and
+                           reload-loop; larger speeds up long-prompt reads [deploy]
   --think on|off           Allow reasoning output (default off) [deploy]
   --nodeport PORT|0        Chat page + API NodePort (default 31435; 0 = cluster only) [deploy]
   --api-key-file PATH      Require this API key (read from a file) [deploy]
@@ -607,6 +610,7 @@ SPLIT_CTX_HEADROOM="${NODEYARD_SPLIT_CTX_HEADROOM:-0.9}"  # keep a tenth of each
 SPLIT_KV_PER_TOK=""    # bytes of KV cache per token for the whole model (empty: unknown)
 SPLIT_NCTX_TRAIN=""    # the model's trained context length, an upper bound, when known
 SPLIT_CTX_PER_NODE=""  # "MiB MiB ..." the context's cache on each plan node, for the table
+SPLIT_CTX_MAX=""       # the most a context could physically be (KV-only ceiling), for the message
 SPLIT_HDR_FILE=""
 
 ctxplan_py() { python3 "${NY_SHARE}/dashboard/ctxplan.py" "$@"; }
@@ -674,23 +678,37 @@ split_node_kv_budgets() {
 # fall back to a safe default -- it must never abort the deploy (set -e + ERR trap).
 split_size_ctx() {
     SPLIT_CTX_PER_NODE=""
+    SPLIT_CTX_MAX=""
     [[ "${SPLIT_CTX_MODE:-fixed}" == max ]] || return 0
     local small="Couldn't read the model's shape to size the context to the RAM"
     split_fetch_header || true
-    local kv_per_tok="" budgets="" got=""
+    local kv_per_tok="" budgets="" plan="" rec="" mx=""
     if [[ -n "$SPLIT_HDR_FILE" ]]; then
         kv_per_tok="$(ctxplan_py kvpertok --header "$SPLIT_HDR_FILE" --kv "$SPLIT_KV" 2>/dev/null)" || kv_per_tok=""
     fi
     if [[ "$kv_per_tok" =~ ^[0-9]+$ ]] && ((kv_per_tok > 0)) && budgets="$(split_node_kv_budgets)" && [[ -n "$budgets" ]]; then
         SPLIT_KV_PER_TOK="$kv_per_tok"
-        got="$(ctxplan_py maxctx --header "$SPLIT_HDR_FILE" --kv "$SPLIT_KV" --nodes "$budgets" --headroom "$SPLIT_CTX_HEADROOM" 2>/dev/null)" || got=""
-        if [[ "$got" =~ ^[0-9]+$ ]] && ((got >= 512)); then
-            SPLIT_CTX="$got"
-            ny_ok "Context set to ${SPLIT_CTX} tokens: the most this model's ${SPLIT_KV} KV cache fits in the free RAM across ${#PLAN_NAMES[@]} node$([[ ${#PLAN_NAMES[@]} -ne 1 ]] && echo s)."
+        # Ask for both the ceiling (KV-only) and the recommended size, which keeps
+        # the compute buffer free so the model doesn't OOM on warm-up and reload
+        # in a loop.  We deploy the recommended size and report the ceiling too.
+        plan="$(ctxplan_py plan --header "$SPLIT_HDR_FILE" --kv "$SPLIT_KV" --nodes "$budgets" \
+            --headroom "$SPLIT_CTX_HEADROOM" --ubatch "$SPLIT_UBATCH" 2>/dev/null)" || plan=""
+        if [[ -n "$plan" ]]; then
+            rec="$(printf '%s' "$plan" | python3 -c 'import sys,json;print(int(json.load(sys.stdin)["recommended"]))' 2>/dev/null)" || rec=""
+            mx="$(printf '%s' "$plan" | python3 -c 'import sys,json;print(int(json.load(sys.stdin)["max"]))' 2>/dev/null)" || mx=""
+        fi
+        if [[ "$rec" =~ ^[0-9]+$ ]] && ((rec >= 512)); then
+            SPLIT_CTX="$rec"
+            [[ "$mx" =~ ^[0-9]+$ ]] && SPLIT_CTX_MAX="$mx"
+            if [[ -n "$SPLIT_CTX_MAX" ]] && ((SPLIT_CTX_MAX > SPLIT_CTX)); then
+                ny_ok "Context set to ${SPLIT_CTX} tokens (the RAM could hold up to ${SPLIT_CTX_MAX}): the lower figure leaves each node room for the compute buffer, so the model loads once instead of running out of memory and reloading."
+            else
+                ny_ok "Context set to ${SPLIT_CTX} tokens: the most this model's ${SPLIT_KV} KV cache safely fits in the free RAM across ${#PLAN_NAMES[@]} node$([[ ${#PLAN_NAMES[@]} -ne 1 ]] && echo s)."
+            fi
             SPLIT_CTX_PER_NODE="$(ctxplan_py pernodekv --header "$SPLIT_HDR_FILE" --kv "$SPLIT_KV" --ctx "$SPLIT_CTX" --shares "$SPLIT_SHARES" 2>/dev/null)" || SPLIT_CTX_PER_NODE=""
         else
             SPLIT_CTX=4096
-            ny_warn "The free RAM only leaves room for a small context; using ${SPLIT_CTX}. Add a node, free memory, or try --kv-cache q8_0."
+            ny_warn "The free RAM only leaves room for a small context; using ${SPLIT_CTX}. Add a node, free memory, or try --kv-cache q8_0 or a smaller --ubatch."
         fi
     else
         SPLIT_CTX=16384
@@ -752,7 +770,11 @@ split_print_plan() {
             idx=$((idx + 1))
         done
         if [[ "${SPLIT_CTX_MODE:-fixed}" == max ]]; then
-            echo "  (the most the free RAM allows; set a fixed size with --ctx N)"
+            if [[ -n "${SPLIT_CTX_MAX:-}" ]] && ((SPLIT_CTX_MAX > SPLIT_CTX)); then
+                echo "  (recommended; the RAM could hold up to ${SPLIT_CTX_MAX} but the rest is kept free for the compute buffer so the model doesn't reload-loop. Set a fixed size with --ctx N)"
+            else
+                echo "  (the most the free RAM safely allows; set a fixed size with --ctx N)"
+            fi
         fi
     fi
     echo "To keep extra memory free on a node you also use day to day: --reserve NODE=GiB"
@@ -1111,6 +1133,10 @@ ${main_fetch}
         - "${ts_list}$([[ "${PLAN_GPU_SHARE:-0}" -gt 0 ]] && printf ',%s' "$PLAN_GPU_SHARE" || true)"
         - -c
         - "${SPLIT_CTX}"
+        # micro-batch: smaller keeps the compute buffer bounded (the Betelgeuse
+        # lever) so a big context doesn't OOM the node on warm-up and reload-loop
+        - -ub
+        - "${SPLIT_UBATCH}"
         - -np
         - "1"
         - -t
@@ -1165,6 +1191,7 @@ split_parse_flags() {
     SPLIT_NODEPORT=31435
     SPLIT_CTX=16384
     SPLIT_CTX_MODE="fixed"   # 'max' sizes the context to the free RAM after the plan
+    SPLIT_UBATCH="${NODEYARD_SPLIT_UBATCH:-512}"  # micro-batch (-ub); smaller = smaller compute buffer
     SPLIT_KV="f16"
     SPLIT_THINK="off"
     SPLIT_API_KEY=""
@@ -1240,6 +1267,11 @@ split_parse_flags() {
                 SPLIT_KV="$2"
                 shift 2
                 ;;
+            --ubatch)
+                [[ $# -ge 2 ]] && ny_valid_int "$2" 16 2048 || ny_usage_error "--ubatch needs a micro-batch size (16-2048)"
+                SPLIT_UBATCH="$2"
+                shift 2
+                ;;
             --think)
                 [[ $# -ge 2 ]] || ny_usage_error "--think needs on|off"
                 SPLIT_THINK="$2"
@@ -1290,6 +1322,7 @@ split_parse_flags() {
     done
     [[ "$SPLIT_NODEPORT" == 0 ]] || ny_valid_int "$SPLIT_NODEPORT" 30000 32767 || ny_usage_error "--nodeport must be 0 or between 30000 and 32767."
     [[ "$SPLIT_CTX_MODE" == max ]] || ny_valid_int "$SPLIT_CTX" 512 1048576 || ny_usage_error "--ctx: ${NY_VALID_MSG}"
+    ny_valid_int "$SPLIT_UBATCH" 16 2048 || ny_usage_error "--ubatch (or NODEYARD_SPLIT_UBATCH): ${NY_VALID_MSG}"
     # the main node's extra reserve is mostly the KV cache: a smaller cache needs less of it
     case "${SPLIT_KV:-f16}" in q8_0) SPLIT_RES_MAIN=640 ;; q4_0) SPLIT_RES_MAIN=448 ;; esac
     ny_valid_enum "$SPLIT_THINK" on off || ny_usage_error "--think: ${NY_VALID_MSG}"

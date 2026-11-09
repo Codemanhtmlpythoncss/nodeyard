@@ -36,6 +36,21 @@ CTX_STEP = 256        # round contexts to a whole number of 256-token pages
 CTX_MIN = 512
 CTX_HARD_CAP = 1048576
 
+# When a context is sized so its KV cache fills (almost) all of a node's free
+# RAM, there is nothing left for the *compute buffer* -- the activation and graph
+# memory llama.cpp allocates to actually run a token.  The server then OOMs the
+# moment it warms up, the pod restarts, and you get the "loads to 100%, resets,
+# loads again" loop.  So the recommended context leaves a per-node reserve for
+# that buffer.  Its size is dominated by the micro-batch and the model width (a
+# handful of n_ubatch x n_embd activation tensors are live at once); with flash
+# attention on it does not grow with the context, so a fixed reserve is enough.
+# We floor it generously to also cover the GPU runtime context and fragmentation.
+COMPUTE_FLOOR_MIB = 512.0   # never reserve less than this per layer-holding node
+ACT_TENSORS = 8             # ~live n_ubatch x n_embd fp32 activation tensors
+ACT_ELEM_BYTES = 4          # fp32 activations
+ACT_SAFETY = 1.5            # headroom over the rough estimate
+DEFAULT_UBATCH = 512        # llama.cpp's default micro-batch (-ub)
+
 # ---------------------------------------------------------------------------
 # GGUF header reading (just enough of the format to get the attention shape)
 # ---------------------------------------------------------------------------
@@ -173,6 +188,7 @@ def gguf_params(header):
         "arch": arch,
         "n_layer": n_layer,
         "n_head_kv": n_head_kv or n_head,
+        "n_embd": embed or (n_head * key_length if n_head else 0),
         "key_length": key_length,
         "value_length": value_length or key_length,
         "n_ctx_train": n_ctx_train,
@@ -239,6 +255,60 @@ def per_node_kv_mib(ctx, kv_per_tok, shares):
     return [round(ctx * kv_per_tok * max(share, 0.0) / MIB, 1) for share in shares]
 
 
+def compute_reserve_mib(params, n_ubatch=DEFAULT_UBATCH, floor_mib=COMPUTE_FLOOR_MIB):
+    """MiB to keep free *per layer-holding node* for the compute buffer, so a
+    context sized to the KV ceiling still has room to run and does not OOM-loop.
+
+    Estimated from the micro-batch and model width -- the activation tensors live
+    at once -- then floored to also cover the GPU runtime context and memory
+    fragmentation.  A smaller ``--ubatch`` (the Betelgeuse lever) shrinks it.
+    """
+    n_embd = int(params.get("n_embd") or 0)
+    n_ubatch = max(int(n_ubatch or DEFAULT_UBATCH), 1)
+    est = ACT_SAFETY * ACT_TENSORS * n_ubatch * n_embd * ACT_ELEM_BYTES / MIB
+    return round(max(float(floor_mib), est), 1)
+
+
+def recommended_ctx(nodes, kv_per_tok, *, headroom=0.9, reserve_mib=0.0,
+                    cap_ctx=0, compute_mib=COMPUTE_FLOOR_MIB):
+    """Largest context that fits once the compute buffer is also kept free.
+
+    It is just ``max_ctx`` with the per-node reserve raised by ``compute_mib``,
+    so warm-up has the memory it needs and the pod doesn't restart in a loop.
+    """
+    return max_ctx(nodes, kv_per_tok, headroom=headroom,
+                   reserve_mib=float(reserve_mib) + float(compute_mib), cap_ctx=cap_ctx)
+
+
+def ctx_plan(nodes, kv_per_tok, *, params=None, n_ubatch=DEFAULT_UBATCH,
+             headroom=0.9, reserve_mib=0.0, cap_ctx=0, max_headroom=0.95):
+    """Both numbers the operator needs: the most a context *could* be and the
+    size we actually recommend.
+
+      * ``max`` -- the largest context whose KV cache physically fits the free
+        RAM (leaving only a thin ``max_headroom`` margin, no compute buffer).
+        Running at it is what triggers the load-reset loop; it is shown so the
+        operator can see the ceiling.
+      * ``recommended`` -- ``max`` re-solved leaving the compute buffer free on
+        every node, so the model loads once and stays up.  This is what a
+        ``--ctx max`` deploy uses.
+
+    ``recommended`` is never above ``max`` (a smaller per-node budget can only
+    lower the answer).  All inputs are the same ``(free_mib, share)`` list used
+    by :func:`max_ctx`; ``params`` (a GGUF shape) sizes the compute reserve.
+    """
+    compute_mib = compute_reserve_mib(params or {}, n_ubatch) if params else COMPUTE_FLOOR_MIB
+    if not cap_ctx and params:  # never advertise more than the model was trained for
+        cap_ctx = int(params.get("n_ctx_train") or 0)
+    hi = max(float(headroom), float(max_headroom))
+    ceiling = max_ctx(nodes, kv_per_tok, headroom=hi, reserve_mib=reserve_mib, cap_ctx=cap_ctx)
+    rec = recommended_ctx(nodes, kv_per_tok, headroom=headroom, reserve_mib=reserve_mib,
+                          cap_ctx=cap_ctx, compute_mib=compute_mib)
+    rec = min(rec, ceiling)
+    return {"max": ceiling, "recommended": rec, "compute_mib": compute_mib,
+            "n_ctx_train": int(params.get("n_ctx_train") or 0) if params else 0}
+
+
 # ---------------------------------------------------------------------------
 # CLI used by ai_split.sh (bash): numbers in, one number or JSON out
 # ---------------------------------------------------------------------------
@@ -281,6 +351,15 @@ def main(argv):
     pk.add_argument("--ctx", type=int, required=True)
     pk.add_argument("--shares", required=True, help='"s1,s2,..."')
 
+    spn = sub.add_parser("plan", help="max and recommended context as JSON")
+    spn.add_argument("--header", required=True)
+    spn.add_argument("--kv", default="f16", choices=sorted(KV_ELEM_BYTES))
+    spn.add_argument("--nodes", required=True, help='"freeMiB:share,freeMiB:share,..."')
+    spn.add_argument("--headroom", type=float, default=0.9)
+    spn.add_argument("--reserve-mib", type=float, default=0.0)
+    spn.add_argument("--ubatch", type=int, default=DEFAULT_UBATCH, help="micro-batch (-ub); smaller leaves more room")
+    spn.add_argument("--cap-ctx", type=int, default=0, help="override the trained-context cap")
+
     args = p.parse_args(argv)
 
     def header_bytes(path):
@@ -304,6 +383,13 @@ def main(argv):
         shares = [float(x) for x in args.shares.split(",") if x.strip()]
         vals = per_node_kv_mib(args.ctx, kv_bytes_per_token(params, args.kv), shares)
         print(" ".join("%.1f" % v for v in vals))
+        return 0
+    if args.cmd == "plan":
+        cap = args.cap_ctx or params.get("n_ctx_train") or 0
+        plan = ctx_plan(_parse_nodes(args.nodes), kv_bytes_per_token(params, args.kv),
+                        params=params, n_ubatch=args.ubatch, headroom=args.headroom,
+                        reserve_mib=args.reserve_mib, cap_ctx=cap)
+        print(json.dumps(plan))
         return 0
     return 2
 
