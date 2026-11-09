@@ -36,7 +36,7 @@ DEFAULT_BG = {"kind": "preset", "preset": PRESETS[0], "v": 0, "blur": 0, "dim": 
 LISTEN_RE = re.compile(r"^[a-z0-9.:]+(,[a-z0-9.:]+)*$")  # each item is then checked on its own
 ENV = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/tmp", "LANG": "C.UTF-8", "NODEYARD_COLOR": "never"}
 CHAT_DEFAULTS = {"system": "", "temperature": 0.7, "max_tokens": 1024, "compress": "auto", "web": False,
-                 "skills_auto": True, "autofix": False, "files": "ask", "context_length": 8192}
+                 "skills_auto": True, "autofix": False, "files": "ask", "context_length": 8192, "context_max": False}
 
 DEMO_DOCTOR = {"ok": True, "issues": 1, "warnings": 2, "fixed": 0, "checks": [
     {"id": "deps", "category": "nodeyard", "title": "nodeyard's required tools are installed", "status": "ok", "detail": None, "fix": None},
@@ -232,7 +232,7 @@ class Settings:
             out["compress"] = value["compress"]
         if value.get("files") in ("ask", "always", "never"):
             out["files"] = value["files"]
-        for key in ("web", "skills_auto", "autofix"):
+        for key in ("web", "skills_auto", "autofix", "context_max"):
             if isinstance(value.get(key), bool):
                 out[key] = value[key]
         return out
@@ -271,7 +271,7 @@ class Settings:
                 if value[key] not in allowed:
                     raise SettingsError("Choose a supported %s option." % key)
                 candidate[key] = value[key]
-        for key in ("web", "skills_auto", "autofix"):
+        for key in ("web", "skills_auto", "autofix", "context_max"):
             if key in value:
                 if not isinstance(value[key], bool):
                     raise SettingsError("%s must be on or off." % key.replace("_", " ").capitalize())

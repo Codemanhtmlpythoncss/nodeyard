@@ -15,7 +15,7 @@
     search: { q: "", sort: "downloads", results: null, loading: false, error: "", files: {}, open: "" }, key: "", useKey: false, locked: false,
     attach: [],
   };
-  const DEFAULT_CHAT_SETTINGS = { system: "", temperature: 0.7, max_tokens: 1024, compress: "auto", web: false, skills_auto: true, autofix: false, files: "ask", context_length: 8192 };
+  const DEFAULT_CHAT_SETTINGS = { system: "", temperature: 0.7, max_tokens: 1024, compress: "auto", web: false, skills_auto: true, autofix: false, files: "ask", context_length: 8192, context_max: false };
   function chatDefaults() {
     let saved = {};
     try { saved = JSON.parse(store.get("ai.chatDefaults", "") || "{}"); } catch (e) { /* use defaults */ }
@@ -27,8 +27,11 @@
     d.compress = d.compress === "off" ? "off" : "auto";
     d.web = d.web === true; d.skills_auto = d.skills_auto !== false; d.autofix = d.autofix === true;
     d.files = ["ask", "always", "never"].includes(d.files) ? d.files : "ask";
+    d.context_max = d.context_max === true;
     return d;
   }
+  // the context to start a model with, from the defaults: "max" (fit free RAM) or the fixed number
+  const defaultCtx = () => { const d = chatDefaults(); return d.context_max ? "max" : d.context_length; };
   const INVENTORY_TTL = 30 * 24 * 60 * 60 * 1000;
   function readSavedInventory() {
     try {
@@ -592,7 +595,7 @@
     const sp = S.d.ai && S.d.ai.split, same = !want || want.same || (sp && sp.model === want.file), name = ((want && want.file) || (sp && sp.model) || "the model").replace(/\.gguf$/i, "");
     A.loadingModel = { chat: c.id, name, t0: Date.now(), cancelled: false, line: "" }; paintSend(); refreshChat();
     try {
-      const r = same ? await postJSON("/api/run", { action: "split-load" }) : await postJSON("/api/run", { action: sp ? "switch" : "deploy", local: true, file: want.file, ctx: chatDefaults().context_length, alias: aliasFor(want.file), nodes: [], keep_old: true });
+      const r = same ? await postJSON("/api/run", { action: "split-load" }) : await postJSON("/api/run", { action: sp ? "switch" : "deploy", local: true, file: want.file, ctx: defaultCtx(), alias: aliasFor(want.file), nodes: [], keep_old: true });
       if (!r.ok) { toast(r.error || "Couldn't start loading the model."); return false; }
       let status = "running";
       while (status === "running") {
@@ -1787,7 +1790,7 @@
       ${sp && !old ? html`<p style="color:var(--warn)">This restarts the running model with these settings.</p>` : ""}
       <label class="field-l">Name for the API<input class="input" data-v="alias" value="${alias}" spellcheck="false"></label>
       <label class="field-l">Context length (how much text it can remember: attached files count)<input class="input" data-v="ctx" type="number" min="512" max="131072" step="512" value="${(sp && sp.model === file && +sp.ctx) || chatDefaults().context_length}"></label>
-      <label class="check" style="margin-top:6px"><input type="checkbox" data-v="ctxmax"> <span><b>Max for RAM</b> — use the largest context the free memory fits, its cache spread across the machines (ignores the number above)</span></label>
+      <label class="check" style="margin-top:6px"><input type="checkbox" data-v="ctxmax" ${!(sp && sp.model === file) && chatDefaults().context_max ? raw("checked") : ""}> <span><b>Max for RAM</b> — use the largest context the free memory fits, its cache spread across the machines (ignores the number above)</span></label>
       <label class="field-l">Conversation memory (KV cache)<select class="select" data-v="kv">
         <option value="f16">Full precision</option>
         <option value="q8_0" ${fit && fit.need > fit.free ? "selected" : ""}>Half the memory (q8_0): practically the same answers</option>
