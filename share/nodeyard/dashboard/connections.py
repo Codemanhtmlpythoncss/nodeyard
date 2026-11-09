@@ -332,6 +332,14 @@ class Connections:
         with self.lock:
             return json.loads(json.dumps(self.records[str(did)]))
 
+    def recheck(self):
+        """Re-probe every device now and return the fresh view (for the Devices panel's Recheck)."""
+        with self.lock:
+            ids = set(self.records.keys())
+        if ids:
+            self.tick(force_ids=ids)
+        return self.view()
+
     def start(self):
         if self.thread is None:
             self.thread = threading.Thread(target=self._loop, name="nodeyard-connections", daemon=True)
@@ -392,7 +400,10 @@ def register(ctx, args):
         except ConnectionError_ as e:
             fail(h, e)
 
+    def recheck(h, body):
+        h._json({"ok": True, "devices": c.recheck()})
+
     ctx.get_routes["/api/devices/connections"] = view
-    ctx.post_routes.update({"/api/devices/connections": update, "/api/devices/test": test})
+    ctx.post_routes.update({"/api/devices/connections": update, "/api/devices/test": test, "/api/devices/recheck": recheck})
     c.start()
     return c
