@@ -127,6 +127,7 @@
     const d = s.chat_defaults || {};
     const gateNets = s.gate ? s.gate.trusted.join("\n") : "127.0.0.0/8\n10.0.0.0/8\n172.16.0.0/12\n192.168.0.0/16\n100.64.0.0/10\n::1/128\nfc00::/7\nfd7a:115c:a1e0::/48";
     NY.freshHTML(el, html`${s.demo ? html`<div class="banner">Demo: changes here aren't saved anywhere.</div>` : ""}
+      <div class="setsub" id="set-subtabs"><button class="subtab" data-st="tab-main">Main</button><button class="subtab" data-st="tab-access">Accessibility</button></div>
       ${themeCard(theme)}
       ${card("Window appearance", html`<p class="muted small" style="margin-top:0">Saved in this browser and applied across the Nodeyard dashboard, Music and AI Galaxy.</p>
         ${field(html`Window transparency <b id="st-window-alpha-v">${appearance.transparency}%</b>`, html`<input type="range" id="st-window-alpha" min="0" max="85" step="5" value="${appearance.transparency}" class="range">`, "Choose the transparency level, then turn on the switch to apply it to every window.")}
@@ -230,6 +231,29 @@
         ${field("Name", html`<input class="input" id="st-name" value="${s.cluster_name}" placeholder="homelab" spellcheck="false">`, "Lowercase letters, digits and dashes. Shown in the sidebar after the dashboard restarts.")}
         <button class="btn" data-st="name-set">Save</button>`)}
       </div>`);
+    applySettingsTab();
+  }
+  // Split the settings into Main (what most people need regularly) and Accessibility (appearance +
+  // advanced/less-used options). Cards are tagged by their title, so no card content is duplicated.
+  const SETTINGS_MAIN = new Set(["Update", "AI chat defaults", "Sign-in", "One shared API key", "Kubernetes", "Public access"]);
+  const SETTINGS_ACCESS = new Set(["Themes", "Window appearance", "Background", "Hugging Face", "Dashboard service", "Model gate", "Secure address (https)", "Node agents", "Disk limits", "Cluster name"]);
+  function settingsGroupOf(title) {
+    if (SETTINGS_MAIN.has(title)) return "main";
+    if (SETTINGS_ACCESS.has(title)) return "accessibility";
+    for (const t of SETTINGS_MAIN) if (title.startsWith(t)) return "main";
+    for (const t of SETTINGS_ACCESS) if (title.startsWith(t)) return "accessibility";
+    return null;   // unknown card: always show, never hide it
+  }
+  function applySettingsTab() {
+    const el = $("#set-body"); if (!el) return;
+    const tab = T.settingsTab === "accessibility" ? "accessibility" : "main";
+    el.querySelectorAll(":scope > section.card, :scope > .grid > section.card").forEach((c) => {
+      const h = c.querySelector("h3"); if (!h) return;
+      const g = settingsGroupOf((h.textContent || "").trim());
+      if (g) c.style.display = g === tab ? "" : "none";
+    });
+    const bar = $("#set-subtabs");
+    if (bar) bar.querySelectorAll(".subtab").forEach((b) => b.classList.toggle("on", (b.dataset.st === "tab-access") === (tab === "accessibility")));
   }
   function httpsCard(h) {
     h = h || {};
@@ -266,6 +290,7 @@
   document.addEventListener("click", async (e) => {
     const el = e.target.closest("[data-st]"); if (!el) return;
     const a = el.dataset.st, s = T.settings;
+    if (a === "tab-main" || a === "tab-access") { T.settingsTab = a === "tab-access" ? "accessibility" : "main"; applySettingsTab(); return; }
     if (a === "update-all") {
       if (!confirm("Update nodeyard, sc-pick and the audio/download tools, then restart the dashboard?")) return;
       const msg = $("#st-update-msg"); if (msg) msg.textContent = "Starting…";

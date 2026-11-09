@@ -1122,3 +1122,9 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .log-when{color:var(--ink3);white-space:nowrap;font-size:12px;min-width:148px}
 .log-who{color:var(--ink3);min-width:84px;white-space:nowrap}
 .log-msg{flex:1;min-width:0}
+
+/* Settings Main/Accessibility sub-tabs */
+.setsub{display:flex;gap:4px;flex-wrap:wrap;margin:0 0 14px;border-bottom:1px solid var(--line)}
+.setsub .subtab{background:none;border:0;cursor:pointer;padding:8px 16px;color:var(--ink3);font-size:13px;font-weight:600;border-bottom:2px solid transparent}
+.setsub .subtab:hover{color:var(--ink)}
+.setsub .subtab.on{color:var(--accent);border-bottom-color:var(--accent)}
