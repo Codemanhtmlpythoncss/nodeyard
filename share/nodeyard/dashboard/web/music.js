@@ -59,6 +59,8 @@
       "#ny-player select{background:rgba(125,160,200,.10);border:1px solid var(--line,rgba(125,160,200,.18));color:inherit;border-radius:6px;padding:4px;font-size:12px}" +
       "#ny-player button:disabled{opacity:.4;cursor:default}" +
       "#ny-player button.act{color:var(--sc,#ff5500)}" +
+      "#ny-player #ny-like{font-size:17px;line-height:1}" +
+      "#ny-player #ny-like.liked{color:#ff5a6a}" +
       "#ny-player button.act::after{content:'';position:absolute;left:50%;bottom:1px;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--sc,#ff5500)}" +
       "#ny-player #ny-shuffle,#ny-player #ny-repeat,#ny-player #ny-sleep{position:relative}" +
       "#ny-player .loop-state{font-size:10px;font-weight:700;letter-spacing:.03em;color:var(--ink3,#8fa3c0);min-width:46px}" +
@@ -96,6 +98,7 @@
     bar.id = "ny-player";
     bar.innerHTML =
       '<div class="np"><b id="ny-np-title">—</b><span id="ny-np-sub"></span></div>' +
+      '<button id="ny-like" title="Like this track" aria-label="Like this track" aria-pressed="false" hidden>♡</button>' +
       '<canvas id="ny-viz" width="120" height="30" aria-hidden="true"></canvas>' +
       '<button id="ny-prev" title="Previous">⏮</button>' +
       '<button id="ny-play" title="Play/pause">▶</button>' +
@@ -144,6 +147,7 @@
     $("#ny-shuffle").onclick = () => { M.shuffle = !M.shuffle; resetShuffle(M.idx); paintBtn(); savePlayback(false, true); };
     $("#ny-repeat").onclick = cycleRepeat;
     $("#ny-copy").onclick = copyCurrentLink;
+    $("#ny-like").onclick = likeCurrent;
     $("#ny-rate").onchange = (e) => setPlaybackRate(e.target.value, true);
     $("#ny-eq").onchange = (e) => setEqualizer(e.target.value, true);
     $("#ny-seek").oninput = (e) => { if (audio.duration && M.seekable && !M.live) audio.currentTime = (e.target.value / 100) * audio.duration; };
@@ -359,9 +363,39 @@
     const copy = $("#ny-copy");
     copy.disabled = !(current && current.url);
     copy.title = copy.disabled ? "No SoundCloud link for this track" : "Copy SoundCloud link";
+    paintLike(current);
     if (S.view === "music") renderTab();
     mediaSession(); paintSleep();
     notify();
+  }
+
+  // The heart in the bar: filled when the now-playing track is one of your likes.
+  // Likes are SoundCloud tracks (the server keeps them), so only those show the heart.
+  function paintLike(current) {
+    const like = $("#ny-like"); if (!like) return;
+    const likable = !M.live && !!current && !!current.url;
+    like.hidden = !likable;
+    if (!likable) return;
+    const liked = M.scLikes.some((x) => trackKey(x) === trackKey(current));
+    like.textContent = liked ? "♥" : "♡";
+    like.classList.toggle("liked", liked);
+    like.title = liked ? "Liked — click to unlike" : "Like this track";
+    like.setAttribute("aria-label", like.title);
+    like.setAttribute("aria-pressed", liked ? "true" : "false");
+  }
+  // Like/unlike whatever is playing right now, from the bar (works on any page).
+  async function likeCurrent() {
+    const t = M.live ? null : M.queue[M.idx]; if (!t) return;
+    const key = trackKey(t);
+    const liked = !M.scLikes.some((x) => trackKey(x) === key);
+    try {
+      const r = await postJSON("/api/music/like", { track: trackForApi(t), liked });
+      if (!r.ok) { toast(r.error || "Couldn't save that like."); return; }
+      M.scLikes = Array.isArray(r.likes) ? r.likes : [];
+      if (M.data) M.data.likes = M.scLikes;
+      if (M.data && M.data.sc) M.data.sc.likes = M.scLikes.filter((x) => x.url);
+      paintBtn();
+    } catch (e) { toast("Couldn't save that like."); }
   }
 
   // ---- playback -----------------------------------------------------------
@@ -432,6 +466,7 @@
     M.restored = true;
     try {
       const r = await getJSON("/api/music/playback");
+      if (Array.isArray(r.likes)) M.scLikes = r.likes;   // so the bar's heart is right straight away
       const state = r.playback || {};
       // The native app replaces the Music WKWebView when the user selects AI Galaxy, so pagehide is not guaranteed.
       // Restore any recent player state; the `playing` flag still keeps paused tracks paused.
@@ -496,16 +531,45 @@
     bar.classList.add("on");
     paintBtn();
   }
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  // Reload the current track and carry on from where it stopped (used to resume after a blip).
+  function resumeAtPosition(t, pos) {
+    if (trackKey(M.queue[M.idx] || {}) !== trackKey(t)) return;   // the user moved on
+    audio.src = srcFor(t);
+    audio.addEventListener("loadedmetadata", () => {
+      try { if (pos > 0 && (!audio.duration || pos < audio.duration)) audio.currentTime = pos; } catch (e) { /* ignore */ }
+    }, { once: true });
+    audio.play().then(() => { $("#ny-np-sub").textContent = subOf(t); }).catch(() => {});
+  }
+  // Playback errored. A reachable server with a reason (DRM, private) is a real problem with the
+  // track. A server we can't reach is almost always the dashboard restarting for an update — keep
+  // the player where it is, wait for the server to come back, and resume from the same spot so a
+  // deploy doesn't cut the music off.
   async function onAudioError() {
-    if (M.live) return;
+    if (M.live || M._recovering) return;
     const t = M.queue[M.idx]; if (!t) return;
-    if (t.kind === "sc" || t.url) {      // get the server's reason (DRM-protected, private, …)
-      try {
-        const r = await fetch(srcFor(t), { headers: { Range: "bytes=0-1" } });
-        if (!r.ok) { toast((await r.text()) || "Couldn't play that track."); return; }
-      } catch (e) { /* fall through */ }
-    }
-    toast("Couldn't play that track.");
+    const pos = audio.currentTime || 0;
+    try {
+      const r = await fetch(srcFor(t), { headers: { Range: "bytes=0-1" }, cache: "no-store", credentials: "same-origin" });
+      if (r.ok) { resumeAtPosition(t, pos); return; }      // server's fine now: just a hiccup, pick it back up
+      toast((await r.text()) || "Couldn't play that track.");
+      return;
+    } catch (e) { /* server unreachable — probably restarting; recover below */ }
+    M._recovering = true;
+    $("#ny-np-sub").textContent = subOf(t) + " · reconnecting…";
+    try {
+      for (let i = 0; i < 40 && !M.stopping; i++) {
+        await wait(2000);
+        if (trackKey(M.queue[M.idx] || {}) !== trackKey(t)) return;   // the user changed track
+        try {
+          const r = await fetch(srcFor(t), { headers: { Range: "bytes=0-1" }, cache: "no-store", credentials: "same-origin" });
+          if (r.ok || r.status === 429) { resumeAtPosition(t, pos); return; }   // 429 = up but busy; retry via play's own error
+          toast((await r.text()) || "Couldn't play that track.");
+          return;
+        } catch (e2) { /* still down, keep waiting */ }
+      }
+      if (!M.stopping) { $("#ny-np-sub").textContent = subOf(t); toast("Lost the music connection. Press play to resume."); }
+    } finally { M._recovering = false; }
   }
   // What plays after this one, without moving anything (null when nothing follows).
   function peekNext() {

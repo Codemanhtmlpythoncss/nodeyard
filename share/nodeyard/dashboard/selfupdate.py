@@ -24,6 +24,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 UNIT = "nodeyard-dashboard.service"
 CHECK_SECONDS = 10
 SETTLE_SECONDS = 20     # an install copies files one by one: wait until they stop changing
+MUSIC_FRESH = 45        # the page reports playback at least this often while a track plays
+MUSIC_MAX_DEFER = 600   # don't hold an update back for music longer than this (the page resumes on its own)
 RESULTS = {"oom-kill": "it ran out of memory", "signal": "it was killed or crashed", "core-dump": "it crashed",
            "exit-code": "it stopped with an error", "watchdog": "it stopped responding", "timeout": "it took too long to start or stop"}
 
@@ -146,6 +148,17 @@ class SelfUpdate:
         r = getattr(ctx, "research", None)
         if r is not None and any(s.get("status") not in ("done", "failed", "cancelled") for s in list(getattr(r, "sessions", {}).values())):
             return "a research report is being written"
+        # Restarting cuts the audio the page is streaming from us. Wait for a gap in the music,
+        # but not forever: once an update has been pending a while, let it through — the page picks
+        # the track back up on its own when we're back.
+        m = getattr(ctx, "music", None)
+        if m is not None and (self.pending_since is None or time.time() - self.pending_since < MUSIC_MAX_DEFER):
+            try:
+                pb = m.playback()
+                if pb.get("playing") is True and time.time() - float(pb.get("updated") or 0) < MUSIC_FRESH:
+                    return "music is playing"
+            except Exception:  # noqa: BLE001 -- never let this block a restart on error
+                pass
         return ""
 
     def check(self, now=None):

@@ -950,7 +950,10 @@
     if (label.textContent !== text) label.textContent = text;
   }
   function reloadWhenIdle() {
-    const busy = () => userIsInteracting() || (NY.ai && NY.ai.streaming && NY.ai.streaming());
+    // Reloading throws away a playing track, so hold the reload while music is on (as we do for a
+    // chat you're reading or an answer streaming). It reloads once the music stops.
+    const musicOn = () => { try { return !!(NY.music && NY.music.state && NY.music.state().playing); } catch (e) { return false; } };
+    const busy = () => userIsInteracting() || (NY.ai && NY.ai.streaming && NY.ai.streaming()) || musicOn();
     if (!busy()) { location.reload(); return; }
     toast("The dashboard was updated. The page reloads when you're done here.");
     const t = setInterval(() => { if (!busy()) { clearInterval(t); location.reload(); } }, 3000);
