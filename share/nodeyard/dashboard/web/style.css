@@ -1107,3 +1107,12 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .quote-list li { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .quote-form { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
 .quote-form .row > .input { flex: 1 1 200px; }
+
+/* Logs tab: the diagnostic event list */
+.log-list{max-height:62vh;overflow:auto}
+.log-row{display:flex;gap:10px;align-items:baseline;padding:7px 12px;border-bottom:1px solid var(--line);font-size:13px}
+.log-row:last-child{border-bottom:0}
+.log-row.crit{background:rgba(255,90,106,.07)}
+.log-when{color:var(--ink3);white-space:nowrap;font-size:12px;min-width:148px}
+.log-who{color:var(--ink3);min-width:84px;white-space:nowrap}
+.log-msg{flex:1;min-width:0}
