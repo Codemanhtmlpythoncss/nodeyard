@@ -839,6 +839,10 @@ cluster_remove_node_cmd() {
                 purge=1
                 shift
                 ;;
+            --yes | -y)
+                NY_YES=1
+                shift
+                ;;
             -*) ny_usage_error "Unknown option for 'remove-node': $1" ;;
             *)
                 [[ -z "$node" ]] || ny_usage_error "Unexpected argument: $1"
