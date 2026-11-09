@@ -68,8 +68,12 @@
   document.addEventListener("visibilitychange", () => { const v = $("#ny-bg .vid"); if (!document.hidden && v && v.dataset.src && v.paused && v.autoplay) v.play().catch(() => {}); });
   // a muted video may only start after the first click on some browsers
   document.addEventListener("click", () => { const v = $("#ny-bg .vid"); if (v && v.dataset.src && v.paused && !(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches)) v.play().catch(() => {}); }, { once: true });
+  let loadSeq = 0;
   async function loadSettings() {
-    try { const r = await getJSON("/api/settings"); if (r.ok) { T.settings = r; store.set("ai.chatDefaults", JSON.stringify(r.chat_defaults || {})); NY.publicAccess = r.public || null; applyBackground(r.background); } } catch (e) { /* signed out */ }
+    // Ignore a slow/out-of-order response (e.g. the one fired on open) if a newer load or a save
+    // has happened since — otherwise it would clobber a value you just saved and "put it back".
+    const seq = ++loadSeq;
+    try { const r = await getJSON("/api/settings"); if (r.ok && seq === loadSeq) { T.settings = r; store.set("ai.chatDefaults", JSON.stringify(r.chat_defaults || {})); NY.publicAccess = r.public || null; applyBackground(r.background); } } catch (e) { /* signed out */ }
     return T.settings;
   }
   loadSettings();
@@ -138,7 +142,8 @@
           ${field("Default reply length (tokens)", html`<span class="row" style="gap:10px"><input class="input" id="st-chat-max" type="number" min="16" max="65536" step="16" value="${d.max_tokens || 1024}" style="width:130px" ${d.max_tokens === 0 ? raw("disabled") : ""}>
             <span class="check"><input type="checkbox" id="st-chat-nolimit" ${d.max_tokens === 0 ? raw("checked") : ""}> <span>No limit</span></span></span>`)}</div>
         <div class="row wrap" style="gap:18px;align-items:flex-end">
-          ${field("Default model context length", html`<input class="input" id="st-chat-ctx" type="number" min="512" max="131072" step="512" value="${d.context_length || 8192}" style="width:150px">`, "Used when you start a downloaded model. A running model keeps its current context until it is started again.")}
+          <div>${field("Default model context length", html`<input class="input" id="st-chat-ctx" type="number" min="512" max="131072" step="512" value="${d.context_length || 8192}" style="width:150px" ${d.context_max ? raw("disabled") : ""}>`, "Used when you start a downloaded model. A running model keeps its current context until it is started again.")}
+            <label class="check" style="margin-top:6px"><input type="checkbox" id="st-chat-ctxmax" data-st="ctxmax" ${d.context_max ? raw("checked") : ""}> <span>Max context — use the largest that fits free RAM, spread across the machines (ignores the number)</span></label></div>
           ${field("Context compression", html`<select class="select" id="st-chat-compress"><option value="auto" ${d.compress !== "off" ? raw("selected") : ""}>Automatic</option><option value="off" ${d.compress === "off" ? raw("selected") : ""}>Off</option></select>`)}
           ${field("Files", html`<select class="select" id="st-chat-files"><option value="ask" ${!d.files || d.files === "ask" ? raw("selected") : ""}>Only when I ask</option><option value="always" ${d.files === "always" ? raw("selected") : ""}>Always create files</option><option value="never" ${d.files === "never" ? raw("selected") : ""}>Never</option></select>`)}</div>
         <div class="row wrap" style="gap:14px;margin:8px 0">
@@ -270,18 +275,20 @@
     else if (a === "doc-fix") startJob("doctor-fix", { only: el.dataset.id }, () => loadDoctor(true));
     else if (a === "doc-fix-all") startJob("doctor-fix", {}, () => loadDoctor(true));
     else if (a === "theme") { setTheme(el.dataset.theme); renderSettings(); }
+    else if (a === "ctxmax") { const n = $("#st-chat-ctx"); if (n) n.disabled = el.checked; }   // lock the number live when Max context is on
     else if (a === "chat-defaults") {
       const noLimit = $("#st-chat-nolimit").checked;
       const defaults = {
         system: $("#st-chat-system").value, temperature: +$("#st-chat-temp").value,
         max_tokens: noLimit ? 0 : +$("#st-chat-max").value,
         compress: $("#st-chat-compress").value, files: $("#st-chat-files").value,
-        context_length: +$("#st-chat-ctx").value,
+        context_length: +$("#st-chat-ctx").value, context_max: $("#st-chat-ctxmax").checked,
         web: $("#st-chat-web").checked, skills_auto: $("#st-chat-skills").checked,
         autofix: $("#st-chat-autofix").checked,
       };
       const r = await post("/api/settings/chat-defaults", { defaults });
-      if (r.ok) { T.settings.chat_defaults = r.chat_defaults; store.set("ai.chatDefaults", JSON.stringify(r.chat_defaults)); toast("AI chat defaults saved for new chats."); renderSettings(); }
+      // bump loadSeq so a settings fetch still in flight (e.g. from opening the page) can't overwrite this save
+      if (r.ok) { loadSeq++; T.settings.chat_defaults = r.chat_defaults; store.set("ai.chatDefaults", JSON.stringify(r.chat_defaults)); toast("AI chat defaults saved for new chats."); renderSettings(); }
     }
     else if (a === "pw-set") {
       const r = await post("/api/settings/password", { password: $("#st-pw1").value, again: $("#st-pw2").value });
