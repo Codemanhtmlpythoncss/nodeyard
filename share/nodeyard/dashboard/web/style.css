@@ -1108,6 +1108,12 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .quote-form { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
 .quote-form .row > .input { flex: 1 1 200px; }
 
+/* Sub-tabs: the bar shown for a merged sidebar tab (Network, Health, Tools) */
+#subtabs:not(:empty){display:flex;gap:4px;flex-wrap:wrap;margin:0 0 14px;border-bottom:1px solid var(--line)}
+#subtabs .subtab{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;color:var(--ink3);font-size:13px;font-weight:600;border-bottom:2px solid transparent;text-decoration:none;white-space:nowrap}
+#subtabs .subtab:hover{color:var(--ink)}
+#subtabs .subtab.on{color:var(--accent);border-bottom-color:var(--accent)}
+#subtabs .subtab .icon{width:15px;height:15px}
 /* Logs tab: the diagnostic event list */
 .log-list{max-height:62vh;overflow:auto}
 .log-row{display:flex;gap:10px;align-items:baseline;padding:7px 12px;border-bottom:1px solid var(--line);font-size:13px}

@@ -931,12 +931,32 @@
 
   // ---------------------------------------------------------------- chrome, routing, search
   const MOBILE_PRIMARY = new Set(["overview", "nodes", "pods", "ai", "desk"]);
+  // Related pages folded into one sidebar tab, with sub-tabs across the top. The first member is
+  // the tab you land on; each member stays its own view/route, so nothing in those pages changes.
+  const GROUPS = [
+    { label: "Network", icon: "network", sub: "Addresses, reach and access", members: ["network", "access"] },
+    { label: "Health", icon: "alerts", sub: "Alerts, events and checks", members: ["alerts", "events", "doctor"] },
+    { label: "Tools", icon: "tools", sub: "Tools, commands and your APIs", members: ["tools", "commands", "apis"] },
+  ];
+  const groupByMember = {};   // view id -> its group
+  GROUPS.forEach((g) => g.members.forEach((m) => { groupByMember[m] = g; }));
+  const groupOf = (id) => groupByMember[id] || null;
+  // The sidebar list: each group collapsed to one entry (at its first member's spot), others as-is.
+  function navList() {
+    const out = [];
+    VIEWS.forEach((v) => {
+      const g = groupByMember[v.id];
+      if (!g) { out.push(v); return; }
+      if (g.members[0] === v.id) out.push({ id: v.id, label: g.label, icon: g.icon, sub: g.sub, group: g });
+    });
+    return out;
+  }
   let mobileMenuReturnFocus = null;
   function buildNav() {
     const link = (v, mobile) => (v.href ? '<a href="' + v.href + '"' : '<a href="#' + v.id + '" data-view="' + v.id + '"') + (mobile ? ' class="mobile-section-link"' : "") + '><svg class="icon"><use href="#i-' + v.icon + '"/></svg><span class="nav-label">' + esc(v.label) + '</span><span class="n" id="' + (mobile ? "mobile-n-" : "nav-n-") + v.id + '"></span></a>';
-    setHTML($("#nav"), VIEWS.map((v) => raw(link(v, false))));
+    setHTML($("#nav"), navList().map((v) => raw(link(v, false))));
     setHTML($("#mobile-tabs"), [...MOBILE_PRIMARY].map((id) => VIEWS.find((v) => v.id === id)).map((v) => raw('<a href="#' + v.id + '" data-view="' + v.id + '"><svg class="icon"><use href="#i-' + v.icon + '"/></svg><span class="mobile-tab-label">' + esc(v.label) + '</span></a>')).concat([raw('<button type="button" class="mobile-tab-more" aria-haspopup="dialog" aria-controls="mobile-menu" aria-expanded="false"><svg class="icon"><use href="#i-settings"/></svg><span class="mobile-tab-label">More</span></button>')]));
-    setHTML($("#mobile-more-list"), VIEWS.filter((v) => !MOBILE_PRIMARY.has(v.id)).map((v) => raw(link(v, true))));
+    setHTML($("#mobile-more-list"), navList().filter((v) => !MOBILE_PRIMARY.has(v.id)).map((v) => raw(link(v, true))));
   }
   function setMobileMenu(open, restoreFocus) {
     const menu = $("#mobile-menu"), shell = $(".shell"), more = $(".mobile-tab-more");
@@ -952,15 +972,24 @@
     if (open) $("[data-mobile-close]").focus();
     else if (restoreFocus !== false && mobileMenuReturnFocus && mobileMenuReturnFocus.isConnected) mobileMenuReturnFocus.focus();
   }
+  // the sub-tab bar for a grouped view (its members), as a sibling of #view so a page re-render can't wipe it
+  function paintSubtabs() {
+    const st = $("#subtabs"); if (!st) return;
+    const g = groupOf(S.view);
+    setHTML(st, g ? g.members.map((m) => { const mv = VIEWS.find((x) => x.id === m); return raw('<a href="#' + m + '" data-view="' + m + '" class="subtab' + (m === S.view ? " on" : "") + '"><svg class="icon"><use href="#i-' + mv.icon + '"/></svg>' + esc(mv.label) + "</a>"); }) : "");
+  }
   function renderChrome() {
     const v = VIEWS.find((x) => x.id === S.view);
     document.body.classList.toggle("desk-mode", S.view === "desk");
     document.body.classList.toggle("galaxy-mode", S.view === "galaxy");
-    $$("[data-view]").forEach((a) => {
-      const active = a.dataset.view === S.view;
+    // a grouped view highlights its group's single sidebar entry (the group's first member)
+    const g = groupOf(S.view), navActive = g ? g.members[0] : S.view;
+    $$("#nav [data-view], #mobile-tabs [data-view], #mobile-more-list [data-view]").forEach((a) => {
+      const active = a.dataset.view === navActive;
       a.classList.toggle("on", active);
       if (active) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
     });
+    paintSubtabs();
     $("#title").textContent = v.label;
     $("#subtitle").textContent = S.d ? v.sub : "";
     const th = store.get("theme", "auto");
@@ -1040,7 +1069,7 @@
       if (!$("#view")) setHTML(content, html`<div id="banners"></div><div class="loading"><div><div class="spin"></div>${S.res && S.res.error ? "Waiting for the cluster: " + S.res.error : "Reading your cluster…"}</div></div>`);
       return;
     }
-    if (!$("#view")) { setHTML(content, html`<div id="banners"></div><div id="view"></div>`); S.built = null; }
+    if (!$("#view")) { setHTML(content, html`<div id="banners"></div><div id="subtabs"></div><div id="view"></div>`); S.built = null; paintSubtabs(); }
     setHTML($("#banners"), standalone ? "" : banners());
     if (!v) { setTimeout(queueRender, 200); return; }   // that page's script hasn't loaded yet
     const keep = $$(".tablewrap").map((el) => [el.scrollLeft, el.scrollTop]), rebuilt = S.built !== S.view;
