@@ -57,9 +57,14 @@
   const nodeState = (n) => {
     const since = +n.ready_since || 0, age = nowSrv() - since;
     const recent = since > 0 && age >= 0 && age <= 60;
+    // Ready=Unknown means the control plane hasn't heard from the node (NodeStatusUnknown) — e.g. right
+    // after the control node restarts, or a network blip. That is NOT the same as the node being down, so
+    // it shows amber "Status unknown", not red "Not ready". A node actively reporting NotReady (Ready=False)
+    // stays red. "Checking in"/"Recovering" cover the first 60s of any change.
+    const unknown = !n.ready && n.ready_status === "Unknown";
     const checking = !n.ready && recent, recovering = !!n.ready && recent;
-    return { label: checking ? "Checking in" : recovering ? "Recovering" : n.ready ? "Ready" : "Not ready",
-      cls: checking || recovering ? "warn" : n.ready ? "good" : "bad", checking, recovering, recent };
+    return { label: checking ? "Checking in" : recovering ? "Recovering" : n.ready ? "Ready" : unknown ? "Status unknown" : "Not ready",
+      cls: checking || recovering || unknown ? "warn" : n.ready ? "good" : "bad", checking, recovering, recent, unknown };
   };
   const statusClass = (s) => (/^(Running|Succeeded|Completed|Ready|Bound|Normal)$/.test(s) ? "good" : /^(Pending|ContainerCreating|PodInitializing|Terminating|Init:|Released|Available)/.test(s) ? "warn" : "bad");
   const chip = (text, cls) => html`<span class="chip ${cls || ""}">${text}</span>`;
