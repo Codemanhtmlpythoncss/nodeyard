@@ -1122,3 +1122,11 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .log-when{color:var(--ink3);white-space:nowrap;font-size:12px;min-width:148px}
 .log-who{color:var(--ink3);min-width:84px;white-space:nowrap}
 .log-msg{flex:1;min-width:0}
+
+/* Fix: diagnose-and-repair panel */
+.fix-btn .icon{color:var(--accent)}
+.fix-summary{display:flex;gap:18px;flex-wrap:wrap;font-weight:600;font-size:14px;padding:2px 0 6px}
+.fix-summary .bad{color:var(--bad)}.fix-summary .good{color:var(--good)}.fix-summary .warn{color:var(--warn)}
+.fix-row{display:flex;gap:10px;align-items:flex-start;padding:10px 2px;border-bottom:1px solid var(--line)}
+.fix-row:last-child{border-bottom:0}
+.fix-row .grow{min-width:0}
