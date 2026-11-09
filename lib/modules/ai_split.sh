@@ -518,6 +518,9 @@ split_active_fraction() {
 SPLIT_HOP_MS="${NODEYARD_SPLIT_HOP_MS:-40}"
 SPLIT_GPU_BW="${NODEYARD_SPLIT_GPU_BW:-80}" # GB/s a small NVIDIA card reaches (GTX 1050 Ti: 112 on paper)
 SPLIT_GPU_RESERVE=1024                      # MiB of video memory kept for the context and work buffers
+# Flash attention: faster attention and a smaller KV cache. "auto" lets llama.cpp turn it on where the GPU
+# supports it and fall back otherwise (safe on older cards); "on"/"off" force it. A quantized KV cache needs it.
+SPLIT_FLASH_ATTN="${NODEYARD_SPLIT_FLASH_ATTN:-auto}"
 split_best_subset() {
     awk -v need="$1" -v main="$2" -v act="$3" -v size="$4" -v forced="$5" -v hop="$SPLIT_HOP_MS" '
     BEGIN { n = 0; mi = -1 }
@@ -1035,8 +1038,13 @@ YAML
         done
 
         local think_args="" key_args="" kv_args="" svc_type="NodePort" np_line="    nodePort: ${SPLIT_NODEPORT}"
-        # a quantized KV cache (the conversation's memory) needs flash attention; it halves (q8_0) or quarters (q4_0) it
-        if [[ "${SPLIT_KV:-f16}" != "f16" ]]; then kv_args=$'\n        - --flash-attn\n        - "on"\n        - -ctk\n        - "'"${SPLIT_KV}"$'"\n        - -ctv\n        - "'"${SPLIT_KV}"'"'; fi
+        # a quantized KV cache (the conversation's memory) needs flash attention; it halves (q8_0) or quarters (q4_0) it.
+        # With an f16 cache, still enable flash attention (default "auto": faster, and off automatically where the GPU can't).
+        if [[ "${SPLIT_KV:-f16}" != "f16" ]]; then
+            kv_args=$'\n        - --flash-attn\n        - "on"\n        - -ctk\n        - "'"${SPLIT_KV}"$'"\n        - -ctv\n        - "'"${SPLIT_KV}"'"'
+        elif [[ "$SPLIT_FLASH_ATTN" != "off" ]]; then
+            kv_args=$'\n        - --flash-attn\n        - "'"${SPLIT_FLASH_ATTN}"'"'
+        fi
         if [[ "$SPLIT_THINK" != "on" ]]; then think_args=$'\n        - --reasoning-budget\n        - "0"'; fi
         if [[ -n "$SPLIT_API_KEY" ]]; then key_args=$'\n        - --api-key-file\n        - /secrets/api-key'; fi
         if [[ "$SPLIT_NODEPORT" == "0" ]]; then
