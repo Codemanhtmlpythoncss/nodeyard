@@ -155,7 +155,19 @@
         ${T.newPassword ? html`<div class="cmd mt"><span class="mono">${T.newPassword}</span><button class="btn small" data-copy="${T.newPassword}">Copy</button></div><p class="small" style="color:var(--warn)">Write it down: it is only shown now (or later on the server: sudo nodeyard dashboard password --show).</p>` : ""}
         <label class="check mt"><input type="checkbox" data-st="weak" ${s.weak_password ? raw("checked") : ""}> <span>Allow any password, with no minimum length or strength</span></label>
         ${s.weak_password ? html`<p class="small" style="color:var(--warn);margin:6px 0 0">${s.public && s.public.dashboard ? html`<b>The dashboard is public</b>, so anyone on the internet can try to guess a short password (they get 5 tries per 5 minutes, and 30 for everyone together).` : "If you make the dashboard public, a short password can be guessed from the internet."}</p>` : ""}
-        <div class="row wrap mt" style="gap:8px;align-items:center"><button class="btn danger" data-st="signout-all">Sign out everywhere</button><span class="muted small">${s.sessions} signed-in browser${s.sessions === 1 ? "" : "s"}</span></div>`
+        <div class="row wrap mt" style="gap:8px;align-items:center"><button class="btn danger" data-st="signout-all">Sign out everywhere</button><span class="muted small">${s.sessions} signed-in browser${s.sessions === 1 ? "" : "s"}</span></div>
+        ${s.remembered ? html`<div class="mt" style="border-top:1px solid var(--line);padding-top:12px">
+          <label class="check"><input type="checkbox" data-st="remember-toggle" ${s.remembered.enabled ? raw("checked") : ""}> <span>Stay signed in for about a month on your own network, so an update doesn't ask for the password again</span></label>
+          ${s.remembered.enabled ? (s.remembered.devices.length ? html`
+            <div class="faint small" style="margin:10px 0 6px">Remembered browsers. Each one's sign-in address and hardware (MAC) are logged so it's recognised without the password (never over public access):</div>
+            <div style="display:flex;flex-direction:column;gap:6px">${s.remembered.devices.map((e) => html`<div class="row" style="gap:10px;align-items:center;flex-wrap:wrap">
+              <span class="mono">${e.ip || "—"}</span>
+              <span class="mono faint" title="Hardware address">${e.mac || "no MAC"}</span>
+              <span class="muted small">last seen ${fmt.ago(e.last)} ago</span>
+              <button class="btn small" data-st="remember-forget" data-id="${e.id}" style="margin-left:auto">Forget</button></div>`)}</div>
+            <button class="btn small danger mt" data-st="remember-forget-all">Forget all & require the password</button>`
+            : html`<p class="faint small" style="margin:8px 0 0">No browsers remembered yet — the next sign-in from your network will be.</p>`) : ""}
+        </div>` : ""}`
         : empty("No sign-in", "This dashboard only answers on its own machine, so it has no password."))}
       ${card("Background", html`
         <div class="field-l">Built in</div>
@@ -285,6 +297,17 @@
     } else if (a === "signout-all") {
       const r = await post("/api/settings/signout-all");
       if (r.ok) location.href = "/login";
+    } else if (a === "remember-toggle") {
+      const on = el.checked;
+      const r = await post("/api/settings/remember", { on });
+      if (r.ok) { T.settings.remembered = r.remembered; renderSettings(); } else el.checked = !on;
+    } else if (a === "remember-forget") {
+      const r = await post("/api/settings/remember-forget", { id: el.dataset.id });
+      if (r.ok) { T.settings.remembered = r.remembered; renderSettings(); }
+    } else if (a === "remember-forget-all") {
+      if (!window.confirm("Forget every remembered browser?\n\nEach one has to enter the dashboard password next time.")) return;
+      const r = await post("/api/settings/remember-forget", { all: true });
+      if (r.ok) { T.settings.remembered = r.remembered; renderSettings(); }
     } else if (a === "key-reveal") {
       const r = await post("/api/ai/reveal-key");
       if (r.ok) setHTML($("#st-key-shown"), html`<div class="cmd mt"><span class="mono">${r.key}</span><button class="btn small" data-copy="${r.key}">Copy</button></div>`);
