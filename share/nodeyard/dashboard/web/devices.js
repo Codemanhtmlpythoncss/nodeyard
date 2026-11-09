@@ -11,6 +11,18 @@
   let open = U.store.get("devices", "1") === "1";
   const TEMP = 4, LOAD = 6;      // positions in a history sample's per-node list
   const expanded = new Set();
+  const reach = { busy: false, at: 0, by: {} };   // name -> reachability state, from a Recheck
+
+  // For a NotReady node, say whether it actually answers (so you can tell "really down" from
+  // "up but Kubernetes marks it NotReady"). Empty until you press Recheck.
+  function reachChip(name, ready) {
+    if (ready) return "";
+    const st = reach.by[name.toLowerCase()];
+    if (st === "both" || st === "lan" || st === "tailscale") return chip("online", "good");
+    if (st === "partial") return chip("up · agent down", "warn");
+    if (st === "unreachable") return chip("offline", "bad");
+    return "";
+  }
 
   function apply() {
     shell.classList.toggle("devs-on", open);
@@ -59,7 +71,7 @@
     const tseries = series(n.name, TEMP, 60), lseries = series(n.name, LOAD, 60);
     return html`<details class="dev ${!n.ready && !health.checking ? "down" : ""}" data-device="${n.name}" ${expanded.has(n.name) ? "open" : ""}>
       <summary>
-        <i class="dot ${health.cls}"></i><b class="dev-name">${n.name}</b>${health.recent || !n.ready ? chip(health.label, health.cls) : ""}
+        <i class="dot ${health.cls}"></i><b class="dev-name">${n.name}</b>${health.recent || !n.ready ? chip(health.label, health.cls) : ""}${reachChip(n.name, n.ready)}
         <span class="grow"></span>
         ${temp != null ? chip(fmt.temp(temp), tempClass(temp)) : html`<span class="faint small">no temp</span>`}
       </summary>
@@ -100,6 +112,8 @@
       ${anyAgent ? "" : html`<div class="dev-note">Temperatures and load come from the node agents. Install them in Settings → Node agents.</div>`}
       <div class="dev-list">${d.nodes.map(device)}</div>
       <div class="dev-foot">
+        <button class="btn small" data-dev-recheck ${reach.busy ? "disabled" : ""}>${reach.busy ? "Checking…" : "Recheck devices"}</button>
+        <span class="faint small">Re-reads the cluster and tests each machine, so you can see whether a "NotReady" one is actually online.${reach.at ? " Last checked " + fmt.dur((Date.now() - reach.at) / 1000) + " ago." : ""}</span>
         <button class="btn small danger" data-dev-restart>Restart Kubernetes…</button>
         <span class="faint small">Restarts k3s and every nodeyard service on each node, workers first. Offline nodes are skipped.</span>
         <button class="btn small danger" data-dev-reboot>Reboot every machine…</button>
@@ -118,6 +132,7 @@
     const o = e.target.closest("[data-dev-open]");
     if (o) { U.openDrawer("node:" + o.dataset.devOpen); return; }
     if (e.target.closest("[data-dev-close]")) { toggle(false); return; }
+    if (e.target.closest("[data-dev-recheck]")) { doRecheck(); return; }
     if (e.target.closest("[data-dev-restart]")) {
       if (!window.confirm("Restart k3s and every nodeyard service on every node?\n\nWorkers restart one at a time, then the control node. Containers keep running, but the cluster is unreachable for a minute or two. Machines that are completely offline are skipped.")) return;
       U.startJob("restart-cluster", {}, () => U.load(true));
@@ -127,6 +142,20 @@
       U.startJob("reboot-cluster", {}, () => U.load(true));
     }
   });
+  async function doRecheck() {
+    if (reach.busy) return;
+    reach.busy = true; paint();
+    try { await U.load(true); } catch (e) { /* force a fresh cluster read so Ready is current */ }
+    try {
+      const r = await U.postJSON("/api/devices/recheck", {});
+      if (r && r.ok) {
+        reach.by = {};
+        (r.devices || []).forEach((d) => { if (d && d.name) reach.by[String(d.name).toLowerCase()] = d.status; });
+        reach.at = Date.now();
+      } else if (r && r.error) U.toast(r.error);
+    } catch (e) { U.toast("Couldn't recheck the devices."); }
+    reach.busy = false; paint();
+  }
   document.addEventListener("keydown", (e) => {
     if (e.key !== "d" || e.ctrlKey || e.metaKey || e.altKey || /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName || "")) return;
     toggle();
