@@ -291,6 +291,7 @@ class Settings:
             "listen": getattr(a, "listen", ""), "port": getattr(a, "port", 0), "interval": self.ctx.store.interval,
             "cluster_name": getattr(a, "cluster_name", "") or "",
             "auth": self.ctx.auth is not None, "sessions": self.ctx.auth.count() if self.ctx.auth else 0,
+            "remembered": self.ctx.remember.view() if getattr(self.ctx, "remember", None) else None,
             "demo": self.demo, "can_run": self.demo or bool(self.bin and os.access(self.bin, os.X_OK)),
             "hf_token": self._secret_exists("hf-token"), "model_key": self._secret_exists("ai-split-api-key"),
             "agents": bool((st.get("agents") or {}).get("installed")),
@@ -360,6 +361,9 @@ class Settings:
             if rc:
                 raise SettingsError(self._last_error(out), 500)
         self.ctx.auth.set_password(pw, keep=token, min_length=1 if self.weak_ok() else 6)
+        rem = getattr(self.ctx, "remember", None)
+        if rem is not None:
+            rem.forget_all()        # a new password revokes every month-long remember
         return {"password": pw} if body.get("random") is True else {}
 
     def weak_ok(self):
@@ -390,7 +394,29 @@ class Settings:
     def signout_all(self):
         if self.ctx.auth is None:
             raise SettingsError("This dashboard has no sign-in.")
-        return {"signed_out": self.ctx.auth.signout_all()}
+        n = self.ctx.auth.signout_all()
+        rem = getattr(self.ctx, "remember", None)
+        if rem is not None:
+            rem.forget_all()        # also drop month-long remembers, so everyone really has to sign in
+        return {"signed_out": n}
+
+    def remembered_set(self, body):
+        """Turn the month-long "stay signed in" on or off (off also forgets every remembered browser)."""
+        rem = getattr(self.ctx, "remember", None)
+        if rem is None:
+            raise SettingsError("This dashboard has no sign-in.")
+        return {"remembered": (rem.set_enabled(body.get("on") is True), rem.view())[1]}
+
+    def remembered_forget(self, body):
+        """Forget one remembered browser (by id) or all of them."""
+        rem = getattr(self.ctx, "remember", None)
+        if rem is None:
+            raise SettingsError("This dashboard has no sign-in.")
+        if body.get("all") is True:
+            rem.forget_all()
+        else:
+            rem.forget(str(body.get("id") or "")[:48])
+        return {"remembered": rem.view()}
 
     # -- secrets --------------------------------------------------------------------------
 
@@ -873,6 +899,8 @@ def register(ctx, args):
         "/api/settings/password": wrap(lambda h, b: s.set_password(b, h._token())),
         "/api/settings/chat-defaults": wrap(lambda h, b: s.set_chat_defaults(b)),
         "/api/settings/signout-all": wrap(lambda h, b: s.signout_all()),
+        "/api/settings/remember": wrap(lambda h, b: s.remembered_set(b)),
+        "/api/settings/remember-forget": wrap(lambda h, b: s.remembered_forget(b)),
         "/api/settings/weak-password": wrap(lambda h, b: s.set_weak(b)),
         "/api/settings/model-key": wrap(lambda h, b: s.set_model_key(b)),
         "/api/settings/adopt-model-key": wrap(lambda h, b: s.adopt_model_key()),

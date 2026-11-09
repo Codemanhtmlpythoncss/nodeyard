@@ -269,7 +269,11 @@ class Handler(BaseHTTPRequestHandler):
         if "Cache-Control" not in extra:   # (a caller's own caching must not be cancelled by a second, stricter header)
             self.send_header("Cache-Control", "no-store" if ctype.startswith("application/json") else "no-cache")
         for k, v in extra.items():
-            self.send_header(k, v)
+            if isinstance(v, (list, tuple)):   # e.g. two Set-Cookie headers on sign-in
+                for item in v:
+                    self.send_header(k, item)
+            else:
+                self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -316,7 +320,7 @@ class Handler(BaseHTTPRequestHandler):
     def _https(self):
         return self._forwarded() is not None and self.headers.get("X-Forwarded-Proto", "").lower() == "https"
 
-    def _token(self):
+    def _cookie(self, name):
         raw = self.headers.get("Cookie", "")
         if not raw:
             return None
@@ -324,12 +328,25 @@ class Handler(BaseHTTPRequestHandler):
             c = http.cookies.SimpleCookie(raw)
         except http.cookies.CookieError:
             return None
-        m = c.get(authmod.COOKIE)
+        m = c.get(name)
         return m.value if m else None
+
+    def _token(self):
+        return self._cookie(authmod.COOKIE)
 
     def _authed(self):
         a = self.ctx.auth
-        return a is None or a.valid(self._token())
+        if a is None:
+            return True
+        if a.valid(self._token()):
+            return True
+        # Signed in within the last month? A remembered browser skips the password — but never from
+        # public access (a forwarded request), where the password is always required.
+        rem = getattr(self.ctx, "remember", None)
+        if rem is not None and self._forwarded() is None:
+            ip = self.client_address[0]
+            return rem.recognised(self._cookie(authmod.REMEMBER_COOKIE), ip, rem.mac_for(ip))
+        return False
 
     def _gate(self, public=False):
         """True if the request may go on; otherwise the answer has been sent."""
@@ -550,7 +567,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if srv.auth is not None:
                 srv.auth.logout(self._token())
-            return self._json({"ok": True}, extra={"Set-Cookie": "%s=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict" % authmod.COOKIE})
+            rem = getattr(srv, "remember", None)
+            if rem is not None:
+                rem.forget_token(self._cookie(authmod.REMEMBER_COOKIE))
+            clear = ["%s=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict" % authmod.COOKIE,
+                     "%s=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict" % authmod.REMEMBER_COOKIE]
+            return self._json({"ok": True}, extra={"Set-Cookie": clear})
         fn = srv.post_routes.get(path)
         if fn is None:
             return self._json({"ok": False, "error": "Nothing here accepts that kind of request."}, 405, {"Allow": "GET, HEAD"})
@@ -586,8 +608,17 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.flush()
             time.sleep(0.4)
             return self._json({"ok": False, "error": "That isn't the right password."}, 401)
-        cookie = "%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Strict%s" % (authmod.COOKIE, token, authmod.SESSION_SECONDS, "; Secure" if self._https() else "")
-        return self._json({"ok": True}, extra={"Set-Cookie": cookie})
+        secure = "; Secure" if self._https() else ""
+        cookies = ["%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Strict%s" % (authmod.COOKIE, token, authmod.SESSION_SECONDS, secure)]
+        # Remember this browser for the month, but only a real sign-in from your own network — never
+        # a forwarded (public) one, whose address is just the Tailscale Funnel on this machine.
+        rem = getattr(srv, "remember", None)
+        if rem is not None and fwd is None:
+            peer = self.client_address[0]
+            rtoken = rem.remember(peer, rem.mac_for(peer), label=self.headers.get("User-Agent", "")[:60])
+            if rtoken:
+                cookies.append("%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Strict%s" % (authmod.REMEMBER_COOKIE, rtoken, authmod.REMEMBER_SECONDS, secure))
+        return self._json({"ok": True}, extra={"Set-Cookie": cookies})
 
     do_PUT = do_DELETE = do_PATCH = do_OPTIONS = lambda self: self._json(
         {"ok": False, "error": "Nothing here accepts that kind of request."}, 405, {"Allow": "GET, HEAD, POST"})
@@ -701,8 +732,14 @@ def main():
         import agents as agentsmod
         agents = agentsmod.AgentPoller(a.agent_token_file)
     store = Store(source, a.interval, agents)
+    # Remember a signed-in browser for a month so an update doesn't force a fresh sign-in (only when
+    # there's a password to skip in the first place).
+    remember = None
+    if auth is not None:
+        state_dir = getattr(a, "state_dir", "") or "/var/lib/nodeyard/dashboard"
+        remember = authmod.Remember(os.path.join(state_dir, "remember.json"))
     ctx = Context(store=store, source=source, mode="demo" if a.demo else "live", nd_version=a.nodeyard_version, auth=auth,
-                  port=a.port, listen_addrs=addrs)
+                  remember=remember, port=a.port, listen_addrs=addrs)
 
     def agents_route(h, q):
         snap = store.snapshot()
