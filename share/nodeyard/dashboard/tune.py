@@ -491,15 +491,18 @@ class Tuning:
         # own earlier entry; a change that isn't kept removes its earlier kept entry, so a reboot never brings back an old value.
         kept = parse_persisted(p.get("persist_script"))
         changed = {k for k, _ in rt}
-        if rt and (body.get("persist") or (changed & set(kept))):
+        # Restart-resistant by default: a change is kept after a reboot unless the caller
+        # explicitly opts out with persist=false ("apply only until the next restart").
+        want_persist = body.get("persist") is not False
+        if rt and (want_persist or (changed & set(kept))):
             merged = {k: v for k, v in kept.items() if k not in changed}
-            if body.get("persist"):
+            if want_persist:
                 merged.update({k: block for k, block in rt})
                 says.append("Keep these after a reboot (the nodeyard-tune service)")
             else:
-                says.append("Not kept after a reboot (and the earlier kept value for %s is dropped)" % ", ".join(sorted(changed & set(kept))))
+                says.append("Apply only until the next reboot (the earlier kept value for %s is dropped)" % ", ".join(sorted(changed & set(kept))))
             script.append(persist_script(merged))
-        return says, "\n".join(script), {"keys": [k for k, _ in rt], "persist": bool(rt and body.get("persist")), "skipped": skipped,
+        return says, "\n".join(script), {"keys": [k for k, _ in rt], "persist": bool(rt and want_persist), "skipped": skipped,
                                          "pi": any("Raspberry Pi clock" in x for x in says), "lean": bool(lean), "restore": False}
 
     def _restore_plan(self, p):
