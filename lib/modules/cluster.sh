@@ -5,8 +5,9 @@
 
 ny_cmd "worker-info" cluster_worker_info_cmd "Nodes" "Show the address, ports and commands needed to add a worker" nodes json
 ny_cmd "add-node" cluster_add_node_cmd "Nodes" "Install nodeyard on another machine over SSH and join it to this cluster" nodes
-ny_cmd "restart-cluster" cluster_restart_all_cmd "Cluster" "Restart Kubernetes (k3s) on every node: workers one at a time, then this server" nodes
-ny_cmd "reboot-cluster" cluster_reboot_all_cmd "Cluster" "Reboot every machine in the cluster, one at a time" nodes
+ny_cmd "restart-cluster" cluster_restart_all_cmd "Cluster" "Restart k3s and every nodeyard service on every node (offline nodes skipped): workers one at a time, then this server" nodes
+ny_cmd "restart-services" cluster_restart_services_cmd "Cluster" "Restart every nodeyard service on THIS machine (k3s and the nodeyard-* services)" nodes
+ny_cmd "reboot-cluster" cluster_reboot_all_cmd "Cluster" "Reboot every machine in the cluster, one at a time (offline nodes skipped)" nodes
 ny_cmd "remove-node" cluster_remove_node_cmd "Nodes" "Drain a node and remove it from the cluster" nodes
 ny_cmd "nettest" cluster_nettest_cmd "Health" "Test pod-to-pod, DNS and pod-to-node traffic on every node" nettest
 ny_cmd_alias "net-test" "nettest"
@@ -432,16 +433,83 @@ ny_self_bundle() {
     tar -czf "$dest" -C "$NY_HOME" "${items[@]}"
 }
 
+# cluster_node_reachable NODE -- true if any address Kubernetes knows for the node still answers,
+# so a machine that is completely offline (not just NotReady) can be skipped instead of waited on.
+cluster_node_reachable() {
+    local node="$1" ip port
+    for ip in $(kctl get node "$node" -o jsonpath='{range .status.addresses[?(@.type=="InternalIP")]}{.address} {end}{range .status.addresses[?(@.type=="ExternalIP")]}{.address} {end}' 2>/dev/null); do
+        [[ -n "$ip" ]] || continue
+        ping -c1 -W2 "$ip" >/dev/null 2>&1 && return 0
+        if command -v timeout >/dev/null 2>&1; then
+            for port in 10250 22; do
+                timeout 2 bash -c "exec 3<>/dev/tcp/${ip}/${port}" >/dev/null 2>&1 && return 0
+            done
+        fi
+    done
+    return 1
+}
+
+# cluster_restart_local_services -- restart every active nodeyard-* systemd service on THIS machine.
+# --no-block so restarting nodeyard-dashboard (which may be running this) returns at once.
+cluster_restart_local_services() {
+    local s
+    command -v systemctl >/dev/null 2>&1 || return 0
+    for s in $(systemctl list-units --type=service --state=active --no-legend 'nodeyard-*' 2>/dev/null | awk '{print $1}'); do
+        ny_step "Restarting ${s}"
+        systemctl restart --no-block "$s" 2>/dev/null || ny_warn "Couldn't restart ${s}."
+    done
+}
+
+cluster_restart_services_cmd_help() {
+    cat <<'HELP'
+Usage: nodeyard restart-services [--yes]
+
+Restarts every service nodeyard runs on THIS machine, in one go: its own
+nodeyard-* services (the dashboard, fan, zram, tuning, watchdog, pod forwarder,
+...) and then k3s (which also cycles the node-agent pods). Containers keep
+running; k3s and the dashboard come back on their own in a few seconds. Handy
+after an update that refreshed the files but left the old program running, or to
+clear a stuck service. For the whole cluster, use 'nodeyard restart-cluster'.
+HELP
+}
+
+cluster_restart_services_cmd() {
+    ny_need_root
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yes | -y) NY_YES=1; shift ;;
+            *) ny_usage_error "Unknown option for 'restart-services': $1" ;;
+        esac
+    done
+    ny_confirm "Restart every nodeyard service on this machine (its nodeyard-* services and k3s)? Containers keep running; k3s and the dashboard reconnect on their own." n || {
+        ny_info "Cancelled."
+        return 0
+    }
+    k3s_load_state
+    if ny_simulating || [[ "$NY_DRY_RUN" -eq 1 ]]; then
+        ny_plan_add restart "Restart this machine's nodeyard-* services and $(k3s_service_name)"
+        return 0
+    fi
+    cluster_restart_local_services
+    local k
+    k="$(k3s_service_name)"
+    ny_step "Restarting ${k}"
+    ny_run systemctl restart --no-block "$k" || ny_warn "Couldn't restart ${k}."
+    ny_ok "Restarted nodeyard's services on this machine. k3s and the dashboard come back in a few seconds."
+    return 0
+}
+
 cluster_restart_all_cmd_help() {
     cat <<'HELP'
 Usage: nodeyard restart-cluster [--workers-only] [--timeout SECONDS]
 
-Restarts Kubernetes (k3s) on every machine of the cluster. Run it on a server
-node. Workers are restarted first, one at a time, each by a short helper pod
-that asks that machine's init system to restart k3s (no SSH needed), and
-nodeyard waits until the node is Ready again before the next one. This
-server is restarted last; kubectl is unavailable for a minute or two, then
-nodeyard waits for every node to be Ready.
+Restarts k3s and every nodeyard service on every machine of the cluster. Run it
+on a server node. Workers are restarted first, one at a time, each by a short
+helper pod that asks that machine to restart its nodeyard-* services and then
+k3s (no SSH needed); nodeyard waits until the node is Ready again before the next
+one. A machine that is completely offline (no address answers) is skipped, not
+waited on. This server is restarted last; kubectl is unavailable for a minute or
+two, then nodeyard waits for every node to be Ready.
 
   --workers-only   leave this server alone
   --timeout N      how long to wait for each node to come back (default 300)
@@ -484,18 +552,22 @@ cluster_restart_all_cmd() {
         [[ "${node,,}" == "${self,,}" ]] && found_self=1
     done
     ((found_self)) || ny_die "This server (${self}) isn't listed as a node in the cluster." "No nodes were restarted. Check /etc/nodeyard/node-name and the Kubernetes node list." "$NY_E_PRECONDITION"
-    ny_confirm "Restart Kubernetes on every node? Workloads keep running, but the cluster is unreachable for a minute or two while the server restarts." n || {
+    ny_confirm "Restart k3s and every nodeyard service on every node? Workloads keep running, but the cluster is unreachable for a minute or two while the server restarts. Offline machines are skipped." n || {
         ny_info "Cancelled."
         return 0
     }
     local ns="nodeyard-restart"
     for node in $nodes; do
         [[ "${node,,}" == "${self,,}" ]] && continue
-        ny_step "Restarting k3s on ${node}"
         if ny_simulating || [[ "$NY_DRY_RUN" -eq 1 ]]; then
-            ny_plan_add restart "Restart k3s on ${node} with a helper pod, then wait until it is Ready"
+            ny_plan_add restart "Restart nodeyard's services and k3s on ${node} with a helper pod, then wait until it is Ready (skipped if offline)"
             continue
         fi
+        if ! cluster_node_reachable "$node"; then
+            ny_warn "${node} is completely offline (no address answered); skipping it."
+            continue
+        fi
+        ny_step "Restarting nodeyard's services and k3s on ${node}"
         kctl create namespace "$ns" >/dev/null 2>&1 || true
         kctl -n "$ns" delete pod "restart-${node}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
         local manifest
@@ -518,8 +590,15 @@ spec:
     - |
       U=k3s-agent
       systemctl is-active k3s-agent >/dev/null 2>&1 || systemctl is-enabled k3s-agent >/dev/null 2>&1 || U=k3s
-      if command -v systemctl >/dev/null 2>&1; then systemctl restart --no-block "\$U"; else rc-service "\$U" restart >/dev/null 2>&1 & fi
-      echo "asked the machine to restart \$U"
+      if command -v systemctl >/dev/null 2>&1; then
+        for s in \$(systemctl list-units --type=service --state=active --no-legend 'nodeyard-*' 2>/dev/null | awk '{print \$1}'); do
+          systemctl restart --no-block "\$s" 2>/dev/null || true
+        done
+        systemctl restart --no-block "\$U"
+      else
+        rc-service "\$U" restart >/dev/null 2>&1 &
+      fi
+      echo "asked the machine to restart its nodeyard services and \$U"
 YAML
         kctl apply -f "$manifest" >/dev/null || {
             ny_warn "Couldn't start the helper pod on ${node}; skipping it."
@@ -532,11 +611,12 @@ YAML
         cluster_wait_node_ready "$node" "$timeout" || ny_warn "${node} didn't report Ready within ${timeout}s; carrying on."
     done
     if [[ "$workers_only" -eq 0 ]]; then
-        ny_step "Restarting k3s on this server (${self})"
+        ny_step "Restarting nodeyard's services and k3s on this server (${self})"
         if ny_simulating || [[ "$NY_DRY_RUN" -eq 1 ]]; then
-            ny_plan_add restart "Restart k3s on this server, then wait for every node to be Ready"
+            ny_plan_add restart "Restart this server's nodeyard-* services and k3s, then wait for every node to be Ready"
             return 0
         fi
+        cluster_restart_local_services   # the dashboard, fan, zram, tune, watchdog, pod forwarder, ...
         ny_run systemctl restart "$(k3s_service_name)" || ny_die "Couldn't restart $(k3s_service_name)."
         local t0=$SECONDS
         until kctl get nodes >/dev/null 2>&1; do
@@ -548,7 +628,7 @@ YAML
         done
     fi
     kctl delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-    ny_ok "Kubernetes restarted on every node."
+    ny_ok "Restarted k3s and nodeyard's services on every reachable node."
     kctl get nodes 2>/dev/null | sed 's/^/    /' || true
     return 0
 }
@@ -618,7 +698,11 @@ cluster_reboot_all_cmd() {
     for node in $nodes; do
         [[ "${node,,}" == "${self,,}" ]] && continue
         if ny_simulating || [[ "$NY_DRY_RUN" -eq 1 ]]; then
-            ny_plan_add reboot "Drain ${node}, reboot the whole machine, and wait for its boot ID to change and the node to be Ready"
+            ny_plan_add reboot "Drain ${node}, reboot the whole machine, and wait for its boot ID to change and the node to be Ready (skipped if offline)"
+            continue
+        fi
+        if ! cluster_node_reachable "$node"; then
+            ny_warn "${node} is completely offline (no address answered); skipping it."
             continue
         fi
         cluster_reboot_node "$node" "$timeout" "$ns"

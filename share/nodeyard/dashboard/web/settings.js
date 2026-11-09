@@ -198,7 +198,7 @@
           <p class="faint small">If your current key works with the model, this makes it the shared key for the dashboard API and yardcode too. The model stays on that key.</p>` : ""}
         <p class="faint small">Changing it restarts the model's front end (about a minute). Update Nodeyard AI and yardcode to use the new shared key.</p>`)}
       ${card("Kubernetes", html`
-        <p class="muted small" style="margin-top:0">Restart Kubernetes (k3s) on every machine: workers one at a time, then the control node. Running containers keep running; the cluster is out of reach for a minute or two. Use it when nodes act stuck.</p>
+        <p class="muted small" style="margin-top:0">Restart k3s and every nodeyard service on every machine: workers one at a time, then the control node. Running containers keep running; the cluster is out of reach for a minute or two. Machines that are completely offline are skipped. Use it when nodes act stuck, or after an update that didn't take.</p>
         <button class="btn danger" data-st="k8s-restart">Restart Kubernetes…</button>
         <p class="muted small">For a complete machine restart, workers are drained and rebooted one at a time, then the control server. This interrupts workloads and takes the whole cluster offline briefly.</p>
         <button class="btn danger" data-st="k8s-reboot">Reboot every machine…</button>
@@ -326,7 +326,7 @@
       if (r.ok) { toast("The server key now matches the running model. Keep using your current key in yardcode."); loadSettings().then(renderSettings); }
     }
     else if (a === "k8s-restart") {
-      if (!window.confirm("Restart Kubernetes on every node?\n\nWorkers restart one at a time, then the control node. Containers keep running, but the cluster is unreachable for a minute or two.")) return;
+      if (!window.confirm("Restart k3s and every nodeyard service on every node?\n\nWorkers restart one at a time, then the control node. Containers keep running, but the cluster is unreachable for a minute or two. Machines that are completely offline are skipped.")) return;
       startJob("restart-cluster", {}, () => U.load(true));
     } else if (a === "k8s-reboot") {
       if (!window.confirm("Fully reboot every machine in the Kubernetes cluster?\n\nWorkers are drained and rebooted one at a time; the control server reboots last. Every workload will be interrupted, and the dashboard will go offline briefly.")) return;

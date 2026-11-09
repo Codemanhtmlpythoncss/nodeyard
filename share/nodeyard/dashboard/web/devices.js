@@ -101,7 +101,7 @@
       <div class="dev-list">${d.nodes.map(device)}</div>
       <div class="dev-foot">
         <button class="btn small danger" data-dev-restart>Restart Kubernetes…</button>
-        <span class="faint small">Restarts k3s on every node, workers first.</span>
+        <span class="faint small">Restarts k3s and every nodeyard service on each node, workers first. Offline nodes are skipped.</span>
         <button class="btn small danger" data-dev-reboot>Reboot every machine…</button>
         <span class="faint small">Restarts the operating system on each node, then the control server.</span>
       </div>`);
@@ -119,7 +119,7 @@
     if (o) { U.openDrawer("node:" + o.dataset.devOpen); return; }
     if (e.target.closest("[data-dev-close]")) { toggle(false); return; }
     if (e.target.closest("[data-dev-restart]")) {
-      if (!window.confirm("Restart Kubernetes on every node?\n\nWorkers restart one at a time, then the control node. Containers keep running, but the cluster is unreachable for a minute or two.")) return;
+      if (!window.confirm("Restart k3s and every nodeyard service on every node?\n\nWorkers restart one at a time, then the control node. Containers keep running, but the cluster is unreachable for a minute or two. Machines that are completely offline are skipped.")) return;
       U.startJob("restart-cluster", {}, () => U.load(true));
     }
     if (e.target.closest("[data-dev-reboot]")) {
