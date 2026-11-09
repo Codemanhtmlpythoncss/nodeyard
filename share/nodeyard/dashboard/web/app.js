@@ -768,8 +768,11 @@
         const cpu = nodeSeries(0, n.name), mem = nodeSeries(1, n.name), pods = S.d.pods.filter((p) => p.node === n.name);
         const pcols = [{ k: "name", t: "Pod", v: (p) => p.name, r: (p) => html`<b>${p.name}</b>` }, { k: "ns", t: "Namespace", v: (p) => p.namespace, r: (p) => chip(p.namespace) }, { k: "status", t: "Status", v: (p) => p.status, r: (p) => statusChip(p.status) },
           { k: "cpu", t: "CPU", cls: "num", v: (p) => p.cpu, r: (p) => (p.cpu == null ? "–" : fmt.cores(p.cpu)) }, { k: "mem", t: "Memory", cls: "num", v: (p) => p.mem, r: (p) => (p.mem == null ? "–" : fmt.bytes(p.mem)) }];
+        const isControl = (n.roles || []).some((r) => /control-plane|master|etcd/.test(r));
         main = html`<div class="row wrap" style="gap:8px;margin-bottom:12px"><button class="btn small" data-term-goto="node:${n.name}" data-method="kube" title="A shell on this node in the Terminal page">Terminal</button>
-          <button class="btn small" data-term-goto="node:${n.name}" data-method="diagnose" title="Read-only checks for a node that drops out, then a root shell">Run checks</button></div>
+          <button class="btn small" data-term-goto="node:${n.name}" data-method="diagnose" title="Read-only checks for a node that drops out, then a root shell">Run checks</button>
+          <span class="grow"></span>
+          <button class="btn small danger" data-node-remove="${n.name}" ${isControl ? raw("disabled") : ""} title="${isControl ? "The control-plane node runs the cluster and can't be removed here" : "Remove this node from the cluster"}">Remove node…</button></div>
           <div class="grid" style="grid-template-columns:repeat(3,1fr);gap:10px;text-align:center">
           <div class="card" style="padding:12px">${donut(frac(n.cpu_used, n.cpu_cores), { size: 78 })}<div class="muted" style="font-size:12px;margin-top:4px">CPU · ${cpuText(n)}</div></div>
           <div class="card" style="padding:12px">${donut(frac(n.mem_used, n.mem_total), { size: 78 })}<div class="muted" style="font-size:12px;margin-top:4px">Memory · ${memText(n)}</div></div>
@@ -1138,6 +1141,21 @@
     openJob(r.job, onDone);
     return true;
   }
+  // Remove a node from the cluster (real `nodeyard remove-node`, streamed in a job window). Never the
+  // control-plane node. Offline nodes can still be removed — their records are cleared; if the machine
+  // later comes back still running k3s it would rejoin, so it must be powered off or have k3s uninstalled.
+  function removeNode(name) {
+    const n = S.nodeBy[name];
+    if (n && (n.roles || []).some((r) => /control-plane|master|etcd/.test(r))) { toast("The control-plane node runs the cluster and can't be removed here."); return; }
+    const offline = n && !n.ready;
+    const msg = "Remove " + name + " from the cluster?\n\n" +
+      (offline ? "• It's not Ready now. Its node record and join password are cleared so the name can be reused.\n"
+               : "• Its pods move to other nodes first, then it's deleted and its join record cleared (the name can rejoin later).\n") +
+      "• If that machine is still powered on and running k3s it will rejoin — power it off, or run `sudo nodeyard uninstall k3s` on it.\n" +
+      "• No other node is affected.";
+    if (!window.confirm(msg)) return;
+    startJob("remove-node", { node: name }, () => { if (S.drawer === "node:" + name) closeDrawer(); load(true); });
+  }
   // What runs when a task finishes must not depend on its progress window staying open: closing the
   // window early used to skip it (e.g. a deleted model stayed in the saved model list).
   const jobWatchers = new Map();
@@ -1245,6 +1263,8 @@
     if (t.closest("[data-mobile-help]")) { setMobileMenu(false, false); closeModals(); $("#scrim").classList.add("on"); $("#helpm").classList.add("on"); $("#helpm").focus(); return; }
     if (t.closest("[data-mobile-refresh]")) { setMobileMenu(false, false); load(true); return; }
     if (t.closest("[data-mobile-fullrefresh]")) { setMobileMenu(false, false); fullRefresh(); return; }
+    const rm = t.closest("[data-node-remove]");
+    if (rm && !rm.disabled) { removeNode(rm.dataset.nodeRemove); return; }
     const fa = t.closest("[data-act^=full-]");
     if (fa) {
       const act = fa.dataset.act;
