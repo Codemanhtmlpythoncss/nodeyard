@@ -25,6 +25,7 @@
     { id: "events", label: "Events", icon: "events", sub: "What Kubernetes has been doing" },
     { id: "alerts", label: "Alerts", icon: "alerts", sub: "Things that need your attention" },
     { id: "doctor", label: "Doctor", icon: "doctor", sub: "Checks for common problems, with one-click fixes" },
+    { id: "logs", label: "Logs", icon: "file", sub: "Cluster events over the last 48 hours, and a downloadable diagnostic report" },
     { id: "services", label: "Services", icon: "services", sub: "Uptime, latency and certificates for your apps and machines" },
     { id: "tools", label: "Tools", icon: "tools", sub: "Network checks, Wake-on-LAN and metrics" },
     { id: "tune", label: "Tuning", icon: "tune", sub: "AI settings and power, clocks and overclocking for each machine" },
@@ -690,6 +691,60 @@
     },
   };
 
+  const LG = { data: null, error: "", loaded: false, q: "", level: "", device: "", busy: false };
+  async function loadDiag() {
+    LG.busy = true;
+    try { const r = await getJSON("/api/diag/events"); if (r && r.ok) { LG.data = r; LG.error = ""; } else { LG.error = (r && r.error) || "Couldn't load the log."; } }
+    catch (e) { LG.error = "Couldn't reach the dashboard."; }
+    LG.busy = false; LG.loaded = true; renderDiag();
+  }
+  const diagWhen = (t) => { try { return new Date((+t || 0) * 1000).toLocaleString(); } catch (e) { return ""; } };
+  function filteredDiag() {
+    const d = LG.data; if (!d) return [];
+    let evs = (d.events || []).slice().reverse();   // newest first
+    if (LG.level) evs = evs.filter((e) => (e.level || "info") === LG.level);
+    if (LG.device) evs = evs.filter((e) => (e.node || e.ref || "") === LG.device);
+    if (LG.q) { const q = LG.q.toLowerCase(); evs = evs.filter((e) => ((e.title || "") + " " + (e.detail || "") + " " + (e.node || e.ref || "") + " " + (e.kind || "")).toLowerCase().includes(q)); }
+    return evs;
+  }
+  function renderDiagList() {
+    const list = $("#logs-list"); if (!list) return;
+    const evs = filteredDiag();
+    const lvlChip = (l) => chip(l, l === "critical" ? "bad" : l === "warning" ? "warn" : "");
+    setHTML(list, evs.length ? evs.map((e) => html`<div class="log-row${e.level === "critical" ? " crit" : ""}">
+      <span class="log-when mono">${diagWhen(e.t)}</span>${lvlChip(e.level || "info")}
+      <span class="log-who mono">${e.node || e.ref || "cluster"}</span>
+      <span class="log-msg"><b>${e.title || e.kind || ""}</b>${e.detail ? html` <span class="muted">${e.detail}</span>` : ""}</span></div>`)
+      : html`<div class="empty" style="padding:22px">No matching events.</div>`);
+  }
+  function renderDiag() {
+    const host = $("#logs-body"); if (!host || S.view !== "logs") return;
+    const dl = html`<div class="row wrap" style="gap:8px"><a class="btn primary" href="/api/diag/log?format=txt" download><svg class="icon"><use href="#i-download"/></svg>Download 48-Hour Report (.txt)</a>
+      <a class="btn" href="/api/diag/log" download><svg class="icon"><use href="#i-download"/></svg>Full log (.json)</a>
+      <button class="btn" data-logs="refresh">${LG.busy ? "Refreshing…" : "Refresh"}</button></div>`;
+    if (!LG.data) { setHTML(host, html`<div class="card">${dl}<div class="empty mt">${LG.busy ? "Loading the log…" : (LG.error || "No log recorded yet.")}</div></div>`); return; }
+    const s = LG.data.summary || {}, devices = LG.data.devices || [];
+    setHTML(host, html`<div class="card">${dl}
+      <div class="row wrap mt" style="gap:14px;font-size:13px">
+        <span>Recorded window: <b>${s.window_hours || 0} h</b> of ${s.window_requested_hours || 48}</span>
+        <span>Events: <b>${(LG.data.events || []).length}</b></span>
+        <span class="${(s.not_ready_now || []).length ? "bad" : ""}">Not ready now: <b>${(s.not_ready_now || []).join(", ") || "none"}</b></span>
+        <span class="${s.critical_alerts_now ? "bad" : ""}">Critical alerts now: <b>${s.critical_alerts_now || 0}</b></span>
+      </div>
+      <p class="faint small" style="margin:8px 0 0">Node readiness and connectivity changes, alerts, pod restarts, model and dashboard events the control node observed, kept on disk across restarts. Secrets are redacted from the downloads. Per-device journald shipping is not included yet.</p>
+      <div class="row wrap mt" style="gap:8px;align-items:center">
+        <input class="input" id="logs-q" placeholder="Search events…" value="${esc(LG.q)}" style="min-width:200px;flex:1" spellcheck="false">
+        <select class="select" id="logs-level"><option value="">All levels</option><option value="critical" ${LG.level === "critical" ? raw("selected") : ""}>Critical</option><option value="warning" ${LG.level === "warning" ? raw("selected") : ""}>Warning</option><option value="info" ${LG.level === "info" ? raw("selected") : ""}>Info</option></select>
+        <select class="select" id="logs-device"><option value="">All devices</option>${devices.map((dv) => html`<option value="${esc(dv)}" ${LG.device === dv ? raw("selected") : ""}>${dv}</option>`)}</select>
+      </div></div>
+      <div class="card mt" style="padding:0"><div class="log-list" id="logs-list"></div></div>`);
+    renderDiagList();
+  }
+  V.logs = {
+    build() { NY.freshHTML($("#view"), html`<div id="logs-body"></div>`); if (!LG.loaded) loadDiag(); else renderDiag(); },
+    update() {},
+  };
+
   // ---------------------------------------------------------------- drawer
   function parseRef(ref) { const i = ref.indexOf(":"); return { kind: ref.slice(0, i), rest: ref.slice(i + 1) }; }
   function openDrawer(ref, noHash) {
@@ -1245,6 +1300,8 @@
     if (t.closest("[data-mobile-help]")) { setMobileMenu(false, false); closeModals(); $("#scrim").classList.add("on"); $("#helpm").classList.add("on"); $("#helpm").focus(); return; }
     if (t.closest("[data-mobile-refresh]")) { setMobileMenu(false, false); load(true); return; }
     if (t.closest("[data-mobile-fullrefresh]")) { setMobileMenu(false, false); fullRefresh(); return; }
+    const lg = t.closest("[data-logs]");
+    if (lg) { if (lg.dataset.logs === "refresh") loadDiag(); return; }
     const fa = t.closest("[data-act^=full-]");
     if (fa) {
       const act = fa.dataset.act;
@@ -1269,12 +1326,15 @@
     if (t.dataset && t.dataset.f) { setPath(t.dataset.f, t.value); if (S.d) V[S.view].update(); }
     else if (t.id === "pq") { pSel = 0; renderPalette(); }
     else if (t.id === "lg-q" && S.logs) { S.logs.q = t.value; renderLogBox(); }
+    else if (t.id === "logs-q") { LG.q = t.value; renderDiagList(); }
   });
   document.addEventListener("change", (e) => {
     const t = e.target;
     if (t.dataset && t.dataset.f) { setPath(t.dataset.f, t.value); if (S.d) V[S.view].update(); }
     else if (t.id === "lg-c" && S.logs) { S.logs.container = t.value; S.logs.text = null; renderLogs(); }
     else if (t.id === "lg-n" && S.logs) { S.logs.lines = +t.value; if (S.logs.text != null) loadLogs(false); }
+    else if (t.id === "logs-level") { LG.level = t.value; renderDiagList(); }
+    else if (t.id === "logs-device") { LG.device = t.value; renderDiagList(); }
     else if (t.id === "interval" || t.id === "mobile-interval") { S.interval = +t.value; $("#interval").value = t.value; $("#mobile-interval").value = t.value; store.set("interval", t.value); schedule(); }
   });
   document.addEventListener("keydown", (e) => {
