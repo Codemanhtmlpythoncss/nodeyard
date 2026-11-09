@@ -113,8 +113,11 @@ def _skip_value(buf, off, vtype):
 
 
 # The architecture keys we need for KV sizing (matched by suffix, after the arch prefix).
+# expert_count tells a mixture-of-experts model apart: >0 means the experts can be
+# kept on CPU (--cpu-moe) so attention/dense stay on the GPU.
 _WANTED = ("block_count", "attention.head_count", "attention.head_count_kv",
-           "attention.key_length", "attention.value_length", "embedding_length", "context_length")
+           "attention.key_length", "attention.value_length", "embedding_length",
+           "context_length", "expert_count")
 
 
 def gguf_metadata(header):
@@ -184,6 +187,7 @@ def gguf_params(header):
     if not key_length:
         raise GGUFError("cannot determine head dimension from GGUF header")
     n_ctx_train = pick("context_length", required=False, default=0)
+    n_expert = pick("expert_count", required=False, default=0)
     return {
         "arch": arch,
         "n_layer": n_layer,
@@ -192,6 +196,7 @@ def gguf_params(header):
         "key_length": key_length,
         "value_length": value_length or key_length,
         "n_ctx_train": n_ctx_train,
+        "n_expert": n_expert or 0,
     }
 
 
