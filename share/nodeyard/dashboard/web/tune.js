@@ -112,7 +112,7 @@
     if (document.activeElement && document.activeElement.closest && document.activeElement.closest("#tu-root input, #tu-root select")) return;   // (don't redraw what's being edited)
     setHTML($("#tu-root"), html`<div class="card tu-head"><div class="row wrap" style="justify-content:space-between;gap:10px"><div>
         <h2 style="margin:0">Tuning</h2><div class="muted small mt">Per-device settings for running AI, and power, clock and overclock controls. Nothing on a machine changes until you've seen exactly what will run and pressed Run. Every change is in the audit log.</div></div>
-        <div class="row wrap" style="gap:6px"><button class="btn" data-tu-probe="all">Read every machine</button><button class="btn" data-tu-reset-all>Reset all…</button></div></div>
+        <div class="row wrap" style="gap:6px"><button class="btn primary" data-tu-all>Tune all for performance</button><button class="btn" data-tu-probe="all">Read every machine</button><button class="btn" data-tu-reset-all>Reset all…</button></div></div>
         ${!d.agents ? html`<p class="warn-t small">Install the node agents (Processes page) for CPU and temperature details.</p>` : ""}</div>
       ${d.nodes.map(nodeCard)}`);
   }
@@ -152,6 +152,31 @@
       <div class="row wrap mt"><button class="btn primary" data-tu-run="${node}">Run on ${node}</button><button class="btn" data-tu-close>Cancel</button></div></div>`);
     dlg.dataset.node = node; dlg._settings = settings; dlg.hidden = false;
     dlg.querySelector("[data-tu-run]").focus();
+  }
+  // Tune all machines for performance in one go: the safe, reversible levers only — CPU governor and
+  // energy/platform preference to "performance", and each GPU's power limit to its own maximum. Overclock
+  // and CPU power limits are left per-machine (they're riskier and need a per-machine review).
+  async function tuneAllPerformance() {
+    const d = TU.data; if (!d) { toast("Reading machines first…"); return; }
+    const jobs = [];
+    for (const n of d.nodes) {
+      const p = n.probe; if (!n.ready || !p) continue;
+      const s = {};
+      if (p.governors && p.governors.includes("performance") && p.governor !== "performance") s.governor = "performance";
+      if (p.epps && p.epps.includes("performance") && p.epp !== "performance") (s.oc = s.oc || {}).epp = "performance";
+      if (p.profiles && p.profiles.includes("performance") && p.profile !== "performance") (s.oc = s.oc || {}).profile = "performance";
+      (p.gpus || []).forEach((g) => { if (Math.round(g.power) < Math.round(g.max)) (s.gpu_power = s.gpu_power || {})[g.index] = Math.round(g.max); });
+      if (Object.keys(s).length) jobs.push({ node: n.node, settings: s });
+    }
+    if (!jobs.length) { toast("Every machine is already set for performance. (Press “Read every machine” if some haven’t been read yet.)"); return; }
+    if (!window.confirm("Set " + jobs.length + " machine" + (jobs.length === 1 ? "" : "s") + " to performance for the fastest AI?\n\n• CPU governor → performance\n• GPU power → each card’s maximum\n• Energy/platform preference → performance\n\nThey run warmer and the fan is louder under load; the chips still slow themselves before overheating, and “Reset all” undoes it. Overclocking is NOT changed here.")) return;
+    let ok = 0; const failed = [];
+    for (const j of jobs) {
+      const r = await post("/api/tune/apply", { node: j.node, settings: j.settings, confirm: true });
+      if (r && r.ok) ok++; else failed.push(j.node);
+    }
+    toast("Performance applied to " + ok + " machine" + (ok === 1 ? "" : "s") + (failed.length ? "; couldn’t on: " + failed.join(", ") : "") + ".");
+    load().then(paint);
   }
   async function resetAll() {
     const r = await post("/api/tune/reset-all", { confirm: false }); if (!r) return;
@@ -198,6 +223,7 @@
     let b;
     if ((b = t.closest("[data-tu-close]"))) { document.getElementById("tu-dialog").hidden = true; return; }
     if ((b = t.closest("[data-tu-run]"))) { run(b.dataset.tuRun); return; }
+    if (t.closest("[data-tu-all]")) { tuneAllPerformance(); return; }
     if (t.closest("[data-tu-reset-all]")) { resetAll(); return; }
     if (t.closest("[data-tu-reset-run]")) { resetRun(); return; }
     if ((b = t.closest("[data-tu-oc]"))) { const n = TU.data.nodes.find((x) => x.node === b.dataset.tuOc); if (n && n.oc && n.oc.fix) review(n.node, n.oc.fix); return; }
