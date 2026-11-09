@@ -332,6 +332,29 @@ class Connections:
         with self.lock:
             return json.loads(json.dumps(self.records[str(did)]))
 
+    def forget(self, did):
+        """Drop one saved device record by id. Used to clear a stale or duplicate
+        connection row without touching the cluster. If the machine is still a node
+        its record is simply rediscovered on the next tick, so this only sticks for
+        records whose node is gone (or a duplicate id that no live node matches)."""
+        with self.lock:
+            rec = self.records.pop(str(did), None)
+            if rec is None:
+                raise ConnectionError_("No such device.", 404)
+            self._save()
+            return rec.get("name", "")
+
+    def forget_name(self, name):
+        """Drop every saved record for a machine name -- used when its node is removed
+        from the cluster, so no phantom connection row is left behind."""
+        with self.lock:
+            ids = [k for k, r in self.records.items() if r.get("name") == name]
+            for k in ids:
+                self.records.pop(k, None)
+            if ids:
+                self._save()
+            return len(ids)
+
     def recheck(self):
         """Re-probe every device now and return the fresh view (for the Devices panel's Recheck)."""
         with self.lock:
@@ -403,7 +426,21 @@ def register(ctx, args):
     def recheck(h, body):
         h._json({"ok": True, "devices": c.recheck()})
 
+    def forget(h, body):
+        try:
+            did = str(body.get("id") or "")
+            node = str(body.get("node") or "")
+            if did:
+                h._json({"ok": True, "name": c.forget(did)})
+            elif node:
+                h._json({"ok": True, "forgotten": c.forget_name(node)})
+            else:
+                fail(h, ConnectionError_("Which device? Pass an id or a node name."))
+        except ConnectionError_ as e:
+            fail(h, e)
+
     ctx.get_routes["/api/devices/connections"] = view
-    ctx.post_routes.update({"/api/devices/connections": update, "/api/devices/test": test, "/api/devices/recheck": recheck})
+    ctx.post_routes.update({"/api/devices/connections": update, "/api/devices/test": test,
+                            "/api/devices/recheck": recheck, "/api/devices/forget": forget})
     c.start()
     return c

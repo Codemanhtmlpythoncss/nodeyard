@@ -35,7 +35,7 @@
       { k: "ts", t: "Tailscale", v: (d) => d.tailscale.address, r: (d) => pathCell(d, "tailscale") },
       { k: "use", t: "Using", v: (d) => d.preferred || "", r: (d) => html`${d.preferred ? pathName[d.preferred] : html`<span class="faint">none</span>`}<div class="sub">${d.settings.preference === "auto" ? "automatic" : "prefers " + pathName[d.settings.preference]}${d.settings.failover ? "" : ", no failover"}</div>` },
       { k: "checked", t: "Checked", v: (d) => -(d.lan.checked_at || d.tailscale.checked_at || 0), r: (d) => { const t = Math.max(d.lan.checked_at || 0, d.tailscale.checked_at || 0); return t ? ago(t) + " ago" : "–"; } },
-      { k: "act", t: "", cls: "right nowrap", r: (d) => raw('<button class="btn small" data-conn="test" data-id="' + esc(d.id) + '"' + (C.busy[d.id] ? " disabled" : "") + ">" + (C.busy[d.id] ? "Testing…" : "Test now") + '</button> <button class="btn small" data-conn="edit" data-id="' + esc(d.id) + '">Settings</button>') },
+      { k: "act", t: "", cls: "right nowrap", r: (d) => raw('<button class="btn small" data-conn="test" data-id="' + esc(d.id) + '"' + (C.busy[d.id] ? " disabled" : "") + ">" + (C.busy[d.id] ? "Testing…" : "Test now") + '</button> <button class="btn small" data-conn="edit" data-id="' + esc(d.id) + '">Settings</button> <button class="btn small danger" data-conn="remove" data-id="' + esc(d.id) + '"' + (C.busy[d.id] ? " disabled" : "") + ">Remove</button>") },
     ];
     const events = C.devices.flatMap((d) => (d.history || []).map((e) => Object.assign({ device: d.name }, e))).sort((a, b) => b.time - a.time).slice(0, 8);
     setHTML(el, card("Connections", html`<p class="muted small" style="margin-top:0">Each machine's Wi-Fi/LAN and Tailscale address, found by the node agents and Kubernetes and checked separately (node agent and kubelet ports, not ping). A changed address is used once it answers; until then the last good one is kept.</p>
@@ -76,10 +76,39 @@
     });
   }
 
+  // Forget one saved connection record (by its unique id). Clears a stale or duplicate
+  // row without touching the cluster.
+  async function forget(d) {
+    C.busy[d.id] = true; render();
+    try {
+      const r = await postJSON("/api/devices/forget", { id: d.id });
+      if (r.ok) { C.devices = (C.devices || []).filter((x) => x.id !== d.id); toast("Removed " + d.name + " from the list."); }
+      else toast(r.error || "Couldn't remove it.");
+    } catch (e) { toast(e.message || "Couldn't reach the dashboard server."); }
+    finally { delete C.busy[d.id]; render(); }
+  }
+
+  // The Remove button. Duplicate rows (same name) only forget the one record, so a
+  // healthy node's stale twin can go without deleting the node. A single row that is a
+  // live cluster node runs the full, guarded node removal (which also clears its record).
+  function removeRow(d) {
+    const dupes = (C.devices || []).filter((x) => x.name === d.name);
+    const node = S.nodeBy ? S.nodeBy[d.name] : null;
+    if (dupes.length > 1) {
+      const addr = (d.lan && d.lan.address) || (d.tailscale && d.tailscale.address) || d.id;
+      if (!window.confirm("There are " + dupes.length + " saved records named “" + d.name + "”. Forget just this one (" + addr + ")?\n\nThis only clears the stored address record — it doesn't touch the cluster.")) return;
+      return forget(d);
+    }
+    if (node) { U.removeNode(d.name); return; }   // a live cluster node: full guarded removal (also forgets the record)
+    if (!window.confirm("Forget the saved connection record for “" + d.name + "”?\n\nIt isn't a current cluster node, so this just clears the stored record.")) return;
+    forget(d);
+  }
+
   async function act(kind, id) {
     const d = (C.devices || []).find((x) => x.id === id);
     if (kind === "refresh") return load(true);
     if (!d) return;
+    if (kind === "remove") return removeRow(d);
     if (kind === "test") {
       C.busy[id] = true; render();
       try { const r = await postJSON("/api/devices/test", { id }); if (r.ok) Object.assign(d, r.device); else toast(r.error || "The test didn't run."); }
