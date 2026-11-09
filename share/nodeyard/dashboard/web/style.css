@@ -1114,3 +1114,11 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 #subtabs .subtab:hover{color:var(--ink)}
 #subtabs .subtab.on{color:var(--accent);border-bottom-color:var(--accent)}
 #subtabs .subtab .icon{width:15px;height:15px}
+/* Logs tab: the diagnostic event list */
+.log-list{max-height:62vh;overflow:auto}
+.log-row{display:flex;gap:10px;align-items:baseline;padding:7px 12px;border-bottom:1px solid var(--line);font-size:13px}
+.log-row:last-child{border-bottom:0}
+.log-row.crit{background:rgba(255,90,106,.07)}
+.log-when{color:var(--ink3);white-space:nowrap;font-size:12px;min-width:148px}
+.log-who{color:var(--ink3);min-width:84px;white-space:nowrap}
+.log-msg{flex:1;min-width:0}

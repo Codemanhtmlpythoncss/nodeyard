@@ -18,9 +18,26 @@ service — the tail of the dashboard's own journal.
 import collections
 import json
 import os
+import re
 import subprocess
 import threading
 import time
+
+# Scrub anything that looks like a secret before it leaves the server in an exported report.
+_BEARER_RE = re.compile(r"(?i)\bbearer\s+[^\s'\"]{6,}")
+_SECRET_RE = re.compile(
+    r"(?i)(api[_-]?key|apikey|token|secret|password|passwd|pwd|authorization|auth[_-]?token)"
+    r"(\s*[:=]\s*|\s+)(['\"]?)([^\s'\"]{6,})")
+_KEYBLOCK_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.S)
+
+
+def redact(text):
+    """Replace obvious secrets (key=value pairs, bearer tokens, private-key blocks) with a marker."""
+    if not text or not isinstance(text, str):
+        return text
+    text = _KEYBLOCK_RE.sub("[redacted private key]", text)
+    text = _BEARER_RE.sub("bearer ***REDACTED***", text)   # before the keyword pass, so the token after Bearer goes
+    return _SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + m.group(3) + "***REDACTED***", text)
 
 POLL_SECONDS = 15                  # how often we look (catches a flap down to this)
 SAMPLE_SECONDS = 60                # heartbeat cadence
@@ -254,12 +271,40 @@ class Recorder:
             "critical_alerts_now": sum(1 for a in (snap.get("alerts") or []) if a.get("level") == "critical"),
         }
 
-    def bundle(self, now=None):
+    @staticmethod
+    def _redact_events(events):
+        out = []
+        for e in events:
+            e = dict(e)
+            if e.get("title"):
+                e["title"] = redact(e["title"])
+            if e.get("detail"):
+                e["detail"] = redact(e["detail"])
+            out.append(e)
+        return out
+
+    def events_view(self, now=None, limit=4000):
+        """A lighter payload for the Logs viewer: redacted events, the devices seen, and the summary."""
         now = now or time.time()
         with self.lock:
             self._prune(now)
             entries = list(self.entries)
         events = [e for e in entries if e.get("type") == "event"]
+        samples = [e for e in entries if e.get("type") == "sample"]
+        devices = sorted({e.get("node") for e in events if e.get("node")} |
+                         {n for s in samples for n in (s.get("nodes") or {})})
+        return {"ok": True, "generated_at": round(now, 2),
+                "window_hours": round(((now - float(samples[0]["t"])) / 3600.0) if samples else 0, 1),
+                "devices": [d for d in devices if d],
+                "summary": self._summary(events, samples, now),
+                "events": self._redact_events(events[-limit:])}
+
+    def bundle(self, now=None):
+        now = now or time.time()
+        with self.lock:
+            self._prune(now)
+            entries = list(self.entries)
+        events = self._redact_events([e for e in entries if e.get("type") == "event"])
         samples = [e for e in entries if e.get("type") == "sample"]
         snap = self.ctx.store.snapshot()
         su = getattr(self.ctx, "selfupdate", None)
@@ -269,17 +314,60 @@ class Recorder:
             "cluster": ((snap.get("state") or {}).get("cluster") or {}).get("name") or getattr(self.ctx, "mode", ""),
             "nodeyard_version": getattr(self.ctx, "nd_version", ""),
             "generated_at": round(now, 2),
-            "generated_at_iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)),
+            "generated_at_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now)),
+            "timezone": time.strftime("%Z", time.localtime(now)),
             "recorder_started": round(self.started, 2),
             "summary": self._summary(events, samples, now),
             "dashboard": {"build": getattr(su, "build", ""), "last_restart": getattr(su, "last_exit", {}),
                           "oom_kills": getattr(su, "oom_seen", None)} if su else {},
-            "journal_tail": self._journal(),
+            "journal_tail": redact(self._journal()),
             "events": events,
             "samples": samples,
             "snapshot": {"updated": snap.get("updated"), "alerts": snap.get("alerts"),
                          "totals": snap.get("totals"), "state": snap.get("state")},
         }
+
+
+def text_report(data):
+    """A human- and AI-readable .txt rendering of the bundle."""
+    L = []
+    s = data.get("summary", {})
+    L.append("NODEYARD DIAGNOSTIC REPORT (last %s hours)" % (s.get("window_requested_hours") or 48))
+    L.append("Generated: %s (%s)" % (data.get("generated_at_iso", ""), data.get("timezone", "")))
+    L.append("Cluster: %s    nodeyard %s" % (data.get("cluster", "?"), data.get("nodeyard_version", "?")))
+    L.append("Coverage: %s h actually recorded (survives restarts)" % s.get("window_hours", 0))
+    dash = data.get("dashboard") or {}
+    if dash:
+        lr = dash.get("last_restart") or {}
+        L.append("Dashboard build: %s; last unclean stop: %s; OOM kills in window: %s"
+                 % (dash.get("build", "?"), (lr.get("why") if lr else "none"), dash.get("oom_kills")))
+    L.append("")
+    L.append("SUMMARY")
+    L.append("  Not ready now:        %s" % (", ".join(s.get("not_ready_now") or []) or "none"))
+    flaps = s.get("node_notready_counts") or {}
+    L.append("  NotReady events:      %s" % (", ".join("%s=%d" % (k, v) for k, v in flaps.items()) or "none"))
+    hot = s.get("hottest_temp_c") or {}
+    L.append("  Hottest temps seen:   %s" % (", ".join("%s=%s C" % (k, v) for k, v in hot.items()) or "n/a"))
+    L.append("  Critical alerts now:  %s" % s.get("critical_alerts_now", 0))
+    L.append("  Events / samples:     %s / %s" % (s.get("events", 0), s.get("samples", 0)))
+    L.append("")
+    L.append("EVENTS (oldest first; local time)")
+    for e in data.get("events") or []:
+        when = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(float(e.get("t") or 0)))
+        who = e.get("node") or e.get("ref") or "cluster"
+        line = "  %s [%-8s] %-18s %s" % (when, (e.get("level") or "info").upper(), who, e.get("title") or e.get("kind") or "")
+        if e.get("detail"):
+            line += " — " + e["detail"]
+        L.append(line)
+    if not (data.get("events")):
+        L.append("  (none yet)")
+    jt = data.get("journal_tail")
+    if jt:
+        L.append("")
+        L.append("DASHBOARD JOURNAL (redacted, newest last)")
+        for ln in jt.splitlines():
+            L.append("  " + ln)
+    return "\n".join(L) + "\n"
 
 
 def register(ctx, args):
@@ -301,7 +389,15 @@ def register(ctx, args):
 
     def download(h, q):
         data = rec.bundle()
-        fname = "nodeyard-log-%s.json" % time.strftime("%Y%m%d-%H%M", time.localtime())
-        h._json(data, extra={"Content-Disposition": 'attachment; filename="%s"' % fname})
+        stamp = time.strftime("%Y%m%d-%H%M", time.localtime())
+        if (q.get("format", [""])[0] or "") == "txt":
+            body = text_report(data)
+            return h._send(200, body, "text/plain; charset=utf-8",
+                           {"Content-Disposition": 'attachment; filename="nodeyard-report-%s.txt"' % stamp})
+        h._json(data, extra={"Content-Disposition": 'attachment; filename="nodeyard-log-%s.json"' % stamp})
+
+    def events(h, q):
+        h._json(rec.events_view())
 
     ctx.get_routes["/api/diag/log"] = download
+    ctx.get_routes["/api/diag/events"] = events
