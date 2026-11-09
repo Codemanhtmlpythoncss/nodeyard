@@ -117,13 +117,13 @@ class ControlAPIOpenAIModelsTests(unittest.TestCase):
         # No deployment: the downloaded file's base name resolves to its "split:<file>" target.
         self.assertEqual(controlapi.resolve_model_id(Undeployed(), "sample"), "split:sample.gguf")
 
-    def test_loading_event_is_an_openai_chunk_with_30_second_eta_updates(self):
+    def test_loading_event_is_an_openai_chunk_with_10_second_eta_updates(self):
         event = controlapi.loading_chunk("turn-1", "split:sample.gguf", "clustered", "loading", 30, 70)
         self.assertEqual(event["object"], "chat.completion.chunk")
         self.assertEqual(event["choices"][0], {"index": 0, "delta": {}, "finish_reason": None})
         self.assertEqual(event["nodeyard"]["progress_pct"], 30)
         self.assertEqual(event["nodeyard"]["eta_seconds"], 70)
-        self.assertEqual(event["nodeyard"]["update_interval_seconds"], 30)
+        self.assertEqual(event["nodeyard"]["update_interval_seconds"], 10)
 
     def test_eta_is_only_returned_when_observed_progress_is_positive(self):
         self.assertEqual(controlapi.estimate_eta([(0.0, 0.0), (30.0, 30.0)], now=30.0, pct=30.0), 70)
@@ -139,7 +139,7 @@ class ControlAPIOpenAIModelsTests(unittest.TestCase):
         self.assertFalse(controlapi.ollama_loaded(Backend(), "ollama:ollama-0:qwen:7b"))
         self.assertIsNone(controlapi.ollama_loaded(Backend(), "ollama:ollama-1:qwen:7b"))
 
-    def test_split_load_emits_progress_again_after_30_seconds(self):
+    def test_split_load_emits_progress_every_10_seconds(self):
         class Clock:
             now = 0.0
 
@@ -179,7 +179,7 @@ class ControlAPIOpenAIModelsTests(unittest.TestCase):
                                                timeout=60, clock=clock, pause=clock.sleep)
         self.assertTrue(ready)
         updates = [event for event in turn.events if event["nodeyard"]["stage"] == "loading"]
-        self.assertEqual(len(updates), 2)
+        self.assertEqual(len(updates), 4)   # every 10s over ~30s: t=0,10,20,30
         self.assertEqual(updates[-1]["nodeyard"]["progress_pct"], 30)
         self.assertEqual(updates[-1]["nodeyard"]["eta_seconds"], 70)
 
