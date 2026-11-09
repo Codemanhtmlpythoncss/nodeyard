@@ -65,6 +65,12 @@ def alerts(state):
                 add("info", "%s briefly stopped reporting" % n["name"],
                     "%s Kubernetes has reported this for %d seconds and is checking whether it continues." % (detail, int(down_for)),
                     "node", n["name"])
+            elif n.get("ready_status") == "Unknown":
+                # NodeStatusUnknown: the control plane hasn't heard from the kubelet. The machine may be up
+                # but unreachable (a control-node restart or network blip) or actually down — we don't know.
+                add("warning", "%s's status is unknown" % n["name"],
+                    "%s The control plane hasn't heard from it, so it may be up but unreachable (for example just after the control node restarts) rather than down. Use Recheck in the Devices panel to test whether it actually answers." % detail,
+                    "node", n["name"])
             else:
                 add("critical", "%s is not ready" % n["name"], detail, "node", n["name"])
         for cond in ("MemoryPressure", "DiskPressure", "PIDPressure"):

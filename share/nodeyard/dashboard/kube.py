@@ -540,7 +540,12 @@ class KubeSource:
         taints = ["%s%s:%s" % (t.get("key", ""), "=" + t["value"] if t.get("value") else "", t.get("effect", ""))
                   for t in spec.get("taints", []) or []]
         return {
-            "name": name, "ready": conds.get("Ready") == "True", "status": "Ready" if conds.get("Ready") == "True" else "NotReady",
+            "name": name, "ready": conds.get("Ready") == "True",
+            # raw Ready condition: "True" (ready), "False" (node reports it is NOT ready), "Unknown"
+            # (NodeStatusUnknown — the control plane hasn't heard from the kubelet; e.g. right after the
+            # control node restarts, or a network blip — which is NOT the same as the node being down), "" (new).
+            "ready_status": conds.get("Ready", ""),
+            "status": "Ready" if conds.get("Ready") == "True" else ("Unknown" if conds.get("Ready") == "Unknown" else "NotReady"),
             "disk_limit": (meta.get("annotations") or {}).get("nodeyard/disk-limit-gib") or None,
             "roles": roles, "internal_ip": internal, "external_ip": external, "addresses": addrs,
             "os": info.get("osImage", ""), "kernel": info.get("kernelVersion", ""), "arch": info.get("architecture", ""),

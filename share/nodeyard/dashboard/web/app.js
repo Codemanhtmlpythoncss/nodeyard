@@ -58,9 +58,14 @@
   const nodeState = (n) => {
     const since = +n.ready_since || 0, age = nowSrv() - since;
     const recent = since > 0 && age >= 0 && age <= 60;
+    // Ready=Unknown means the control plane hasn't heard from the node (NodeStatusUnknown) — e.g. right
+    // after the control node restarts, or a network blip. That is NOT the same as the node being down, so
+    // it shows amber "Status unknown", not red "Not ready". A node actively reporting NotReady (Ready=False)
+    // stays red. "Checking in"/"Recovering" cover the first 60s of any change.
+    const unknown = !n.ready && n.ready_status === "Unknown";
     const checking = !n.ready && recent, recovering = !!n.ready && recent;
-    return { label: checking ? "Checking in" : recovering ? "Recovering" : n.ready ? "Ready" : "Not ready",
-      cls: checking || recovering ? "warn" : n.ready ? "good" : "bad", checking, recovering, recent };
+    return { label: checking ? "Checking in" : recovering ? "Recovering" : n.ready ? "Ready" : unknown ? "Status unknown" : "Not ready",
+      cls: checking || recovering || unknown ? "warn" : n.ready ? "good" : "bad", checking, recovering, recent, unknown };
   };
   const statusClass = (s) => (/^(Running|Succeeded|Completed|Ready|Bound|Normal)$/.test(s) ? "good" : /^(Pending|ContainerCreating|PodInitializing|Terminating|Init:|Released|Available)/.test(s) ? "warn" : "bad");
   const chip = (text, cls) => html`<span class="chip ${cls || ""}">${text}</span>`;
@@ -1060,6 +1065,14 @@
     if (S.res && S.res.mode === "demo") out.push(html`<div class="banner demo"><svg class="icon"><use href="#i-alerts"/></svg>Demo mode: this is a simulated cluster, not yours.</div>`);
     return html`${out}`;
   }
+  // Show a page's own failure inside #view, without taking down the rest of the dashboard or navigation.
+  function viewError(v, e) {
+    try { console.error("View '" + (S.view) + "' failed:", e); } catch (_) { /* no console */ }
+    const label = (VIEWS.find((x) => x.id === S.view) || {}).label || S.view;
+    const el = $("#view");
+    if (el) setHTML(el, html`<div class="card"><div class="empty"><svg class="icon"><use href="#i-warn"/></svg><b>${label} couldn't load</b>
+      <div class="muted small">Something on this page errored${e && e.message ? ": " + String(e.message).slice(0, 200) : "."} The rest of the dashboard still works — switch pages, or use Refresh in the top bar.</div></div></div>`);
+  }
   function render() {
     renderChrome();
     const content = $("#content");
@@ -1073,8 +1086,13 @@
     setHTML($("#banners"), standalone ? "" : banners());
     if (!v) { setTimeout(queueRender, 200); return; }   // that page's script hasn't loaded yet
     const keep = $$(".tablewrap").map((el) => [el.scrollLeft, el.scrollTop]), rebuilt = S.built !== S.view;
-    if (rebuilt) { v.build(); S.built = S.view; $("#view").classList.remove("fade"); void $("#view").offsetWidth; $("#view").classList.add("fade"); syncControls(); }
-    v.update();
+    // A page that throws while building or updating (e.g. the AI page when its backend is unreachable)
+    // must not break the whole app or bounce navigation: show its error in place and keep everything else.
+    if (rebuilt) {
+      try { v.build(); } catch (e) { viewError(v, e); }
+      S.built = S.view; $("#view").classList.remove("fade"); void $("#view").offsetWidth; $("#view").classList.add("fade"); syncControls();
+    }
+    try { v.update(); } catch (e) { if (rebuilt) viewError(v, e); /* else keep the last good render */ }
     syncControls();
     updateDrawer(false);
     (NY.ui.hooks || []).forEach((f) => { try { f(); } catch (e) { /* a side panel must never break the page */ } });
