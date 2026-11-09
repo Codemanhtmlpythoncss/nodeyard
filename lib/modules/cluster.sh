@@ -433,16 +433,18 @@ ny_self_bundle() {
     tar -czf "$dest" -C "$NY_HOME" "${items[@]}"
 }
 
-# cluster_node_reachable NODE -- true if any address Kubernetes knows for the node still answers,
-# so a machine that is completely offline (not just NotReady) can be skipped instead of waited on.
+# cluster_node_reachable NODE -- true if any address for the node still answers from this server,
+# so a machine that is truly offline can be skipped. Probes every address Kubernetes knows AND the
+# node's own name (Tailscale MagicDNS or /etc/hosts resolves it), on ping and the agent/kubelet/ssh
+# ports -- so a node that is up over Tailscale while its LAN address is down still counts as online.
 cluster_node_reachable() {
-    local node="$1" ip port
-    for ip in $(kctl get node "$node" -o jsonpath='{range .status.addresses[?(@.type=="InternalIP")]}{.address} {end}{range .status.addresses[?(@.type=="ExternalIP")]}{.address} {end}' 2>/dev/null); do
-        [[ -n "$ip" ]] || continue
-        ping -c1 -W2 "$ip" >/dev/null 2>&1 && return 0
+    local node="$1" addr port
+    for addr in "$node" $(kctl get node "$node" -o jsonpath='{range .status.addresses[?(@.type=="InternalIP")]}{.address} {end}{range .status.addresses[?(@.type=="ExternalIP")]}{.address} {end}' 2>/dev/null); do
+        [[ -n "$addr" ]] || continue
+        ping -c1 -W2 "$addr" >/dev/null 2>&1 && return 0
         if command -v timeout >/dev/null 2>&1; then
-            for port in 10250 22; do
-                timeout 2 bash -c "exec 3<>/dev/tcp/${ip}/${port}" >/dev/null 2>&1 && return 0
+            for port in 10250 9093 22; do
+                timeout 2 bash -c "exec 3<>/dev/tcp/${addr}/${port}" >/dev/null 2>&1 && return 0
             done
         fi
     done
@@ -564,7 +566,8 @@ cluster_restart_all_cmd() {
             continue
         fi
         if ! cluster_node_reachable "$node"; then
-            ny_warn "${node} is completely offline (no address answered); skipping it."
+            ny_warn "${node} didn't answer from this server; skipping it."
+            ny_hint "If it's up on another path (e.g. Tailscale), restart it there: ssh root@${node} \"systemctl restart 'nodeyard-*.service'; systemctl restart k3s-agent\""
             continue
         fi
         ny_step "Restarting nodeyard's services and k3s on ${node}"
@@ -702,7 +705,7 @@ cluster_reboot_all_cmd() {
             continue
         fi
         if ! cluster_node_reachable "$node"; then
-            ny_warn "${node} is completely offline (no address answered); skipping it."
+            ny_warn "${node} didn't answer from this server; skipping its reboot."
             continue
         fi
         cluster_reboot_node "$node" "$timeout" "$ns"
