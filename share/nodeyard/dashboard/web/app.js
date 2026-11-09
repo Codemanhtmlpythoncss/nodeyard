@@ -1316,7 +1316,11 @@
       "• If that machine is still powered on and running k3s it will rejoin — power it off, or run `sudo nodeyard uninstall k3s` on it.\n" +
       "• No other node is affected.";
     if (!window.confirm(msg)) return;
-    startJob("remove-node", { node: name }, () => { if (S.drawer === "node:" + name) closeDrawer(); load(true); });
+    startJob("remove-node", { node: name }, () => {
+      postJSON("/api/devices/forget", { node: name }).catch(() => {});  // clear its saved connection record too
+      if (S.drawer === "node:" + name) closeDrawer();
+      load(true);
+    });
   }
   // What runs when a task finishes must not depend on its progress window staying open: closing the
   // window early used to skip it (e.g. a deleted model stayed in the saved model list).
@@ -1527,7 +1531,7 @@
   });
 
   NY.ui = { hooks: [], bar, tempClass, nodeState, S, V, $, $$, store, chip, statusChip, ip, card, table, metric, seg, empty, ago, plural, frac, toast, copyText, getJSON, postJSON, setPath, getPath, syncControls,
-    fillSelect, openDrawer, startJob, openJob, aiSummary, load, go, queueRender };
+    fillSelect, openDrawer, startJob, openJob, aiSummary, load, go, queueRender, removeNode };
   buildNav();
   const saved = store.get("view", "overview");
   if (!location.hash && VIEWS.some((v) => v.id === saved)) S.view = saved;
