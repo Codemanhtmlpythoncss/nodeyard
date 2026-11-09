@@ -1237,6 +1237,7 @@
     if ((el = t.closest("#mobile-menu [data-view]"))) { e.preventDefault(); setMobileMenu(false, false); go(el.dataset.view); requestAnimationFrame(() => $("#content").focus({ preventScroll: true })); return; }
     if (t.closest("[data-mobile-theme]")) { cycleTheme(); return; }
     if (t.closest("[data-mobile-export]")) { $("#export").click(); return; }
+    if (t.closest("[data-mobile-log]")) { $("#export-log").click(); return; }
     if (t.closest("[data-mobile-live]")) { setLive(!S.live); return; }
     if (t.closest("[data-mobile-help]")) { setMobileMenu(false, false); closeModals(); $("#scrim").classList.add("on"); $("#helpm").classList.add("on"); $("#helpm").focus(); return; }
     if (t.closest("[data-mobile-refresh]")) { setMobileMenu(false, false); load(true); return; }

@@ -774,6 +774,8 @@ def main():
     galaxy3d.register(ctx, a)
     import selfupdate    # restarts on the new program after an update (the page files are already new)
     selfupdate.register(ctx, a)
+    import diaglog       # a rolling two-day record of the cluster, downloadable as one file (/api/diag/log)
+    diaglog.register(ctx, a)
     def refresh_all(h, body):
         """Full refresh: every module forgets what it remembered (cluster lists, connections, model lists, the disk
         inventory, Tailscale and CLI answers, page files, the music library, services), the cluster is read again, and

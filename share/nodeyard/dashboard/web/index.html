@@ -89,7 +89,8 @@
       <span class="pill" id="status" role="status" aria-live="polite" aria-atomic="true"><i class="dot"></i><span>Connecting…</span></span>
       <button class="btn icon-only" id="refresh" aria-label="Refresh now" title="Refresh now (r)"><svg class="icon"><use href="#i-refresh"/></svg></button>
       <button class="btn icon-only" id="fullrefresh" aria-label="Full refresh" title="Full refresh (Shift+R): clear the dashboard's caches, re-check every node and the AI model (reloading it if it's broken), then reload the page"><svg class="icon"><use href="#i-reset"/></svg></button>
-      <a class="btn icon-only" id="export" href="/api/export" download aria-label="Download a JSON snapshot" title="Download a JSON snapshot"><svg class="icon"><use href="#i-download"/></svg></a>
+      <a class="btn icon-only" id="export" href="/api/export" download aria-label="Download a JSON snapshot" title="Download a JSON snapshot of right now"><svg class="icon"><use href="#i-download"/></svg></a>
+      <a class="btn icon-only" id="export-log" href="/api/diag/log" download aria-label="Download the last 2 days as a log" title="Download the last 2 days as a log — node flaps, alerts, restarts and temperatures — to send if something goes wrong"><svg class="icon"><use href="#i-file"/></svg></a>
       <button class="btn icon-only" id="theme" aria-label="Switch theme" title="Switch theme (t)"><svg class="icon"><use href="#i-moon"/></svg></button>
     </header>
     <div class="content" id="content" tabindex="-1"><div class="loading"><div><div class="spin"></div>Reading your cluster…</div></div></div>
@@ -105,6 +106,7 @@
   <div class="mobile-menu-tools">
     <button class="btn" type="button" data-mobile-theme><svg class="icon"><use href="#i-moon"/></svg>Theme</button>
     <button class="btn" type="button" data-mobile-export><svg class="icon"><use href="#i-download"/></svg>Export snapshot</button>
+    <button class="btn" type="button" data-mobile-log><svg class="icon"><use href="#i-file"/></svg>Download 2‑day log</button>
     <button class="btn" type="button" data-mobile-live role="switch" aria-checked="true"><span class="dot good"></span><span>Live updates on</span></button>
     <button class="btn" type="button" data-mobile-refresh><svg class="icon"><use href="#i-refresh"/></svg>Refresh now</button>
     <button class="btn" type="button" data-mobile-fullrefresh><svg class="icon"><use href="#i-reset"/></svg>Full refresh</button>
