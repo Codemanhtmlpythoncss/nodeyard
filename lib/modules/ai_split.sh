@@ -59,6 +59,10 @@ Options:
   --ubatch N               Micro-batch size (16-2048, default 512). Smaller keeps the
                            compute buffer bounded so a big context can't OOM and
                            reload-loop; larger speeds up long-prompt reads [deploy]
+  --moe-cpu all|N          Mixture-of-experts models only: keep the expert weights in
+                           CPU RAM (all) or for the top N layers, so the GPU holds the
+                           attention/dense layers run for every token. Frees VRAM for
+                           the hot path; often faster on a small GPU (experimental) [deploy]
   --think on|off           Allow reasoning output (default off) [deploy]
   --nodeport PORT|0        Chat page + API NodePort (default 31435; 0 = cluster only) [deploy]
   --api-key-file PATH      Require this API key (read from a file) [deploy]
@@ -714,6 +718,16 @@ split_size_ctx() {
         SPLIT_CTX=16384
         ny_warn "${small}; using ${SPLIT_CTX}. Set a number with --ctx N."
     fi
+    # While we have the header, notice a mixture-of-experts model and, if it isn't
+    # already set, suggest keeping its experts on CPU so the GPU holds the hot path.
+    if [[ -z "$SPLIT_MOE_CPU" && "${PLAN_GPU_SHARE:-0}" -gt 0 && -n "$SPLIT_HDR_FILE" ]]; then
+        local n_expert
+        n_expert="$(ctxplan_py params --header "$SPLIT_HDR_FILE" 2>/dev/null \
+            | python3 -c 'import sys,json;print(int(json.load(sys.stdin).get("n_expert",0)))' 2>/dev/null)" || n_expert=""
+        if [[ "$n_expert" =~ ^[0-9]+$ ]] && ((n_expert > 0)); then
+            ny_hint "This is a mixture-of-experts model (${n_expert} experts). To put more of the hot path on the GPU, redeploy with --moe-cpu all (keeps the expert weights in CPU RAM, attention/dense on the GPU) -- often faster on a small GPU. Tune with --moe-cpu N if VRAM allows."
+        fi
+    fi
     [[ -n "$SPLIT_HDR_FILE" ]] && { rm -f "$SPLIT_HDR_FILE" 2>/dev/null || true; }
     SPLIT_HDR_FILE=""
     return 0
@@ -754,6 +768,13 @@ split_print_plan() {
     fi
     if [[ "${PLAN_GPU_SHARE:-0}" -gt 0 ]]; then
         echo "GPU: $(awk -v m="$PLAN_GPU_SHARE" 'BEGIN{printf "%.1f", m/1024}') GiB of the model on ${PLAN_NAMES[0]}'s NVIDIA GPU (the fastest part)."
+    fi
+    if [[ -n "${SPLIT_MOE_CPU:-}" ]]; then
+        if [[ "${PLAN_GPU_SHARE:-0}" -gt 0 ]]; then
+            echo "MoE experts: kept in CPU RAM (--moe-cpu ${SPLIT_MOE_CPU}), so the GPU holds the attention/dense layers that run every token."
+        else
+            echo "MoE experts: --moe-cpu ${SPLIT_MOE_CPU} is set but there's no GPU in this plan, so it only moves memory around without the speed-up. It helps when the main node has an NVIDIA GPU."
+        fi
     fi
     if [[ -n "${PLAN_TOKS:-}" ]]; then
         echo "Estimated speed: about ${PLAN_TOKS} tokens/s (${PLAN_WHY})"
@@ -1056,9 +1077,17 @@ spec: {selector: {app: ${n}}, ports: [{port: 50052, targetPort: 50052}]}
 YAML
         done
 
-        local think_args="" key_args="" kv_args="" svc_type="NodePort" np_line="    nodePort: ${SPLIT_NODEPORT}"
+        local think_args="" key_args="" kv_args="" moe_args="" svc_type="NodePort" np_line="    nodePort: ${SPLIT_NODEPORT}"
         # a quantized KV cache (the conversation's memory) needs flash attention; it halves (q8_0) or quarters (q4_0) it
         if [[ "${SPLIT_KV:-f16}" != "f16" ]]; then kv_args=$'\n        - --flash-attn\n        - "on"\n        - -ctk\n        - "'"${SPLIT_KV}"$'"\n        - -ctv\n        - "'"${SPLIT_KV}"'"'; fi
+        # Mixture-of-experts: keep the big, rarely-used expert weights in CPU RAM so the
+        # GPU holds only the attention/dense layers that run for every token (the Betelgeuse
+        # idea in stock llama.cpp). Frees VRAM to put more of the hot path on the GPU.
+        if [[ "$SPLIT_MOE_CPU" == "all" ]]; then
+            moe_args=$'\n        - --cpu-moe'
+        elif [[ "$SPLIT_MOE_CPU" =~ ^[0-9]+$ ]]; then
+            moe_args=$'\n        - --n-cpu-moe\n        - "'"${SPLIT_MOE_CPU}"'"'
+        fi
         if [[ "$SPLIT_THINK" != "on" ]]; then think_args=$'\n        - --reasoning-budget\n        - "0"'; fi
         if [[ -n "$SPLIT_API_KEY" ]]; then key_args=$'\n        - --api-key-file\n        - /secrets/api-key'; fi
         if [[ "$SPLIT_NODEPORT" == "0" ]]; then
@@ -1142,7 +1171,7 @@ ${main_fetch}
         - -t
         - "2"
         - -cram
-        - "$(split_cram)"${kv_args}
+        - "$(split_cram)"${kv_args}${moe_args}
         # reuse the conversation's cached tokens when its start shifts (a trimmed chat history, an agent's moving
         # window) instead of reading the whole prompt again
         - --cache-reuse
@@ -1192,6 +1221,7 @@ split_parse_flags() {
     SPLIT_CTX=16384
     SPLIT_CTX_MODE="fixed"   # 'max' sizes the context to the free RAM after the plan
     SPLIT_UBATCH="${NODEYARD_SPLIT_UBATCH:-512}"  # micro-batch (-ub); smaller = smaller compute buffer
+    SPLIT_MOE_CPU="${NODEYARD_SPLIT_MOE_CPU:-}"    # "" off, "all" --cpu-moe, N --n-cpu-moe N (MoE models only)
     SPLIT_KV="f16"
     SPLIT_THINK="off"
     SPLIT_API_KEY=""
@@ -1272,6 +1302,11 @@ split_parse_flags() {
                 SPLIT_UBATCH="$2"
                 shift 2
                 ;;
+            --moe-cpu)
+                [[ $# -ge 2 && ( "$2" == all || "$2" =~ ^[0-9]+$ ) ]] || ny_usage_error "--moe-cpu needs 'all' or a number of layers (MoE models only)"
+                SPLIT_MOE_CPU="$2"
+                shift 2
+                ;;
             --think)
                 [[ $# -ge 2 ]] || ny_usage_error "--think needs on|off"
                 SPLIT_THINK="$2"
@@ -1323,6 +1358,7 @@ split_parse_flags() {
     [[ "$SPLIT_NODEPORT" == 0 ]] || ny_valid_int "$SPLIT_NODEPORT" 30000 32767 || ny_usage_error "--nodeport must be 0 or between 30000 and 32767."
     [[ "$SPLIT_CTX_MODE" == max ]] || ny_valid_int "$SPLIT_CTX" 512 1048576 || ny_usage_error "--ctx: ${NY_VALID_MSG}"
     ny_valid_int "$SPLIT_UBATCH" 16 2048 || ny_usage_error "--ubatch (or NODEYARD_SPLIT_UBATCH): ${NY_VALID_MSG}"
+    [[ -z "$SPLIT_MOE_CPU" || "$SPLIT_MOE_CPU" == all || "$SPLIT_MOE_CPU" =~ ^[0-9]+$ ]] || ny_usage_error "--moe-cpu (or NODEYARD_SPLIT_MOE_CPU) must be 'all' or a number of layers"
     # the main node's extra reserve is mostly the KV cache: a smaller cache needs less of it
     case "${SPLIT_KV:-f16}" in q8_0) SPLIT_RES_MAIN=640 ;; q4_0) SPLIT_RES_MAIN=448 ;; esac
     ny_valid_enum "$SPLIT_THINK" on off || ny_usage_error "--think: ${NY_VALID_MSG}"

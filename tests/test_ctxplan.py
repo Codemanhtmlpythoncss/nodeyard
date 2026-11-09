@@ -202,6 +202,24 @@ class PerNodeKvTests(unittest.TestCase):
         self.assertEqual(vals, [1024.0])
 
 
+class MoeDetectionTests(unittest.TestCase):
+    def test_dense_model_has_no_experts(self):
+        self.assertEqual(ctxplan.gguf_params(LLAMA)["n_expert"], 0)
+
+    def test_mixture_of_experts_count_is_read(self):
+        g = make_gguf([
+            _kv_string("general.architecture", "gpt-oss"),
+            _kv_u32("gpt-oss.block_count", 24),
+            _kv_u32("gpt-oss.attention.head_count", 64),
+            _kv_u32("gpt-oss.attention.head_count_kv", 8),
+            _kv_u32("gpt-oss.attention.key_length", 64),
+            _kv_u32("gpt-oss.attention.value_length", 64),
+            _kv_u32("gpt-oss.context_length", 131072),
+            _kv_u32("gpt-oss.expert_count", 128),
+        ])
+        self.assertEqual(ctxplan.gguf_params(g)["n_expert"], 128)
+
+
 class ComputeReserveTests(unittest.TestCase):
     def test_params_expose_embedding_width(self):
         self.assertEqual(ctxplan.gguf_params(LLAMA)["n_embd"], 4096)
