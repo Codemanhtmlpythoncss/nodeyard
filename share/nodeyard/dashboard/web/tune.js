@@ -52,7 +52,7 @@
           <input type="range" data-amd="${g.card}" min="10" max="${g.cap_max}" step="5" value="${g.cap}"><span class="faint small">up to ${g.cap_max} W</span></label>`)}
         ${n.pi_presets.length ? html`<label>Raspberry Pi overclock<select class="select" data-k="pi_preset"><option value="">Leave as it is</option>${raw(n.pi_presets.map((x) => '<option value="' + esc(x.id) + '">' + esc(x.label) + "</option>").join(""))}</select>
           <span class="faint small">Needs the official power supply and a fan or heatsink; applies after a reboot. ${p.pi.throttled && p.pi.throttled !== "0x0" ? "This Pi has been throttled: fix power or cooling first." : ""}</span></label>` : ""}
-        <label class="row small"><input type="checkbox" data-k="persist" ${p.persist ? "checked" : ""}> Keep after a reboot</label>
+        <label class="row small"><input type="checkbox" data-k="persist" checked> Keep after a reboot <span class="faint">(on by default — uncheck to apply only until the next restart)</span></label>
         <div class="row wrap"><button class="btn primary" data-tu-review="${n.node}">Review changes…</button><button class="btn" data-tu-restore="${n.node}">Restore defaults…</button>
           <button class="btn small" data-tu-probe="${n.node}" ${n.probing ? "disabled" : ""}>Read again</button></div>
         <div class="faint small">Read ${n.probe_at ? ago(n.probe_at) + " ago" : ""}${p.model ? " · " + p.model : ""}</div>
@@ -91,7 +91,7 @@
       <label class="row small"><input type="checkbox" data-ak="network" ${n.ai.share_mib || n.ai.main ? "checked" : ""}> Low-latency networking for the split model <span class="faint">(busy polling, bigger socket buffers)</span></label>
       ${deep ? html`<label class="row small"><input type="checkbox" data-ak="cstates"> Keep CPU cores out of deep sleep <span class="faint">(faster wake per token; more power and heat)</span></label>` : ""}
       ${p.readahead_dev ? html`<label class="row small"><input type="checkbox" data-ak="readahead" checked> Faster model loading <span class="faint">(4 MB read-ahead on ${p.readahead_dev})</span></label>` : ""}
-      <label class="row small"><input type="checkbox" data-ak="persist" ${p.persist ? "checked" : ""}> Keep after a reboot</label>
+      <label class="row small"><input type="checkbox" data-ak="persist" checked> Keep after a reboot <span class="faint">(on by default — uncheck for until the next restart)</span></label>
       <div class="row"><button class="btn" data-tu-ak-review="${n.node}">Review…</button><span class="faint small">Kernel settings that matter for LLMs, changed live; no new kernel to install.</span></div></div>`;
   }
   function leanSection(n, p) {
@@ -112,7 +112,7 @@
     if (document.activeElement && document.activeElement.closest && document.activeElement.closest("#tu-root input, #tu-root select")) return;   // (don't redraw what's being edited)
     setHTML($("#tu-root"), html`<div class="card tu-head"><div class="row wrap" style="justify-content:space-between;gap:10px"><div>
         <h2 style="margin:0">Tuning</h2><div class="muted small mt">Per-device settings for running AI, and power, clock and overclock controls. Nothing on a machine changes until you've seen exactly what will run and pressed Run. Every change is in the audit log.</div></div>
-        <div class="row wrap" style="gap:6px"><button class="btn primary" data-tu-all>Tune all for performance</button><button class="btn" data-tu-probe="all">Read every machine</button><button class="btn" data-tu-reset-all>Reset all…</button></div></div>
+        <div class="row wrap" style="gap:6px"><button class="btn primary" data-tu-all>Tune all for performance</button><button class="btn" data-tu-all-temp title="Tune every machine for performance, but only until the next restart">…just until reboot</button><button class="btn" data-tu-probe="all">Read every machine</button><button class="btn" data-tu-reset-all>Reset all…</button></div></div>
         ${!d.agents ? html`<p class="warn-t small">Install the node agents (Processes page) for CPU and temperature details.</p>` : ""}</div>
       ${d.nodes.map(nodeCard)}`);
   }
@@ -133,7 +133,8 @@
     if (v("profile") && v("profile").value !== p.profile) oc.profile = v("profile").value;
     f.querySelectorAll("[data-amd]").forEach((el) => { const g = (p.amdgpus || []).find((x) => x.card === el.dataset.amd); if (g && +el.value !== g.cap) (oc.amd_cap = oc.amd_cap || {})[g.card] = +el.value; });
     if (Object.keys(oc).length) out.oc = oc;
-    if (v("persist") && v("persist").checked && Object.keys(out).length) out.persist = true;
+    // Send the keep-after-reboot choice explicitly: on by default, false is the opt-out.
+    if (v("persist") && Object.keys(out).length) out.persist = v("persist").checked;
     return out;
   }
   async function review(node, settings) {
@@ -156,7 +157,7 @@
   // Tune all machines for performance in one go: the safe, reversible levers only — CPU governor and
   // energy/platform preference to "performance", and each GPU's power limit to its own maximum. Overclock
   // and CPU power limits are left per-machine (they're riskier and need a per-machine review).
-  async function tuneAllPerformance() {
+  async function tuneAllPerformance(persist) {
     const d = TU.data; if (!d) { toast("Reading machines first…"); return; }
     const jobs = [];
     for (const n of d.nodes) {
@@ -169,13 +170,14 @@
       if (Object.keys(s).length) jobs.push({ node: n.node, settings: s });
     }
     if (!jobs.length) { toast("Every machine is already set for performance. (Press “Read every machine” if some haven’t been read yet.)"); return; }
-    if (!window.confirm("Set " + jobs.length + " machine" + (jobs.length === 1 ? "" : "s") + " to performance for the fastest AI?\n\n• CPU governor → performance\n• GPU power → each card’s maximum\n• Energy/platform preference → performance\n\nThey run warmer and the fan is louder under load; the chips still slow themselves before overheating, and “Reset all” undoes it. Overclocking is NOT changed here.")) return;
+    const keep = persist !== false;
+    if (!window.confirm("Set " + jobs.length + " machine" + (jobs.length === 1 ? "" : "s") + " to performance for the fastest AI?\n\n• CPU governor → performance\n• GPU power → each card’s maximum\n• Energy/platform preference → performance\n\n" + (keep ? "These are kept after a reboot (“Reset all” undoes them)." : "These apply only until the next restart.") + "\nThey run warmer and the fan is louder under load; the chips still slow themselves before overheating. Overclocking is NOT changed here.")) return;
     let ok = 0; const failed = [];
     for (const j of jobs) {
-      const r = await post("/api/tune/apply", { node: j.node, settings: j.settings, confirm: true });
+      const r = await post("/api/tune/apply", { node: j.node, settings: j.settings, confirm: true, persist: keep });
       if (r && r.ok) ok++; else failed.push(j.node);
     }
-    toast("Performance applied to " + ok + " machine" + (ok === 1 ? "" : "s") + (failed.length ? "; couldn’t on: " + failed.join(", ") : "") + ".");
+    toast("Performance applied to " + ok + " machine" + (ok === 1 ? "" : "s") + (keep ? ", kept after reboot" : " until the next restart") + (failed.length ? "; couldn’t on: " + failed.join(", ") : "") + ".");
     load().then(paint);
   }
   async function resetAll() {
@@ -223,7 +225,8 @@
     let b;
     if ((b = t.closest("[data-tu-close]"))) { document.getElementById("tu-dialog").hidden = true; return; }
     if ((b = t.closest("[data-tu-run]"))) { run(b.dataset.tuRun); return; }
-    if (t.closest("[data-tu-all]")) { tuneAllPerformance(); return; }
+    if (t.closest("[data-tu-all-temp]")) { tuneAllPerformance(false); return; }
+    if (t.closest("[data-tu-all]")) { tuneAllPerformance(true); return; }
     if (t.closest("[data-tu-reset-all]")) { resetAll(); return; }
     if (t.closest("[data-tu-reset-run]")) { resetRun(); return; }
     if ((b = t.closest("[data-tu-oc]"))) { const n = TU.data.nodes.find((x) => x.node === b.dataset.tuOc); if (n && n.oc && n.oc.fix) review(n.node, n.oc.fix); return; }
