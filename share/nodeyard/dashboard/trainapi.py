@@ -632,6 +632,46 @@ class Trainer:
             raise TrainError("Couldn't convert it: %s" % e)
         return dict(rep, name=os.path.basename(dst), size=os.path.getsize(dst))
 
+    def samples(self, names, count=20, held_out=False):
+        """Real exchanges from the ticked files to test the model with: (what the person said, the reply in the data).
+        Plain text gives (the start of a line, how it goes on). held_out: from the last 5%, which the trainer never
+        trains on, so passing means it learned the patterns rather than these lines."""
+        import random
+        training_data = _jobs_module("training_data")
+        pairs, chat = [], False
+        for name in names[:10]:
+            path = self._data_path(name)
+            if not os.path.isfile(path):
+                continue
+            with open(path, "rb") as f:
+                raw = f.read(CHECK_SAMPLE)
+            text, rep = training_data.normalize(raw.decode("utf-8", errors="replace"))
+            blocks = [b for b in text.split("\n\n") if b.strip()]
+            cut = int(len(blocks) * 0.95)
+            blocks = blocks[cut:] if held_out else blocks[:cut]
+            for b in blocks:
+                lines = b.split("\n")
+                for a, c in zip(lines, lines[1:]):
+                    if a.startswith("User:") and c.startswith("Assistant:"):
+                        q, ans = a[5:].strip(), c[10:].strip()
+                        if q and ans and len(q) <= 600 and len(ans) <= 400:
+                            pairs.append({"prompt": q, "answer": ans})
+                            chat = True
+                if not rep["chat"]:
+                    for line in lines:
+                        w = line.split()
+                        if len(w) >= 12:
+                            pairs.append({"prompt": " ".join(w[:8]), "answer": " ".join(w[8:20])})
+        if not pairs:
+            raise TrainError("No exchanges found in the ticked files to test with.", 404)
+        seen, unique = set(), []
+        for p in pairs:   # a pairs file repeats every line: test each prompt once
+            if p["prompt"] not in seen:
+                seen.add(p["prompt"])
+                unique.append(p)
+        picked = random.sample(unique, min(max(1, count), len(unique)))
+        return {"samples": picked, "chat": chat, "held_out": held_out, "from": len(unique)}
+
     def speakers(self, name):
         path = self._data_path(name)
         if not os.path.isfile(path):
@@ -806,17 +846,19 @@ class Trainer:
             quality = None
             q = body.get("quality")
             if isinstance(q, dict) and q.get("on"):
-                prompts = [{"prompt": str(p.get("prompt") or "")[:500], "expect": [str(e)[:80] for e in (p.get("expect") or [])][:10]}
-                           for p in (q.get("prompts") or [])[:20] if isinstance(p, dict) and str(p.get("prompt") or "").strip()]
+                prompts = [{"prompt": str(p.get("prompt") or "")[:1000], "expect": [str(e)[:80] for e in (p.get("expect") or [])][:10],
+                            "answer": str(p.get("answer") or "")[:1000]}
+                           for p in (q.get("prompts") or [])[:100] if isinstance(p, dict) and str(p.get("prompt") or "").strip()]
                 target = q.get("target_loss")
                 try:
                     target = float(target) if target not in (None, "") else None
                 except (TypeError, ValueError):
                     raise TrainError("The target loss must be a number.")
-                if not any(p["expect"] for p in prompts) and target is None:
-                    raise TrainError("To stop when it's good enough, give at least one test prompt an expected word, or a target loss.")
+                if not any(p["expect"] or p["answer"] for p in prompts) and target is None:
+                    raise TrainError("To stop when it's good enough, give at least one test prompt an expected word or answer, or a target loss.")
                 quality = json.dumps({"prompts": prompts, "pass": _clamp_float(q.get("pass"), 0.05, 1.0, 1.0), "target_loss": target,
-                                      "give_up": max(0, min(100, int(q.get("give_up") or 10)))})
+                                      "give_up": max(0, min(100, int(q.get("give_up") or 10))),
+                                      "match": "close" if q.get("match") == "close" else "exact"})
             chosen = body.get("machines") if isinstance(body.get("machines"), list) and body.get("machines") else None
             machines = self.machines()
             plan = self.plan(machines, chosen)
@@ -1384,6 +1426,9 @@ def register(ctx, args):
         "/api/train/check": wrap(lambda q: {"check": t.check((q.get("name") or [""])[0])}),
         "/api/train/datasets": wrap(lambda q: {"catalog": t.fetcher.catalog()}),
         "/api/train/speakers": wrap(lambda q: t.speakers((q.get("name") or [""])[0])),
+        "/api/train/samples": wrap(lambda q: t.samples([n for n in (q.get("data") or [""])[0].split("|") if n],
+                                                      max(1, min(100, int((q.get("count") or ["20"])[0] or 20))),
+                                                      (q.get("held_out") or ["0"])[0] == "1")),
     })
     ctx.post_routes.update({
         "/api/train/upload": wrap(t.upload),

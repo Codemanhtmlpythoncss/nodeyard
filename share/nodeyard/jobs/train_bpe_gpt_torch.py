@@ -21,9 +21,11 @@ import json
 import math
 import os
 import random
+import re
 import signal
 import time
 import uuid
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -428,13 +430,32 @@ def parse_quality(spec: str | None):
         return None
     q = json.loads(spec)
     prompts = []
-    for p in (q.get("prompts") or [])[:20]:
+    for p in (q.get("prompts") or [])[:100]:
         if isinstance(p, dict) and str(p.get("prompt") or "").strip():
-            prompts.append({"prompt": str(p["prompt"])[:500],
-                            "expect": [str(e).strip() for e in (p.get("expect") or []) if str(e).strip()][:10]})
+            prompts.append({"prompt": str(p["prompt"])[:1000],
+                            "expect": [str(e).strip() for e in (p.get("expect") or []) if str(e).strip()][:10],
+                            "answer": str(p.get("answer") or "").strip()[:1000]})
     target = q.get("target_loss")
     return {"prompts": prompts, "pass": min(1.0, max(0.0, float(q.get("pass", 1.0)))),
-            "target_loss": float(target) if target not in (None, "") else None, "give_up": max(0, int(q.get("give_up", 10)))}
+            "target_loss": float(target) if target not in (None, "") else None,
+            "give_up": max(0, int(q.get("give_up") or 10)),
+            "match": q.get("match") if q.get("match") in ("exact", "close") else "exact"}
+
+
+def words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", text.lower())
+
+
+def answer_score(reply: str, answer: str) -> float:
+    """How much of the expected answer the reply got right: F1 of their words (1.0 = the same words)."""
+    got, want = words(reply), words(answer)
+    if not got or not want:
+        return 1.0 if got == want else 0.0
+    common = sum((Counter(got) & Counter(want)).values())
+    if not common:
+        return 0.0
+    precision, recall = common / len(got), common / len(want)
+    return 2 * precision * recall / (precision + recall)
 
 
 @torch.no_grad()
@@ -445,6 +466,18 @@ def check_quality(model, tokenizer, context: int, device, quality: dict, chat: b
     results = []
     for p in quality["prompts"]:
         prompt = f"User: {p['prompt']}\nAssistant:" if chat else p["prompt"]
+        if p["answer"]:
+            # A known answer: take the model's most likely word each time (no dice), long enough for the answer.
+            budget = min(240, len(tokenizer.encode(" " + p["answer"])) + 12)
+            reply = write_reply(model, tokenizer, context, prompt, device, rng, chat, max_tokens=budget, temperature=0.001, top_k=1,
+                                repetition_penalty=1.0)
+            if not chat:   # continuing text: compare the same number of words
+                reply = " ".join(reply.split()[:len(p["answer"].split())])
+            similarity = answer_score(reply, p["answer"])
+            ok = similarity >= (0.999 if quality["match"] == "exact" else 0.8)
+            results.append({"prompt": p["prompt"], "reply": reply[:600], "answer": p["answer"][:600], "expect": [],
+                            "similarity": round(similarity, 3), "ok": ok})
+            continue
         reply = write_reply(model, tokenizer, context, prompt, device, rng, chat, max_tokens=60, temperature=0.3, top_k=10)
         ok = any(e.lower() in reply.lower() for e in p["expect"]) if p["expect"] else None
         results.append({"prompt": p["prompt"], "reply": reply[:400], "expect": p["expect"], "ok": ok})
