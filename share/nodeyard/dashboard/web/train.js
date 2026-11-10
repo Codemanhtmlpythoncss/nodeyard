@@ -17,7 +17,7 @@
     q: Object.assign({ on: false, preset: "starter", prompts: [], pass: 1, target_loss: "", give_up: 10, count: 20, held_out: false, match: "exact" },
       (() => { try { return JSON.parse(store.get("train.quality", "") || "null"); } catch (_) { return null; } })() || {}),
     machines: JSON.parse(store.get("train.machines", "[]") || "[]"), share: store.get("train.share", "1") !== "0", together: store.get("train.together", "share") || "share",
-    both: store.get("train.both", "0") === "1",
+    both: store.get("train.both", "0") === "1", autosetupBusy: false,
   };
 
   // ---------- small maths helpers (the same formulas as the trainer) ----------
@@ -701,6 +701,12 @@ Assistant: game tonight?</pre></div>
     const N = params(+s.vocab_size, +s.context, +s.dim, +s.layers), act = actBytes(+s.batch_size, +s.context, +s.dim, +s.layers, +s.heads, +s.vocab_size), fl = 6 * N * s.batch_size * s.context;
     const field = (k, label, help, attrs = "") => html`<label class="tr-field"><span>${raw(label)}</span><input class="input" data-tr-set="${k}" value="${s[k]}" ${raw(attrs)}><span class="faint small">${raw(help)}</span></label>`;
     return html`<div class="grid tr-grid2">
+      <section class="card tr-span2 tr-autosetup"><div class="row wrap" style="align-items:center;gap:12px">
+        <div><h2 class="tr-h" style="margin:0">Auto-setup</h2>
+          <p class="faint small" style="margin:.2em 0 0">One click: pick the best machines (each one's GPU and CPU together), get them ready, measure the links between them, and fill in the recommended settings. Then just press Start.</p></div>
+        <span class="spacer"></span>
+        <button class="btn primary" data-tr-act="autosetup" ${TR.autosetupBusy || !TR.sel.length ? "disabled" : ""}>${TR.autosetupBusy ? "Setting up…" : "Auto-setup"}</button></div>
+        ${!TR.sel.length ? html`<p class="faint small" style="margin:.5em 0 0">Choose some data in <a href="#" data-tr-tab="data">step 2</a> first.</p>` : ""}</section>
       ${machinesCard()}
       <section class="card"><h2 class="tr-h">Recommended for ${ov.plan.share.length > 1 ? "these machines" : ov.plan.lead || "this hardware"}</h2>
         <label class="tr-field"><span>How long can it train?</span><select class="select" data-tr-act="hours">${raw([[0.25, "15 minutes"], [1, "1 hour"], [3, "3 hours"], [8, "overnight (8 h)"], [24, "a day"], [72, "3 days"]].map(([v, l]) => '<option value="' + v + '"' + (+v === +TR.hours ? " selected" : "") + ">" + l + "</option>").join(""))}</select></label>
@@ -1180,6 +1186,20 @@ Assistant: game tonight?</pre></div>
     }
     else if (a === "delete-preset") {
       if (confirm("Delete the saved settings “" + TR.preset + "”?")) { const r = await post("/api/train/presets/delete", { name: TR.preset }); if (r) { TR.ov.presets = r.presets; resetSettings(); } }
+    }
+    else if (a === "autosetup") {
+      if (!TR.sel.length) { toast("Choose some data in step 2 first."); return; }
+      TR.autosetupBusy = true; paint();
+      const r = await post("/api/train/autosetup", { data: TR.sel, hours: TR.hours });
+      TR.autosetupBusy = false;
+      if (!r) { paint(); return; }
+      TR.both = !!r.both; store.set("train.both", TR.both ? "1" : "0");
+      TR.together = r.together || "share"; store.set("train.together", TR.together);
+      TR.machines = (r.machines || []).filter((n) => !n.endsWith(" · CPU"));   // tick the real machines; each one's CPU half rides along
+      store.set("train.machines", JSON.stringify(TR.machines));
+      TR.edited = null; TR.preset = ""; store.set("train.preset", ""); TR.form = null;   // take the recommended settings
+      await loadOverview();
+      toast("Set up on " + (TR.machines.length || 1) + " machine" + (TR.machines.length === 1 ? "" : "s") + (TR.both ? " (GPU + CPU)" : "") + ". Review and press Start.");
     }
     else if (a === "start") {
       const body = { data: TR.sel, settings: TR.form, resume: TR.resume, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.together !== "fastest", together: TR.together, both: TR.both,
