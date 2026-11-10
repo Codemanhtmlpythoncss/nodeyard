@@ -1176,6 +1176,11 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .tr-legend span { padding: 1px 6px; border-radius: 6px; background: rgba(127, 127, 127, .1); margin-right: 4px; }
 .tr-qtable td { min-width: 180px; } .tr-qtable td:last-child { min-width: 0; } .tr-qtable .input { width: 100%; }
 .tr-quality { margin-top: 12px; }
+.tr-lessons-h { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--faint); margin: 10px 8px 4px; }
+.tr-lessons-h small { display: block; text-transform: none; letter-spacing: 0; }
+.tr-big1 { font-size: 17px; line-height: 1.5; padding: 10px 14px; border-left: 3px solid var(--accent); background: rgba(124, 140, 255, .08); border-radius: 6px; }
+.tr-plain { font-size: 15px; padding: 10px 14px; border-radius: 8px; background: rgba(61, 220, 151, .08); border-left: 3px solid var(--good); margin-bottom: 12px; }
+.tr-quiz { margin-top: 12px; } .tr-quiz summary { cursor: pointer; }
 .tr-inside-mode { margin-bottom: 12px; }
 .tr-ev { display: grid; grid-template-columns: minmax(220px, 300px) minmax(0, 1fr); gap: 12px; align-items: start; }
 .tr-ev-net { max-height: 80vh; overflow: auto; position: sticky; top: 8px; }

@@ -93,10 +93,149 @@
     size: { V: 2048, T: 128, d: 192, L: 4, h: 6, B: 32 },
     samp: { temp: 1, k: 0, p: 1 },
     multi: { a: 800, b: 300, c: 0, N: 20, link: 100, round: 120 },
+    m1: { x: 3 }, msum: { v: [3, 1, 4, 1, 5] }, mdot: { a: [3, 2, 3], b: [2, 1, 3] }, mmat: { x: [1, 0.5, -1] }, msq: { v: 2 },
+    mexp: { x: 1 }, mlog: { p: 0.5 }, mavg: { v: [2, 4, 4, 4, 6] }, msoft: { s: [2, 1, 0] }, mslope: { w: 0 }, mchain: { x: 1 },
+    mdice: { counts: [0, 0, 0], total: 0, last: null, lastPick: 0 },
   };
   const WORDS = [" the", " cat", " sat", " on", " mat"];
 
-  const LESSONS = [
+  // ---------- maths basics: everything the AI lessons use, explained for a beginner ----------
+  const uses = (t) => html`<div class="tr-adv ok small"><b>Where the AI uses this:</b> ${raw(t)}</div>`;
+  const quiz = (q, a) => html`<details class="tr-quiz"><summary><b>Check yourself:</b> ${q}</summary><p>${raw(a)}</p></details>`;
+  const big1 = (t) => html`<p class="tr-big1">${raw(t)}</p>`;
+  const MATHS = [
+    { id: "m-letters", title: "Letters are boxes for numbers", body: () => {
+      const x = L.m1.x, y = 2 * x + 1;
+      return html`${big1("A letter like <b>x</b> is just a box with a number in it. A formula is a recipe that says what to do with the boxes.")}
+      <p>When you see <code>y = 2 × x + 1</code>, it means: “take whatever number is in x, double it, then add 1, and call the answer y”. Change x and y changes too. That's all a formula is.</p>
+      <div class="tr-two"><div>${slider("m1.x", "x", -5, 5, 0.5, x)}</div><div class="tr-calc">y = 2 × x + 1<br>y = 2 × ${f(x)} + 1<br>y = ${f(2 * x)} + 1<br>y = <b>${f(y)}</b></div></div>
+      <h4>Three number tricks you'll see everywhere</h4>
+      <ul class="tr-steps"><li><b>Negative numbers</b> are below zero: −3 is three steps the other way. Two negatives multiplied make a positive: −2 × −3 = 6.</li>
+        <li><b>Decimals</b> are bits of a whole: 0.5 is a half, 0.001 is a thousandth.</li>
+        <li><b>Short way to write big and tiny numbers:</b> <code>1e3</code> means 1 with 3 zeros = 1,000. <code>1e-3</code> means 0.001 (the 1 moved 3 places right of the dot). So a learning rate of <code>3e-4</code> = 0.0003.</li></ul>
+      ${uses("everything. A model is one giant formula with millions of boxes (the <b>weights</b>). Training changes the numbers in the boxes.")}
+      ${quiz("If x = 4, what is 2 × x + 1?", "2 × 4 = 8, then 8 + 1 = <b>9</b>.")}`;
+    } },
+    { id: "m-sum", title: "Adding up lots of things: Σ", body: () => {
+      const v = L.msum.v; let run = 0;
+      return html`${big1("The big Greek letter <b>Σ</b> (sigma) just means “add them all up”.")}
+      <p>Instead of writing a₀ + a₁ + a₂ + a₃ + a₄, mathematicians write <code>Σ aᵢ</code>: “add up every a”. The little <b>i</b> is a counter: 0, 1, 2, … It picks which one you mean (a₀ is the first, a₁ the second; computers count from 0).</p>
+      <div class="tr-two"><div>${v.map((x, i) => slider("msum.v." + i, "a" + "₀₁₂₃₄"[i], -5, 5, 1, x))}</div>
+        <div class="tr-calc">${v.map((x, i) => { run += x; return html`${i ? "+ " : raw("&nbsp;&nbsp;")}${f(x)} &nbsp;→ running total ${f(run)}<br>`; })}Σ aᵢ = <b>${f(run)}</b></div></div>
+      ${uses("every layer adds up hundreds of multiplications with Σ. The <b>loss</b> is a Σ over every word of the text, divided by how many there are.")}
+      ${quiz("What is Σ of 2, 3 and 5?", "2 + 3 + 5 = <b>10</b>.")}`;
+    } },
+    { id: "m-dot", title: "Lists of numbers and the dot product", body: () => {
+      const a = L.mdot.a, b = L.mdot.b, pr = a.map((x, i) => x * b[i]), s = pr.reduce((p, q) => p + q, 0);
+      return html`${big1("A <b>vector</b> is a list of numbers. The <b>dot product</b> of two lists: multiply them in pairs, then add up.")}
+      <p>Think of a list as a description: [sweet, crunchy, healthy] for a snack. An apple might be [3, 2, 3]. Someone's taste might be [2, 1, 3]. The dot product 3×2 + 2×1 + 3×3 = 17 says how well they match. Big and positive = they agree. Near zero = unrelated. Negative = they disagree.</p>
+      <div class="tr-two"><div><p class="faint small">list a</p>${a.map((x, i) => slider("mdot.a." + i, "a" + "₀₁₂"[i], -3, 3, 1, x))}<p class="faint small">list b</p>${b.map((x, i) => slider("mdot.b." + i, "b" + "₀₁₂"[i], -3, 3, 1, x))}</div>
+        <div class="tr-calc">a · b = a₀×b₀ + a₁×b₁ + a₂×b₂<br>${pr.map((p, i) => html`${i ? "+ " : raw("&nbsp;&nbsp;")}${f(a[i])} × ${f(b[i])} = ${f(p)}<br>`)}= <b>${f(s)}</b><br><span class="faint">${s > 2 ? "they agree" : s < -2 ? "they disagree" : "not much in common"}</span></div></div>
+      ${uses("each word (token) is described by a list of numbers (its <b>embedding</b>). <b>Attention</b> takes dot products between words to decide which earlier words matter to the current one.")}
+      ${quiz("Dot product of [1, 2] and [3, 4]?", "1×3 + 2×4 = 3 + 8 = <b>11</b>.")}`;
+    } },
+    { id: "m-matrix", title: "Grids of numbers: matrices", body: () => {
+      const x = L.mmat.x, W = [[1, 0, 2], [-1, 3, 1]], y = W.map((row) => row.reduce((s, w, k) => s + w * x[k], 0));
+      return html`${big1("A <b>matrix</b> is a grid of numbers. “Matrix × list” means: do one dot product per row.")}
+      <p>A row of the grid is a recipe: how much of each input to mix in. Each row gives one output number, so a grid with 2 rows turns 3 numbers into 2. This is a whole layer of “neurons” in one go: each row is one neuron.</p>
+      <div class="tr-two"><div>${x.map((v, i) => slider("mmat.x." + i, "input x" + "₀₁₂"[i], -3, 3, 0.5, v))}<p class="faint small">The grid W (fixed here; in a model these are learned weights):<br>row 0: [1, 0, 2]<br>row 1: [−1, 3, 1]</p></div>
+        <div class="tr-calc">${W.map((row, r) => html`output ${r} = ${row.map((w, k) => f(w) + "×" + f(x[k])).join(" + ")}<br>&nbsp;&nbsp;= ${row.map((w, k) => f(w * x[k])).join(" + ")} = <b>${f(y[r])}</b><br>`)}</div></div>
+      ${uses("almost all the work. Q, K and V, the feed-forward layer and the final scores are each a matrix times a list. A model with millions of weights is mostly a few big grids.")}
+      ${quiz("A grid has 4 rows and 3 columns. Multiply it by a list of 3 numbers. How many numbers come out?", "One per row: <b>4</b>.")}`;
+    } },
+    { id: "m-roots", title: "Squares and square roots", body: () => {
+      const v = L.msq.v, sq = sqrtSteps(v);
+      return html`${big1("<b>Squaring</b> is a number times itself. The <b>square root</b> √ goes backwards: which number times itself gives this?")}
+      <p>3² = 3 × 3 = 9, so √9 = 3. Squares are never negative (−3 × −3 = 9 too), which makes them good for measuring “how far off” something is without + and − cancelling out.</p>
+      <p>A computer finds √ by guessing and improving: start with a guess s, then take the average of s and v ÷ s. Repeat. Each step gets closer. This is called <b>Newton's method</b>:</p>
+      <div class="tr-two"><div>${slider("msq.v", "v", 0.5, 50, 0.5, v)}<div class="tr-calc">v² = ${f(v)} × ${f(v)} = <b>${f(v * v)}</b></div></div><pre class="tr-pre small">${sq.lines.join("\n")}</pre></div>
+      ${uses("the <b>layer norm</b> divides by a square root to make a token's numbers a standard size. Attention divides by √(head size) so dot products don't get too big.")}
+      ${quiz("What is √16?", "4, because 4 × 4 = 16.")}`;
+    } },
+    { id: "m-exp", title: "e and growing numbers", body: () => {
+      const x = L.mexp.x, ex = expSteps(x);
+      return html`${big1("<b>e</b> is a special number, about 2.718. <b>eˣ</b> means e multiplied by itself x times. It's always above zero, and it grows fast.")}
+      <p>e⁰ = 1. e¹ = 2.718. e² = 7.39. e³ = 20.1. Going negative it shrinks toward zero but never reaches it: e⁻¹ = 0.37, e⁻⁵ = 0.0067. A computer works it out with additions and multiplications: 1 + x + x²/2 + x³/6 + … (each piece is the last one × x ÷ the next counting number).</p>
+      <div class="tr-two"><div>${slider("mexp.x", "x", -5, 5, 0.25, x)}<div class="tr-calc">e^${f(x)} = <b>${f(ex.value)}</b></div><canvas class="tr-cv" data-tr-chart="mexp"></canvas></div><pre class="tr-pre small">${ex.lines.join("\n")}</pre></div>
+      ${uses("turning scores into chances (<b>softmax</b>): every score goes through eˣ, so every chance is positive and a bigger score gets a much bigger chance.")}
+      ${quiz("Is e⁻¹⁰ negative?", "No. eˣ is never negative; e⁻¹⁰ is a tiny positive number, 0.0000454.")}`;
+    }, draw: () => { const p = []; for (let x = -5; x <= 3; x += 0.1) p.push([x, Math.exp(x)]); chart($('[data-tr-chart="mexp"]'), [{ pts: p, color: cssv("--accent", "#7c8cff") }], { mark: [L.mexp.x, Math.exp(Math.min(3, L.mexp.x))], xlabel: "x → eˣ" }); } },
+    { id: "m-log", title: "Logarithms: the undo button", body: () => {
+      const p = L.mlog.p, ln = Math.log(p);
+      return html`${big1("<b>ln</b> (the natural logarithm) undoes eˣ: if e to some power gives p, then ln p is that power.")}
+      <p>e⁰ = 1, so ln 1 = 0. e⁻¹ ≈ 0.37, so ln 0.37 ≈ −1. For chances between 0 and 1, ln is negative, and the smaller the chance, the more negative. So <b>−ln p</b> works as a “surprise score”: a sure thing (p = 1) scores 0; a 1-in-100 shock scores 4.6.</p>
+      <div class="tr-two"><div>${slider("mlog.p", "chance p", 0.01, 1, 0.01, p)}</div><div class="tr-calc">ln ${f(p)} = ${f(ln)}<br>surprise −ln p = <b>${f(-ln)}</b><br>check: e^${f(ln)} = ${f(Math.exp(ln))}</div></div>
+      ${uses("the <b>loss</b>. For every word in your text, the model gave the real next word some chance p; the loss is the average of −ln p. Training tries to make the model less surprised by real text.")}
+      ${quiz("The model gave the right next word a chance of 1 (100%). What's its surprise −ln p?", "−ln 1 = <b>0</b>: no surprise at all.")}`;
+    } },
+    { id: "m-avg", title: "Averages and spread", body: () => {
+      const v = L.mavg.v, n = v.length, mu = v.reduce((a, b) => a + b, 0) / n, vr = v.reduce((a, b) => a + (b - mu) * (b - mu), 0) / n, sd = Math.sqrt(vr);
+      return html`${big1("The <b>mean</b> (μ) is the average. The <b>variance</b> (σ²) says how spread out the numbers are. Its square root σ is the “typical distance from average”.")}
+      <p>Mean: add them up and divide by how many. Variance: for each number, how far is it from the mean? Square that distance (so negatives don't cancel), then average those squares.</p>
+      <div class="tr-two"><div>${v.map((x, i) => slider("mavg.v." + i, "number " + (i + 1), 0, 10, 1, x))}</div>
+        <div class="tr-calc">mean μ = (${v.join(" + ")}) ÷ ${n} = ${f(v.reduce((a, b) => a + b, 0))} ÷ ${n} = <b>${f(mu)}</b><br>
+        variance σ² = (${v.map((x) => "(" + f(x) + "−" + f(mu) + ")²").join(" + ")}) ÷ ${n}<br>&nbsp;&nbsp;= (${v.map((x) => f((x - mu) * (x - mu))).join(" + ")}) ÷ ${n} = <b>${f(vr)}</b><br>
+        σ = √${f(vr)} = <b>${f(sd)}</b><br>“standardised” first number: (${f(v[0])} − ${f(mu)}) ÷ ${f(sd)} = ${f(sd ? (v[0] - mu) / sd : 0)}</div></div>
+      ${uses("the <b>layer norm</b>: for each word it subtracts the mean and divides by σ, so every word's numbers have average 0 and spread 1 before the next layer. That keeps training stable.")}
+      ${quiz("What's the mean of 2, 4 and 6?", "(2 + 4 + 6) ÷ 3 = 12 ÷ 3 = <b>4</b>.")}`;
+    } },
+    { id: "m-soft", title: "Turning scores into chances", body: () => {
+      const s = L.msoft.s, e = s.map((x) => Math.exp(x)), tot = e.reduce((a, b) => a + b, 0), names = ["cat", "dog", "car"];
+      return html`${big1("To turn any scores into chances that add up to 100%: make each one positive with eˣ, then divide each by the total.")}
+      <p>Scores can be any number, even negative. Chances must be between 0 and 1 and add up to 1. eˣ makes everything positive (and makes the top score stand out); dividing by the total makes them add up to 1. This recipe is called <b>softmax</b>.</p>
+      <div class="tr-two"><div>${s.map((x, i) => slider("msoft.s." + i, "score for “" + names[i] + "”", -3, 5, 0.5, x))}</div>
+        <div class="tr-calc">${s.map((x, i) => html`e^${f(x)} = ${f(e[i])}<br>`)}total = ${e.map((x) => f(x)).join(" + ")} = ${f(tot)}<br>${s.map((x, i) => html`chance of “${names[i]}” = ${f(e[i])} ÷ ${f(tot)} = <b>${f(100 * e[i] / tot, 3)}%</b><br>`)}</div></div>
+      ${uses("the very last step: the model gives every token in its vocabulary a score, and softmax turns them into the chances of each being the next word. Attention uses it too, to decide how much to look at each earlier word.")}
+      ${quiz("Two scores are equal. What chance does each get?", "50% each: equal scores give equal chances.")}`;
+    } },
+    { id: "m-slope", title: "Slopes: which way is downhill?", body: () => {
+      const w = L.mslope.w, F = (x) => (x - 3) * (x - 3) + 1, h = 0.01, slope = (F(w + h) - F(w)) / h;
+      return html`${big1("The <b>slope</b> (or <b>gradient</b>) tells you how much the answer changes when you nudge the input a tiny bit. To make the answer smaller, step the other way.")}
+      <p>Imagine you're blindfolded on a hill and want to reach the bottom. Feel the ground: if it slopes up to the right, step left. That's exactly how a model learns. The “hill” is the loss (how wrong it is) and the position is a weight.</p>
+      <p>You can measure a slope with a <b>nudge test</b>: change w by a tiny amount (0.01), see how much the answer changed, divide.</p>
+      <div class="tr-two"><div>${slider("mslope.w", "weight w", -1, 7, 0.1, w)}<canvas class="tr-cv" data-tr-chart="mslope"></canvas></div>
+        <div class="tr-calc">loss(w) = (w − 3)² + 1<br>loss(${f(w)}) = (${f(w - 3)})² + 1 = ${f(F(w))}<br>loss(${f(w + h)}) = ${f(F(w + h))}<br>slope ≈ (${f(F(w + h))} − ${f(F(w))}) ÷ ${h} = <b>${f(slope)}</b><br>
+        <span class="faint">${Math.abs(slope) < 0.05 ? "flat: you're at the bottom" : slope > 0 ? "uphill to the right → step left (make w smaller)" : "downhill to the right → step right (make w bigger)"}</span><br>one step: w − 0.1 × slope = ${f(w)} − 0.1 × ${f(slope)} = <b>${f(w - 0.1 * slope)}</b></div></div>
+      ${uses("<b>training</b>. For every weight, the computer works out the slope of the loss (the gradient) and moves the weight a small step downhill. The size of the step is the <b>learning rate</b>.")}
+      ${quiz("The slope at your weight is −2. Should the weight go up or down?", "Negative slope means the loss goes down as w goes up, so make w <b>bigger</b>.")}`;
+    }, draw: () => { const F = (x) => (x - 3) * (x - 3) + 1, p = []; for (let x = -1; x <= 7; x += 0.1) p.push([x, F(x)]); chart($('[data-tr-chart="mslope"]'), [{ pts: p, color: cssv("--accent", "#7c8cff") }], { mark: [L.mslope.w, F(L.mslope.w)], xlabel: "w → loss" }); } },
+    { id: "m-chain", title: "The chain rule: passing the blame back", body: () => {
+      const x = L.mchain.x, u = 2 * x + 1, y = 3 * u, h = 0.01, measured = (3 * (2 * (x + h) + 1) - y) / h;
+      return html`${big1("When one thing feeds into another, their slopes <b>multiply</b>. That's the chain rule.")}
+      <p>Think of gears. Turn the first gear once and the second turns twice; the second turns the third three times as fast. So the first gear turns the third 2 × 3 = 6 times as fast. A model is a long chain of steps, so the chain rule tells each weight how much it was to blame for the final mistake: multiply the slopes along the chain, from the end backwards.</p>
+      <div class="tr-two"><div>${slider("mchain.x", "x", -3, 3, 0.5, x)}</div>
+        <div class="tr-calc">step 1: u = 2 × x + 1 = 2 × ${f(x)} + 1 = ${f(u)} &nbsp; (slope 2)<br>step 2: y = 3 × u = 3 × ${f(u)} = ${f(y)} &nbsp; (slope 3)<br>chain rule: slope of y from x = 2 × 3 = <b>6</b><br>
+        nudge test: (y at x + 0.01 − y) ÷ 0.01 = <b>${f(measured)}</b> ✓</div></div>
+      ${uses("<b>backpropagation</b>. The computer starts at the loss and goes backwards through every layer, multiplying slopes, to get each weight's gradient. It's the chain rule applied millions of times.")}
+      ${quiz("Step one has slope 4, step two has slope 0.5. What's the slope of the whole chain?", "4 × 0.5 = <b>2</b>.")}`;
+    } },
+    { id: "m-chance", title: "Random choices with loaded dice", body: () => {
+      const r = L.mdice, ps = [0.6, 0.3, 0.1], names = ["the", "a", "zebra"];
+      return html`${big1("Choosing at random with <b>loaded dice</b> means each option has its own chance. Likelier options come up more often, but anything can happen.")}
+      <p>If “the” has a 60% chance, roll a random number between 0 and 1: below 0.6 picks “the”, 0.6–0.9 picks “a”, above 0.9 picks “zebra”. Roll lots of times and the counts match the chances.</p>
+      <div class="tr-two"><div><button class="btn small" data-tr-act="mdice-roll">Roll 10 times</button> <button class="btn small" data-tr-act="mdice-reset">Reset</button><p class="faint small">last roll: ${r.last == null ? "–" : f(r.last, 3) + " → “" + names[r.lastPick] + "”"}</p></div>
+        <div class="tr-calc">${names.map((nm, i) => html`“${nm}” (chance ${ps[i] * 100}%): picked ${r.counts[i]} times = ${r.total ? f(100 * r.counts[i] / r.total, 3) : 0}%<br>`)}rolls: ${r.total}</div></div>
+      ${uses("<b>writing</b>. After softmax gives each possible next word a chance, the model rolls loaded dice to pick one. That's why the same question can get different answers. “Temperature” makes the dice more or less loaded.")}
+      ${quiz("Why don't we always pick the most likely word?", "Always picking the top word makes boring, repetitive text, and it gets stuck in loops. A little randomness keeps it natural.")}`;
+    } },
+  ];
+  const PLAIN = {
+    big: "A language model is a huge formula that guesses the next word. Training = show it real text, see how wrong its guesses were, nudge its numbers to be a bit less wrong, repeat.",
+    neuron: "One neuron: multiply each input by its weight, add them up, add a bias, then bend the answer a little. Thousands of these, stacked, can learn almost any pattern.",
+    bpe: "Text becomes numbers by splitting it into common chunks (tokens) and giving each chunk an ID number.",
+    embed: "Each token ID gets a list of numbers that describes it; similar words end up with similar lists. Another list says where in the sentence it is.",
+    attn: "Each word looks back at the earlier words and decides (with dot products and softmax) which ones matter for understanding it, then mixes in their information.",
+    block: "Helpers that keep things stable: layer norm resets the numbers to a standard size, the feed-forward layer “thinks” about each word on its own, and residuals add the new information on top of the old.",
+    ce: "The model's final scores become chances (softmax); the loss is the surprise −ln p it felt at the real next word, averaged over the text.",
+    gd: "Training: work out which way is downhill for every weight (the gradient, using the chain rule), then take a small step that way.",
+    adam: "AdamW is a smarter way to take each step: it remembers recent slopes to smooth the steps out, and gives each weight its own step size.",
+    sched: "Start with tiny steps (warm-up), take the biggest steps early on, then gradually smaller ones to settle into a good spot.",
+    size: "How many numbers (weights) the model has, how much memory that needs, and how much arithmetic each training step costs.",
+    samp: "To write, the model rolls loaded dice for every next word; temperature, top-k and top-p change how loaded the dice are.",
+    multi: "Several computers can each train a copy, then average the copies, so the work is shared.",
+    scale: "Big models like Qwen use exactly this recipe, just with far more numbers and far more text, which takes far more computing.",
+  };
+  const AI_LESSONS = [
     { id: "big", title: "The big picture", body: () => html`
       <p>A language model is one function with millions of adjustable numbers (<b>weights</b>). Give it some text and it returns, for every possible next piece of text, a probability. <b>Training</b> nudges the weights so that the piece that really came next gets a higher probability. That's all — everything else is how to do that well.</p>
       <div class="tr-flow">${["Text", "Tokens (numbers)", "Embeddings (vectors)", "Transformer blocks ×L", "Logits (a score per token)", "Softmax (probabilities)", "Pick the next token"].map((s, i) => html`<span class="tr-flow-step">${s}</span>${i < 6 ? raw('<span class="tr-flow-arrow">→</span>') : ""}`)}</div>
@@ -105,7 +244,7 @@
         <li><b>Loss:</b> measure how wrong it was: the average of −ln(probability it gave the right token).</li>
         <li><b>Backward:</b> calculus (the chain rule) gives, for every weight, how much the loss would change if that weight moved a little: the <b>gradient</b>.</li>
         <li><b>Update:</b> move every weight a small step against its gradient (AdamW decides the step size per weight).</li></ol>
-      <p>Repeat thousands of times. Lessons 2–13 open each box with its exact maths and live numbers; tab 4 shows the real values inside <i>your</i> model.</p>
+      <p>Repeat thousands of times. The lessons after this one open each box with its exact maths and live numbers; tab 4 shows the real values inside <i>your</i> model. New to the maths? The “Maths you need” lessons at the top of the list come first.</p>
       ${eq("w ← w − η · ∂ℒ/∂w")}
       ${keyTable([["w", "any one weight"], ["η (eta)", "learning rate: the step size"], ["ℒ", "the loss: how wrong the model was"], ["∂ℒ/∂w", "the gradient: how the loss changes when w changes"]])}` },
     { id: "neuron", title: "A neuron", body: () => {
@@ -159,7 +298,7 @@
       <div class="tr-two"><div>${v.map((x, i) => slider("norm.v." + i, "x" + "₀₁₂₃"[i], -5, 5, 0.1, x))}</div>
       <div class="tr-calc">μ = (${v.map((x) => f(x)).join(" + ")}) ÷ 4 = <b>${f(mu)}</b><br>σ² = mean of (x − μ)² = <b>${f(va)}</b><br>√(σ² + 0.00001) = ${f(Math.sqrt(va + 1e-5))}<br>normalised = ${vec(nv)}<br><span class="faint">then × γ, + β (learned, start at 1 and 0)</span></div></div>
       ${keyTable([["μ, σ²", "mean and variance of one token's d numbers"], ["ε", "0.00001: avoids dividing by zero"], ["γ, β", "learned scale and shift, d each (2d weights per norm)"], ["W₁, b₁", "d → 4d: “expands” each token (4d² + 4d weights)", "yours: " + n0(4 * curSet().dim ** 2 + 4 * curSet().dim)], ["W₂, b₂", "4d → d: back down (4d² + d weights)"], ["L", "how many blocks are stacked", "yours: " + curSet().layers]])}
-      <p class="muted small">Per block: attention 4d² + 4d, feed-forward 8d² + 5d, two norms 4d — total 12d² + 13d weights. Lesson 10 adds them up for your model.</p>`;
+      <p class="muted small">Per block: attention 4d² + 4d, feed-forward 8d² + 5d, two norms 4d — total 12d² + 13d weights. “Counting weights, memory and time” adds them up for your model.</p>`;
     } },
     { id: "ce", title: "Logits, softmax and the loss", body: () => {
       const s = L.ce, p = softmax(s.logits), loss = -Math.log(p[s.target]);
@@ -265,6 +404,7 @@
       <p class="muted small">Honest scale: 10–30 million weights trained on a few hundred MB of good text gives readable paragraphs and simple, style-matched replies — a big step up, but not an assistant that knows the world. Everything that model knows came from your data.</p>`;
     } },
   ];
+  const LESSONS = MATHS.map((l) => Object.assign({ track: "maths" }, l)).concat(AI_LESSONS.map((l) => Object.assign({ track: "ai" }, l)));
 
   function vis(t) { return String(t).replace(/ /g, "␣").replace(/\n/g, "⏎"); }
   function bpeDemo(text, merges) {
@@ -402,15 +542,20 @@
     drawAll();
   }
   function drawAll() {
-    if (TR.tab === "learn") { const ls = LESSONS[TR.lesson]; if (ls.draw) ls.draw(); }
+    if (TR.tab === "learn") { const ls = LESSONS[TR.lesson]; if (ls && ls.draw) ls.draw(); }
     if (TR.tab === "train") paintLive();
   }
 
   function learnTab() {
-    const ls = LESSONS[TR.lesson];
-    return html`<div class="tr-learn"><nav class="tr-lessons" aria-label="Lessons">${LESSONS.map((l, i) => html`<button class="${i === TR.lesson ? "on" : ""}" data-tr-lesson="${i}"><span>${i + 1}</span>${l.title}</button>`)}
+    const ls = LESSONS[TR.lesson] || LESSONS[0], nM = MATHS.length;
+    const num = (i) => (i < nM ? "M" + (i + 1) : String(i - nM + 1));
+    const item = (l, i) => html`<button class="${i === TR.lesson ? "on" : ""}" data-tr-lesson="${i}"><span>${num(i)}</span>${l.title}</button>`;
+    return html`<div class="tr-learn"><nav class="tr-lessons" aria-label="Lessons">
+        <div class="tr-lessons-h">Maths you need <small>start here if it's new</small></div>${LESSONS.slice(0, nM).map((l, i) => item(l, i))}
+        <div class="tr-lessons-h">How AI works</div>${LESSONS.slice(nM).map((l, i) => item(l, i + nM))}
         <button class="${TR.lesson === -1 ? "on" : ""}" data-tr-act="glossary"><span>∑</span>Every variable</button></nav>
-      <section class="card tr-lesson" id="tr-lesson"><h2 class="tr-h">${TR.lesson + 1}. ${ls.title}</h2>${ls.body()}
+      <section class="card tr-lesson" id="tr-lesson"><h2 class="tr-h">${num(TR.lesson)}. ${ls.title}</h2>
+        ${ls.track === "ai" && PLAIN[ls.id] ? html`<div class="tr-plain"><b>In plain words:</b> ${PLAIN[ls.id]}</div>` : ""}${ls.body()}
         <div class="row tr-nav">${TR.lesson > 0 ? html`<button class="btn" data-tr-lesson="${TR.lesson - 1}">← ${LESSONS[TR.lesson - 1].title}</button>` : ""}<span class="spacer"></span>
           ${TR.lesson < LESSONS.length - 1 ? html`<button class="btn primary" data-tr-lesson="${TR.lesson + 1}">${LESSONS[TR.lesson + 1].title} →</button>` : html`<button class="btn primary" data-tr-tab="data">Next: your data →</button>`}</div></section></div>
       ${glossary()}`;
@@ -658,7 +803,7 @@ Assistant: game tonight?</pre></div>
           : TR.together === "race" ? "Each machine trains the whole model on its own, with a different random seed (and so different random windows of text). When " + p.lead + " finishes, the others stop where they are; the copy with the lowest validation loss is saved. Different seeds really do end at different losses: racing picks the luckiest."
           : "Only " + p.lead + " trains; the others stay idle."}</p>` : ov.mode === "cluster" ? html`<p class="faint small">Tick more machines to share one model between them or race copies.</p>` : ""}
       ${p.notes.filter((n) => p.lead).map((n) => html`<p class="faint small">${n}</p>`)}
-      <p class="faint small">Training runs on ${ov.mode === "cluster" ? "the chosen nodes, each in a pod (namespace nodeyard-train)" : "this machine, in a separate worker process"}; models are copied back here. Lesson 13 explains how sharing works.</p></section>`;
+      <p class="faint small">Training runs on ${ov.mode === "cluster" ? "the chosen nodes, each in a pod (namespace nodeyard-train)" : "this machine, in a separate worker process"}; models are copied back here. The lesson “Training on several machines” explains how sharing works.</p></section>`;
   }
   function savedModels() {
     const ms = TR.ov ? TR.ov.models : [];
@@ -771,7 +916,7 @@ Assistant: game tonight?</pre></div>
       <div class="tr-msgs" id="tr-msgs">${c.history.length ? c.history.map((m) => html`<div class="tr-msg ${m.role}"><b>${m.role === "user" ? "You" : "Model"}</b><div>${m.content}</div></div>`) : html`<div class="empty small">${c.mode === "chat" ? "Say something. The model sees “User: …\\nAssistant:” and writes the reply." : "Type the start of some text; the model continues it."}</div>`}
         ${c.busy ? html`<div class="tr-msg assistant"><b>Model</b><div><span class="spin"></span></div></div>` : ""}</div>
       <div class="row"><textarea class="input grow" id="tr-ask" rows="2" placeholder="${c.mode === "chat" ? "Message your model…" : "Start of the text…"}"></textarea><button class="btn primary" data-tr-act="send" ${c.busy ? "disabled" : ""}>Send</button></div>
-      <p class="faint small">Replies come only from what this model learned from your data. Short, odd or repetitive answers mean it needs more data or training (see lesson 14).</p></section>`;
+      <p class="faint small">Replies come only from what this model learned from your data. Short, odd or repetitive answers mean it needs more data or training (see the lesson “Why it isn't Qwen (yet)”).</p></section>`;
   }
 
   // ---------- every number: the whole network, every weight, every calculation in + − × ÷ ----------
@@ -1040,6 +1185,8 @@ Assistant: game tonight?</pre></div>
       if (r) { toast("Training " + r.model); TR.lines = []; TR.since = 0; TR.status = null; TR.model = TR.resume ? TR.model : ""; await loadOverview(); poll(); }
     }
     else if (a === "stop") { if (await post("/api/train/stop", {})) toast("Stopping: it saves after the current step."); }
+    else if (a === "mdice-roll") { const d = L.mdice; for (let n = 0; n < 10; n++) { const r = Math.random(), pick = r < 0.6 ? 0 : r < 0.9 ? 1 : 2; d.counts[pick]++; d.total++; d.last = r; d.lastPick = pick; } paint(); }
+    else if (a === "mdice-reset") { Object.assign(L.mdice, { counts: [0, 0, 0], total: 0, last: null }); paint(); }
     else if (a === "inside-every" || a === "inside-summary") { store.set("train.inside", a.slice(7)); paint(); }
     else if (a === "ev-trace") evTrace();
     else if (a === "ev-left" || a === "ev-right") { EV.col0 = Math.max(0, EV.col0 + (a === "ev-left" ? -PAGE_COLS : PAGE_COLS)); paint(); }
