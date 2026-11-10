@@ -21,6 +21,7 @@ import json
 import math
 import os
 import random
+import re
 import signal
 import time
 import uuid
@@ -88,6 +89,15 @@ def encode_with_roles(tokenizer: BPETokenizer, text: str, assistant_only: bool):
             in_user_turn = True
         elif stripped.startswith("Assistant:"):
             in_user_turn = False
+        marker = ROLE_MARKER.match(stripped) if assistant_only else None
+        if marker:
+            # The role marker itself is read but not graded: the chat prompt always supplies "Assistant:", and a model
+            # that learns to write markers prints them inside replies.
+            head = line[:len(line) - len(stripped) + marker.end()]
+            head_ids = tokenizer.encode(head)
+            ids.extend(head_ids)
+            weights.extend([0.0] * len(head_ids))
+            line = line[len(head):]
         line_ids = tokenizer.encode(line)
         ids.extend(line_ids)
         weights.extend([0.0 if (assistant_only and in_user_turn) else 1.0] * len(line_ids))
@@ -102,7 +112,7 @@ def cached_tokens(app_data: Path, tokenizer_path: Path, data_files, assistant_on
     for name in data_files:
         st = os.stat(name)
         key.update(f"{Path(name).name}|{st.st_size}|{int(st.st_mtime)}|".encode())
-    key.update(b"assistant-only" if assistant_only else b"all")
+    key.update(b"assistant-only-v2" if assistant_only else b"all")   # v2: role markers aren't graded
     digest = key.hexdigest()[:16]
     cache = app_data / "tokens.npz"
     try:
@@ -379,15 +389,29 @@ def train(args) -> int:
 
 
 REPLY_ENDS = ("\nUser:", "\nAssistant:", "\nSystem:", "\n\n")
+ROLE_MARKER = re.compile(r"(User|Assistant|System):")
 
 
 def end_of_reply(text: str):
-    """Where a chat reply ends: the next turn, or the blank line that ends a conversation in the training data.
-    (With --assistant-only the model never learns to write "User:", so the blank line is the reliable signal.)"""
+    """Where a chat reply ends: the next turn, the blank line that ends a conversation in the training data, or a
+    role marker anywhere (a small model can write "…Which Assistant:" mid-line; that's never part of a reply)."""
     body = text.lstrip()
     offset = len(text) - len(body)
     found = [body.find(end) for end in REPLY_ENDS if body.find(end) > 0]
+    marker = ROLE_MARKER.search(body, 1)
+    if marker:
+        found.append(marker.start())
     return offset + min(found) if found else None
+
+
+def clean_reply(text: str) -> str:
+    """The reply without a role marker the model may have started it with ("Assistant: …")."""
+    text = text.strip()
+    while True:
+        m = ROLE_MARKER.match(text)
+        if not m:
+            return text
+        text = text[m.end():].strip()
 
 
 @torch.no_grad()
@@ -432,7 +456,10 @@ def write_reply(model, tokenizer, context: int, prompt: str, device, rng, chat: 
         if chat and step % 4 == 0 and end_of_reply(tokenizer.decode(generated)) is not None:
             break
     text = tokenizer.decode(generated)
-    cut = end_of_reply(text) if chat else None
+    if not chat:
+        return text.strip()
+    text = clean_reply(text)
+    cut = end_of_reply(text)
     return (text[:cut] if cut is not None else text).strip()
 
 
