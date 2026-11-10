@@ -233,6 +233,37 @@ class TrainerTests(unittest.TestCase):
         self.assertEqual(kinds, ["Namespace", "Secret", "ConfigMap"])
         self.assertEqual(set(pool.base_manifest()[2]["data"]), set(trainpool.CODE_FILES))
 
+    def test_gpu_detected_from_the_durable_label_when_inventory_is_missing(self):
+        # debian-1's agent inventory drops out often; the nodeyard.io/gpu label (set after nvidia-smi worked there)
+        # must keep it a GPU node so it isn't shown as a plain CPU box.
+        labelled = {"name": "debian-1", "cpu_cores": 8, "arch": "x86_64",
+                    "labels": {"nodeyard.io/gpu": "nvidia", "nodeyard.io/gpu-vram-mib": "4096"}}
+        self.assertEqual(trainapi.node_gpu(labelled)["vram"], 4096 * 1024 ** 2)
+        device, speed, _ = trainapi.node_speed(labelled)
+        self.assertEqual(device, "cuda")
+        self.assertAlmostEqual(speed, 0.8e12)                 # the ~800 GFLOP/s GTX 1050 Ti estimate
+        inv = {"hw": {"hardware": {"gpus": [{"vendor": "0x10DE", "name_full": "GTX 1050 Ti", "vram": 4e9}]}}}
+        self.assertEqual(trainapi.node_gpu(inv)["name"], "GTX 1050 Ti")   # live inventory wins when present
+        self.assertIsNone(trainapi.node_gpu({"arch": "x86_64", "cpu_cores": 8}))   # no GPU, no label
+        self.assertEqual(trainapi.node_speed({"arch": "x86_64", "cpu_cores": 8})[0], "cpu")
+
+    def test_a_gpu_node_keeps_its_gpu_when_the_worker_falls_back_to_cpu(self):
+        node = {"name": "debian-1", "ready": True, "arch": "x86_64", "cpu_cores": 8,
+                "mem_total": 24 * 1024 ** 3, "mem_used": 1024 ** 3,
+                "labels": {"nodeyard.io/gpu": "nvidia", "nodeyard.io/gpu-vram-mib": "4096"}}
+        self.t.pool.cluster_nodes = lambda: [node]
+        self.t.speeds = {"debian-1": {"flops": 51.8e9, "device": "cpu"}}   # a stale CPU-fallback measurement
+        e = self.t.pool.entry("debian-1")
+        e.update(state="ready", status={"device": "cpu", "ram_free": 20 * 1024 ** 3,
+                 "probe": {"torch": "2.4.0", "cuda": False, "cuda_error": "no kernel image",
+                           "gpu": {"name": "NVIDIA GeForce GTX 1050 Ti", "vram": 4e9}}})
+        m = next(x for x in self.t.machines() if x["name"] == "debian-1")
+        self.assertEqual(m["device"], "cuda")                 # not relabelled a CPU box
+        self.assertEqual(m["gpu"]["name"], "NVIDIA GeForce GTX 1050 Ti")
+        self.assertAlmostEqual(m["speed"], 0.8e12)            # the GPU estimate, not the 51.8 GFLOP/s CPU measurement
+        self.assertFalse(m.get("measured"))
+        self.assertEqual(m["worker"]["cuda_error"], "no kernel image")   # the fall-back is still surfaced
+
     def test_register_adds_routes(self):
         ctx = SimpleNamespace(get_routes={}, post_routes={}, post_limits={}, store=None)
         trainapi.register(ctx, SimpleNamespace(demo=True, state_dir=self.dir.name))
