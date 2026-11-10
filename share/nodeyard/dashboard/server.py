@@ -813,6 +813,8 @@ def main():
     djvoice.register(ctx, a)
     import diskusage     # what's filling each node's disk, and how to free it
     diskusage.register(ctx, a)
+    import trainapi      # Train AI: train your own language model from scratch, with every number explained
+    trainapi.register(ctx, a)
     import tune          # per-device AI settings, and CPU/GPU power, clock and overclock controls
     tune.register(ctx, a)
     import memfree       # processes a node doesn't need, moved to swap or stopped (Processes > Free up memory)

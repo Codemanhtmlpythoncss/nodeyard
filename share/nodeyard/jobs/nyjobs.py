@@ -43,7 +43,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TRAINER = HERE / "train_bpe_gpt_torch.py"
-SUPPORT_FILES = [HERE / "bpe_tokenizer.py", HERE / "sampling.py"]
+SUPPORT_FILES = [HERE / "bpe_tokenizer.py", HERE / "sampling.py", HERE / "training_data.py"]
 CONFIG_PATH = Path(os.environ.get("NODEYARD_JOBS_CONFIG", "~/.config/nodeyard/jobs.json")).expanduser()
 JOBS_ROOT = Path(os.environ.get("NODEYARD_JOBS_OUTPUT", "~/nodeyard-jobs")).expanduser()
 REMOTE_ROOT = "nodeyard-jobs"
