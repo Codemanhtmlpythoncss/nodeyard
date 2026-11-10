@@ -17,6 +17,7 @@
     q: Object.assign({ on: false, preset: "starter", prompts: [], pass: 1, target_loss: "", give_up: 10, count: 20, held_out: false, match: "exact" },
       (() => { try { return JSON.parse(store.get("train.quality", "") || "null"); } catch (_) { return null; } })() || {}),
     machines: JSON.parse(store.get("train.machines", "[]") || "[]"), share: store.get("train.share", "1") !== "0", together: store.get("train.together", "share") || "share",
+    both: store.get("train.both", "0") === "1", autosetupBusy: false,
   };
 
   // ---------- small maths helpers (the same formulas as the trainer) ----------
@@ -494,7 +495,7 @@
   // ---------- loading ----------
   async function loadOverview() {
     try {
-      const q = "?hours=" + TR.hours + "&data=" + encodeURIComponent(TR.sel.join("|")) + "&machines=" + encodeURIComponent(TR.machines.join("|"));
+      const q = "?hours=" + TR.hours + "&data=" + encodeURIComponent(TR.sel.join("|")) + "&machines=" + encodeURIComponent(TR.machines.join("|")) + "&both=" + (TR.both ? "1" : "0");
       const r = await getJSON("/api/train" + q);
       if (!r.ok) { toast(r.error || "Couldn't read the trainer."); return; }
       TR.ov = r;
@@ -700,6 +701,12 @@ Assistant: game tonight?</pre></div>
     const N = params(+s.vocab_size, +s.context, +s.dim, +s.layers), act = actBytes(+s.batch_size, +s.context, +s.dim, +s.layers, +s.heads, +s.vocab_size), fl = 6 * N * s.batch_size * s.context;
     const field = (k, label, help, attrs = "") => html`<label class="tr-field"><span>${raw(label)}</span><input class="input" data-tr-set="${k}" value="${s[k]}" ${raw(attrs)}><span class="faint small">${raw(help)}</span></label>`;
     return html`<div class="grid tr-grid2">
+      <section class="card tr-span2 tr-autosetup"><div class="row wrap" style="align-items:center;gap:12px">
+        <div><h2 class="tr-h" style="margin:0">Auto-setup</h2>
+          <p class="faint small" style="margin:.2em 0 0">One click: pick the best machines (each one's GPU and CPU together), get them ready, measure the links between them, and fill in the recommended settings. Then just press Start.</p></div>
+        <span class="spacer"></span>
+        <button class="btn primary" data-tr-act="autosetup" ${TR.autosetupBusy || !TR.sel.length ? "disabled" : ""}>${TR.autosetupBusy ? "Setting up…" : "Auto-setup"}</button></div>
+        ${!TR.sel.length ? html`<p class="faint small" style="margin:.5em 0 0">Choose some data in <a href="#" data-tr-tab="data">step 2</a> first.</p>` : ""}</section>
       ${machinesCard()}
       <section class="card"><h2 class="tr-h">Recommended for ${ov.plan.share.length > 1 ? "these machines" : ov.plan.lead || "this hardware"}</h2>
         <label class="tr-field"><span>How long can it train?</span><select class="select" data-tr-act="hours">${raw([[0.25, "15 minutes"], [1, "1 hour"], [3, "3 hours"], [8, "overnight (8 h)"], [24, "a day"], [72, "3 days"]].map(([v, l]) => '<option value="' + v + '"' + (+v === +TR.hours ? " selected" : "") + ">" + l + "</option>").join(""))}</select></label>
@@ -730,7 +737,7 @@ Assistant: game tonight?</pre></div>
           <label class="tr-field inline"><span>Model</span><select class="select" data-tr-act="model-pick"><option value="">New model…</option>${raw(ov.models.map((m) => '<option value="' + esc(m.name) + '"' + (TR.resume && TR.model === m.name ? " selected" : "") + ">Continue " + esc(m.name) + "</option>").join(""))}</select></label>
           ${TR.resume ? "" : html`<input class="input" data-tr-act="model-name" placeholder="name (optional)" value="${TR.model}" style="width:180px">`}
           <span class="spacer"></span>
-          ${run ? html`<button class="btn danger" data-tr-act="stop" ${TR.status && TR.status.job && TR.status.job.stop ? "disabled" : ""}>${TR.status && TR.status.job && TR.status.job.stop ? "Stopping…" : "Stop and save"}</button>` : html`<button class="btn primary" data-tr-act="start" ${ov.plan.lead && TR.sel.length ? "" : "disabled"}>${TR.resume ? "Continue training" : "Start training"}${ov.plan.lead ? " on " + (TR.together !== "fastest" && ov.plan.share.length > 1 ? ov.plan.share.length + " machines" + (TR.together === "race" ? " (race)" : "") : ov.plan.lead) : ""}</button>`}</div>
+          ${run ? html`<button class="btn danger" data-tr-act="stop" ${TR.status && TR.status.job && TR.status.job.stop ? "disabled" : ""}>${TR.status && TR.status.job && TR.status.job.stop ? "Stopping…" : "Stop and save"}</button>` : html`<button class="btn primary" data-tr-act="start" ${ov.plan.lead && TR.sel.length ? "" : "disabled"}>${TR.resume ? "Continue training" : "Start training"}${ov.plan.lead ? " on " + (TR.together !== "fastest" && ov.plan.share.length > 1 ? ov.plan.share.length + " machines" + (TR.together === "race" ? " (parallel)" : "") : ov.plan.lead) : ""}</button>`}</div>
         ${TR.resume ? html`<p class="faint small">Continuing keeps the saved model's shape and tokenizer (V, T, d, L, h) and AdamW's running averages; the other settings apply. The learning rate schedule starts again, so a lower peak (about 30% of the first run's) stops the first steps from undoing what it already learned.</p>` : ""}</section>
       ${stopWhen()}
       <section class="card tr-span2"><h2 class="tr-h">Live <span class="right" id="tr-live-chip"></span></h2><div id="tr-live"></div>
@@ -770,8 +777,8 @@ Assistant: game tonight?</pre></div>
   }
   function raceLive(st) {
     const j = st.job || {}; if (j.mode !== "race") return "";
-    if (!j.results) return html`<p class="small">Racing: ${(j.machines || []).join(", ")} each train their own copy. The chart shows ${j.lead}; the others' lines are in the log, marked [name].</p>`;
-    return html`<h4>Race result</h4><div class="tr-scroll"><table class="tr-key"><tr><th>Machine</th><th>Best validation loss</th><th>Steps</th><th></th></tr>
+    if (!j.results) return html`<p class="small">Parallel runs: ${(j.machines || []).join(", ")} each train their own copy at the same time. The chart shows ${j.lead}; the others' lines are in the log, marked [name].</p>`;
+    return html`<h4>Parallel runs result</h4><div class="tr-scroll"><table class="tr-key"><tr><th>Machine</th><th>Best validation loss</th><th>Steps</th><th></th></tr>
       ${j.results.map((r) => html`<tr class="${r.winner ? "hl" : ""}"><td><b>${r.machine}</b></td><td>${f(r.validation_loss, 4)}</td><td>${n0(r.steps)}</td><td>${r.winner ? html`<span class="good-t">kept</span>` : ""}</td></tr>`)}</table></div>`;
   }
   function qualityLive(st) {
@@ -788,20 +795,22 @@ Assistant: game tonight?</pre></div>
     const lead = ov.machines.find((m) => m.name === p.lead);
     return html`<section class="card"><h2 class="tr-h">Where it trains <span class="right faint small">${ov.mode === "cluster" ? "your cluster, fastest first" : "no cluster here: this machine"}</span></h2>
       ${!p.lead ? html`<div class="tr-adv bad">${p.notes[0]}</div>` : ""}
-      <div class="tr-scroll"><table class="tr-key tr-machines"><tr><th></th><th>Machine</th><th>Hardware</th><th>Speed</th><th>Trainer</th></tr>
-      ${ov.machines.map((m) => html`<tr class="${inPlan.has(m.name) ? "hl" : ""} ${m.usable ? "" : "off"}">
-        <td>${ov.mode === "cluster" ? html`<input type="checkbox" data-tr-machine="${m.name}" ${TR.machines.length ? (TR.machines.includes(m.name) ? "checked" : "") : (p.share.includes(m.name) ? "checked" : "")} ${m.usable ? "" : "disabled"} aria-label="use ${m.name}">` : ""}</td>
-        <td><b>${m.name}</b>${m.name === p.lead ? html` <span class="chip small">fastest</span>` : ""}</td>
+      <div class="tr-scroll"><table class="tr-key tr-machines"><tr><th></th><th>Machine</th><th>Hardware</th><th>Speed</th><th title="round-trip time and bandwidth from the dashboard to this machine">Link</th><th>Trainer</th></tr>
+      ${ov.machines.map((m) => html`<tr class="${inPlan.has(m.name) ? "hl" : ""} ${m.usable ? "" : "off"} ${m.variant ? "tr-variant" : ""}">
+        <td>${m.variant ? html`<span class="faint" title="trains alongside ${m.parent}" aria-hidden="true">↳</span>` : ov.mode === "cluster" ? html`<input type="checkbox" data-tr-machine="${m.name}" ${TR.machines.length ? (TR.machines.includes(m.name) ? "checked" : "") : (p.share.includes(m.name) ? "checked" : "")} ${m.usable ? "" : "disabled"} aria-label="use ${m.name}">` : ""}</td>
+        <td><b>${m.name}</b>${m.name === p.lead ? html` <span class="chip small">fastest</span>` : ""}${m.variant ? html` <span class="chip small">same machine</span>` : ""}</td>
         <td class="small">${m.gpu ? m.gpu.name + " · " + gb(m.gpu.vram) : n0(m.cores) + " CPU cores"} · ${gb(m.ram_total)} RAM</td>
         <td class="small">${m.usable ? "~" + f(m.speed / 1e9, 3) + " GFLOP/s" + (m.measured ? " (measured)" : " (estimate)") : "–"}</td>
+        <td class="small">${m.variant ? "same machine" : m.link && m.link.rtt_ms != null ? f(m.link.rtt_ms, 3) + " ms" + (m.link.mbit ? " · " + f(m.link.mbit, 3) + " Mb/s" : "") : "–"}</td>
         <td class="small">${m.usable ? html`<span class="${m.worker.state === "ready" ? "good-t" : m.worker.state === "failed" ? "bad-t" : ""}">${stateText(m.worker)}</span>${m.worker.state !== "ready" && m.worker.detail ? html`<div class="faint">${m.worker.detail}</div>` : ""}` : html`<span class="faint">${m.reason}</span>`}</td></tr>`)}</table></div>
+      ${ov.mode === "cluster" && ov.machines.some((m) => m.gpu && !m.variant) ? html`<label class="tr-both small"><input type="checkbox" data-tr-both ${TR.both ? "checked" : ""}> Also use each GPU machine's CPU at the same time — a second trainer on the same machine, so its idle cores help too (no network cost between the two).</label>` : ""}
       ${lead && /starting|installing|checking/.test(lead.worker.state) ? html`<div class="tr-adv ok">Getting <b>${lead.name}</b> ready: PyTorch installs itself there the first time (${lead.gpu ? "about 3 GB for the GPU version" : "about 200 MB"}), then stays. You can start training now: it begins as soon as it's ready.</div>
         ${lead.worker.log.length ? html`<details><summary class="small">Install progress</summary><pre class="tr-pre tr-log">${lead.worker.log.join("\n")}</pre></details>` : ""}` : ""}
       ${p.share.length > 1 ? html`<h3 class="tr-h3">How ${p.share.join(" + ")} work together</h3>
-        <div class="seg tr-together">${[["share", "Share one model"], ["race", "Race copies, keep the best"], ["fastest", "Fastest only"]].map(([k, l]) => html`<button class="${TR.together === k ? "on" : ""}" data-tr-together="${k}">${l}</button>`)}</div>
+        <div class="seg tr-together">${[["share", "Share one model"], ["race", "Parallel runs"], ["fastest", "Fastest only"]].map(([k, l]) => html`<button class="${TR.together === k ? "on" : ""}" data-tr-together="${k}">${l}</button>`)}</div>
         <p class="faint small">${TR.together === "share" ? "One model, trained faster: each machine trains a copy for ~2 minutes, the copies' weights are averaged, repeat (~" + f(p.speed / 1e9, 3) + " GFLOP/s together)."
-          : TR.together === "race" ? "Each machine trains the whole model on its own, with a different random seed (and so different random windows of text). When " + p.lead + " finishes, the others stop where they are; the copy with the lowest validation loss is saved. Different seeds really do end at different losses: racing picks the luckiest."
-          : "Only " + p.lead + " trains; the others stay idle."}</p>` : ov.mode === "cluster" ? html`<p class="faint small">Tick more machines to share one model between them or race copies.</p>` : ""}
+          : TR.together === "race" ? "Parallel runs: each machine trains the whole model on its own in parallel, with a different random seed (and so different random windows of text). When " + p.lead + " finishes, the others stop where they are; the copy with the lowest validation loss is saved. Different seeds really do end at different losses — running several in parallel picks the luckiest."
+          : "Only " + p.lead + " trains; the others stay idle."}</p>` : ov.mode === "cluster" ? html`<p class="faint small">Tick more machines to share one model between them or run copies in parallel.</p>` : ""}
       ${p.notes.filter((n) => p.lead).map((n) => html`<p class="faint small">${n}</p>`)}
       <p class="faint small">Training runs on ${ov.mode === "cluster" ? "the chosen nodes, each in a pod (namespace nodeyard-train)" : "this machine, in a separate worker process"}; models are copied back here. The lesson “Training on several machines” explains how sharing works.</p></section>`;
   }
@@ -822,7 +831,7 @@ Assistant: game tonight?</pre></div>
     const last = st.last || {}, j = st.job, val = st.val.length ? st.val[st.val.length - 1].loss : null, V0 = +(j.settings || {}).vocab_size || 2048;
     const total = +j.steps || 0, frac = total && last.step ? Math.min(1, (last.step - (+(j.base_steps || 0))) / total) : last.of ? last.local / last.of : 0;
     const eta = last.sps && total ? Math.max(0, total * (1 - frac)) / last.sps : last.sps ? (last.of - last.local) / last.sps : null;
-    const where = (j.machines || []).join(" + "), rounds = j.mode === "shared" && j.rounds ? " · round " + j.round + " of " + j.rounds : j.mode === "race" ? " · race" : "";
+    const where = (j.machines || []).join(" + "), rounds = j.mode === "shared" && j.rounds ? " · round " + j.round + " of " + j.rounds : j.mode === "race" ? " · parallel" : "";
     if (chip) setHTML(chip, st.running ? html`<span class="chip good"><i class="dot good"></i>${j.phase && j.phase !== "training" ? j.phase : "training"} ${j.model}${where ? " on " + where : ""}${rounds}</span>` : html`<span class="chip">${j.code === 0 ? "finished" : j.code == null ? "stopped" : "failed (exit " + j.code + ")"} · ${j.model}</span>`);
     setHTML(live, html`<div class="tr-progress big"><i style="width:${(frac * 100).toFixed(1)}%"></i></div>
       <div class="tr-stats">${[["Step", last.local ? (total ? n0(Math.round(frac * total)) + " / " + n0(total) : n0(last.local) + " / " + n0(last.of)) : j.phase || "starting…"], ["Time left", st.running && eta != null ? dur(eta) : "–"], ["Training loss", f(last.loss, 4)], ["Validation loss", f(val, 4)],
@@ -1178,8 +1187,22 @@ Assistant: game tonight?</pre></div>
     else if (a === "delete-preset") {
       if (confirm("Delete the saved settings “" + TR.preset + "”?")) { const r = await post("/api/train/presets/delete", { name: TR.preset }); if (r) { TR.ov.presets = r.presets; resetSettings(); } }
     }
+    else if (a === "autosetup") {
+      if (!TR.sel.length) { toast("Choose some data in step 2 first."); return; }
+      TR.autosetupBusy = true; paint();
+      const r = await post("/api/train/autosetup", { data: TR.sel, hours: TR.hours });
+      TR.autosetupBusy = false;
+      if (!r) { paint(); return; }
+      TR.both = !!r.both; store.set("train.both", TR.both ? "1" : "0");
+      TR.together = r.together || "share"; store.set("train.together", TR.together);
+      TR.machines = (r.machines || []).filter((n) => !n.endsWith(" · CPU"));   // tick the real machines; each one's CPU half rides along
+      store.set("train.machines", JSON.stringify(TR.machines));
+      TR.edited = null; TR.preset = ""; store.set("train.preset", ""); TR.form = null;   // take the recommended settings
+      await loadOverview();
+      toast("Set up on " + (TR.machines.length || 1) + " machine" + (TR.machines.length === 1 ? "" : "s") + (TR.both ? " (GPU + CPU)" : "") + ". Review and press Start.");
+    }
     else if (a === "start") {
-      const body = { data: TR.sel, settings: TR.form, resume: TR.resume, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.together !== "fastest", together: TR.together,
+      const body = { data: TR.sel, settings: TR.form, resume: TR.resume, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.together !== "fastest", together: TR.together, both: TR.both,
         quality: TR.q.on ? { on: true, prompts: qPrompts().filter((p) => p.prompt.trim()).map((p) => ({ prompt: p.prompt, answer: p.answer || "", expect: String(p.expect || "").split(",").map((x) => x.trim()).filter(Boolean) })), pass: TR.q.pass, target_loss: TR.q.target_loss, give_up: TR.q.give_up || 10, match: TR.q.match } : undefined };
       const r = await post("/api/train/start", body);
       if (r) { toast("Training " + r.model); TR.lines = []; TR.since = 0; TR.status = null; TR.model = TR.resume ? TR.model : ""; await loadOverview(); poll(); }
@@ -1230,6 +1253,7 @@ Assistant: game tonight?</pre></div>
       if (t.checked) { if (!TR.machines.includes(d.trMachine)) TR.machines.push(d.trMachine); } else TR.machines = TR.machines.filter((x) => x !== d.trMachine);
       store.set("train.machines", JSON.stringify(TR.machines)); TR.form = null; loadOverview(); return;
     }
+    if (d.trBoth !== undefined) { TR.both = t.checked; store.set("train.both", TR.both ? "1" : "0"); TR.form = null; loadOverview(); return; }
     if (d.trSel) { if (t.checked) { if (!TR.sel.includes(d.trSel)) TR.sel.push(d.trSel); } else TR.sel = TR.sel.filter((x) => x !== d.trSel); saveSel(); loadOverview(); }
     else if (d.trSet === "assistant_only") { TR.form.assistant_only = t.checked; markEdited(); paint(); }
     else if (d.trSet === "device") { TR.form.device = t.value; markEdited(); paint(); }

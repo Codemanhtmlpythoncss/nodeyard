@@ -259,6 +259,15 @@ class TrainerTests(unittest.TestCase):
         self.assertEqual(kinds, ["Namespace", "Secret", "ConfigMap"])
         self.assertEqual(set(pool.base_manifest()[2]["data"]), set(trainpool.CODE_FILES))
 
+    def test_register_adds_routes(self):
+        ctx = SimpleNamespace(get_routes={}, post_routes={}, post_limits={}, store=None)
+        trainapi.register(ctx, SimpleNamespace(demo=True, state_dir=self.dir.name))
+        self.assertIn("/api/train", ctx.get_routes)
+        self.assertIn("/api/train/start", ctx.post_routes)
+        self.assertIn("/api/train/autosetup", ctx.post_routes)   # the one-click setup button
+        self.assertIn("/api/train/upload", ctx.post_limits)
+        self.assertNotIn("/api/train/setup", ctx.post_routes)   # PyTorch installs itself on each machine now
+
     def test_gpu_detected_from_the_durable_label_when_inventory_is_missing(self):
         # debian-1's agent inventory drops out often; the nodeyard.io/gpu label (set after nvidia-smi worked there)
         # must keep it a GPU node so it isn't shown as a plain CPU box.
@@ -290,13 +299,63 @@ class TrainerTests(unittest.TestCase):
         self.assertFalse(m.get("measured"))
         self.assertEqual(m["worker"]["cuda_error"], "no kernel image")   # the fall-back is still surfaced
 
-    def test_register_adds_routes(self):
-        ctx = SimpleNamespace(get_routes={}, post_routes={}, post_limits={}, store=None)
-        trainapi.register(ctx, SimpleNamespace(demo=True, state_dir=self.dir.name))
-        self.assertIn("/api/train", ctx.get_routes)
-        self.assertIn("/api/train/start", ctx.post_routes)
-        self.assertIn("/api/train/upload", ctx.post_limits)
-        self.assertNotIn("/api/train/setup", ctx.post_routes)   # PyTorch installs itself on each machine now
+    def test_each_machines_cpu_trains_alongside_its_gpu(self):
+        gpu = {"name": "gpu", "speed": 8e11, "usable": True, "reason": "", "device": "cuda",
+               "ram_free": 8e9, "gpu": {"name": "x", "vram": 8e9}}
+        cpu = {"name": trainpool.cpu_name("gpu"), "speed": 1e11, "usable": True, "reason": "", "device": "cpu",
+               "ram_free": 4e9, "gpu": None, "variant": "cpu", "parent": "gpu"}
+        p = self.t.plan([gpu, cpu])
+        self.assertEqual(p["lead"], "gpu")
+        self.assertEqual(p["share"], ["gpu", trainpool.cpu_name("gpu")])   # the GPU and its own CPU both train
+        self.assertAlmostEqual(p["speed"], 8e11 + 0.8 * 1e11)
+        self.assertTrue(any("its own CPU" in n for n in p["notes"]))
+        self.assertEqual(self.t.plan([gpu])["share"], ["gpu"])   # no CPU half present: just the GPU
+
+    def test_sharing_waits_on_a_slow_link(self):
+        def m(name, speed):
+            return {"name": name, "speed": speed, "usable": True, "reason": "", "device": "cuda",
+                    "ram_free": 8e9, "gpu": {"name": "x", "vram": 8e9}}
+        machines = [m("gpu", 8e11), m("mini", 6e11)]
+        big = 4 * trainapi.count_parameters(2000, 256, 512, 8)   # a model too big to swap over a slow link each round
+        fast = {"mini": {"rtt_ms": 2.0, "mbit": 1000.0}}
+        slow = {"mini": {"rtt_ms": 5.0, "mbit": 1.0}}           # 1 Mbit: a round's weight swap would dwarf the training
+        self.assertEqual(self.t.plan(machines, links=fast, model_bytes=big)["share"], ["gpu", "mini"])
+        dropped = self.t.plan(machines, links=slow, model_bytes=big)
+        self.assertEqual(dropped["share"], ["gpu"])
+        self.assertTrue(any("link is too slow" in n for n in dropped["notes"]))
+        # a machine the user ticked by hand is kept even over a slow link
+        self.assertEqual(self.t.plan(machines, ["gpu", "mini"], links=slow, model_bytes=big)["share"], ["gpu", "mini"])
+
+    def test_parallel_runs_is_the_race_mode(self):
+        post(self.t, self.t.paste, {"name": "d.txt", "text": "User: hi\nAssistant: ho\n" * 200})
+        fake = [{"name": "a", "speed": 5e11, "usable": True, "reason": "", "device": "cpu", "ram_free": 4e9, "gpu": None},
+                {"name": "b", "speed": 5e11, "usable": True, "reason": "", "device": "cpu", "ram_free": 4e9, "gpu": None}]
+        self.t.machines = lambda both=False: fake
+        self.t._orchestrate = lambda *a, **k: None   # don't talk to real workers in a unit test
+        settings = {"dim": 64, "heads": 2, "steps": 10, "batch_size": 1, "context": 8, "layers": 1,
+                    "vocab_size": 300, "learning_rate": 0.001}
+        for together, want in (("parallel", "race"), ("race", "race"), ("share", "shared")):
+            out = post(self.t, self.t.start, {"data": ["d.txt"], "settings": dict(settings), "together": together,
+                                              "model": "m-" + together})
+            self.assertEqual(sorted(out["machines"]), ["a", "b"], together)
+            self.assertEqual(self.t.job["mode"], want, together)
+            self.t.thread.join(timeout=2)
+
+    def test_the_cpu_half_pod_hides_the_gpu(self):
+        pool = self.t.pool
+        node = {"name": "gpu-box", "mem_total": 16 * 1024 ** 3, "labels": {"nodeyard.io/gpu": "nvidia"}}
+        pod = pool.pod_manifest(node, "cpu")
+        spec = pod["spec"]
+        self.assertTrue(pod["metadata"]["name"].endswith("-cpu"))
+        self.assertNotIn("runtimeClassName", spec)                           # no GPU runtime for the CPU half
+        self.assertTrue(spec["volumes"][2]["hostPath"]["path"].endswith("-cpu"))   # its own data folder
+        env = {e["name"]: e.get("value") for e in spec["containers"][0]["env"]}
+        self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "")
+        self.assertEqual(env["NVIDIA_VISIBLE_DEVICES"], "none")
+        half = str(int(16 * 1024 ** 3 * 0.4))
+        self.assertEqual(spec["containers"][0]["resources"]["limits"]["memory"], half)   # shares the node's memory
+        gpu_pod = pool.pod_manifest(dict(node, _with_cpu=True))               # the GPU pod, told its CPU half is alongside
+        self.assertEqual(gpu_pod["spec"]["containers"][0]["resources"]["limits"]["memory"], half)
 
 
 class WorkerTests(unittest.TestCase):
@@ -349,6 +408,13 @@ class WorkerTests(unittest.TestCase):
         for bad in ("../x", "data/../../etc/passwd", "etc/passwd", "models/a/b/c/d", "data/.hidden"):
             with self.assertRaises(trainpool.PoolError, msg=bad):
                 r.call("POST", "/delete", {"path": bad})
+
+    def test_ping_measures_the_round_trip(self):
+        r = self.remotes[0]
+        self.assertIsInstance(r.ping(0), float)        # empty ping: latency
+        self.assertGreaterEqual(r.ping(4096), 0.0)     # with a payload: throughput
+        with self.assertRaises(trainpool.PoolError):   # still needs the token
+            trainpool.Remote("w0", r.url, "x" * 32).ping(0)
 
     def test_machines_swap_files_directly(self):
         a, b = self.remotes

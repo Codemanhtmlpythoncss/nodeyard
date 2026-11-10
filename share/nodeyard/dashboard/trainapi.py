@@ -367,6 +367,8 @@ class Trainer:
         self.parse_lock = threading.Lock()
         self.check_cache = {}
         self.uploads = {}
+        self._probing = set()        # machines whose link is being measured right now (one probe at a time each)
+        self._probe_lock = threading.Lock()
         self.speeds = self._load_json("speeds.json")
         self.fetcher = trainsets.Fetcher(self.data_dir, lambda: DATA_TOTAL_MAX - self._data_total())
         self.job = self._load_job()
@@ -385,8 +387,12 @@ class Trainer:
             return {}
 
     # -- machines
-    def machines(self):
-        """Every machine that could train, fastest first, with why any can't, and its worker's state."""
+    def machines(self, both=False):
+        """Every machine that could train, fastest first, with why any can't, and its worker's state.
+
+        both=True also lists the CPU half of each GPU machine ("<name> · CPU") as its own entry, so a GPU machine can
+        train on its GPU and its CPU at the same time: the two are separate training participants that get averaged
+        together like any other machines."""
         out = []
         if self.pool.mode == "cluster":
             for n in self.pool.cluster_nodes():
@@ -441,10 +447,36 @@ class Trainer:
             measured = self.speeds.get(m["name"])
             if measured and measured.get("device") == m["device"]:
                 m["speed"], m["measured"] = measured["flops"], True
+            # What this machine's CPU alone would add. For a CPU machine that's its own speed; for a GPU
+            # machine it's the idle cores a CPU co-worker ("<name> · CPU") could put to work.
+            m["cpu_speed"] = m["speed"] if m["device"] == "cpu" else estimate_speed("cpu", m["cores"], m["arch"])
             m["worker"] = {"state": e["state"], "detail": e["detail"], "log": e.get("deplog") or [],
                            "torch": probe.get("torch"), "cuda_error": probe.get("cuda_error")}
+        if both:
+            out += self._cpu_variants(out)
         out.sort(key=lambda m: (not m["usable"], -m["speed"]))
         return out
+
+    def _cpu_variants(self, machines):
+        """A CPU-only co-worker for each usable GPU machine, so its idle cores train alongside its GPU."""
+        extra = []
+        for m in machines:
+            if m["device"] != "cuda" or not m.get("gpu") or not m["usable"]:
+                continue
+            name = trainpool.cpu_name(m["name"])
+            e = self.pool.entry(name)
+            speed = m["cpu_speed"]
+            cm = {"name": name, "kind": m["kind"], "device": "cpu", "gpu": None, "cores": m["cores"],
+                  "arch": m["arch"], "ram_total": m["ram_total"], "ram_free": (m.get("ram_free") or 0) // 2,
+                  "speed": speed, "cpu_speed": speed, "usable": True, "reason": "", "_node": m.get("_node"),
+                  "variant": "cpu", "parent": m["name"]}
+            measured = self.speeds.get(name)
+            if measured and measured.get("device") == "cpu":
+                cm["speed"], cm["measured"] = measured["flops"], True
+            cm["worker"] = {"state": e["state"], "detail": e["detail"], "log": e.get("deplog") or [],
+                            "torch": None, "cuda_error": None}
+            extra.append(cm)
+        return extra
 
     @staticmethod
     def budget_for(m):
@@ -454,9 +486,15 @@ class Trainer:
         free = m.get("ram_free") or 2 * 1024 ** 3
         return int(max(256 * 1024 ** 2, min(0.5 * free, free - 1024 ** 3)))
 
-    def plan(self, machines, chosen=None):
-        """The fastest usable machine leads; others join while they're at least a quarter as fast (at most 4)."""
-        usable = [m for m in machines if m["usable"] and (not chosen or m["name"] in chosen)]
+    def plan(self, machines, chosen=None, links=None, model_bytes=0):
+        """The fastest usable machine leads; others join while they're at least a quarter as fast (at most 4).
+
+        links (optional, from measure_link) is {name: {"rtt_ms", "mbit"}}; when given, a machine is left out if the
+        round's weight swap over its link would eat more than it adds — so sharing is only chosen when it's worth it.
+        A machine's own CPU half ("<name> · CPU", present only when machines() was asked for both) rides along with
+        it: same machine, no network, free idle cores."""
+        coworkers = {m["parent"]: m for m in machines if m.get("variant") == "cpu" and m["usable"]}
+        usable = [m for m in machines if m["usable"] and not m.get("variant") and (not chosen or m["name"] in chosen)]
         notes = []
         if not usable:
             why = "; ".join("%s: %s" % (m["name"], m["reason"]) for m in machines if not m["usable"]) or "no machines found"
@@ -470,15 +508,108 @@ class Trainer:
             elif ratio < 0.25 and not chosen:
                 notes.append("%s left out: about %s× slower than %s, so it would add under %d%% and slow every round's weight swap."
                              % (m["name"], _n(1 / max(ratio, 1e-9)), lead["name"], max(1, int(ratio * 100))))
+            elif links is not None and not chosen and not self._link_worth(m, links, model_bytes)[0]:
+                notes.append("%s left out: %s" % (m["name"], self._link_worth(m, links, model_bytes)[1]))
             else:
                 share.append(m)
-        speed = lead["speed"] + 0.8 * sum(m["speed"] for m in share[1:])
-        if len(share) > 1:
+        members = []
+        for m in share:
+            members.append(m)
+            co = coworkers.get(m["name"])
+            if co:
+                members.append(co)
+        if coworkers:
+            notes.append("Each GPU machine also trains on its own CPU (a second trainer on the same machine), so its "
+                         "idle cores help too — same machine, so there's no network cost between them.")
+        speed = members[0]["speed"] + 0.8 * sum(m["speed"] for m in members[1:])
+        if len(members) > 1:
             notes.append("Shared: each machine trains its own copy for about 2 minutes, then the copies' weights are averaged "
                          "(weighted by how much text each read) and every machine carries on from the average. "
                          "Speed ≈ fastest + 80% of the others (the swaps cost the rest).")
-        return {"lead": lead["name"], "share": [m["name"] for m in share], "notes": notes, "speed": speed,
-                "budget": min(self.budget_for(m) for m in share)}
+        return {"lead": lead["name"], "share": [m["name"] for m in members], "notes": notes, "speed": speed,
+                "budget": min(self.budget_for(m) for m in members)}
+
+    @staticmethod
+    def _link_worth(m, links, model_bytes, round_seconds=120.0):
+        """Is it worth sharing with this machine, given the latency/bandwidth to it? A round is about round_seconds of
+        training plus two weight swaps (send this copy to the lead, pull the average back). Not worth it if the swaps
+        would eat more than half the round."""
+        link = links.get(m["name"]) or {}
+        rtt = (link.get("rtt_ms") or 0) / 1000.0
+        mbit = link.get("mbit") or 0
+        swap = 2 * rtt + (2 * model_bytes * 8 / (mbit * 1e6) if mbit and model_bytes else 0)
+        if swap > 0.5 * round_seconds:
+            return False, ("the link is too slow — swapping weights each round would cost about %ds of every %ds round"
+                           % (int(swap), int(round_seconds)))
+        return True, ""
+
+    def measure_links(self, machines):
+        """Return the cached latency/bandwidth to every machine, and quietly refresh any that's ready and stale.
+
+        The refresh runs in the background (one probe per machine at a time) so a slow link never holds up the page."""
+        now = time.time()
+        for m in machines:
+            if (m.get("worker") or {}).get("state") != "ready":
+                continue
+            name = m["name"]
+            link = self.pool.links.get(name)
+            if link and now - link.get("at", 0) < 90:
+                continue
+            with self._probe_lock:
+                if name in self._probing:
+                    continue
+                self._probing.add(name)
+            threading.Thread(target=self._probe_link, args=(name,), daemon=True).start()
+        return {n: {"rtt_ms": v.get("rtt_ms"), "mbit": v.get("mbit")} for n, v in self.pool.links.items()}
+
+    def _probe_link(self, name):
+        try:
+            r = self.pool.entry(name).get("remote")
+            if r:
+                self.pool.measure_link(name, r, bandwidth=True, cache_seconds=600)
+        except Exception:   # noqa: BLE001 - a probe must never take the dashboard down
+            pass
+        finally:
+            with self._probe_lock:
+                self._probing.discard(name)
+
+    def autosetup(self, body):
+        """One button: choose the best machines (each one's GPU and CPU together), warm their workers up, measure the
+        links between them, and hand back a ready-to-run configuration — which machines, sharing on, and the settings
+        recommended for this data. It does not start training; the page fills itself in and the user presses Start."""
+        names = [n for n in (body.get("data") or []) if isinstance(n, str)]
+        chars, chat = None, False
+        for n in names:
+            try:
+                c = self.check(n)
+                chars = (chars or 0) + c["chars"]
+                chat = chat or c["chat"]
+            except TrainError:
+                pass
+        hours = _clamp_float(body.get("hours"), 0.05, 24 * 30, 1.0)
+        machines = self.machines(both=True)
+        if not any(m["usable"] for m in machines):
+            why = "; ".join("%s: %s" % (m["name"], m["reason"]) for m in machines if not m["usable"]) or "no machines found"
+            raise TrainError("No machine can train right now (%s)." % why, 409)
+        for m in machines:   # warm every real machine so sharing actually engages; the CPU half comes up with it
+            if m["usable"] and not m.get("variant"):
+                self.pool.ensure(m["name"], m.get("_node"))
+        self.measure_links(machines)
+        machines = self.machines(both=True)   # re-read: worker states, speeds and links may have moved
+        links = self.pool.links or None
+        profile = {"chat": chat, "unique_fraction": 1.0, "example_chars": 0} if chars else None
+        plan = self.plan(machines, links=links, model_bytes=0)
+        hw = self.plan_hardware(machines, plan)
+        rec = recommend(dict(hw, chat=chat), chars, hours, profile)
+        plan = self.plan(machines, links=links, model_bytes=4 * (rec.get("parameters") or 0))
+        hw = self.plan_hardware(machines, plan)
+        rec = recommend(dict(hw, chat=chat), chars, hours, profile)
+        for m in machines:
+            lk = (links or {}).get(m["name"])
+            if lk:
+                m["link"] = {"rtt_ms": lk.get("rtt_ms"), "mbit": lk.get("mbit")}
+        return {"both": True, "share": True, "together": "share", "machines": plan["share"], "plan": plan,
+                "hardware": hw, "recommend": rec, "machine_list": [self.public(m) for m in machines], "mode": self.pool.mode}
 
     def plan_hardware(self, machines, plan):
         """What the recommender sizes the model for: the lead's hardware, the plan's combined speed, the smallest memory."""
@@ -895,15 +1026,18 @@ class Trainer:
                                       "give_up": max(0, min(100, int(q.get("give_up") or 10))),
                                       "match": "close" if q.get("match") == "close" else "exact"})
             chosen = body.get("machines") if isinstance(body.get("machines"), list) and body.get("machines") else None
-            machines = self.machines()
-            plan = self.plan(machines, chosen)
+            both = bool(body.get("both"))
+            model_bytes = 4 * count_parameters(int(_opt(options, "--vocab-size")), int(_opt(options, "--context")),
+                                               int(_opt(options, "--dim")), int(_opt(options, "--layers")))
+            machines = self.machines(both=both)
+            plan = self.plan(machines, chosen, links=self.pool.links or None, model_bytes=model_bytes)
             if not plan["lead"]:
                 raise TrainError(plan["notes"][0], 409)
             share = plan["share"] if body.get("share", True) else plan["share"][:1]
             log_path = os.path.join(self.logs_dir, "%s-%d.log" % (name, int(time.time())))
             open(log_path, "a").close()
             self.job = {"model": name, "log": log_path, "started": time.time(), "resume": resume, "data": files, "settings": s,
-                        "ended": None, "code": None, "machines": share, "lead": share[0], "mode": ("race" if body.get("together") == "race" else "shared") if len(share) > 1 else "single",
+                        "ended": None, "code": None, "machines": share, "lead": share[0], "mode": ("race" if body.get("together") in ("race", "parallel") else "shared") if len(share) > 1 else "single",
                         "options": options, "steps": steps, "base_steps": base_steps, "quality": quality, "warmup": warmup, "eval_every": eval_every, "save_every": save_every,
                         "speeds": {m["name"]: m["speed"] for m in machines if m["name"] in share},
                         "round": 0, "rounds": 0, "phase": "starting", "stop": False, "wjob": None}
@@ -1020,8 +1154,9 @@ class Trainer:
             log.close()
 
     def _machine_node(self, name):
+        base, _ = trainpool.split_variant(name)   # "<node> · CPU" trains on the same node as "<node>"
         for m in self.machines():
-            if m["name"] == name:
+            if m["name"] == base:
                 return m.get("_node")
         return None
 
@@ -1594,14 +1729,24 @@ def register(ctx, args):
             except TrainError:
                 pass
         profile = {"chat": chat, "unique_fraction": unique_chars / chars, "example_chars": example_weighted / chars} if chars else None
-        machines = t.machines()
+        both = (q.get("both") or ["0"])[0] == "1"
+        machines = t.machines(both=both)
         chosen = [n for n in (q.get("machines") or [""])[0].split("|") if n] or None
-        plan = t.plan(machines, chosen)
+        links = t.measure_links(machines) or None
+        plan = t.plan(machines, chosen, links=links)
+        hw = t.plan_hardware(machines, plan)
+        rec = recommend(dict(hw, chat=chat), chars, hours, profile)
+        # Judge latency against the real model size, then settle the plan and hardware once more.
+        plan = t.plan(machines, chosen, links=links, model_bytes=4 * (rec.get("parameters") or 0))
+        hw = t.plan_hardware(machines, plan)
+        rec = recommend(dict(hw, chat=chat), chars, hours, profile)
+        for m in machines:   # show each machine's latency in the table
+            lk = (links or {}).get(m["name"])
+            if lk:
+                m["link"] = {"rtt_ms": lk.get("rtt_ms"), "mbit": lk.get("mbit")}
         if plan["lead"]:   # get the best machine ready (PyTorch installs itself) while the page is open
             lead = next(m for m in machines if m["name"] == plan["lead"])
             t.pool.ensure(lead["name"], lead.get("_node"))
-        hw = t.plan_hardware(machines, plan)
-        rec = recommend(dict(hw, chat=chat), chars, hours, profile)
         # What would get a bigger model: more time on these machines, or a faster machine (even one that's down).
         times = []
         for h in (0.25, 1, 3, 8, 24, 72):
@@ -1643,6 +1788,7 @@ def register(ctx, args):
         "/api/train/data/delete": wrap(t.delete_data),
         "/api/train/model/delete": wrap(t.delete_model),
         "/api/train/start": wrap(t.start),
+        "/api/train/autosetup": wrap(t.autosetup),
         "/api/train/stop": wrap(t.stop),
         "/api/train/chat": wrap(t.chat),
         "/api/train/explain": wrap(t.explain),
