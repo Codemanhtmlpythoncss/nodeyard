@@ -1162,6 +1162,19 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .tr-key td.sym { font-family: "STIX Two Math", "Cambria Math", serif; font-size: 15px; white-space: nowrap; width: 1%; }
 .tr-key td.val { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--accent2); white-space: nowrap; text-align: right; }
 .tr-key tr.hl td { background: rgba(124, 140, 255, .1); }
+.tr-cat { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.tr-catitem { border: 1px solid var(--line2); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.tr-catitem p { margin: 2px 0; }
+.tr-conv { display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; align-items: start; margin-bottom: 8px; }
+.tr-conv .tr-pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+.tr-arrow { align-self: center; color: var(--faint); }
+@media (max-width: 700px) { .tr-conv { grid-template-columns: 1fr; } .tr-arrow { transform: rotate(90deg); justify-self: center; } }
+.tr-anno { white-space: pre-wrap; word-break: break-word; }
+.tr-anno.big { font-size: 15px; }
+.ra-mark { color: var(--warn); font-weight: 600; } .ra-user { color: var(--muted); } .ra-asst { color: var(--text); }
+.ra-sep { color: var(--accent); opacity: .8; }
+.tr-legend span { padding: 1px 6px; border-radius: 6px; background: rgba(127, 127, 127, .1); margin-right: 4px; }
+.tr-machines tr.off td { opacity: .6; } .tr-machines td:first-child { width: 22px; }
 .tr-two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; align-items: start; }
 .tr-sl { display: flex; flex-direction: column; gap: 3px; margin: 8px 0; font-size: 13px; }
 .tr-sl > span:first-child { display: flex; justify-content: space-between; gap: 8px; }
