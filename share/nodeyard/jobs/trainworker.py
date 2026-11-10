@@ -492,6 +492,20 @@ def make_handler(w, token):
             if not self.authed():
                 return
             path = urllib.parse.urlparse(self.path).path
+            if path == "/ping":
+                # Link probe: read (and discard) the sent bytes, then reply. The dashboard times the round trip to
+                # work out this machine's latency (an empty ping) and throughput (a few MB), so it can tell whether
+                # sharing the load with this machine is worth the weight-swaps.
+                n = int(self.headers.get("Content-Length") or 0)
+                if n > 64 * 1024 * 1024:
+                    return self.send(413, {"error": "ping too big"})
+                left = n
+                while left:
+                    b = self.rfile.read(min(CHUNK, left))
+                    if not b:
+                        break
+                    left -= len(b)
+                return self.send(200, {"bytes": n})
 
             def go():
                 b = self.body()
