@@ -515,6 +515,10 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def handle_error(self, request, client_address):
+        if not isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):   # a caller hanging up isn't news
+            super().handle_error(request, client_address)
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])

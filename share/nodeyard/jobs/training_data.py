@@ -10,6 +10,7 @@ jobs runner copies every file as data.txt):
       {"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
       {"conversations": [{"from": "human", "value": "..."}, {"from": "gpt", "value": "..."}]}
       {"instruction": "...", "input": "...", "output": "..."}       (input optional)
+      {"instruction": "...", "context": "...", "response": "..."}   (Dolly; context optional)
       {"prompt": "...", "completion": "..."}   or  {"question": "...", "answer": "..."}
       {"text": "..."}
   * A JSON file holding a list of the objects above.
@@ -27,6 +28,7 @@ can be copied to any node next to the trainer.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 ROLE_NAMES = {
@@ -63,7 +65,7 @@ def record_to_text(record) -> str | None:
                        ("prompt", "response"), ("question", "answer"), ("input", "output")):
         if ask in record and reply in record:
             question = _clean(record[ask])
-            extra = _clean(record.get("input")) if ask == "instruction" else ""
+            extra = _clean(record.get("input") or record.get("context")) if ask == "instruction" else ""
             if extra:
                 question = f"{question}\n{extra}"
             answer = _clean(record[reply])
@@ -78,7 +80,8 @@ def record_to_text(record) -> str | None:
 
 def detect_format(text: str) -> str:
     head = text.lstrip()[:4000]
-    if head.startswith("["):
+    # A JSON list starts [ then {, ", [ or ]; a book can start with "[Illustration]" and is plain text.
+    if re.match(r"\[\s*[\[{\"\]]", head):
         return "json"
     first = next((line.strip() for line in head.splitlines() if line.strip()), "")
     if first.startswith("{") and first.endswith("}"):

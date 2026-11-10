@@ -85,7 +85,9 @@ class Remote:
         try:
             conn = self._conn(3)
             conn.request("GET", "/healthz")
-            ok = conn.getresponse().status == 200
+            r = conn.getresponse()
+            r.read()
+            ok = r.status == 200
             conn.close()
             return ok
         except (OSError, http.client.HTTPException):
