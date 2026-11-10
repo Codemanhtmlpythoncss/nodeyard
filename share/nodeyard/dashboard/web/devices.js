@@ -15,6 +15,11 @@
 
   // For a NotReady node, say whether it actually answers (so you can tell "really down" from
   // "up but Kubernetes marks it NotReady"). Empty until you press Recheck.
+  // A node can be removed from here unless it's the control-plane (which runs the cluster).
+  function isRemovable(n) {
+    const nd = S.nodeBy && S.nodeBy[n.name];
+    return !!nd && !(nd.roles || []).some((r) => /control-plane|master|etcd/.test(r));
+  }
   function reachChip(name, ready) {
     if (ready) return "";
     const st = reach.by[name.toLowerCase()];
@@ -87,7 +92,7 @@
         ${h.undervoltage ? html`<div class="kvl"><span class="muted">Power</span><span>${chip("under-voltage", "bad")}</span></div>` : ""}
         ${h.uptime ? html`<div class="kvl"><span class="muted">Up for</span><span>${fmt.dur ? fmt.dur(h.uptime) : Math.round(h.uptime / 3600) + " h"}</span></div>` : ""}
         <div class="kvl"><span class="muted">Pods</span><span>${n.pods_running} / ${n.pods_capacity}</span></div>
-        <button class="btn small" data-dev-open="${n.name}">Open details</button>
+        <div class="row wrap" style="gap:6px"><button class="btn small" data-dev-open="${n.name}">Open details</button>${isRemovable(n) ? html`<button class="btn small danger" data-dev-remove="${n.name}">Remove node</button>` : ""}</div>
       </div>
     </details>`;
   }
@@ -131,6 +136,8 @@
   document.addEventListener("click", (e) => {
     const o = e.target.closest("[data-dev-open]");
     if (o) { U.openDrawer("node:" + o.dataset.devOpen); return; }
+    const rm = e.target.closest("[data-dev-remove]");
+    if (rm) { e.preventDefault(); e.stopPropagation(); U.removeNode(rm.dataset.devRemove); return; }  // confirm + guarded streamed removal
     if (e.target.closest("[data-dev-close]")) { toggle(false); return; }
     if (e.target.closest("[data-dev-recheck]")) { doRecheck(); return; }
     if (e.target.closest("[data-dev-restart]")) {
