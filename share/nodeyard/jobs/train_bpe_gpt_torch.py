@@ -330,11 +330,11 @@ def train(args) -> int:
         if not math.isfinite(value):
             raise RuntimeError(f"Training diverged at step {step} (loss {value}). Nothing was saved.")
         total_step = previous_steps + step
-        if step % 10 == 0 or step == args.steps:
-            elapsed = max(1e-9, time.perf_counter() - started)
-            emit(f"Step {step}/{args.steps} | train loss {value:.4f} | {step / elapsed:.2f} steps/sec | "
-                 f"{step * args.batch_size * args.context / elapsed:,.0f} tokens/sec | "
-                 f"total training step {total_step:,} | learning rate {rate:.8g}")
+        # Every step, so the page's charts move with each update (the gradient norm is before clipping).
+        elapsed = max(1e-9, time.perf_counter() - started)
+        emit(f"Step {step}/{args.steps} | train loss {value:.4f} | {step / elapsed:.2f} steps/sec | "
+             f"{step * args.batch_size * args.context / elapsed:,.0f} tokens/sec | "
+             f"total training step {total_step:,} | learning rate {rate:.8g} | gradient norm {grad_norm:.4f}")
         if step % args.eval_every == 0 or step == args.steps:
             validation = evaluate(model, valid_tokens, valid_weights, args.context, args.batch_size, device)
             emit(f"Validation at step {step}: loss {validation:.4f} | total training step {total_step:,}")

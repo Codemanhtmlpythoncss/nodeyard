@@ -44,6 +44,7 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$")
 STEP_RE = re.compile(r"^Step (\d+)/(\d+) \| train loss ([-\d.eE+naif]+) \| ([\d.]+) steps/sec \| ([\d,]+) tokens/sec \| "
                      r"total training step ([\d,]+) \| learning rate ([-\d.eE+]+)")
 VAL_RE = re.compile(r"^Validation at step (\d+): loss ([-\d.eE+naif]+) \| total training step ([\d,]+)")
+STEP_GRAD_RE = re.compile(r"\| gradient norm ([\d.eE+-]+)\s*$")
 GRAD_RE = re.compile(r"^Gradient norm at step (\d+): ([\d.eE+-]+)")
 MODEL_FILES = ("model.pt", "optimizer.pt", "bpe.json", "model.json")
 CHARS_PER_TOKEN = 3.6        # typical for a learned BPE vocabulary on English; the trainer prints the real figure
@@ -917,6 +918,10 @@ class Trainer:
                           "tps": int(m.group(5).replace(",", "")), "of": int(m.group(2)), "local": int(m.group(1)), "sps": _f(m.group(4))}
                     p["train"].append(pt)
                     p["last"] = pt
+                    g = STEP_GRAD_RE.search(line)
+                    if g:
+                        p["grad"].append({"step": pt["step"], "local": pt["local"], "norm": _f(g.group(1))})
+                        p["step_grads"] = True
                     continue
                 m = VAL_RE.match(line)
                 if m:
@@ -932,7 +937,7 @@ class Trainer:
                 if line.startswith(("Good enough at", "Stopped improving")):
                     p["verdict"] = line
                 m = GRAD_RE.match(line)
-                if m:
+                if m and not p.get("step_grads"):
                     p["grad"].append({"local": int(m.group(1)), "norm": _f(m.group(2))})
             if len(p["lines"]) > 5000:
                 drop = len(p["lines"]) - 4000
@@ -941,7 +946,7 @@ class Trainer:
         dropped = p.get("dropped", 0)
         start = max(0, int(since) - dropped)
         return {"job": job, "running": running, "lines": p["lines"][start:], "next": dropped + len(p["lines"]),
-                "train": _thin(p["train"], 1500), "val": p["val"], "grad": p["grad"][-200:], "last": p["last"],
+                "train": _thin(p["train"], 1500), "val": p["val"], "grad": _thin(p["grad"], 1500), "last": p["last"],
                 "quality": [{"step": x["step"], "score": x["score"], "loss": x.get("loss")} for x in p["quality"]],
                 "quality_last": p["quality"][-1] if p["quality"] else None, "verdict": p["verdict"]}
 
@@ -1048,7 +1053,7 @@ class Trainer:
                 last_save = time.time()
             if not out["running"] and not out["text"]:
                 return out.get("code") if out.get("code") is not None else 1
-            time.sleep(0.2 if out["text"] else 1.5)
+            time.sleep(0.1 if out["text"] else 0.5)
 
     def _measure(self, name):
         """Reads a run's log lines for its speed; remembers it so the next plan uses the measured speed."""

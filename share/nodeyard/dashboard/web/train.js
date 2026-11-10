@@ -386,7 +386,7 @@
         paintLive();
       }
     } catch (e) { /* offline */ }
-    TR.pollT = setTimeout(poll, TR.status && TR.status.running ? 1500 : 6000);
+    TR.pollT = setTimeout(poll, TR.status && TR.status.running ? 700 : 6000);
   }
   async function post(url, body) {
     try { const r = await postJSON(url, body); if (!r.ok) { toast(r.error || "That didn't work."); return null; } return r; }
@@ -698,7 +698,7 @@ Assistant: game tonight?</pre></div>
     chart($("#tr-lr"), [{ pts: tr.map((p) => [p.step, p.lr]), color: cssv("--accent2", "#2de") }], { y0: 0, empty: "–" });
     const qs = st ? (st.quality || []).filter((x) => x.score != null) : [];
     if ($("#tr-qchart")) chart($("#tr-qchart"), [{ pts: qs.map((x) => [x.step, x.score * 100]), color: cssv("--good", "#3d9"), dots: true }], { y0: 0, xlabel: "step · % of test prompts passing" });
-    chart($("#tr-grad"), [{ pts: (st ? st.grad : []).map((p) => [p.local, p.norm]), color: cssv("--warn", "#fb2"), dots: true }], { y0: 0, empty: "–" });
+    chart($("#tr-grad"), [{ pts: (st ? st.grad : []).map((p) => [p.step != null ? p.step : p.local, p.norm]), color: cssv("--warn", "#fb2"), dots: st ? st.grad.length < 150 : false }], { y0: 0, empty: "–" });
   }
 
   function workerNote(what) {

@@ -182,6 +182,17 @@ class TrainerTests(unittest.TestCase):
         self.assertEqual(st["grad"][0]["norm"], 0.8)
         self.assertEqual(self.t.status(st["next"])["lines"], [])
 
+    def test_every_step_reports_its_gradient(self):
+        log = os.path.join(self.t.logs_dir, "s.log")
+        with open(log, "w") as f:
+            for i in range(1, 4):
+                f.write("Step %d/3 | train loss 5.0 | 1.00 steps/sec | 100 tokens/sec | total training step %d | learning rate 0.001 | gradient norm %.1f\n" % (i, i, i / 2))
+            f.write("Gradient norm at step 3: 9.9 (clipped to 1.0 when larger)\n")   # the per-check line no longer doubles up
+        self.t.job = {"model": "m", "log": log}
+        st = self.t.status(0)
+        self.assertEqual([p["step"] for p in st["train"]], [1, 2, 3])
+        self.assertEqual([(g["step"], g["norm"]) for g in st["grad"]], [(1, 0.5), (2, 1.0), (3, 1.5)])
+
     def test_start_checks_settings_before_anything_runs(self):
         post(self.t, self.t.paste, {"name": "d.txt", "text": "x" * 2000})
         bad = post(self.t, self.t.start, {"data": ["d.txt"], "settings": {"dim": 63, "heads": 2, "steps": 10, "batch_size": 1, "context": 8,
