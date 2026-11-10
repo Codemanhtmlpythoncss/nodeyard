@@ -259,11 +259,38 @@ doctor_check_cluster_nodes() {
 
 doctor_check_pods() {
     doctor_cluster_relevant || return 2
-    local bad
-    bad="$(kctl get pods -A --no-headers 2>/dev/null | awk '$4 !~ /Running|Completed/{print $1 "/" $2 " (" $4 ")"}' | head -n 5 | paste -sd, - || true)"
-    [[ -z "$bad" ]] && return 0
-    DOCTOR_DETAIL="pods not running: ${bad}"
-    return 3
+    local ghosts other
+    # Ghost pods: stuck in a state that is safe to force-delete -- left behind on a
+    # node the control plane can't reach (the usual fallout of a "Status unknown" node).
+    # These we can clear automatically.
+    ghosts="$(kctl get pods -A --no-headers 2>/dev/null | awk '$4 ~ /^(Terminating|Unknown|ContainerStatusUnknown|NodeLost)$/{print $1 "/" $2}' | head -n 8 | paste -sd, - || true)"
+    # Other not-running pods (Pending, CrashLoopBackOff, Error, Init:...): a real
+    # problem that force-deleting would only paper over, so warn without an auto-fix.
+    other="$(kctl get pods -A --no-headers 2>/dev/null | awk '$4 !~ /Running|Completed|Terminating|Unknown|ContainerStatusUnknown|NodeLost/{print $1 "/" $2 " (" $4 ")"}' | head -n 5 | paste -sd, - || true)"
+    if [[ -n "$ghosts" ]]; then
+        DOCTOR_DETAIL="stuck pods to clear: ${ghosts}${other:+; also not running: ${other}}"
+        return 1
+    fi
+    if [[ -n "$other" ]]; then
+        DOCTOR_DETAIL="pods not running: ${other}"
+        return 3
+    fi
+    return 0
+}
+
+# Force-delete the ghost pods doctor_check_pods found (Terminating/Unknown/
+# ContainerStatusUnknown/NodeLost). Safe: these are stranded copies on an
+# unreachable node; their controller reschedules real work elsewhere, and the
+# kubelet cleans up the containers if the node returns.
+doctor_fix_pods() {
+    doctor_cluster_relevant || return 0
+    local ns name any=0
+    while read -r ns name; do
+        [[ -n "$ns" && -n "$name" ]] || continue
+        ny_run "$(ny_path "$NY_K3S_BIN")" kubectl delete pod -n "$ns" "$name" --force --grace-period=0 >/dev/null 2>&1 || true
+        any=1
+    done < <(kctl get pods -A --no-headers 2>/dev/null | awk '$4 ~ /^(Terminating|Unknown|ContainerStatusUnknown|NodeLost)$/{print $1 " " $2}')
+    return 0
 }
 
 doctor_register deps nodeyard "nodeyard's required tools are installed" doctor_check_deps doctor_fix_deps "install the missing packages"
@@ -289,7 +316,7 @@ doctor_register server-reachable network "the k3s server is reachable" doctor_ch
 doctor_register api-healthz cluster "Kubernetes API responds" doctor_check_api_healthz
 doctor_register node-ready cluster "this node is Ready" doctor_check_node_ready
 doctor_register cluster-nodes cluster "all nodes Ready, none under pressure" doctor_check_cluster_nodes
-doctor_register pods cluster "all pods running" doctor_check_pods
+doctor_register pods cluster "all pods running" doctor_check_pods doctor_fix_pods "force-delete pods stuck Terminating/Unknown (ghosts left on an unreachable node)" k3s
 
 doctor_cmd_help() {
     cat <<'HELP'
