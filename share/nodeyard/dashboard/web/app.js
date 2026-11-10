@@ -1216,18 +1216,22 @@
     const problems = checks.filter((c) => isBad(c) || c.status === "warn");
     const fixable = problems.filter((c) => c.fix);
     const reachText = (name) => { const r = FIX.reach[String(name).toLowerCase()]; return (r === "both" || r === "lan" || r === "tailscale") ? "answers (online)" : r === "partial" ? "up, agent not answering" : r === "unreachable" ? "no answer (offline)" : "not tested"; };
-    const nodeRow = (n) => { const st = nodeState(n); return html`<div class="fix-row"><div class="grow"><b>${n.name} — ${st.label}</b>
+    const reachKind = (name) => { const r = FIX.reach[String(name).toLowerCase()]; return r === "unreachable" ? "physical" : (r === "both" || r === "lan" || r === "tailscale" || r === "partial") ? "software" : ""; };
+    const nodeRow = (n) => { const st = nodeState(n); const k = reachKind(n.name); return html`<div class="fix-row"><div class="grow"><b>${n.name} — ${st.label}</b>
       <div class="muted small">Reachability: ${reachText(n.name)}.</div>
-      <div class="faint small">${st.unknown ? "The control plane hasn't heard from it. If it answers above, it's a control-plane/network issue, not a dead node — try Restart Kubernetes below. If it's offline for good, remove it." : "The node itself reports NotReady — open it for the exact condition (memory, disk, kubelet)."}</div></div>
-      ${chip(st.label, st.cls)}<button class="btn small danger" data-node-remove="${n.name}">Remove node…</button></div>`; };
+      <div class="faint small">${k === "physical" ? "🔧 No answer, so likely physical — check its power, cable and switch port. If it's gone for good, remove it." : st.unknown ? "It answers but the control plane hasn't heard from it — a software/network issue, not a dead node. Try Restart Kubernetes below." : "The node itself reports NotReady — open it for the exact condition (memory, disk, kubelet)."}</div></div>
+      ${k === "physical" ? chip("likely physical", "violet") : k === "software" ? chip("software", "good") : ""}${chip(st.label, st.cls)}<button class="btn small danger" data-node-remove="${n.name}">Remove node…</button></div>`; };
+    // Does this problem need hands-on hardware, or can software fix it?
+    const kindChip = (c) => c.fix ? chip("software · auto", "good") : c.physical ? chip("physical", "violet") : chip("software · manual", "accent");
     const checkRow = (c) => html`<div class="fix-row"><div class="grow"><b>${isBad(c) ? "✗ " : "⚠ "}${c.title}</b>${c.detail ? html`<div class="muted small">${c.detail}</div>` : ""}
-      ${c.fix ? html`<div class="faint small">Fix: ${c.fix}</div>` : html`<div class="faint small">Needs a manual change — no automatic fix.</div>`}</div>
-      ${chip(isBad(c) ? "problem" : "warning", isBad(c) ? "bad" : "warn")}
+      ${c.fix ? html`<div class="faint small">Software fix: ${c.fix}</div>` : c.physical ? html`<div class="faint small">🔧 Needs a physical fix — hands-on hardware (a cable, disk, cooling or power). No software can fix it.</div>` : html`<div class="faint small">Software, but needs a manual change — no automatic fix.</div>`}</div>
+      ${kindChip(c)}${chip(isBad(c) ? "problem" : "warning", isBad(c) ? "bad" : "warn")}
       ${c.fix ? html`<button class="btn small" data-fix="one" data-id="${c.id}">Fix</button>` : ""}</div>`;
+    const physicalCount = problems.filter((c) => !c.fix && c.physical).length + notReady.filter((n) => reachKind(n.name) === "physical").length;
     setHTML(body, html`${FIX.error ? html`<div class="note bad">${FIX.error}</div>` : ""}
       <div class="fix-summary"><span class="${notReady.length ? "bad" : "good"}">${nodes.length - notReady.length}/${nodes.length} nodes ready</span>
         <span class="${problems.length ? "warn" : "good"}">${problems.length} problem${problems.length === 1 ? "" : "s"} found</span>
-        <span>${fixable.length} auto-fixable</span></div>
+        <span>${fixable.length} auto-fixable</span>${physicalCount ? html`<span class="warn">${physicalCount} need${physicalCount === 1 ? "s" : ""} hardware</span>` : ""}</div>
       <div class="row wrap" style="gap:8px;margin:10px 0">${fixable.length ? html`<button class="btn primary" data-fix="all">Fix all ${fixable.length} safe problem${fixable.length === 1 ? "" : "s"}</button>` : ""}<button class="btn" data-fix="rerun">Re-check</button></div>
       ${notReady.length ? html`<div class="section-title">Nodes needing attention</div>${notReady.map(nodeRow)}
         <div class="row wrap" style="gap:8px;margin:8px 2px 2px"><button class="btn small danger" data-fix="restart-k8s">Restart Kubernetes on every node…</button><span class="faint small">The usual fix when a node answers but shows “Status unknown”: restarts k3s + nodeyard services on each reachable node (workers first). Offline nodes are skipped; it confirms first.</span></div>` : ""}

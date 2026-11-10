@@ -47,6 +47,9 @@ DEMO_DOCTOR = {"ok": True, "issues": 1, "warnings": 2, "fixed": 0, "checks": [
     {"id": "pods", "category": "cluster", "title": "all pods running", "status": "issue",
      "detail": "stuck pods to clear: ai-split/rpc-yard-4-7dd5 (ContainerStatusUnknown)",
      "fix": "force-delete pods stuck Terminating/Unknown (ghosts left on an unreachable node)"},
+    {"id": "boot-disk", "category": "host", "title": "system disk", "status": "warn",
+     "detail": "yard-3 runs from an SD card; etcd on SD cards wears out and can freeze the node. Move it to an SSD/NVMe.",
+     "fix": None, "physical": True},
     {"id": "ip-forward", "category": "host", "title": "IP forwarding enabled", "status": "ok", "detail": None, "fix": "set net.ipv4.ip_forward=1 (persistently)"},
 ]}
 

@@ -11,9 +11,11 @@ ny_cmd "doctor" doctor_cmd "Health" "Check this machine for common problems and 
 DOCTOR_CHECKS=()
 DOCTOR_DETAIL=""
 
-# doctor_register ID CATEGORY TITLE CHECK_FN [FIX_FN] [FIX_DESCRIPTION] [FEATURE] [REBOOT]
+# doctor_register ID CATEGORY TITLE CHECK_FN [FIX_FN] [FIX_DESCRIPTION] [FEATURE] [REBOOT] [PHYSICAL]
+# PHYSICAL=1 marks a problem whose remedy is hands-on hardware (a cable, a disk, cooling,
+# power) rather than anything software can change -- surfaced so the dashboard can say so.
 doctor_register() {
-    DOCTOR_CHECKS+=("$1"$'\x1f'"$2"$'\x1f'"$3"$'\x1f'"$4"$'\x1f'"${5:-}"$'\x1f'"${6:-}"$'\x1f'"${7:-doctor}"$'\x1f'"${8:-0}")
+    DOCTOR_CHECKS+=("$1"$'\x1f'"$2"$'\x1f'"$3"$'\x1f'"$4"$'\x1f'"${5:-}"$'\x1f'"${6:-}"$'\x1f'"${7:-doctor}"$'\x1f'"${8:-0}"$'\x1f'"${9:-0}")
 }
 
 # --- checks ------------------------------------------------------------------
@@ -305,7 +307,7 @@ doctor_register ip-forward host "IP forwarding enabled" doctor_check_ip_forward 
 doctor_register time-sync host "clock is kept in sync" doctor_check_time_sync doctor_fix_time_sync "enable systemd-timesyncd, or install chrony" host
 doctor_register var-space host "more than 1 GiB free in /var" doctor_check_var_space
 doctor_register eviction host "a full-disk scare can't lock this node out" doctor_check_eviction doctor_fix_eviction "make k3s reclaim only 2 GiB after a low-disk eviction (restarts k3s)" k3s
-doctor_register boot-disk host "system disk" doctor_check_boot_disk
+doctor_register boot-disk host "system disk" doctor_check_boot_disk "" "" "" "" 1
 doctor_register memory-cgroup host "memory cgroup available" doctor_check_memory_cgroup doctor_fix_memory_cgroup "add cgroup_memory=1 cgroup_enable=memory to the kernel command line" k3s 1
 doctor_register interface network "cluster interface is up with an address" doctor_check_iface doctor_fix_iface "bring the interface up" k3s
 doctor_register api-port network "port 6443 answers locally" doctor_check_api_local doctor_fix_api_local "open the k3s ports in the firewall" k3s
@@ -361,12 +363,12 @@ doctor_cmd() {
     k3s_load_state
     ny_detect_all
 
-    local entry id cat title check fixfn fixdesc feature reboot rc status last_cat=""
+    local entry id cat title check fixfn fixdesc feature reboot physical rc status last_cat=""
     local -a results=() pending=()
     local issues=0 warnings=0 fixed=0
     [[ "$NY_JSON" -eq 1 ]] || printf '%s %s\n\n' "$(ny_color bold "nodeyard doctor")" "$(ny_color dim "($(ny_self_name), role: ${K3S_ROLE:-none})")"
     for entry in "${DOCTOR_CHECKS[@]}"; do
-        IFS=$'\x1f' read -r id cat title check fixfn fixdesc feature reboot <<<"$entry"
+        IFS=$'\x1f' read -r id cat title check fixfn fixdesc feature reboot physical <<<"$entry"
         [[ -z "$only" || "$only" == *",$id,"* ]] || continue
         DOCTOR_DETAIL=""
         rc=0
@@ -393,7 +395,7 @@ doctor_cmd() {
             pending+=("$entry")
         fi
         results+=("$(ny_json_obj "id=$id" "category=$cat" "title=$title" "status=$status" "detail?=$DOCTOR_DETAIL" \
-            "fix?=$fixdesc" "fixed:=$(ny_json_bool "$was_fixed")" "needs_reboot:=$(ny_json_bool "$reboot")")")
+            "fix?=$fixdesc" "fixed:=$(ny_json_bool "$was_fixed")" "needs_reboot:=$(ny_json_bool "$reboot")" "physical:=$(ny_json_bool "$physical")")")
         [[ "$NY_JSON" -eq 1 ]] && continue
         [[ "$status" == skip ]] && continue
         if [[ "$cat" != "$last_cat" ]]; then
@@ -420,7 +422,7 @@ doctor_cmd() {
     if [[ "$fix" -eq 0 && "${#pending[@]}" -gt 0 && "$NY_JSON" -eq 0 ]] && ny_ui_interactive && [[ "$NY_DRY_RUN" -eq 0 ]]; then
         printf '\n'
         for entry in "${pending[@]}"; do
-            IFS=$'\x1f' read -r id cat title check fixfn fixdesc feature reboot <<<"$entry"
+            IFS=$'\x1f' read -r id cat title check fixfn fixdesc feature reboot physical <<<"$entry"
             if ny_ui_yesno "Fix \"${title}\" now? (${fixdesc}$([[ $reboot == 1 ]] && echo '; needs a reboot'))" y; then
                 doctor_apply_fix "$title" "$fixfn" "$feature" "$reboot" && fixed=$((fixed + 1))
             fi
