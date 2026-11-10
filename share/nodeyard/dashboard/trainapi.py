@@ -826,7 +826,7 @@ class Trainer:
             log_path = os.path.join(self.logs_dir, "%s-%d.log" % (name, int(time.time())))
             open(log_path, "a").close()
             self.job = {"model": name, "log": log_path, "started": time.time(), "resume": resume, "data": files, "settings": s,
-                        "ended": None, "code": None, "machines": share, "lead": share[0], "mode": "shared" if len(share) > 1 else "single",
+                        "ended": None, "code": None, "machines": share, "lead": share[0], "mode": ("race" if body.get("together") == "race" else "shared") if len(share) > 1 else "single",
                         "options": options, "steps": steps, "base_steps": base_steps, "quality": quality, "warmup": warmup, "eval_every": eval_every, "save_every": save_every,
                         "speeds": {m["name"]: m["speed"] for m in machines if m["name"] in share},
                         "round": 0, "rounds": 0, "phase": "starting", "stop": False, "wjob": None}
@@ -916,6 +916,8 @@ class Trainer:
         try:
             if job["mode"] == "single":
                 code = self._run_single(job, say, reattach)
+            elif job["mode"] == "race":
+                code = self._run_race(job, say, reattach)
             else:
                 code = self._run_shared(job, say, reattach)
         except (trainpool.PoolError, TrainError) as e:
@@ -976,7 +978,7 @@ class Trainer:
         misses = 0
         last_save = time.time()
         while True:
-            if self.job.get("stop") and not wj.get("stopped"):
+            if (self.job.get("stop") or wj.get("halt")) and not wj.get("stopped"):
                 try:
                     r.call("POST", "/stop", {})
                     wj["stopped"] = True
@@ -1079,20 +1081,10 @@ class Trainer:
         except trainpool.PoolError:
             pass
 
-    def _run_shared(self, job, say, reattach):
-        model = job["model"]
-        if reattach:
-            say("The dashboard restarted during shared training. The last averaged model is kept; stopping the machines.")
-            for name in job["machines"]:
-                e = self.pool.entry(name)
-                try:
-                    (e["remote"] or self.pool.ready(name, self._machine_node(name), wait=120)).call("POST", "/stop", {})
-                except trainpool.PoolError:
-                    pass
-            return 0
+    def _up_all(self, job, say):
+        """Bring every chosen machine's worker up and send it the data, in parallel. Drops the ones that fail."""
         names = list(job["machines"])
-        remotes = {}
-        errors = {}
+        remotes, errors = {}, {}
 
         def up(name):
             try:
@@ -1114,6 +1106,112 @@ class Trainer:
         if len(active) == 1:
             say("Only %s is ready, so it trains alone." % active[0])
             job.update(mode="single", lead=active[0], machines=active)
+        return active, remotes
+
+    def _run_race(self, job, say, reattach):
+        """Race: every machine trains its own full copy (its own random seed). When the fastest finishes, the others
+        stop and save their best checkpoint; the copy with the lowest validation loss is kept."""
+        model = job["model"]
+        if reattach:
+            say("The dashboard restarted during the race: stopping the machines. Start again to finish it.")
+            for name in job["machines"]:
+                e = self.pool.entry(name)
+                try:
+                    (e["remote"] or self.pool.ready(name, self._machine_node(name), wait=120)).call("POST", "/stop", {})
+                except trainpool.PoolError:
+                    pass
+            return 1
+        active, remotes = self._up_all(job, say)
+        if len(active) == 1:
+            return self._run_single(job, say, False)
+        job["lead"] = lead_name = active[0]
+        say("Race: %s each train their own copy of %s, with different random seeds. When %s finishes, the others stop "
+            "and the copy with the lowest validation loss is kept." % (" and ".join(active), model, lead_name))
+        for n in active:
+            if job["resume"]:
+                self._push_model(remotes[n], model)
+            else:
+                self._delete_remote(remotes[n], model)
+        tails = {n: {"id": None, "offset": 0} for n in active}
+        results = {}
+
+        def halt_others(reason):
+            for n, wj in tails.items():
+                if not wj.get("halt"):
+                    wj["halt"] = reason
+
+        def run(n, i):
+            seen, measure = self._measure(n)
+
+            def on_line(line):
+                measure(line)
+                if line.startswith("Good enough at"):
+                    halt_others("%s is good enough" % n)
+            try:
+                opts = job["options"] + ["--steps", str(job["steps"]), "--warmup", str(job["warmup"]), "--eval-every", str(job["eval_every"]),
+                                         "--save-every", str(job["save_every"]), "--seed", str(17 + 1000 * i)]
+                if job["resume"]:
+                    opts.append("--resume")
+                if job.get("quality"):
+                    opts += ["--quality", job["quality"]]
+                tails[n]["id"] = remotes[n].call("POST", "/train", {"model": model, "data": job["data"], "options": opts})["id"]
+                code = self._tail(remotes[n], tails[n], say, prefix="" if n == lead_name else "[%s] " % n, on_line=on_line)
+                results[n] = {"code": code}
+                self._remember_speed(n, seen)
+            except trainpool.PoolError as e:
+                say("[%s] %s" % (n, e))
+                results[n] = {"code": 1}
+            if n == lead_name:
+                halt_others("%s finished" % lead_name)
+
+        job["phase"] = "racing"
+        threads = [threading.Thread(target=run, args=(n, i)) for i, n in enumerate(active)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        # Judge: each machine's saved model.json holds its best validation loss.
+        job["phase"] = "judging"
+        table = []
+        for n in active:
+            info = None
+            try:
+                tmp = os.path.join(self.root, ".race-%s.json" % re.sub(r"[^A-Za-z0-9-]", "-", n))
+                remotes[n].get_file("models/%s/model.json" % model, tmp)
+                with open(tmp, "r", encoding="utf-8") as f:
+                    info = json.load(f)
+                os.remove(tmp)
+            except (trainpool.PoolError, OSError, ValueError):
+                pass
+            loss = (info or {}).get("validation_loss")
+            table.append({"machine": n, "validation_loss": loss, "steps": (info or {}).get("trained_steps"), "code": results.get(n, {}).get("code")})
+        ranked = sorted((t for t in table if t["validation_loss"] is not None), key=lambda t: t["validation_loss"])
+        for t in table:
+            say("Race result: %s — %s" % (t["machine"], ("validation %.4f after %s steps" % (t["validation_loss"], _n(t["steps"] or 0)))
+                                                       if t["validation_loss"] is not None else "no saved model"))
+        if not ranked:
+            raise trainpool.PoolError("No machine finished with a saved model.")
+        best = ranked[0]
+        best["winner"] = True
+        job["results"] = table
+        self._pull_model(remotes[best["machine"]], model)
+        say("Kept %s's copy: validation %.4f%s." % (best["machine"], best["validation_loss"],
+            (" (%.4f better than the next)" % (ranked[1]["validation_loss"] - best["validation_loss"])) if len(ranked) > 1 else ""))
+        return 0
+
+    def _run_shared(self, job, say, reattach):
+        model = job["model"]
+        if reattach:
+            say("The dashboard restarted during shared training. The last averaged model is kept; stopping the machines.")
+            for name in job["machines"]:
+                e = self.pool.entry(name)
+                try:
+                    (e["remote"] or self.pool.ready(name, self._machine_node(name), wait=120)).call("POST", "/stop", {})
+                except trainpool.PoolError:
+                    pass
+            return 0
+        active, remotes = self._up_all(job, say)
+        if len(active) == 1:
             return self._run_single(job, say, False)
         job["lead"] = lead_name = active[0]
         lead = remotes[lead_name]
