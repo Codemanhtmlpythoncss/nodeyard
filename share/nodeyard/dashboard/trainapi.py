@@ -166,16 +166,16 @@ def recommend(hw, data_chars=None, hours=1.0, profile=None):
 
     # Three limits on the model size N; the smallest wins.
     n_compute = math.sqrt(compute / 120)
-    n_data = tokens * 2
+    n_data = tokens * 10
     context0 = 128
     n_memory = budget / 20      # 16 bytes per weight for weights+gradients+AdamW m and v, plus room for activations
     caps = [("compute", n_compute), ("data", n_data), ("memory", n_memory)]
     limit_name, target = min(caps, key=lambda c: c[1])
     target = max(50_000, min(target, 300_000_000))
-    why.append({"name": "Model size N (weights)", "value": _n(target), "formula": "N = min(√(C ÷ 120), 2 × tokens, memory ÷ 20 bytes)",
-                "numbers": "compute C = %s FLOP/s × %s s = %s → √(C÷120) = %s · data %s × 2 = %s · memory %s ÷ 20 = %s → %s is the limit"
+    why.append({"name": "Model size N (weights)", "value": _n(target), "formula": "N = min(√(C ÷ 120), 10 × tokens, memory ÷ 20 bytes)",
+                "numbers": "compute C = %s FLOP/s × %s s = %s → √(C÷120) = %s · data %s × 10 = %s · memory %s ÷ 20 = %s → %s is the limit"
                            % (_sci(speed), _n(seconds), _sci(compute), _n(n_compute), _n(tokens), _n(n_data), _gb(budget), _n(n_memory), limit_name),
-                "explain": "Compute: the Chinchilla rule says train on about 20 tokens per weight, and training costs 6 FLOPs per weight per token, so C = 6·N·20N = 120·N². Data: with little text a bigger model still does better as long as dropout stops it memorising and you stop when validation stops falling (nanoGPT's Shakespeare model has about 10 weights per character of text), so this allows up to 2 weights per token. A smaller cap makes a model too small to learn the text, and the loss goes flat early. Memory: float32 weights, gradients and AdamW's two moments are 16 bytes per weight. %s" % ("Speed here is a guess for this hardware (%s FLOP/s); the real tokens/sec shows once training starts." % _sci(speed))})
+                "explain": "Compute: the Chinchilla rule says train on about 20 tokens per weight, and training costs 6 FLOPs per weight per token, so C = 6·N·20N = 120·N². Data: with little text a bigger model still does better as long as dropout stops it memorising and you stop when validation stops falling (nanoGPT's Shakespeare model has about 10 weights per character of text), so this allows up to 10 weights per token, and the trainer keeps the checkpoint with the best validation. A smaller cap makes a model too small to learn the text, and the loss goes flat early. Memory: float32 weights, gradients and AdamW's two moments are 16 bytes per weight. %s" % ("Speed here is a guess for this hardware (%s FLOP/s); the real tokens/sec shows once training starts." % _sci(speed))})
 
     context = 64 if target < 300_000 else 256 if target > 5_000_000 and device != "cpu" else context0
     base_context = context
@@ -217,16 +217,16 @@ def recommend(hw, data_chars=None, hours=1.0, profile=None):
 
     per_step = flops_per_step(params, batch, context)
     steps_time = compute / per_step
-    steps_data = 10 * tokens / (batch * context)
+    steps_data = 50 * tokens / (batch * context)
     steps = int(max(200, min(200_000, steps_time, steps_data)) // 50 * 50)
     epochs = steps * batch * context / max(1, tokens)
-    why.append({"name": "Steps", "value": _n(steps), "formula": "min(C ÷ (6·N·B·T), 10 passes over the data)",
-                "numbers": "%s ÷ (6·%s·%d·%d) = %s · 10·%s ÷ (%d·%d) = %s → %s steps ≈ %.1f passes over your text"
+    why.append({"name": "Steps", "value": _n(steps), "formula": "min(C ÷ (6·N·B·T), 50 passes over the data)",
+                "numbers": "%s ÷ (6·%s·%d·%d) = %s · 50·%s ÷ (%d·%d) = %s → %s steps ≈ %.1f passes over your text"
                            % (_sci(compute), _n(params), batch, context, _n(steps_time), _n(tokens), batch, context, _n(steps_data), _n(steps), epochs),
-                "explain": "One step = read a batch, measure the loss, compute gradients, update every weight once. Reading text up to 4 times is about as good as new text; more passes still help, less each time (Muennighoff et al., 2023), so this stops at 10. Watch validation: when it stops falling, more steps only memorise."})
+                "explain": "One step = read a batch, measure the loss, compute gradients, update every weight once. Reading text up to 4 times is about as good as new text; more passes still help, less each time (Muennighoff et al., 2023; nanoGPT's Shakespeare run reads its text about 80 times), so this stops at 50. If validation starts rising, the model is memorising: the trainer keeps the best checkpoint, so stopping late costs nothing but time."})
     ratio = target / max(1, tokens)
     dropout = 0.2 if ratio > 0.5 else 0.1 if ratio > 0.05 else 0.0
-    why.append({"name": "Dropout", "value": "%g" % dropout, "formula": "0.2 above 1 weight per 2 tokens · 0.1 above 1 per 20 · otherwise 0",
+    why.append({"name": "Dropout", "value": "%g" % dropout, "formula": "0.2 above 1 weight per 2 tokens · 0.1 above 1 per 20 · otherwise 0 (nanoGPT uses 0.2 on Shakespeare)",
                 "numbers": "%s weights ÷ %s tokens = %.2f weights per token → dropout %g" % (_n(target), _n(tokens), ratio, dropout),
                 "explain": "While training, each block zeroes this fraction of its values at random, so the model can't memorise through any one path. Needed when the model is big for its text; with plenty of text it only slows learning."})
 
@@ -1367,6 +1367,19 @@ def register(ctx, args):
             t.pool.ensure(lead["name"], lead.get("_node"))
         hw = t.plan_hardware(machines, plan)
         rec = recommend(dict(hw, chat=chat), chars, hours, profile)
+        # What would get a bigger model: more time on these machines, or a faster machine (even one that's down).
+        times = []
+        for h in (0.25, 1, 3, 8, 24, 72):
+            r = recommend(dict(hw, chat=chat), chars, h, profile)
+            times.append({"hours": h, "parameters": r["parameters"], "limit": r["limit"], "seconds": r["seconds"]})
+        faster = []
+        for m in machines:
+            if m["speed"] > 2 * (hw.get("speed") or 1) and m["name"] not in plan["share"]:
+                mh = {"device": m["device"], "cores": m["cores"], "arch": m["arch"], "ram_free": m["ram_free"], "gpu": m["gpu"], "speed": m["speed"]}
+                r = recommend(dict(mh, chat=chat), chars, hours, profile)
+                faster.append({"name": m["name"], "gpu": (m["gpu"] or {}).get("name"), "speed": m["speed"], "usable": m["usable"], "reason": m["reason"],
+                               "parameters": r["parameters"], "limit": r["limit"], "seconds": r["seconds"]})
+        rec["bigger"] = {"times": times, "faster": faster[:3]}
         return {"machines": [t.public(m) for m in machines], "plan": plan, "mode": t.pool.mode, "hardware": hw, "recommend": rec,
                 "datasets": t.datasets(), "catalog": t.fetcher.catalog(), "models": t.models(), "presets": t.presets(), "running": t.running(), "job": t.job, "hours": hours, "data_dir": t.data_dir}
 
