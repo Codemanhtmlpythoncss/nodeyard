@@ -31,6 +31,23 @@ NODE_DIR = "/var/lib/nodeyard/train-worker"
 IDLE_SECONDS = 30 * 60
 CHUNK = 4 * 1024 * 1024
 
+# A machine with a GPU can also train on its CPU at the same time: the CPU half runs as a second worker on the same
+# machine, named "<machine> · CPU". It is a full training participant (its own copy of the model, averaged in like any
+# other machine), but with the GPU hidden so PyTorch uses the CPU, and its own data folder so the two halves don't
+# clash. Everything downstream just sees another machine name, so no orchestration code has to know about the split.
+CPU_SUFFIX = " · CPU"
+
+
+def split_variant(name):
+    """('machine', 'cpu') for a '<machine> · CPU' co-worker, else (name, None)."""
+    if name.endswith(CPU_SUFFIX):
+        return name[:-len(CPU_SUFFIX)], "cpu"
+    return name, None
+
+
+def cpu_name(name):
+    return name + CPU_SUFFIX
+
 
 class PoolError(Exception):
     def __init__(self, message, code=503):
@@ -96,6 +113,24 @@ class Remote:
     def status(self):
         return self.call("GET", "/status", timeout=10)
 
+    def ping(self, payload=0, timeout=20):
+        """Round-trip time (seconds) to send `payload` bytes and get a reply. Empty = latency; a few MB = throughput."""
+        data = b"\0" * payload
+        conn = self._conn(timeout)
+        t0 = time.time()
+        try:
+            conn.request("POST", "/ping", body=data,
+                         headers={"Authorization": "Bearer " + self.token, "Content-Length": str(len(data))})
+            r = conn.getresponse()
+            r.read()
+        except (OSError, http.client.HTTPException) as e:
+            raise PoolError("Can't reach the trainer on %s: %s" % (self.name, e))
+        finally:
+            conn.close()
+        if r.status != 200:
+            raise PoolError("%s: ping failed (%d)" % (self.name, r.status))
+        return time.time() - t0
+
     def ls(self, rel):
         return {f["name"]: f for f in self.call("GET", "/ls/" + urllib.parse.quote(rel))["files"]}
 
@@ -158,9 +193,10 @@ def _free_port():
     return port
 
 
-def _pod_name(node):
+def _pod_name(node, variant=None):
     base = re.sub(r"[^a-z0-9-]+", "-", node.lower()).strip("-")[:40] or "node"
-    return "nytrain-%s-%s" % (base, hashlib.sha256(node.encode()).hexdigest()[:5])
+    suffix = hashlib.sha256(node.encode()).hexdigest()[:5]
+    return "nytrain-%s-%s%s" % (base, suffix, "-cpu" if variant == "cpu" else "")
 
 
 class Pool:
@@ -171,6 +207,7 @@ class Pool:
         self.token = self._token(os.path.join(root, "worker-token"))
         self.lock = threading.Lock()
         self.entries = {}   # name -> {"state", "detail", "log", "remote", "status", "used", "thread"}
+        self.links = {}      # name -> {"rtt_ms", "mbit", "at"}: how fast the dashboard reaches each worker
         self.busy = set()    # machines a training job is using
         self.local_count = max(1, min(4, int(os.environ.get("NODEYARD_TRAIN_LOCAL_WORKERS", "1") or 1)))
         threading.Thread(target=self._reaper, daemon=True).start()
@@ -302,10 +339,14 @@ class Pool:
         port = _free_port()
         token_file = os.path.join(os.path.dirname(self.root), "worker-token")
         data_dir = os.path.join(os.path.dirname(self.root), "data")
+        env = dict(os.environ)
+        if split_variant(name)[1] == "cpu":   # the CPU half of a GPU machine: keep the GPU hidden so it uses the CPU
+            env["CUDA_VISIBLE_DEVICES"] = ""
+            env["NVIDIA_VISIBLE_DEVICES"] = "none"
         log = open(os.path.join(root, "worker.log"), "ab")
         try:
             proc = subprocess.Popen([sys.executable, WORKER, "--root", root, "--code", JOBS_DIR, "--port", str(port),
-                                     "--token-file", token_file, "--shared-data", data_dir],
+                                     "--token-file", token_file, "--shared-data", data_dir], env=env,
                                     stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
         finally:
             log.close()
@@ -339,9 +380,15 @@ class Pool:
             {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "nodeyard-train-code", "namespace": NS}, "data": files},
         ]
 
-    def pod_manifest(self, node):
-        gpu = (node.get("labels") or {}).get("nodeyard.io/gpu") == "nvidia"
+    def pod_manifest(self, node, variant=None):
+        """One trainer pod. variant="cpu" is the CPU half of a GPU machine: the GPU is hidden so PyTorch falls back to
+        the CPU, it uses its own data folder so it can't clash with the GPU pod, and the two share the node's memory."""
+        gpu = (node.get("labels") or {}).get("nodeyard.io/gpu") == "nvidia" and variant != "cpu"
         mem = int(node.get("mem_total") or 0)
+        # Two pods on one node (GPU + its CPU half) must share the memory headroom, not each take 80%.
+        both = variant == "cpu" or ((node.get("labels") or {}).get("nodeyard.io/gpu") == "nvidia" and node.get("_with_cpu"))
+        frac = 0.4 if both else 0.8
+        data_dir = NODE_DIR + ("-cpu" if variant == "cpu" else "")
         container = {
             "name": "worker", "image": IMAGE,
             "command": ["python", "-u", "/code/trainworker.py", "--root", "/data", "--code", "/code", "--host", "0.0.0.0",
@@ -355,29 +402,35 @@ class Pool:
                              {"name": "data", "mountPath": "/data"}],
         }
         if mem > 0:   # leave the node room for itself: the trainer is stopped before the machine runs out
-            container["resources"]["limits"] = {"memory": str(max(512 * 1024 ** 2, int(mem * 0.8)))}
+            container["resources"]["limits"] = {"memory": str(max(512 * 1024 ** 2, int(mem * frac)))}
         spec = {
             "nodeName": node["name"], "restartPolicy": "Never", "terminationGracePeriodSeconds": 45,
             "tolerations": [{"operator": "Exists"}],
             "containers": [container],
             "volumes": [{"name": "code", "configMap": {"name": "nodeyard-train-code"}},
                         {"name": "secret", "secret": {"secretName": "nodeyard-train-token"}},
-                        {"name": "data", "hostPath": {"path": NODE_DIR, "type": "DirectoryOrCreate"}}],
+                        {"name": "data", "hostPath": {"path": data_dir, "type": "DirectoryOrCreate"}}],
         }
         if gpu:
             spec["runtimeClassName"] = "nvidia"
             container["env"] += [{"name": "NVIDIA_VISIBLE_DEVICES", "value": "all"},
                                  {"name": "NVIDIA_DRIVER_CAPABILITIES", "value": "compute,utility"}]
+        elif variant == "cpu":   # a GPU machine's CPU half: make sure no GPU is visible, so PyTorch uses the CPU
+            container["env"] += [{"name": "NVIDIA_VISIBLE_DEVICES", "value": "none"},
+                                 {"name": "CUDA_VISIBLE_DEVICES", "value": ""}]
         return {"apiVersion": "v1", "kind": "Pod",
-                "metadata": {"name": _pod_name(node["name"]), "namespace": NS,
+                "metadata": {"name": _pod_name(node["name"], variant), "namespace": NS,
                              "labels": {"app": "nodeyard-train"}, "annotations": {"nodeyard/code": code_hash()}},
                 "spec": spec}
 
     def _start_pod(self, name, node, e):
-        node = node or next((n for n in self.cluster_nodes() if n.get("name") == name), None)
+        base, variant = split_variant(name)
+        node = node or next((n for n in self.cluster_nodes() if n.get("name") == base), None)
         if not node:
-            raise PoolError("%s isn't in the cluster." % name)
-        pod = _pod_name(name)
+            raise PoolError("%s isn't in the cluster." % base)
+        if variant == "cpu":   # tell the manifest the GPU pod is alongside, so both share the memory headroom
+            node = dict(node, _with_cpu=True)
+        pod = _pod_name(base, variant)
         code, out, _ = self._kubectl(["-n", NS, "get", "pod", pod, "-o", "json"])
         current = json.loads(out) if code == 0 else None
         if current:
@@ -388,7 +441,7 @@ class Pool:
                 current = None
         if not current:
             self._note(e, "starting", "creating the trainer pod on %s" % name)
-            body = json.dumps({"apiVersion": "v1", "kind": "List", "items": self.base_manifest() + [self.pod_manifest(node)]}).encode()
+            body = json.dumps({"apiVersion": "v1", "kind": "List", "items": self.base_manifest() + [self.pod_manifest(node, variant)]}).encode()
             code, _, err = self._kubectl(["apply", "--server-side", "--force-conflicts", "--field-manager=nodeyard-train", "-f", "-"], stdin=body, timeout=90)
             if code != 0:
                 raise PoolError("Couldn't create the trainer pod: %s" % err.strip()[-300:])
@@ -414,6 +467,32 @@ class Pool:
             time.sleep(3)
         raise PoolError("The trainer pod didn't start within 15 minutes.")
 
+    # -- how good the link to each worker is (latency + throughput), for deciding whether sharing is worth it
+    def measure_link(self, name, remote=None, bandwidth=True, cache_seconds=0):
+        """Measure (and cache) the link to a worker. rtt_ms is the round-trip latency; mbit is the measured upload
+        throughput (None if not measured). Returns the cached value when it's younger than cache_seconds."""
+        cached = self.links.get(name)
+        if cached and cache_seconds and time.time() - cached.get("at", 0) < cache_seconds and (cached.get("mbit") or not bandwidth):
+            return cached
+        e = self.entry(name)
+        remote = remote or e.get("remote")
+        if not remote:
+            return cached
+        try:
+            lat = min(remote.ping(0, timeout=5) for _ in range(3))   # smallest of three: least disturbed by a hiccup
+        except PoolError:
+            return cached
+        link = {"rtt_ms": round(lat * 1000, 1), "mbit": (cached or {}).get("mbit"), "at": time.time()}
+        if bandwidth:
+            try:
+                size = 4 * 1024 * 1024
+                dt = max(1e-4, remote.ping(size, timeout=30) - lat)   # take the latency off the transfer time
+                link["mbit"] = round(size * 8 / dt / 1e6, 1)
+            except PoolError:
+                pass
+        self.links[name] = link
+        return link
+
     # -- stopping idle workers
     def stop(self, name):
         e = self.entry(name)
@@ -425,7 +504,8 @@ class Pool:
             except (OSError, ValueError, KeyError):
                 pass
         else:
-            self._kubectl(["-n", NS, "delete", "pod", _pod_name(name), "--wait=false"])
+            base, variant = split_variant(name)
+            self._kubectl(["-n", NS, "delete", "pod", _pod_name(base, variant), "--wait=false"])
         e.update(state="off", detail="stopped after %d idle minutes" % (IDLE_SECONDS // 60), remote=None, status=None)
 
     def _reaper(self):
