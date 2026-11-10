@@ -103,6 +103,56 @@ class RecommendTests(unittest.TestCase):
             self.assertLessEqual(2 * s["vocab_size"] * s["dim"], 0.5 * r["parameters"])
 
 
+class GradientAccumulationTests(unittest.TestCase):
+    HW = RecommendTests.HW
+
+    @staticmethod
+    def _expected(batch, context):
+        # The same rule the recommender uses: lift a small batch toward the ~16k-token comfort level, cap at 8.
+        return max(1, min(8, round(16384 / max(1, batch * context))))
+
+    def test_recommend_sets_a_valid_accum_and_explains_it_only_when_on(self):
+        for hw in self.HW:
+            for chars in (5_000, 200_000, 50_000_000, 2_000_000_000):
+                for hours in (0.25, 8, 72):
+                    r = trainapi.recommend(hw, chars, hours)
+                    s = r["settings"]
+                    where = (hw["device"], chars, hours)
+                    self.assertEqual(s["grad_accum"], self._expected(s["batch_size"], s["context"]), where)
+                    self.assertTrue(1 <= s["grad_accum"] <= 8, where)
+                    # Each update averages a bounded, steadier sample; it never balloons far past the comfort band.
+                    self.assertLessEqual(s["grad_accum"] * s["batch_size"] * s["context"], 16384 * 2, where)
+                    explained = any(w["name"] == "Gradient accumulation" for w in r["why"])
+                    self.assertEqual(explained, s["grad_accum"] > 1, where)
+                    self.assertTrue(all(w["formula"] and w["numbers"] for w in r["why"]), where)
+
+    def test_accumulation_preserves_the_compute_budget(self):
+        # A small box gets a small batch, so accumulation kicks in; the step count drops to match, so the model
+        # still reads the text about the same number of times — steadier updates, not more work.
+        r = trainapi.recommend(self.HW[0], 8_000_000, 8)
+        s = r["settings"]
+        self.assertGreater(s["grad_accum"], 1)
+        passes = s["steps"] * s["grad_accum"] * s["batch_size"] * s["context"] / max(1, r["tokens"])
+        self.assertLessEqual(passes, 51)          # the 50-passes-over-the-data cap still holds across the whole run
+
+    def test_options_carry_grad_accum_to_the_trainer(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = trainapi.Trainer(d)
+            t._orchestrate = lambda *a, **k: None   # options are built and stored before the worker thread runs
+            post(t, t.paste, {"name": "d.txt", "text": "User: hi\nAssistant: hello\n\n" * 100})
+            s = {"dim": 64, "heads": 2, "steps": 10, "batch_size": 2, "grad_accum": 4,
+                 "context": 8, "layers": 1, "vocab_size": 300, "learning_rate": 0.001}
+            self.assertNotIn("error", post(t, t.start, {"data": ["d.txt"], "settings": s}))
+            opts = t.job["options"]
+            self.assertIn("--grad-accum", opts)
+            self.assertEqual(opts[opts.index("--grad-accum") + 1], "4")
+            t.job["stop"] = True
+
+    def test_missing_grad_accum_in_old_options_defaults_to_one(self):
+        self.assertEqual(trainapi._opt_int(["--batch-size", "8"], "--grad-accum", 1), 1)
+        self.assertEqual(trainapi._opt_int(["--grad-accum", "3"], "--grad-accum", 1), 3)
+
+
 class TrainingDataTests(unittest.TestCase):
     def test_every_supported_shape_becomes_user_assistant_text(self):
         lines = [
