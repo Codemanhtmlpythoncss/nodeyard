@@ -17,6 +17,7 @@
     q: Object.assign({ on: false, preset: "starter", prompts: [], pass: 1, target_loss: "", give_up: 10, count: 20, held_out: false, match: "exact" },
       (() => { try { return JSON.parse(store.get("train.quality", "") || "null"); } catch (_) { return null; } })() || {}),
     machines: JSON.parse(store.get("train.machines", "[]") || "[]"), share: store.get("train.share", "1") !== "0", together: store.get("train.together", "share") || "share",
+    both: store.get("train.both", "0") === "1",
   };
 
   // ---------- small maths helpers (the same formulas as the trainer) ----------
@@ -354,7 +355,7 @@
   // ---------- loading ----------
   async function loadOverview() {
     try {
-      const q = "?hours=" + TR.hours + "&data=" + encodeURIComponent(TR.sel.join("|")) + "&machines=" + encodeURIComponent(TR.machines.join("|"));
+      const q = "?hours=" + TR.hours + "&data=" + encodeURIComponent(TR.sel.join("|")) + "&machines=" + encodeURIComponent(TR.machines.join("|")) + "&both=" + (TR.both ? "1" : "0");
       const r = await getJSON("/api/train" + q);
       if (!r.ok) { toast(r.error || "Couldn't read the trainer."); return; }
       TR.ov = r;
@@ -644,12 +645,13 @@ Assistant: game tonight?</pre></div>
     return html`<section class="card"><h2 class="tr-h">Where it trains <span class="right faint small">${ov.mode === "cluster" ? "your cluster, fastest first" : "no cluster here: this machine"}</span></h2>
       ${!p.lead ? html`<div class="tr-adv bad">${p.notes[0]}</div>` : ""}
       <div class="tr-scroll"><table class="tr-key tr-machines"><tr><th></th><th>Machine</th><th>Hardware</th><th>Speed</th><th>Trainer</th></tr>
-      ${ov.machines.map((m) => html`<tr class="${inPlan.has(m.name) ? "hl" : ""} ${m.usable ? "" : "off"}">
-        <td>${ov.mode === "cluster" ? html`<input type="checkbox" data-tr-machine="${m.name}" ${TR.machines.length ? (TR.machines.includes(m.name) ? "checked" : "") : (p.share.includes(m.name) ? "checked" : "")} ${m.usable ? "" : "disabled"} aria-label="use ${m.name}">` : ""}</td>
-        <td><b>${m.name}</b>${m.name === p.lead ? html` <span class="chip small">fastest</span>` : ""}</td>
+      ${ov.machines.map((m) => html`<tr class="${inPlan.has(m.name) ? "hl" : ""} ${m.usable ? "" : "off"} ${m.variant ? "tr-variant" : ""}">
+        <td>${m.variant ? html`<span class="faint" title="trains alongside ${m.parent}" aria-hidden="true">↳</span>` : ov.mode === "cluster" ? html`<input type="checkbox" data-tr-machine="${m.name}" ${TR.machines.length ? (TR.machines.includes(m.name) ? "checked" : "") : (p.share.includes(m.name) ? "checked" : "")} ${m.usable ? "" : "disabled"} aria-label="use ${m.name}">` : ""}</td>
+        <td><b>${m.name}</b>${m.name === p.lead ? html` <span class="chip small">fastest</span>` : ""}${m.variant ? html` <span class="chip small">same machine</span>` : ""}</td>
         <td class="small">${m.gpu ? m.gpu.name + " · " + gb(m.gpu.vram) : n0(m.cores) + " CPU cores"} · ${gb(m.ram_total)} RAM</td>
         <td class="small">${m.usable ? "~" + f(m.speed / 1e9, 3) + " GFLOP/s" + (m.measured ? " (measured)" : " (estimate)") : "–"}</td>
         <td class="small">${m.usable ? html`<span class="${m.worker.state === "ready" ? "good-t" : m.worker.state === "failed" ? "bad-t" : ""}">${stateText(m.worker)}</span>${m.worker.state !== "ready" && m.worker.detail ? html`<div class="faint">${m.worker.detail}</div>` : ""}` : html`<span class="faint">${m.reason}</span>`}</td></tr>`)}</table></div>
+      ${ov.mode === "cluster" && ov.machines.some((m) => m.gpu && !m.variant) ? html`<label class="tr-both small"><input type="checkbox" data-tr-both ${TR.both ? "checked" : ""}> Also use each GPU machine's CPU at the same time — a second trainer on the same machine, so its idle cores help too (no network cost between the two).</label>` : ""}
       ${lead && /starting|installing|checking/.test(lead.worker.state) ? html`<div class="tr-adv ok">Getting <b>${lead.name}</b> ready: PyTorch installs itself there the first time (${lead.gpu ? "about 3 GB for the GPU version" : "about 200 MB"}), then stays. You can start training now: it begins as soon as it's ready.</div>
         ${lead.worker.log.length ? html`<details><summary class="small">Install progress</summary><pre class="tr-pre tr-log">${lead.worker.log.join("\n")}</pre></details>` : ""}` : ""}
       ${p.share.length > 1 ? html`<h3 class="tr-h3">How ${p.share.join(" + ")} work together</h3>
@@ -1034,7 +1036,7 @@ Assistant: game tonight?</pre></div>
       if (confirm("Delete the saved settings “" + TR.preset + "”?")) { const r = await post("/api/train/presets/delete", { name: TR.preset }); if (r) { TR.ov.presets = r.presets; resetSettings(); } }
     }
     else if (a === "start") {
-      const body = { data: TR.sel, settings: TR.form, resume: TR.resume, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.together !== "fastest", together: TR.together,
+      const body = { data: TR.sel, settings: TR.form, resume: TR.resume, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.together !== "fastest", together: TR.together, both: TR.both,
         quality: TR.q.on ? { on: true, prompts: qPrompts().filter((p) => p.prompt.trim()).map((p) => ({ prompt: p.prompt, answer: p.answer || "", expect: String(p.expect || "").split(",").map((x) => x.trim()).filter(Boolean) })), pass: TR.q.pass, target_loss: TR.q.target_loss, give_up: TR.q.give_up || 10, match: TR.q.match } : undefined };
       const r = await post("/api/train/start", body);
       if (r) { toast("Training " + r.model); TR.lines = []; TR.since = 0; TR.status = null; TR.model = TR.resume ? TR.model : ""; await loadOverview(); poll(); }
@@ -1083,6 +1085,7 @@ Assistant: game tonight?</pre></div>
       if (t.checked) { if (!TR.machines.includes(d.trMachine)) TR.machines.push(d.trMachine); } else TR.machines = TR.machines.filter((x) => x !== d.trMachine);
       store.set("train.machines", JSON.stringify(TR.machines)); TR.form = null; loadOverview(); return;
     }
+    if (d.trBoth !== undefined) { TR.both = t.checked; store.set("train.both", TR.both ? "1" : "0"); TR.form = null; loadOverview(); return; }
     if (d.trSel) { if (t.checked) { if (!TR.sel.includes(d.trSel)) TR.sel.push(d.trSel); } else TR.sel = TR.sel.filter((x) => x !== d.trSel); saveSel(); loadOverview(); }
     else if (d.trSet === "assistant_only") { TR.form.assistant_only = t.checked; markEdited(); paint(); }
     else if (d.trSet === "device") { TR.form.device = t.value; markEdited(); paint(); }
