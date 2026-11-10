@@ -585,7 +585,7 @@ Assistant: game tonight?</pre></div>
           <label class="tr-field inline"><span>Model</span><select class="select" data-tr-act="model-pick"><option value="">New model…</option>${raw(ov.models.map((m) => '<option value="' + esc(m.name) + '"' + (TR.resume && TR.model === m.name ? " selected" : "") + ">Continue " + esc(m.name) + "</option>").join(""))}</select></label>
           ${TR.resume ? "" : html`<input class="input" data-tr-act="model-name" placeholder="name (optional)" value="${TR.model}" style="width:180px">`}
           <span class="spacer"></span>
-          ${run ? html`<button class="btn danger" data-tr-act="stop" ${TR.status && TR.status.job && TR.status.job.stop ? "disabled" : ""}>${TR.status && TR.status.job && TR.status.job.stop ? "Stopping…" : "Stop and save"}</button>` : html`<button class="btn primary" data-tr-act="start" ${ov.plan.lead && TR.sel.length ? "" : "disabled"}>${TR.resume ? "Continue training" : "Start training"}${ov.plan.lead ? " on " + (TR.together !== "fastest" && ov.plan.share.length > 1 ? ov.plan.share.length + " machines" + (TR.together === "race" ? " (race)" : "") : ov.plan.lead) : ""}</button>`}</div>
+          ${run ? html`<button class="btn danger" data-tr-act="stop" ${TR.status && TR.status.job && TR.status.job.stop ? "disabled" : ""}>${TR.status && TR.status.job && TR.status.job.stop ? "Stopping…" : "Stop and save"}</button>` : html`<button class="btn primary" data-tr-act="start" ${ov.plan.lead && TR.sel.length ? "" : "disabled"}>${TR.resume ? "Continue training" : "Start training"}${ov.plan.lead ? " on " + (TR.together !== "fastest" && ov.plan.share.length > 1 ? ov.plan.share.length + " machines" + (TR.together === "race" ? " (parallel)" : "") : ov.plan.lead) : ""}</button>`}</div>
         ${TR.resume ? html`<p class="faint small">Continuing keeps the saved model's shape and tokenizer (V, T, d, L, h) and AdamW's running averages; the other settings apply. The learning rate schedule starts again, so a lower peak (about 30% of the first run's) stops the first steps from undoing what it already learned.</p>` : ""}</section>
       ${stopWhen()}
       <section class="card tr-span2"><h2 class="tr-h">Live <span class="right" id="tr-live-chip"></span></h2><div id="tr-live"></div>
@@ -625,8 +625,8 @@ Assistant: game tonight?</pre></div>
   }
   function raceLive(st) {
     const j = st.job || {}; if (j.mode !== "race") return "";
-    if (!j.results) return html`<p class="small">Racing: ${(j.machines || []).join(", ")} each train their own copy. The chart shows ${j.lead}; the others' lines are in the log, marked [name].</p>`;
-    return html`<h4>Race result</h4><div class="tr-scroll"><table class="tr-key"><tr><th>Machine</th><th>Best validation loss</th><th>Steps</th><th></th></tr>
+    if (!j.results) return html`<p class="small">Parallel runs: ${(j.machines || []).join(", ")} each train their own copy at the same time. The chart shows ${j.lead}; the others' lines are in the log, marked [name].</p>`;
+    return html`<h4>Parallel runs result</h4><div class="tr-scroll"><table class="tr-key"><tr><th>Machine</th><th>Best validation loss</th><th>Steps</th><th></th></tr>
       ${j.results.map((r) => html`<tr class="${r.winner ? "hl" : ""}"><td><b>${r.machine}</b></td><td>${f(r.validation_loss, 4)}</td><td>${n0(r.steps)}</td><td>${r.winner ? html`<span class="good-t">kept</span>` : ""}</td></tr>`)}</table></div>`;
   }
   function qualityLive(st) {
@@ -653,10 +653,10 @@ Assistant: game tonight?</pre></div>
       ${lead && /starting|installing|checking/.test(lead.worker.state) ? html`<div class="tr-adv ok">Getting <b>${lead.name}</b> ready: PyTorch installs itself there the first time (${lead.gpu ? "about 3 GB for the GPU version" : "about 200 MB"}), then stays. You can start training now: it begins as soon as it's ready.</div>
         ${lead.worker.log.length ? html`<details><summary class="small">Install progress</summary><pre class="tr-pre tr-log">${lead.worker.log.join("\n")}</pre></details>` : ""}` : ""}
       ${p.share.length > 1 ? html`<h3 class="tr-h3">How ${p.share.join(" + ")} work together</h3>
-        <div class="seg tr-together">${[["share", "Share one model"], ["race", "Race copies, keep the best"], ["fastest", "Fastest only"]].map(([k, l]) => html`<button class="${TR.together === k ? "on" : ""}" data-tr-together="${k}">${l}</button>`)}</div>
+        <div class="seg tr-together">${[["share", "Share one model"], ["race", "Parallel runs"], ["fastest", "Fastest only"]].map(([k, l]) => html`<button class="${TR.together === k ? "on" : ""}" data-tr-together="${k}">${l}</button>`)}</div>
         <p class="faint small">${TR.together === "share" ? "One model, trained faster: each machine trains a copy for ~2 minutes, the copies' weights are averaged, repeat (~" + f(p.speed / 1e9, 3) + " GFLOP/s together)."
-          : TR.together === "race" ? "Each machine trains the whole model on its own, with a different random seed (and so different random windows of text). When " + p.lead + " finishes, the others stop where they are; the copy with the lowest validation loss is saved. Different seeds really do end at different losses: racing picks the luckiest."
-          : "Only " + p.lead + " trains; the others stay idle."}</p>` : ov.mode === "cluster" ? html`<p class="faint small">Tick more machines to share one model between them or race copies.</p>` : ""}
+          : TR.together === "race" ? "Parallel runs: each machine trains the whole model on its own in parallel, with a different random seed (and so different random windows of text). When " + p.lead + " finishes, the others stop where they are; the copy with the lowest validation loss is saved. Different seeds really do end at different losses — running several in parallel picks the luckiest."
+          : "Only " + p.lead + " trains; the others stay idle."}</p>` : ov.mode === "cluster" ? html`<p class="faint small">Tick more machines to share one model between them or run copies in parallel.</p>` : ""}
       ${p.notes.filter((n) => p.lead).map((n) => html`<p class="faint small">${n}</p>`)}
       <p class="faint small">Training runs on ${ov.mode === "cluster" ? "the chosen nodes, each in a pod (namespace nodeyard-train)" : "this machine, in a separate worker process"}; models are copied back here. Lesson 13 explains how sharing works.</p></section>`;
   }
@@ -677,7 +677,7 @@ Assistant: game tonight?</pre></div>
     const last = st.last || {}, j = st.job, val = st.val.length ? st.val[st.val.length - 1].loss : null, V0 = +(j.settings || {}).vocab_size || 2048;
     const total = +j.steps || 0, frac = total && last.step ? Math.min(1, (last.step - (+(j.base_steps || 0))) / total) : last.of ? last.local / last.of : 0;
     const eta = last.sps && total ? Math.max(0, total * (1 - frac)) / last.sps : last.sps ? (last.of - last.local) / last.sps : null;
-    const where = (j.machines || []).join(" + "), rounds = j.mode === "shared" && j.rounds ? " · round " + j.round + " of " + j.rounds : j.mode === "race" ? " · race" : "";
+    const where = (j.machines || []).join(" + "), rounds = j.mode === "shared" && j.rounds ? " · round " + j.round + " of " + j.rounds : j.mode === "race" ? " · parallel" : "";
     if (chip) setHTML(chip, st.running ? html`<span class="chip good"><i class="dot good"></i>${j.phase && j.phase !== "training" ? j.phase : "training"} ${j.model}${where ? " on " + where : ""}${rounds}</span>` : html`<span class="chip">${j.code === 0 ? "finished" : j.code == null ? "stopped" : "failed (exit " + j.code + ")"} · ${j.model}</span>`);
     setHTML(live, html`<div class="tr-progress big"><i style="width:${(frac * 100).toFixed(1)}%"></i></div>
       <div class="tr-stats">${[["Step", last.local ? (total ? n0(Math.round(frac * total)) + " / " + n0(total) : n0(last.local) + " / " + n0(last.of)) : j.phase || "starting…"], ["Time left", st.running && eta != null ? dur(eta) : "–"], ["Training loss", f(last.loss, 4)], ["Validation loss", f(val, 4)],
