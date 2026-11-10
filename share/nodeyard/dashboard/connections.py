@@ -186,6 +186,10 @@ class Connections:
                     override = s[path + "_override"]
                     if override:
                         candidate = override
+                        # A typed address is authoritative: use it straight away, without
+                        # waiting for it to answer (the machine may be off right now). The
+                        # probe below still reports whether it's reachable.
+                        p["address"] = override
                     elif p["address"] and not s["auto_update"]:
                         candidate = p["address"]          # keep the address it has; changes are shown, not followed
                     else:
