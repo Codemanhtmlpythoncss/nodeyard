@@ -16,6 +16,7 @@ runs on a node with nothing else installed except torch and numpy.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -91,6 +92,65 @@ def encode_with_roles(tokenizer: BPETokenizer, text: str, assistant_only: bool):
     return np.asarray(ids, dtype=np.int64), np.asarray(weights, dtype=np.float32)
 
 
+def cached_tokens(app_data: Path, tokenizer_path: Path, data_files, assistant_only: bool, encode):
+    """Encoding with BPE is slow in Python, and a resumed or round-based run reads the same text again: keep the
+    token ids next to the model, keyed by the tokenizer, the data files (name, size, time) and assistant-only."""
+    key = hashlib.sha256()
+    key.update(tokenizer_path.read_bytes())
+    for name in data_files:
+        st = os.stat(name)
+        key.update(f"{Path(name).name}|{st.st_size}|{int(st.st_mtime)}|".encode())
+    key.update(b"assistant-only" if assistant_only else b"all")
+    digest = key.hexdigest()[:16]
+    cache = app_data / "tokens.npz"
+    try:
+        with np.load(cache) as saved:
+            if str(saved["key"]) == digest:
+                emit("Using the tokens cached from the last run (same text and tokenizer).")
+                return saved["tokens"], saved["weights"]
+    except (OSError, KeyError, ValueError):
+        pass
+    tokens, weights = encode()
+    try:
+        tmp = app_data / "tokens.tmp.npz"
+        np.savez(tmp, key=np.array(digest), tokens=tokens, weights=weights)
+        os.replace(tmp, cache)
+    except OSError:
+        pass
+    return tokens, weights
+
+
+def average(args) -> int:
+    """Weighted mean of several copies of the same model (training shared across machines).
+
+    Each machine trained its own copy for a while on different random windows; averaging the weights combines what
+    they learned: w = Σ_i a_i·w_i / Σ_i a_i, with a_i the tokens machine i trained on.
+    """
+    parts = []
+    for spec in args.parts:
+        path, _, weight = spec.rpartition(":")
+        parts.append((Path(path), float(weight)))
+    total = sum(w for _, w in parts)
+    if not parts or total <= 0:
+        raise ValueError("Nothing to average.")
+    merged = None
+    for path, weight in parts:
+        state = torch.load(path, map_location="cpu")
+        if merged is None:
+            merged = {k: v.double() * (weight / total) for k, v in state.items()}
+        else:
+            if state.keys() != merged.keys():
+                raise ValueError(f"{path.name} is a different model shape.")
+            for k, v in state.items():
+                merged[k] += v.double() * (weight / total)
+    out = args.out / MODEL_FILE
+    tmp = args.out / (MODEL_FILE + ".tmp")
+    torch.save({k: v.float() for k, v in merged.items()}, tmp)
+    os.replace(tmp, out)
+    emit("Averaged " + str(len(parts)) + " copies: " + ", ".join(f"{p.name} × {w / total:.3f}" for p, w in parts))
+    return 0
+
+
 def sample_windows(tokens, weights, context, batch, rng, device):
     starts = np.array([rng.randrange(0, len(tokens) - context - 1) for _ in range(batch)])
     offsets = np.arange(context + 1)[None, :]
@@ -164,7 +224,8 @@ def train(args) -> int:
         tokenizer = BPETokenizer.train(text, args.vocab_size)
         tokenizer.save(tokenizer_path)
 
-    tokens, weights = encode_with_roles(tokenizer, text, args.assistant_only)
+    tokens, weights = cached_tokens(app_data, tokenizer_path, args.data_files, args.assistant_only,
+                                    lambda: encode_with_roles(tokenizer, text, args.assistant_only))
     split = int(len(tokens) * 0.95)
     if len(tokens) - split < args.context + 2:
         if args.resume:
@@ -235,7 +296,14 @@ def train(args) -> int:
     last_validation = None
     done = 0
     for step in range(1, args.steps + 1):
-        rate = learning_rate(step, args.steps, peak, args.warmup)
+        if args.lr_progress:
+            # Round-based training across machines: this run covers progress a..b of the whole job's cosine curve
+            # (warm-up already happened in the first round).
+            a, b = args.lr_progress
+            progress = a + (b - a) * step / max(1, args.steps)
+            rate = peak * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(1.0, progress))))
+        else:
+            rate = learning_rate(step, args.steps, peak, args.warmup)
         for group in optimizer.param_groups:
             group["lr"] = rate
         inputs, targets, target_weights = sample_windows(train_tokens, train_weights, args.context,
@@ -510,7 +578,13 @@ def main() -> int:
     train_parser.add_argument("--resume", action="store_true")
     train_parser.add_argument("--result-file", default=None)
     train_parser.add_argument("--save-every", type=int, default=500, help="save a checkpoint every N steps (0: only at the end)")
+    train_parser.add_argument("--lr-progress", nargs=2, type=float, default=None, metavar=("FROM", "TO"),
+                              help="follow the cosine schedule from FROM to TO (0..1) of a longer job, with no warm-up")
     train_parser.set_defaults(handler=train)
+    average_parser = commands.add_parser("average", help="weighted mean of copies of one model")
+    average_parser.add_argument("--out", required=True, type=Path)
+    average_parser.add_argument("--part", dest="parts", action="append", required=True, help="PATH:WEIGHT")
+    average_parser.set_defaults(handler=average)
     generate_parser = commands.add_parser("generate")
     generate_parser.add_argument("--app-data", required=True, type=Path)
     generate_parser.add_argument("--prompt", default="")

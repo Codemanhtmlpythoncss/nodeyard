@@ -1162,6 +1162,7 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .tr-key td.sym { font-family: "STIX Two Math", "Cambria Math", serif; font-size: 15px; white-space: nowrap; width: 1%; }
 .tr-key td.val { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--accent2); white-space: nowrap; text-align: right; }
 .tr-key tr.hl td { background: rgba(124, 140, 255, .1); }
+.tr-machines tr.off td { opacity: .6; } .tr-machines td:first-child { width: 22px; }
 .tr-two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; align-items: start; }
 .tr-sl { display: flex; flex-direction: column; gap: 3px; margin: 8px 0; font-size: 13px; }
 .tr-sl > span:first-child { display: flex; justify-content: space-between; gap: 8px; }

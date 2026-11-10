@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,8 @@ sys.path.insert(0, str(ROOT / "share" / "nodeyard" / "dashboard"))
 sys.path.insert(0, str(ROOT / "share" / "nodeyard" / "jobs"))
 
 import trainapi  # noqa: E402
+import trainpool  # noqa: E402
+import trainworker  # noqa: E402
 import training_data  # noqa: E402
 
 
@@ -135,14 +138,41 @@ class TrainerTests(unittest.TestCase):
         self.assertEqual(st["grad"][0]["norm"], 0.8)
         self.assertEqual(self.t.status(st["next"])["lines"], [])
 
-    def test_start_needs_pytorch_and_valid_settings(self):
-        self.t.probe_cache = (9e18, {"torch": None})
-        self.assertEqual(post(self.t, self.t.start, {"data": ["x.txt"]})["code"], 409)
-        self.t.probe_cache = (9e18, {"torch": "2.0"})
+    def test_start_checks_settings_before_anything_runs(self):
         post(self.t, self.t.paste, {"name": "d.txt", "text": "x" * 2000})
         bad = post(self.t, self.t.start, {"data": ["d.txt"], "settings": {"dim": 63, "heads": 2, "steps": 10, "batch_size": 1, "context": 8,
                                                                        "layers": 1, "vocab_size": 300, "learning_rate": 0.001}})
         self.assertIn("divide", bad["error"])
+        self.assertEqual(post(self.t, self.t.start, {"data": ["nope.txt"]})["code"], 404)
+        self.assertFalse(self.t.running())
+
+    def test_plan_picks_the_fastest_and_leaves_out_slow_machines(self):
+        def m(name, speed, usable=True, reason=""):
+            return {"name": name, "speed": speed, "usable": usable, "reason": reason, "device": "cpu", "ram_free": 4e9, "gpu": None}
+        machines = [m("gpu", 8e11), m("mini", 3e11), m("pi", 3e10), m("dead", 9e12, False, "not ready")]
+        machines.sort(key=lambda x: (not x["usable"], -x["speed"]))
+        p = self.t.plan(machines)
+        self.assertEqual(p["lead"], "gpu")
+        self.assertEqual(p["share"], ["gpu", "mini"])
+        self.assertTrue(any("pi left out" in n for n in p["notes"]))
+        self.assertAlmostEqual(p["speed"], 8e11 + 0.8 * 3e11)
+        self.assertEqual(self.t.plan(machines, ["pi", "mini"])["share"], ["mini", "pi"])   # chosen by hand: kept
+        none = self.t.plan([m("dead", 1e9, False, "not ready")])
+        self.assertIsNone(none["lead"])
+        self.assertIn("not ready", none["notes"][0])
+
+    def test_pod_for_a_gpu_node(self):
+        pool = self.t.pool
+        pod = pool.pod_manifest({"name": "gpu-box", "mem_total": 16 * 1024 ** 3, "labels": {"nodeyard.io/gpu": "nvidia"}})
+        spec = pod["spec"]
+        self.assertEqual(spec["nodeName"], "gpu-box")
+        self.assertEqual(spec["runtimeClassName"], "nvidia")
+        self.assertEqual(spec["volumes"][2]["hostPath"]["path"], trainpool.NODE_DIR)
+        self.assertIn("limits", spec["containers"][0]["resources"])
+        self.assertNotIn("runtimeClassName", pool.pod_manifest({"name": "pi", "labels": {}})["spec"])
+        kinds = [x["kind"] for x in pool.base_manifest()]
+        self.assertEqual(kinds, ["Namespace", "Secret", "ConfigMap"])
+        self.assertEqual(set(pool.base_manifest()[2]["data"]), set(trainpool.CODE_FILES))
 
     def test_register_adds_routes(self):
         ctx = SimpleNamespace(get_routes={}, post_routes={}, post_limits={}, store=None)
@@ -150,6 +180,78 @@ class TrainerTests(unittest.TestCase):
         self.assertIn("/api/train", ctx.get_routes)
         self.assertIn("/api/train/start", ctx.post_routes)
         self.assertIn("/api/train/upload", ctx.post_limits)
+        self.assertNotIn("/api/train/setup", ctx.post_routes)   # PyTorch installs itself on each machine now
+
+
+class WorkerTests(unittest.TestCase):
+    """The training worker's file and job API, without PyTorch."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.token = "t" * 32
+        self.workers = []
+        self.remotes = []
+        for i in range(2):
+            w = trainworker.Worker(os.path.join(self.dir.name, "w%d" % i), str(ROOT / "share" / "nodeyard" / "jobs"))
+            w.deps["state"] = "installing"
+            srv = trainworker.Server(("127.0.0.1", 0), trainworker.make_handler(w, self.token))
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            self.workers.append((w, srv))
+            self.remotes.append(trainpool.Remote("w%d" % i, "http://127.0.0.1:%d" % srv.server_address[1], self.token))
+
+    def tearDown(self):
+        for _, srv in self.workers:
+            srv.shutdown()
+            srv.server_close()
+        self.dir.cleanup()
+
+    def test_token_is_required(self):
+        bad = trainpool.Remote("w0", self.remotes[0].url, "x" * 32)
+        with self.assertRaises(trainpool.PoolError):
+            bad.status()
+        self.assertTrue(bad.healthy())   # /healthz needs no token
+        self.assertEqual(self.remotes[0].status()["deps"]["state"], "installing")
+
+    def test_files_go_up_in_pieces_come_back_and_keep_their_version(self):
+        r = self.remotes[0]
+        src = os.path.join(self.dir.name, "big.txt")
+        with open(src, "wb") as f:
+            f.write(os.urandom(trainpool.CHUNK * 2 + 123))
+        v = trainpool.file_version(src)
+        r.put_file("data/big.txt", src, v)
+        self.assertEqual(r.ls("data")["big.txt"]["version"], v)
+        back = os.path.join(self.dir.name, "back.txt")
+        r.get_file("data/big.txt", back)
+        with open(src, "rb") as a, open(back, "rb") as b:
+            self.assertEqual(a.read(), b.read())
+        with open(os.path.join(self.workers[0][0].data_dir, "big.txt"), "ab") as f:   # changed on the worker: the old version no longer holds
+            f.write(b"x")
+        self.assertNotEqual(r.ls("data")["big.txt"]["version"], v)
+
+    def test_paths_stay_inside_the_worker(self):
+        r = self.remotes[0]
+        for bad in ("../x", "data/../../etc/passwd", "etc/passwd", "models/a/b/c/d", "data/.hidden"):
+            with self.assertRaises(trainpool.PoolError, msg=bad):
+                r.call("POST", "/delete", {"path": bad})
+
+    def test_machines_swap_files_directly(self):
+        a, b = self.remotes
+        src = os.path.join(self.dir.name, "model.pt")
+        with open(src, "wb") as f:
+            f.write(b"weights" * 1000)
+        a.put_file("models/m/model.pt", src, "7000:1")
+        b.call("POST", "/pull", {"url": a.url, "path": "models/m/model.pt", "dest": "models/m/peer.pt", "version": "7000:1"})
+        self.assertEqual(b.ls("models/m")["peer.pt"]["size"], 7000)
+
+    def test_jobs_wait_for_pytorch_and_options_cannot_redirect_files(self):
+        r = self.remotes[0]
+        with self.assertRaises(trainpool.PoolError) as e:
+            r.call("POST", "/train", {"model": "m", "data": [], "options": []})
+        self.assertIn("PyTorch", str(e.exception))
+        self.workers[0][0].deps["state"] = "ready"
+        for opt in ("--app-data", "--result-file=/etc/x", "--data-file"):
+            with self.assertRaises(trainpool.PoolError):
+                r.call("POST", "/train", {"model": "m", "data": [], "options": [opt, "/tmp/x"]})
 
 
 if __name__ == "__main__":

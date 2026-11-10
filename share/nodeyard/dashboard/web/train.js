@@ -11,7 +11,8 @@
     tab: store.get("train.tab", "learn"), lesson: +store.get("train.lesson", 0) || 0, ov: null, hours: +store.get("train.hours", 1) || 1,
     sel: JSON.parse(store.get("train.sel", "[]") || "[]"), check: null, form: null, model: "", resume: false, status: null, since: 0,
     lines: [], pollT: 0, ovT: 0, chat: { model: "", history: [], mode: "chat", temperature: 0.7, top_k: 40, top_p: 0.9, busy: false },
-    explain: null, exModel: "", exPrompt: "User: Hello, who are you?", exBusy: false, upload: null, setupT: 0,
+    explain: null, exModel: "", exPrompt: "User: Hello, who are you?", exBusy: false, upload: null, ovPollT: 0,
+    machines: JSON.parse(store.get("train.machines", "[]") || "[]"), share: store.get("train.share", "1") !== "0",
   };
 
   // ---------- small maths helpers (the same formulas as the trainer) ----------
@@ -87,6 +88,7 @@
     sched: { peak: 0.001, warmup: 100, steps: 2000, at: 500 },
     size: { V: 2048, T: 128, d: 192, L: 4, h: 6, B: 32 },
     samp: { temp: 1, k: 0, p: 1 },
+    multi: { a: 800, b: 300, c: 0, N: 20, link: 100, round: 120 },
   };
   const WORDS = [" the", " cat", " sat", " on", " mat"];
 
@@ -99,7 +101,7 @@
         <li><b>Loss:</b> measure how wrong it was: the average of −ln(probability it gave the right token).</li>
         <li><b>Backward:</b> calculus (the chain rule) gives, for every weight, how much the loss would change if that weight moved a little: the <b>gradient</b>.</li>
         <li><b>Update:</b> move every weight a small step against its gradient (AdamW decides the step size per weight).</li></ol>
-      <p>Repeat thousands of times. Lessons 2–12 open each box with its exact maths and live numbers; tab 4 shows the real values inside <i>your</i> model.</p>
+      <p>Repeat thousands of times. Lessons 2–13 open each box with its exact maths and live numbers; tab 4 shows the real values inside <i>your</i> model.</p>
       ${eq("w ← w − η · ∂ℒ/∂w")}
       ${keyTable([["w", "any one weight"], ["η (eta)", "learning rate: the step size"], ["ℒ", "the loss: how wrong the model was"], ["∂ℒ/∂w", "the gradient: how the loss changes when w changes"]])}` },
     { id: "neuron", title: "A neuron", body: () => {
@@ -224,6 +226,23 @@
       <div><p class="faint small">“I'd like to eat …” — the next word:</p>${names.map((nm, i) => html`<div class="tr-prow"><span>${nm.trim()}</span><span class="tr-pbar" style="width:${Math.round(p[i] * 220)}px"></span><b>${f(p[i] * 100, 3)}%</b></div>`)}</div></div>
       <p class="muted small">Your chat uses temperature 0.7, top-k 40, top-p 0.9 and a repetition penalty of 1.15 (logits of tokens used recently are divided by 1.15) by default.</p>`;
     } },
+    { id: "multi", title: "Training on several machines", body: () => {
+      const s = L.multi, sp = [s.a, s.b, s.c].filter((x) => x > 0).sort((x, y) => y - x), lead = sp[0] || 1, others = sp.slice(1);
+      const N = s.N * 1e6, bytes = 4 * N * 2 * others.length, sync = bytes * 8 / (s.link * 1e6), eff = s.round / (s.round + sync);
+      const share = sp.map((x) => x / sp.reduce((a, b) => a + b, 0)), combined = (lead + others.reduce((a, b) => a + b, 0)) * 1e9 * eff;
+      const perStep = 4 * N * 2 * others.length * 8 / (s.link * 1e6);
+      return html`<p>One model can't be split across your machines like a pizza: every training step needs every weight. What <i>can</i> be shared is the <b>reading</b>. Each machine trains its own copy on different random windows of your text for a round (about 2 minutes), then the copies are <b>averaged</b> and every machine carries on from the average. This is called <b>local SGD</b> (or federated averaging): the same idea as big labs' data-parallel training, but swapping weights every few hundred steps instead of every step, because a home network is far slower than the links between datacentre GPUs.</p>
+      ${eq("w = Σ<sub>i</sub> a<sub>i</sub>·w<sub>i</sub> ⁄ Σ<sub>i</sub> a<sub>i</sub> &nbsp;&nbsp; a<sub>i</sub> = tokens machine i read this round = steps<sub>i</sub> · B · T")}
+      ${keyTable([["w<sub>i</sub>", "machine i's copy of one weight after its round"], ["a<sub>i</sub>", "how much text it read: a faster machine does more steps in the same 2 minutes, so it counts for more"], ["w", "the averaged weight every machine starts the next round from"]])}
+      <div class="tr-two"><div>${slider("multi.a", "machine A, GFLOP/s", 10, 3000, 10, s.a)}${slider("multi.b", "machine B, GFLOP/s", 0, 3000, 10, s.b)}${slider("multi.c", "machine C, GFLOP/s (0 = none)", 0, 3000, 10, s.c)}
+        ${slider("multi.N", "model, millions of weights", 1, 200, 1, s.N)}${slider("multi.link", "network, Mbit/s", 10, 1000, 10, s.link)}${slider("multi.round", "round length, seconds", 10, 600, 10, s.round)}</div>
+      <div class="tr-calc">steps each machine does per round ∝ its speed: ${sp.map((x, i) => "ABC"[i] + " " + f(share[i] * 100, 3) + "%").join(" · ")}<br>
+        weights swapped per round: the lead fetches ${others.length} cop${others.length === 1 ? "y" : "ies"} and sends the average back: 2 × ${others.length} × 4 bytes × ${n0(N)} = ${gb(bytes)}<br>
+        at ${s.link} Mbit/s: ${dur(sync)} of swapping per ${dur(s.round)} round → ${f(eff * 100, 3)}% of the time is training<br>
+        <b>combined ≈ ${f(combined / 1e9, 4)} GFLOP/s</b> vs ${f(lead, 4)} for the fastest alone (${f(combined / 1e9 / lead, 3)}×)<br>
+        swapping every step instead (classic data-parallel) would cost ${dur(perStep)} per step${perStep > 1 ? html` — <span class="bad-t">slower than the step itself</span>` : ""}</div></div>
+      <p class="muted small">Two rules fall out of the numbers. A machine much slower than the fastest adds little (a Pi next to a GPU adds about 1%) but every round still waits to swap with it, so the Train tab leaves out machines under a quarter of the fastest's speed. And a bigger model means more bytes per swap, so the network matters more as the model grows. Before round 1 one machine trains alone for the warm-up, so every copy starts from the same weights (copies started from different random weights can't be averaged: their neurons wouldn't line up).</p>`;
+    } },
     { id: "scale", title: "Why it isn't Qwen (yet)", body: () => {
       const ov = TR.ov, sp = ov ? ov.recommend.speed : 1e10, q = { N: 494e6, D: 18e12 }, qc = 6 * q.N * q.D;
       const r = ov ? ov.recommend : null;
@@ -237,7 +256,7 @@
       <ol class="tr-steps"><li><b>More and better text.</b> The single biggest lever. Clean, varied, well-written data beats clever settings. Remove junk (menus, code you don't want, repeated boilerplate).</li>
         <li><b>Conversation data for a chatbot.</b> A model only learns to answer if it sees thousands of User/Assistant examples. Tick “learn only the replies”.</li>
         <li><b>Train for the right length.</b> Watch validation loss: when it stops falling, stop (more steps only memorise).</li>
-        <li><b>The fastest machine.</b> The Train tab ranks your cluster's machines; a GPU is 10–100× faster than a Pi's CPU.</li>
+        <li><b>The fastest machine.</b> The Train tab picks it for you (a GPU is 10–100× faster than a Pi's CPU) and lets similar machines share the work.</li>
         <li><b>Size the model to the data.</b> About 20 tokens of text per weight is compute-optimal; with less, a smaller model generalises better.</li></ol>
       <p class="muted small">Honest scale: 10–30 million weights trained on a few hundred MB of good text gives readable paragraphs and simple, style-matched replies — a big step up, but not an assistant that knows the world. Everything that model knows came from your data.</p>`;
     } },
@@ -299,7 +318,7 @@
   // ---------- loading ----------
   async function loadOverview() {
     try {
-      const q = "?hours=" + TR.hours + "&data=" + encodeURIComponent(TR.sel.join("|"));
+      const q = "?hours=" + TR.hours + "&data=" + encodeURIComponent(TR.sel.join("|")) + "&machines=" + encodeURIComponent(TR.machines.join("|"));
       const r = await getJSON("/api/train" + q);
       if (!r.ok) { toast(r.error || "Couldn't read the trainer."); return; }
       TR.ov = r;
@@ -307,7 +326,10 @@
       if (!TR.form) TR.form = Object.assign({ save_every: 500, device: "auto", assistant_only: false }, r.recommend.settings);
       if (!TR.chat.model && r.models.length) TR.chat.model = r.models[r.models.length - 1].name;
       if (!TR.exModel && r.models.length) TR.exModel = r.models[r.models.length - 1].name;
-      if (r.setup && r.setup.running) { clearTimeout(TR.setupT); TR.setupT = setTimeout(loadOverview, 2000); }
+      const mnames = new Set(r.machines.map((m) => m.name)); TR.machines = TR.machines.filter((n) => mnames.has(n));
+      // While a machine is starting or installing PyTorch, keep reading its progress.
+      clearTimeout(TR.ovPollT);
+      if (r.machines.some((m) => /starting|installing|checking/.test(m.worker.state)) && S.view === "train") TR.ovPollT = setTimeout(loadOverview, 3000);
     } catch (e) { /* signed out */ }
     paint();
   }
@@ -403,19 +425,10 @@
     const ov = TR.ov; if (!ov) return html`<div class="empty"><div class="spin"></div>Reading this machine's hardware…</div>`;
     const hw = ov.hardware, r = ov.recommend, s = TR.form, run = TR.status ? TR.status.running : ov.running;
     const N = params(+s.vocab_size, +s.context, +s.dim, +s.layers), act = actBytes(+s.batch_size, +s.context, +s.dim, +s.layers, +s.heads, +s.vocab_size), fl = 6 * N * s.batch_size * s.context;
-    const best = ov.cluster.find((n) => n.ready);
     const field = (k, label, help, attrs = "") => html`<label class="tr-field"><span>${raw(label)}</span><input class="input" data-tr-set="${k}" value="${s[k]}" ${raw(attrs)}><span class="faint small">${raw(help)}</span></label>`;
     return html`<div class="grid tr-grid2">
-      <section class="card"><h2 class="tr-h">This machine</h2>
-        <div class="tr-stats">${[["Host", hw.host], ["CPU", hw.cores + " cores · " + hw.arch], ["Memory", gb(hw.ram_total) + " (" + gb(hw.ram_free) + " free)"], ["GPU", hw.gpu ? hw.gpu.name + " · " + gb(hw.gpu.vram) : hw.mps ? "Apple GPU (Metal)" : "none (training uses the CPU)"],
-          ["PyTorch", hw.torch || "not installed"], ["Speed (est.)", f(r.speed, 2) + " FLOP/s"]].map(([a, b]) => html`<div><span>${a}</span><b>${b}</b></div>`)}</div>
-        ${hw.torch ? "" : html`<div class="tr-adv warn">The trainer needs PyTorch. “Set up the trainer” installs it into a private folder for the dashboard (about ${hw.os === "Linux" ? "200 MB for the CPU version" : "1 GB"}; needs internet).</div>
-          <button class="btn primary" data-tr-act="setup" ${ov.setup.running ? "disabled" : ""}>${ov.setup.running ? "Setting up…" : "Set up the trainer"}</button>
-          ${ov.setup.log.length ? html`<pre class="tr-pre tr-log">${ov.setup.log.slice(-40).join("\n")}</pre>` : ""}`}
-        ${ov.cluster.length ? html`<h3 class="tr-h3">Your cluster, fastest first</h3><table class="tr-key">${ov.cluster.slice(0, 6).map((n, i) => html`<tr class="${n === best ? "hl" : ""}"><td>${n.name}</td><td>${n.gpu || n.cores + " CPU cores"}</td><td>${n.ready ? "~" + f(n.speed, 2) + " FLOP/s" : "not ready"}</td></tr>`)}</table>
-          ${best && best.speed > r.speed * 1.5 ? html`<p class="small">${best.name} looks ${f(best.speed / r.speed, 2)}× faster than this machine. To train there, add it once with <code>nodeyard jobs add-host ${best.name} ADDRESS --user USER</code>, then run:</p>
-            <pre class="tr-pre">${jobsCommand(best)}</pre>` : ""}` : ""}</section>
-      <section class="card"><h2 class="tr-h">Recommended for this hardware</h2>
+      ${machinesCard()}
+      <section class="card"><h2 class="tr-h">Recommended for ${ov.plan.share.length > 1 ? "these machines" : ov.plan.lead || "this hardware"}</h2>
         <label class="tr-field"><span>How long can it train?</span><select class="select" data-tr-act="hours">${raw([[0.25, "15 minutes"], [1, "1 hour"], [3, "3 hours"], [8, "overnight (8 h)"], [24, "a day"], [72, "3 days"]].map(([v, l]) => '<option value="' + v + '"' + (+v === +TR.hours ? " selected" : "") + ">" + l + "</option>").join(""))}</select></label>
         <p class="small">${TR.sel.length ? html`For <b>${TR.sel.join(", ")}</b>:` : html`<span class="warn-t">No data chosen yet</span> — <a href="#" data-tr-tab="data">choose it in step 2</a>.`} a <b>${n0(r.parameters)}</b>-weight model, about <b>${dur(r.seconds)}</b>, using ~${gb(r.memory)}. Limited by <b>${r.limit}</b>.</p>
         <div class="tr-why">${r.why.map((w) => html`<details><summary><b>${w.name}</b><span>${w.value}</span></summary><div class="tr-eq small">${w.formula}</div><div class="tr-calc small">${w.numbers}</div><p class="muted small">${w.explain}</p></details>`)}</div>
@@ -427,14 +440,14 @@
           ${field("layers", "Layers L", "transformer blocks")}${field("heads", "Heads h", "parallel attention lookups")}${field("batch_size", "Batch B", "windows averaged per update")}
           ${field("steps", "Steps", "updates to make")}${field("learning_rate", "Learning rate η", "peak step size (1e-3 is a good start)")}${field("warmup", "Warm-up", "steps to ramp η up from 0")}
           ${field("weight_decay", "Weight decay λ", "AdamW's shrink per step")}${field("eval_every", "Check every", "steps between validation checks")}${field("save_every", "Save every", "steps between checkpoints (0 = only at the end)")}
-          <label class="tr-field"><span>Device</span><select class="select" data-tr-set="device">${raw(["auto", "cpu", "cuda", "mps"].map((d) => '<option' + (s.device === d ? " selected" : "") + ">" + d + "</option>").join(""))}</select><span class="faint small">auto picks the GPU when there is one</span></label>
+          <label class="tr-field"><span>Device</span><select class="select" data-tr-set="device">${raw(["auto", "cpu", "cuda", "mps"].map((d) => '<option' + (s.device === d ? " selected" : "") + ">" + d + "</option>").join(""))}</select><span class="faint small">auto: each machine uses its GPU when it has one</span></label>
           <label class="tr-field"><span>Learn only the replies</span><label class="row"><input type="checkbox" data-tr-set="assistant_only" ${s.assistant_only ? "checked" : ""}> on conversations, no loss on User: turns</label><span class="faint small">for chatbots: it learns to answer, not to ask</span></label></div>
         <div class="tr-calc small">N = ${n0(N)} weights · training memory ≈ 16·N + activations = ${gb(16 * N)} + ${gb(act)} = <b>${gb(16 * N + act)}</b> · ${f(fl, 3)} FLOPs per step · ≈ <b>${dur(fl * s.steps / r.speed)}</b> at the estimated speed${+s.dim % +s.heads ? html` · <span class="bad-t">width must divide by heads</span>` : ""}${16 * N + act > (hw.gpu && s.device !== "cpu" ? hw.gpu.vram : hw.ram_free) ? html` · <span class="bad-t">more than the free memory!</span>` : ""}</div>
         <div class="row wrap mt">
           <label class="tr-field inline"><span>Model</span><select class="select" data-tr-act="model-pick"><option value="">New model…</option>${raw(ov.models.map((m) => '<option value="' + esc(m.name) + '"' + (TR.resume && TR.model === m.name ? " selected" : "") + ">Continue " + esc(m.name) + "</option>").join(""))}</select></label>
           ${TR.resume ? "" : html`<input class="input" data-tr-act="model-name" placeholder="name (optional)" value="${TR.model}" style="width:180px">`}
           <span class="spacer"></span>
-          ${run ? html`<button class="btn danger" data-tr-act="stop">Stop and save</button>` : html`<button class="btn primary" data-tr-act="start" ${hw.torch && TR.sel.length ? "" : "disabled"}>${TR.resume ? "Continue training" : "Start training"}</button>`}</div>
+          ${run ? html`<button class="btn danger" data-tr-act="stop" ${TR.status && TR.status.job && TR.status.job.stop ? "disabled" : ""}>${TR.status && TR.status.job && TR.status.job.stop ? "Stopping…" : "Stop and save"}</button>` : html`<button class="btn primary" data-tr-act="start" ${ov.plan.lead && TR.sel.length ? "" : "disabled"}>${TR.resume ? "Continue training" : "Start training"}${ov.plan.lead ? " on " + (TR.share && ov.plan.share.length > 1 ? ov.plan.share.length + " machines" : ov.plan.lead) : ""}</button>`}</div>
         ${TR.resume ? html`<p class="faint small">Continuing keeps the saved model's shape and tokenizer (V, T, d, L, h) and AdamW's running averages; the other settings apply. The learning rate schedule starts again, so a lower peak (about 30% of the first run's) stops the first steps from undoing what it already learned.</p>` : ""}</section>
       <section class="card tr-span2"><h2 class="tr-h">Live <span class="right" id="tr-live-chip"></span></h2><div id="tr-live"></div>
         <div class="tr-charts"><div><h4>Loss (lower is better)</h4><canvas class="tr-cv tall" id="tr-loss"></canvas><p class="faint small"><span class="tr-sw a"></span>training (smoothed) <span class="tr-sw b"></span>validation <span class="tr-sw c"></span>random guess ln V</p></div>
@@ -442,10 +455,24 @@
         <details class="mt"><summary>Training log</summary><pre class="tr-pre tr-log" id="tr-logbox"></pre></details></section>
       ${savedModels()}</div>`;
   }
-  function jobsCommand(n) {
-    const s = TR.form, dir = TR.ov.data_dir || "<data folder>";
-    return "nodeyard jobs run --data '" + dir + "/" + (TR.sel[0] || "your-data.txt") + "' --copies 1 --steps " + s.steps + " --batch-size " + s.batch_size + " --context " + s.context +
-      " --dim " + s.dim + " --heads " + s.heads + " --layers " + s.layers + " --vocab-size " + s.vocab_size + " --learning-rate " + s.learning_rate + " --warmup " + s.warmup + (s.assistant_only ? " --assistant-only" : "");
+  function machinesCard() {
+    const ov = TR.ov, p = ov.plan, inPlan = new Set(TR.share ? p.share : p.share.slice(0, 1));
+    const stateText = (w) => ({ off: "off", starting: "starting", "checking PyTorch": "checking PyTorch", "installing PyTorch": "installing PyTorch", ready: "ready", failed: "can't train" })[w.state] || w.state;
+    const lead = ov.machines.find((m) => m.name === p.lead);
+    return html`<section class="card"><h2 class="tr-h">Where it trains <span class="right faint small">${ov.mode === "cluster" ? "your cluster, fastest first" : "no cluster here: this machine"}</span></h2>
+      ${!p.lead ? html`<div class="tr-adv bad">${p.notes[0]}</div>` : ""}
+      <div class="tr-scroll"><table class="tr-key tr-machines"><tr><th></th><th>Machine</th><th>Hardware</th><th>Speed</th><th>Trainer</th></tr>
+      ${ov.machines.map((m) => html`<tr class="${inPlan.has(m.name) ? "hl" : ""} ${m.usable ? "" : "off"}">
+        <td>${ov.mode === "cluster" ? html`<input type="checkbox" data-tr-machine="${m.name}" ${TR.machines.length ? (TR.machines.includes(m.name) ? "checked" : "") : (p.share.includes(m.name) ? "checked" : "")} ${m.usable ? "" : "disabled"} aria-label="use ${m.name}">` : ""}</td>
+        <td><b>${m.name}</b>${m.name === p.lead ? html` <span class="chip small">fastest</span>` : ""}</td>
+        <td class="small">${m.gpu ? m.gpu.name + " · " + gb(m.gpu.vram) : n0(m.cores) + " CPU cores"} · ${gb(m.ram_total)} RAM</td>
+        <td class="small">${m.usable ? "~" + f(m.speed / 1e9, 3) + " GFLOP/s" + (m.measured ? " (measured)" : " (estimate)") : "–"}</td>
+        <td class="small">${m.usable ? html`<span class="${m.worker.state === "ready" ? "good-t" : m.worker.state === "failed" ? "bad-t" : ""}">${stateText(m.worker)}</span>${m.worker.state !== "ready" && m.worker.detail ? html`<div class="faint">${m.worker.detail}</div>` : ""}` : html`<span class="faint">${m.reason}</span>`}</td></tr>`)}</table></div>
+      ${lead && /starting|installing|checking/.test(lead.worker.state) ? html`<div class="tr-adv ok">Getting <b>${lead.name}</b> ready: PyTorch installs itself there the first time (${lead.gpu ? "about 3 GB for the GPU version" : "about 200 MB"}), then stays. You can start training now: it begins as soon as it's ready.</div>
+        ${lead.worker.log.length ? html`<details><summary class="small">Install progress</summary><pre class="tr-pre tr-log">${lead.worker.log.join("\n")}</pre></details>` : ""}` : ""}
+      ${p.share.length > 1 ? html`<label class="row small mt"><input type="checkbox" data-tr-act="share" ${TR.share ? "checked" : ""}> Share the work across ${p.share.join(" + ")} (~${f(p.speed / 1e9, 3)} GFLOP/s together)</label>` : ""}
+      ${p.notes.filter((n) => p.lead).map((n) => html`<p class="faint small">${n}</p>`)}
+      <p class="faint small">Training runs on ${ov.mode === "cluster" ? "the chosen nodes, each in a pod (namespace nodeyard-train)" : "this machine, in a separate worker process"}; models are copied back here. Lesson 13 explains how sharing works.</p></section>`;
   }
   function savedModels() {
     const ms = TR.ov ? TR.ov.models : [];
@@ -462,10 +489,12 @@
     const chip = $("#tr-live-chip");
     if (!st || !st.job || !st.job.model) { setHTML(live, html`<div class="empty small">Nothing has trained yet. Choose data, check the settings, press Start.</div>`); drawLive(); return; }
     const last = st.last || {}, j = st.job, val = st.val.length ? st.val[st.val.length - 1].loss : null, V0 = +(j.settings || {}).vocab_size || 2048;
-    const frac = last.of ? last.local / last.of : 0, eta = last.sps ? (last.of - last.local) / last.sps : null;
-    if (chip) setHTML(chip, st.running ? html`<span class="chip good"><i class="dot good"></i>training ${j.model}</span>` : html`<span class="chip">${j.code === 0 ? "finished" : j.code == null ? "stopped" : "failed (exit " + j.code + ")"} · ${j.model}</span>`);
+    const total = +j.steps || 0, frac = total && last.step ? Math.min(1, (last.step - (+(j.base_steps || 0))) / total) : last.of ? last.local / last.of : 0;
+    const eta = last.sps && total ? Math.max(0, total * (1 - frac)) / last.sps : last.sps ? (last.of - last.local) / last.sps : null;
+    const where = (j.machines || []).join(" + "), rounds = j.mode === "shared" && j.rounds ? " · round " + j.round + " of " + j.rounds : "";
+    if (chip) setHTML(chip, st.running ? html`<span class="chip good"><i class="dot good"></i>${j.phase && j.phase !== "training" ? j.phase : "training"} ${j.model}${where ? " on " + where : ""}${rounds}</span>` : html`<span class="chip">${j.code === 0 ? "finished" : j.code == null ? "stopped" : "failed (exit " + j.code + ")"} · ${j.model}</span>`);
     setHTML(live, html`<div class="tr-progress big"><i style="width:${(frac * 100).toFixed(1)}%"></i></div>
-      <div class="tr-stats">${[["Step", last.local ? n0(last.local) + " / " + n0(last.of) : "starting…"], ["Time left", st.running && eta != null ? dur(eta) : "–"], ["Training loss", f(last.loss, 4)], ["Validation loss", f(val, 4)],
+      <div class="tr-stats">${[["Step", last.local ? (total ? n0(Math.round(frac * total)) + " / " + n0(total) : n0(last.local) + " / " + n0(last.of)) : j.phase || "starting…"], ["Time left", st.running && eta != null ? dur(eta) : "–"], ["Training loss", f(last.loss, 4)], ["Validation loss", f(val, 4)],
         ["Perplexity e^ℒ", val != null ? f(Math.exp(val), 4) : "–"], ["Learning rate", f(last.lr, 3)], ["Speed", last.tps ? n0(last.tps) + " tokens/s" : "–"], ["Total steps", n0(last.step)]].map(([a, b]) => html`<div><span>${a}</span><b>${b}</b></div>`)}</div>
       ${val != null ? html`<p class="small">Right now the model is about as unsure as picking among <b>${f(Math.exp(val), 3)}</b> equally likely tokens for each next token (a random guess would be ${n0(V0)}: ln ${n0(V0)} = ${f(Math.log(V0), 4)}). ${st.val.length > 2 && st.val[st.val.length - 1].loss > Math.min(...st.val.map((v) => v.loss)) * 1.02 ? "Validation is rising above its best: the model is starting to memorise; more steps won't help much." : ""}</p>` : ""}`);
     const box = $("#tr-logbox"); if (box) { const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 8; box.textContent = TR.lines.slice(-400).join("\n"); if (atEnd) box.scrollTop = box.scrollHeight; }
@@ -483,9 +512,16 @@
     chart($("#tr-grad"), [{ pts: (st ? st.grad : []).map((p) => [p.local, p.norm]), color: cssv("--warn", "#fb2"), dots: true }], { y0: 0, empty: "–" });
   }
 
+  function workerNote(what) {
+    const ov = TR.ov; if (!ov || !ov.machines.length) return "";
+    if (ov.machines.some((m) => m.usable && m.worker.state === "ready")) return "";
+    const lead = ov.machines.find((m) => m.name === ov.plan.lead);
+    if (!lead) return html`<div class="tr-adv bad">${ov.plan.notes[0]}</div>`;
+    return html`<div class="tr-adv ok">${what} runs on <b>${lead.name}</b>, which is ${lead.worker.state === "failed" ? "unable to: " + lead.worker.detail : "getting ready (PyTorch installs itself the first time; " + (lead.worker.detail || "starting") + ")"}.</div>`;
+  }
   function insideTab() {
     const ov = TR.ov, ms = ov ? ov.models : [], x = TR.explain;
-    return html`<section class="card"><h2 class="tr-h">Inside the model: every value of one real step</h2>
+    return html`${workerNote("This")}<section class="card"><h2 class="tr-h">Inside the model: every value of one real step</h2>
       <p class="small">This runs your text through a saved model <b>by hand</b> — each matrix multiply written out — and checks the result against PyTorch. Then it runs the backward pass and one AdamW update. These are the actual numbers training uses. (Vectors show the first ${x ? x.show_dims : 8} of d numbers; statistics cover all of them.)</p>
       <div class="row wrap"><select class="select" data-tr-act="ex-model"><option value="">A tiny untrained model (no training needed)</option>${raw(ms.map((m) => '<option value="' + esc(m.name) + '"' + (TR.exModel === m.name ? " selected" : "") + ">" + esc(m.name) + "</option>").join(""))}</select>
         <input class="input grow" data-tr-act="ex-prompt" value="${TR.exPrompt}" placeholder="Text to run through the model">
@@ -534,14 +570,14 @@
   function chatTab() {
     const ov = TR.ov, ms = ov ? ov.models : [], c = TR.chat;
     if (!ms.length) return html`<section class="card"><div class="empty"><b>No trained model yet</b>Train one in step 3, then talk to it here.<div class="mt"><button class="btn primary" data-tr-tab="train">Go to training</button></div></div></section>`;
-    return html`<section class="card tr-chat"><div class="row wrap"><select class="select" data-tr-act="chat-model">${raw(ms.map((m) => '<option value="' + esc(m.name) + '"' + (c.model === m.name ? " selected" : "") + ">" + esc(m.name) + " (" + n0(m.parameters) + " weights, loss " + f(m.validation_loss, 3) + ")</option>").join(""))}</select>
+    return html`${workerNote("Chat")}<section class="card tr-chat"><div class="row wrap"><select class="select" data-tr-act="chat-model">${raw(ms.map((m) => '<option value="' + esc(m.name) + '"' + (c.model === m.name ? " selected" : "") + ">" + esc(m.name) + " (" + n0(m.parameters) + " weights, loss " + f(m.validation_loss, 3) + ")</option>").join(""))}</select>
         <div class="seg"><button class="${c.mode === "chat" ? "on" : ""}" data-tr-act="mode-chat">Chat</button><button class="${c.mode === "continue" ? "on" : ""}" data-tr-act="mode-continue">Continue text</button></div>
         <span class="spacer"></span><button class="btn small" data-tr-act="chat-clear">Clear</button></div>
       <div class="tr-sliders">${slider("chat.temperature", "temperature", 0.1, 1.5, 0.05, c.temperature)}${slider("chat.top_k", "top-k", 0, 200, 1, c.top_k)}${slider("chat.top_p", "top-p", 0.1, 1, 0.05, c.top_p)}</div>
       <div class="tr-msgs" id="tr-msgs">${c.history.length ? c.history.map((m) => html`<div class="tr-msg ${m.role}"><b>${m.role === "user" ? "You" : "Model"}</b><div>${m.content}</div></div>`) : html`<div class="empty small">${c.mode === "chat" ? "Say something. The model sees “User: …\\nAssistant:” and writes the reply." : "Type the start of some text; the model continues it."}</div>`}
         ${c.busy ? html`<div class="tr-msg assistant"><b>Model</b><div><span class="spin"></span></div></div>` : ""}</div>
       <div class="row"><textarea class="input grow" id="tr-ask" rows="2" placeholder="${c.mode === "chat" ? "Message your model…" : "Start of the text…"}"></textarea><button class="btn primary" data-tr-act="send" ${c.busy ? "disabled" : ""}>Send</button></div>
-      <p class="faint small">Replies come only from what this model learned from your data. Short, odd or repetitive answers mean it needs more data or training (see lesson 13).</p></section>`;
+      <p class="faint small">Replies come only from what this model learned from your data. Short, odd or repetitive answers mean it needs more data or training (see lesson 14).</p></section>`;
   }
 
   // ---------- actions ----------
@@ -591,10 +627,9 @@
     else if (a === "sched-mine") { const s = curSet(); Object.assign(L.sched, { peak: +s.learning_rate, warmup: +s.warmup, steps: +s.steps, at: Math.round(s.steps / 3) }); paint(); }
     else if (a === "size-mine") { const s = curSet(); Object.assign(L.size, { V: +s.vocab_size, T: +s.context, d: +s.dim, L: +s.layers, h: +s.heads, B: +s.batch_size }); paint(); }
     else if (a === "paste") { const name = $("#tr-paste-name").value.trim(), text = $("#tr-paste-text").value; const r = await post("/api/train/paste", { name, text }); if (r) { if (!TR.sel.includes(r.name)) TR.sel.push(r.name); saveSel(); toast("Saved " + r.name); await loadOverview(); checkData(r.name); } }
-    else if (a === "setup") { if (await post("/api/train/setup", {})) { toast("Installing PyTorch… this takes a few minutes."); loadOverview(); } }
     else if (a === "use-rec") { Object.assign(TR.form, TR.ov.recommend.settings); paint(); toast("Recommended settings filled in."); }
     else if (a === "start") {
-      const body = { data: TR.sel, settings: TR.form, resume: TR.resume, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined };
+      const body = { data: TR.sel, settings: TR.form, resume: TR.resume, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.share };
       const r = await post("/api/train/start", body);
       if (r) { toast("Training " + r.model); TR.lines = []; TR.since = 0; TR.status = null; TR.model = TR.resume ? TR.model : ""; await loadOverview(); poll(); }
     }
@@ -628,6 +663,12 @@
   document.addEventListener("change", (e) => {
     if (S.view !== "train" || !e.target.closest("#tr-root")) return;
     const t = e.target, d = t.dataset;
+    if (d.trMachine) {
+      if (!TR.machines.length) TR.machines = TR.ov.plan.share.slice();
+      if (t.checked) { if (!TR.machines.includes(d.trMachine)) TR.machines.push(d.trMachine); } else TR.machines = TR.machines.filter((x) => x !== d.trMachine);
+      store.set("train.machines", JSON.stringify(TR.machines)); TR.form = null; loadOverview(); return;
+    }
+    if (d.trAct === "share") { TR.share = t.checked; store.set("train.share", t.checked ? "1" : "0"); paint(); return; }
     if (d.trSel) { if (t.checked) { if (!TR.sel.includes(d.trSel)) TR.sel.push(d.trSel); } else TR.sel = TR.sel.filter((x) => x !== d.trSel); saveSel(); loadOverview(); }
     else if (d.trSet === "assistant_only") { TR.form.assistant_only = t.checked; }
     else if (d.trSet === "device") { TR.form.device = t.value; }

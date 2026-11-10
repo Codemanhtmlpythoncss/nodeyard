@@ -4,28 +4,30 @@ The page (web/train.js) teaches the maths, checks the training data you give it,
 machine's hardware (and shows the formula and numbers behind every one), runs the trainer, draws the loss as it
 learns, lets you chat with the result, and shows the value of every variable in one real forward and backward pass.
 
-The trainer is share/nodeyard/jobs/train_bpe_gpt_torch.py (the same portable PyTorch trainer `nodeyard jobs`
-runs across the cluster), started as a child process of the dashboard. It needs PyTorch: "Set up the trainer"
-makes a private virtual environment under <state_dir>/train/venv and installs torch and numpy into it.
-NODEYARD_TRAIN_PYTHON picks another Python that already has them.
+The trainer is share/nodeyard/jobs/train_bpe_gpt_torch.py. It never runs inside the dashboard (whose service is
+capped at 768 MB): trainpool.py starts a training worker on the chosen machines (a pod per cluster node, or a local
+process without a cluster) that installs PyTorch by itself the first time. The fastest machine trains; machines at
+least a quarter as fast can share the job, each training its own copy for a round and then averaging their weights.
+NODEYARD_TRAIN_PYTHON makes local workers use a Python that already has PyTorch.
 
-Everything lives under <state_dir>/train/: data/ (your uploaded files), models/<name>/ (one folder per model),
-job.json and logs/ (the current or last run, so a dashboard restart picks a running job back up).
+Everything lives under <state_dir>/train/: data/ (your uploaded files), models/<name>/ (one folder per model, copied
+back from the workers), job.json and logs/ (the current or last run, so a dashboard restart picks a job back up),
+workers/ (local workers), worker-token and speeds.json (each machine's measured speed).
 """
 import base64
 import binascii
-import collections
 import json
 import math
 import os
 import platform
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import threading
 import time
+
+import trainpool
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 JOBS_DIR = os.path.join(os.path.dirname(HERE), "jobs")
@@ -41,25 +43,8 @@ STEP_RE = re.compile(r"^Step (\d+)/(\d+) \| train loss ([-\d.eE+naif]+) \| ([\d.
                      r"total training step ([\d,]+) \| learning rate ([-\d.eE+]+)")
 VAL_RE = re.compile(r"^Validation at step (\d+): loss ([-\d.eE+naif]+) \| total training step ([\d,]+)")
 GRAD_RE = re.compile(r"^Gradient norm at step (\d+): ([\d.eE+-]+)")
+MODEL_FILES = ("model.pt", "optimizer.pt", "bpe.json", "model.json")
 CHARS_PER_TOKEN = 3.6        # typical for a learned BPE vocabulary on English; the trainer prints the real figure
-
-PROBE_CODE = r"""
-import json, os
-out = {"torch": None}
-try:
-    import numpy, torch
-    out["torch"] = torch.__version__
-    out["threads"] = torch.get_num_threads()
-    out["cuda"] = bool(torch.cuda.is_available())
-    if out["cuda"]:
-        p = torch.cuda.get_device_properties(0)
-        out["gpu"] = {"name": p.name, "vram": int(p.total_memory), "count": torch.cuda.device_count()}
-    out["mps"] = bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
-except Exception as e:
-    out["error"] = "%s: %s" % (type(e).__name__, e)
-print(json.dumps(out))
-"""
-
 
 class TrainError(Exception):
     def __init__(self, message, code=400):
@@ -135,13 +120,16 @@ def recommend(hw, data_chars=None, hours=1.0):
     gpu = hw.get("gpu")
     why = []
 
-    if device == "cuda":
+    if hw.get("budget") and len(hw.get("machines") or []) > 1:
+        budget = int(hw["budget"])
+        budget_text = "the smallest share among the machines training together"
+    elif device == "cuda":
         budget = int(0.7 * (gpu or {}).get("vram", 0))
         budget_text = "70%% of the GPU's %s of memory" % _gb((gpu or {}).get("vram", 0))
     else:
         budget = int(max(256 * 1024 ** 2, min(0.5 * ram_free, ram_free - 1024 ** 3)))
         budget_text = "half the free RAM (%s free), keeping 1 GB for everything else" % _gb(ram_free)
-    speed = estimate_speed(device, cores, hw.get("arch", ""), gpu)
+    speed = hw.get("speed") or estimate_speed(device, cores, hw.get("arch", ""), gpu)
     seconds = max(60.0, float(hours) * 3600)
     compute = speed * seconds
 
@@ -307,71 +295,138 @@ def node_speed(node):
 # -- the manager ---------------------------------------------------------------------------------------------
 
 class Trainer:
-    def __init__(self, state_dir, demo=False, store=None):
+    def __init__(self, state_dir, demo=False, store=None, kubeconfig=None):
         self.root = os.path.join(state_dir, "train")
         self.data_dir = os.path.join(self.root, "data")
         self.models_dir = os.path.join(self.root, "models")
         self.logs_dir = os.path.join(self.root, "logs")
-        self.venv = os.path.join(self.root, "venv")
         for d in (self.data_dir, self.models_dir, self.logs_dir):
             os.makedirs(d, exist_ok=True)
         self.demo = demo
         self.store = store
         self.lock = threading.Lock()
-        self.proc = None
-        self.job = self._load_job()
+        self.pool = trainpool.Pool(self.root, demo=demo, store=store, kubeconfig=kubeconfig)
+        self.thread = None
         self.parsed = {"path": None, "offset": 0, "train": [], "val": [], "grad": [], "lines": [], "last": {}}
         self.parse_lock = threading.Lock()
-        self.probe_cache = (0.0, None)
         self.check_cache = {}
-        self.setup_state = {"running": False, "log": [], "ok": None}
         self.uploads = {}
+        self.speeds = self._load_json("speeds.json")
+        self.job = self._load_job()
+        if self.job.get("model") and not self.job.get("ended"):
+            if self.job.get("machines"):   # the dashboard restarted mid-job: pick it back up
+                self.thread = threading.Thread(target=self._orchestrate, args=(True,), daemon=True)
+                self.thread.start()
+            else:                           # a job from before training moved onto workers
+                self.job.update(ended=time.time(), code=None)
 
-    # -- python with torch
-    def python(self):
-        env = os.environ.get("NODEYARD_TRAIN_PYTHON")
-        if env:
-            return env
-        venv_py = os.path.join(self.venv, "bin", "python3")
-        return venv_py if os.path.exists(venv_py) else sys.executable
-
-    def probe(self, force=False):
-        at, cached = self.probe_cache
-        if cached and not force and time.time() - at < 300:
-            return cached
+    def _load_json(self, name):
         try:
-            r = subprocess.run([self.python(), "-c", PROBE_CODE], capture_output=True, text=True, timeout=90)
-            out = json.loads((r.stdout.strip().splitlines() or ["{}"])[-1])
-        except (OSError, ValueError, subprocess.SubprocessError) as e:
-            out = {"torch": None, "error": str(e)}
-        out["python"] = self.python()
-        self.probe_cache = (time.time(), out)
-        return out
+            with open(os.path.join(self.root, name), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
 
-    def hardware(self):
-        p = self.probe()
-        total, free = read_memory()
-        device = "cuda" if p.get("cuda") else "mps" if p.get("mps") else "cpu"
-        return {"cores": os.cpu_count() or 1, "arch": platform.machine(), "os": platform.system(), "host": platform.node(),
-                "ram_total": total, "ram_free": free, "gpu": p.get("gpu"), "mps": bool(p.get("mps")), "device": device,
-                "torch": p.get("torch"), "torch_error": p.get("error"), "python": p.get("python")}
-
-    def cluster(self):
-        """The cluster's machines ranked by estimated training speed, so the page can say which is best."""
-        if self.store is None:
-            return []
-        try:
-            nodes = ((self.store.snapshot() or {}).get("state") or {}).get("nodes") or []
-        except Exception:
-            return []
+    # -- machines
+    def machines(self):
+        """Every machine that could train, fastest first, with why any can't, and its worker's state."""
         out = []
-        for n in nodes:
-            device, speed, gpu = node_speed(n)
-            out.append({"name": n.get("name"), "ready": bool(n.get("ready")), "arch": n.get("arch", ""), "cores": n.get("cpu_cores"),
-                        "ram": n.get("mem_total"), "device": device, "gpu": gpu, "speed": speed})
-        out.sort(key=lambda x: (not x["ready"], -x["speed"]))
+        if self.pool.mode == "cluster":
+            for n in self.pool.cluster_nodes():
+                device, speed, gpu = node_speed(n)
+                vram = next((g.get("vram") for g in (((n.get("hw") or {}).get("hardware") or {}).get("gpus") or []) if g.get("vram")), None)
+                total, used = n.get("mem_total") or 0, n.get("mem_used") or 0
+                free_disk = (n.get("disk_total") or 0) - (n.get("disk_used") or 0)
+                need_disk = 4e9 if device == "cuda" else 1.5e9
+                reason = ""
+                if not n.get("ready"):
+                    reason = "not ready: Kubernetes hasn't heard from it"
+                elif n.get("arch") in ("arm", "386"):
+                    reason = "a 32-bit CPU: PyTorch has no build for it"
+                elif n.get("disk_total") and free_disk < need_disk:
+                    reason = "only %s of disk free; PyTorch needs about %s" % (_gb(free_disk), _gb(need_disk))
+                elif total and total < 1.5 * 1024 ** 3:
+                    reason = "under 1.5 GB of memory"
+                out.append({"name": n.get("name"), "kind": "node", "device": device, "gpu": {"name": gpu, "vram": vram or 4e9} if gpu else None,
+                            "cores": n.get("cpu_cores") or 1, "arch": n.get("arch", ""), "ram_total": total, "ram_free": max(0, total - used),
+                            "speed": speed, "usable": not reason, "reason": reason, "_node": n})
+        else:
+            total, free = read_memory()
+            names = self.pool.local_names()
+            for name in names:   # several local workers (a test setup) share this machine's cores and memory
+                cores = max(1, (os.cpu_count() or 1) // len(names))
+                out.append({"name": name, "kind": "local", "device": "cpu", "gpu": None, "cores": cores, "arch": platform.machine(),
+                            "ram_total": total, "ram_free": free // len(names), "speed": estimate_speed("cpu", cores, platform.machine()),
+                            "usable": True, "reason": "", "_node": None})
+        for m in out:
+            e = self.pool.entry(m["name"])
+            st = e.get("status") or {}
+            probe = st.get("probe") or {}
+            if e["state"] == "ready":   # the worker knows what PyTorch can really use there
+                m["device"] = st.get("device") or m["device"]
+                if probe.get("cuda") and probe.get("gpu"):
+                    m["gpu"] = {"name": probe["gpu"]["name"], "vram": probe["gpu"]["vram"]}
+                elif m["device"] != "cuda":
+                    m["gpu"] = None
+                if m["kind"] == "local" or st.get("ram_free"):
+                    m["ram_free"] = st.get("ram_free") or m["ram_free"]
+                m["speed"] = estimate_speed(m["device"], m["cores"], m["arch"], m["gpu"])
+            if e["state"] == "failed" and m["usable"]:
+                m["usable"], m["reason"] = False, e["detail"]
+            measured = self.speeds.get(m["name"])
+            if measured and measured.get("device") == m["device"]:
+                m["speed"], m["measured"] = measured["flops"], True
+            m["worker"] = {"state": e["state"], "detail": e["detail"], "log": e.get("deplog") or [],
+                           "torch": probe.get("torch"), "cuda_error": probe.get("cuda_error")}
+        out.sort(key=lambda m: (not m["usable"], -m["speed"]))
         return out
 
+    @staticmethod
+    def budget_for(m):
+        """Memory this machine can give training (bytes)."""
+        if m["device"] == "cuda" and m.get("gpu"):
+            return int(0.7 * m["gpu"]["vram"])
+        free = m.get("ram_free") or 2 * 1024 ** 3
+        return int(max(256 * 1024 ** 2, min(0.5 * free, free - 1024 ** 3)))
+
+    def plan(self, machines, chosen=None):
+        """The fastest usable machine leads; others join while they're at least a quarter as fast (at most 4)."""
+        usable = [m for m in machines if m["usable"] and (not chosen or m["name"] in chosen)]
+        notes = []
+        if not usable:
+            why = "; ".join("%s: %s" % (m["name"], m["reason"]) for m in machines if not m["usable"]) or "no machines found"
+            return {"lead": None, "share": [], "notes": ["Nothing can train right now (%s)." % why], "speed": 0, "budget": 0}
+        lead = usable[0]
+        share = [lead]
+        for m in usable[1:]:
+            ratio = m["speed"] / max(1.0, lead["speed"])
+            if len(share) >= 4:
+                notes.append("%s left out: at most 4 machines share one model." % m["name"])
+            elif ratio < 0.25 and not chosen:
+                notes.append("%s left out: about %s× slower than %s, so it would add under %d%% and slow every round's weight swap."
+                             % (m["name"], _n(1 / max(ratio, 1e-9)), lead["name"], max(1, int(ratio * 100))))
+            else:
+                share.append(m)
+        speed = lead["speed"] + 0.8 * sum(m["speed"] for m in share[1:])
+        if len(share) > 1:
+            notes.append("Shared: each machine trains its own copy for about 2 minutes, then the copies' weights are averaged "
+                         "(weighted by how much text each read) and every machine carries on from the average. "
+                         "Speed ≈ fastest + 80% of the others (the swaps cost the rest).")
+        return {"lead": lead["name"], "share": [m["name"] for m in share], "notes": notes, "speed": speed,
+                "budget": min(self.budget_for(m) for m in share)}
+
+    def plan_hardware(self, machines, plan):
+        """What the recommender sizes the model for: the lead's hardware, the plan's combined speed, the smallest memory."""
+        by = {m["name"]: m for m in machines}
+        lead = by.get(plan["lead"])
+        if not lead:
+            return {"device": "cpu", "cores": 1, "arch": "", "ram_free": 2 * 1024 ** 3, "gpu": None, "speed": estimate_speed("cpu", 1), "budget": 256 * 1024 ** 2}
+        return {"device": lead["device"], "cores": lead["cores"], "arch": lead["arch"], "ram_free": lead["ram_free"], "gpu": lead["gpu"],
+                "speed": plan["speed"], "budget": plan["budget"], "machines": plan["share"]}
+
+    @staticmethod
+    def public(m):
+        return {k: v for k, v in m.items() if not k.startswith("_")}
     # -- data
     def _data_path(self, name):
         if not isinstance(name, str) or not NAME_RE.match(name) or not name.lower().endswith(DATA_EXT) or ".." in name:
@@ -525,11 +580,7 @@ class Trainer:
 
     # -- the training job
     def _load_job(self):
-        try:
-            with open(os.path.join(self.root, "job.json"), "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (OSError, ValueError):
-            return {}
+        return self._load_json("job.json")
 
     def _save_job(self):
         tmp = os.path.join(self.root, "job.json.tmp")
@@ -538,37 +589,18 @@ class Trainer:
         os.replace(tmp, os.path.join(self.root, "job.json"))
 
     def running(self):
-        if self.proc is not None:
-            return self.proc.poll() is None
-        pid = self.job.get("pid")
-        if not pid or self.job.get("ended"):
-            return False
-        try:
-            os.kill(pid, 0)
-        except (OSError, ProcessLookupError):
-            return False
-        # Only trust a pid if it is still our trainer (pids are reused).
-        try:
-            with open("/proc/%d/cmdline" % pid, "rb") as f:
-                return b"train_bpe_gpt_torch.py" in f.read()
-        except OSError:
-            return sys.platform == "darwin"
+        return self.thread is not None and self.thread.is_alive()
 
     def start(self, body):
         with self.lock:
             if self.running():
                 raise TrainError("A model is already training. Stop it first.", 409)
-            if not self.probe().get("torch"):
-                raise TrainError("PyTorch isn't installed for the trainer yet: press “Set up the trainer” first.", 409)
             files = body.get("data") or []
             if not isinstance(files, list) or not files:
                 raise TrainError("Choose at least one training file.")
-            paths = []
             for name in files:
-                p = self._data_path(name)
-                if not os.path.isfile(p):
+                if not os.path.isfile(self._data_path(name)):
                     raise TrainError("%s isn't there any more." % name, 404)
-                paths.append(p)
             resume = bool(body.get("resume"))
             name = body.get("model") or time.strftime("model-%Y%m%d-%H%M%S")
             mdir = self._model_dir(name)
@@ -576,6 +608,13 @@ class Trainer:
                 raise TrainError("There's no saved model called %s to continue." % name, 404)
             if not resume and os.path.exists(os.path.join(mdir, "model.json")):
                 raise TrainError("A model called %s already exists: pick another name, or continue it." % name, 409)
+            base_steps = 0
+            if resume:
+                try:
+                    with open(os.path.join(mdir, "model.json"), "r", encoding="utf-8") as f:
+                        base_steps = int(json.load(f).get("trained_steps") or 0)
+                except (OSError, ValueError):
+                    pass
             s = body.get("settings") or {}
 
             def num(key, lo, hi, cast=int, default=None):
@@ -591,41 +630,35 @@ class Trainer:
             dim, heads = num("dim", 8, 4096), num("heads", 1, 64)
             if dim % heads:
                 raise TrainError("The width (%d) must divide evenly by the number of heads (%d)." % (dim, heads))
-            args = [self.python(), "-u", TRAINER, "train", "--app-data", mdir,
-                    "--steps", str(num("steps", 1, 10_000_000)), "--batch-size", str(num("batch_size", 1, 4096)),
-                    "--context", str(num("context", 8, 8192)), "--dim", str(dim), "--heads", str(heads),
-                    "--layers", str(num("layers", 1, 128)), "--vocab-size", str(num("vocab_size", 256, 100_000)),
-                    "--learning-rate", repr(num("learning_rate", 1e-7, 1.0, float)),
-                    "--weight-decay", repr(num("weight_decay", 0.0, 1.0, float, 0.1)),
-                    "--warmup", str(num("warmup", 0, 1_000_000, int, 100)), "--eval-every", str(num("eval_every", 1, 1_000_000, int, 250)),
-                    "--save-every", str(num("save_every", 0, 1_000_000, int, 500)), "--device", s.get("device") if s.get("device") in ("auto", "cpu", "cuda", "mps") else "auto"]
-            for p in paths:
-                args += ["--data-file", p]
+            steps, warmup = num("steps", 1, 10_000_000), num("warmup", 0, 1_000_000, int, 100)
+            # Options every machine gets; steps, warm-up, checks and saves are added per run.
+            options = ["--batch-size", str(num("batch_size", 1, 4096)), "--context", str(num("context", 8, 8192)),
+                       "--dim", str(dim), "--heads", str(heads), "--layers", str(num("layers", 1, 128)),
+                       "--vocab-size", str(num("vocab_size", 256, 100_000)),
+                       "--learning-rate", repr(num("learning_rate", 1e-7, 1.0, float)),
+                       "--weight-decay", repr(num("weight_decay", 0.0, 1.0, float, 0.1)),
+                       "--device", s.get("device") if s.get("device") in ("auto", "cpu", "cuda", "mps") else "auto"]
             if s.get("assistant_only"):
-                args.append("--assistant-only")
-            if resume:
-                args.append("--resume")
-            os.makedirs(mdir, exist_ok=True)
+                options.append("--assistant-only")
+            eval_every, save_every = num("eval_every", 1, 1_000_000, int, 250), num("save_every", 0, 1_000_000, int, 500)
+            chosen = body.get("machines") if isinstance(body.get("machines"), list) and body.get("machines") else None
+            machines = self.machines()
+            plan = self.plan(machines, chosen)
+            if not plan["lead"]:
+                raise TrainError(plan["notes"][0], 409)
+            share = plan["share"] if body.get("share", True) else plan["share"][:1]
             log_path = os.path.join(self.logs_dir, "%s-%d.log" % (name, int(time.time())))
-            log = open(log_path, "ab")
-            try:
-                self.proc = subprocess.Popen(args, cwd=JOBS_DIR, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                             start_new_session=True)
-            finally:
-                log.close()
-            self.job = {"pid": self.proc.pid, "model": name, "log": log_path, "started": time.time(), "resume": resume,
-                        "data": files, "settings": s, "ended": None, "code": None}
+            open(log_path, "a").close()
+            self.job = {"model": name, "log": log_path, "started": time.time(), "resume": resume, "data": files, "settings": s,
+                        "ended": None, "code": None, "machines": share, "lead": share[0], "mode": "shared" if len(share) > 1 else "single",
+                        "options": options, "steps": steps, "base_steps": base_steps, "warmup": warmup, "eval_every": eval_every, "save_every": save_every,
+                        "speeds": {m["name"]: m["speed"] for m in machines if m["name"] in share},
+                        "round": 0, "rounds": 0, "phase": "starting", "stop": False, "wjob": None}
             self._save_job()
-            threading.Thread(target=self._wait, args=(self.proc,), daemon=True).start()
+            self.thread = threading.Thread(target=self._orchestrate, daemon=True)
+            self.thread.start()
             self._prune_logs()
-            return {"model": name}
-
-    def _wait(self, proc):
-        code = proc.wait()
-        with self.lock:
-            if self.job.get("pid") == proc.pid:
-                self.job["ended"], self.job["code"] = time.time(), code
-                self._save_job()
+            return {"model": name, "machines": share}
 
     def _prune_logs(self):
         logs = sorted((os.path.join(self.logs_dir, x) for x in os.listdir(self.logs_dir)), key=os.path.getmtime)
@@ -635,10 +668,8 @@ class Trainer:
     def stop(self, body=None):
         if not self.running():
             raise TrainError("Nothing is training.", 409)
-        try:
-            os.kill(self.job["pid"], signal.SIGINT)   # the trainer finishes its step, saves, and exits
-        except OSError as e:
-            raise TrainError("Couldn't stop it: %s" % e, 500)
+        self.job["stop"] = True   # the job's loop asks each machine to finish its step and save
+        self._save_job()
         return {"stopping": True}
 
     def status(self, since=0):
@@ -647,10 +678,8 @@ class Trainer:
             return self._status(since)
 
     def _status(self, since):
-        job = dict(self.job)
+        job = {k: v for k, v in self.job.items() if k not in ("options", "speeds")}
         running = self.running()
-        if not running and job.get("pid") and not job.get("ended"):
-            job["ended"] = time.time()
         p = self.parsed
         path = job.get("log")
         if path != p["path"]:
@@ -686,21 +715,353 @@ class Trainer:
         return {"job": job, "running": running, "lines": p["lines"][start:], "next": dropped + len(p["lines"]),
                 "train": _thin(p["train"], 1500), "val": p["val"], "grad": p["grad"][-200:], "last": p["last"]}
 
-    # -- using a model
-    def _run(self, args, timeout=180):
+    # -- running a job on the workers
+    def _orchestrate(self, reattach=False):
+        job = self.job
+        log = open(job["log"], "a", encoding="utf-8", buffering=1)
+
+        def say(line):
+            log.write(line.rstrip("\n") + "\n")
+
+        code = 1
+        self.pool.busy.update(job["machines"])
         try:
-            r = subprocess.run([self.python(), "-u", TRAINER] + args, cwd=JOBS_DIR, capture_output=True, text=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            raise TrainError("The model took too long to answer.", 504)
-        except OSError as e:
-            raise TrainError("Couldn't run the trainer: %s" % e, 500)
-        if r.returncode != 0:
-            err = [l for l in (r.stdout + r.stderr).splitlines() if l.strip()]
+            if job["mode"] == "single":
+                code = self._run_single(job, say, reattach)
+            else:
+                code = self._run_shared(job, say, reattach)
+        except (trainpool.PoolError, TrainError) as e:
+            say("ERROR: %s" % e)
+        except Exception as e:   # noqa: BLE001 - written to the job's log
+            say("ERROR: %s: %s" % (type(e).__name__, e))
+        finally:
+            self.pool.busy.difference_update(job["machines"])
+            with self.lock:
+                job.update(ended=time.time(), code=code, phase="done")
+                if self.job is job:
+                    self._save_job()
+            log.close()
+
+    def _machine_node(self, name):
+        for m in self.machines():
+            if m["name"] == name:
+                return m.get("_node")
+        return None
+
+    def _remote(self, name, say, wait=3600):
+        say("Getting %s ready (it installs PyTorch the first time; this can take a few minutes)..." % name)
+        return self.pool.ready(name, self._machine_node(name), wait=wait, say=lambda l: say("[%s] %s" % (name, l)))
+
+    def _sync_data(self, r, files, say):
+        have = r.ls("data")
+        for name in files:
+            local = os.path.join(self.data_dir, name)
+            v = trainpool.file_version(local)
+            if have.get(name, {}).get("version") != v:
+                say("Sending %s (%s) to %s..." % (name, _mb(os.path.getsize(local)), r.name))
+                r.put_file("data/" + name, local, v)
+
+    def _push_model(self, r, model, files=MODEL_FILES):
+        mdir = self._model_dir(model)
+        have = r.ls("models/" + model)
+        for f in files:
+            local = os.path.join(mdir, f)
+            if os.path.isfile(local):
+                v = trainpool.file_version(local)
+                if have.get(f, {}).get("version") != v:
+                    r.put_file("models/%s/%s" % (model, f), local, v)
+
+    def _pull_model(self, r, model):
+        mdir = self._model_dir(model)
+        os.makedirs(mdir, exist_ok=True)
+        have = r.ls("models/" + model)
+        if "model.json" not in have:
+            return False
+        for f in MODEL_FILES:   # model.json last, so the model list never shows a half-copied model
+            if f in have and f != "model.json":
+                r.get_file("models/%s/%s" % (model, f), os.path.join(mdir, f), have[f]["version"])
+        r.get_file("models/%s/model.json" % model, os.path.join(mdir, "model.json"), have["model.json"]["version"])
+        return True
+
+    def _tail(self, r, wj, say, prefix="", on_line=None):
+        """Copy a worker's job log into this job's log until it ends; returns its exit code. Rides out short network drops."""
+        misses = 0
+        last_save = time.time()
+        while True:
+            if self.job.get("stop") and not wj.get("stopped"):
+                try:
+                    r.call("POST", "/stop", {})
+                    wj["stopped"] = True
+                except trainpool.PoolError:
+                    pass
+            try:
+                out = r.call("GET", "/log?id=%s&offset=%d" % (wj["id"], wj["offset"]), timeout=30)
+                misses = 0
+            except trainpool.PoolError as e:
+                misses += 1
+                if misses > 20:
+                    raise trainpool.PoolError("Lost touch with %s for a minute: %s" % (r.name, e))
+                time.sleep(3)
+                continue
+            if out.get("gone"):
+                raise trainpool.PoolError("%s lost the training run (its worker restarted)." % r.name)
+            for line in out["text"].splitlines():
+                say(prefix + line)
+                if on_line:
+                    on_line(line)
+            wj["offset"] = out["next"]
+            if time.time() - last_save > 10:
+                with self.lock:
+                    self._save_job()
+                last_save = time.time()
+            if not out["running"] and not out["text"]:
+                return out.get("code") if out.get("code") is not None else 1
+            time.sleep(0.2 if out["text"] else 1.5)
+
+    def _measure(self, name):
+        """Reads a run's log lines for its speed; remembers it so the next plan uses the measured speed."""
+        seen = {"params": None, "sps": None, "tps": None, "device": None}
+
+        def on_line(line):
+            m = STEP_RE.match(line)
+            if m:
+                seen["sps"], seen["tps"] = float(m.group(4)), int(m.group(5).replace(",", ""))
+            elif line.startswith("Model initialized: "):
+                seen["params"] = int(re.sub(r"[^\d]", "", line.split(" trainable")[0]))
+            elif line.startswith("Device: "):
+                seen["device"] = line.split()[1]
+        return seen, on_line
+
+    def _remember_speed(self, name, seen):
+        if seen["params"] and seen["params"] >= 1_000_000 and seen["tps"] and seen["device"]:   # tiny models measure overhead, not speed
+            dev = "cuda" if seen["device"].startswith("cuda") else seen["device"]
+            self.speeds[name] = {"flops": 6.0 * seen["params"] * seen["tps"], "device": dev, "at": time.time()}
+            try:
+                with open(os.path.join(self.root, "speeds.json"), "w", encoding="utf-8") as f:
+                    json.dump(self.speeds, f)
+            except OSError:
+                pass
+
+    def _run_single(self, job, say, reattach):
+        model = job["model"]
+        name = job["lead"]
+        r = self._remote(name, say)
+        seen, measure = self._measure(name)
+        if not (reattach and job.get("wjob")):
+            job["phase"] = "sending data"
+            self._sync_data(r, job["data"], say)
+            if job["resume"]:
+                self._push_model(r, model)
+            else:
+                self._delete_remote(r, model)
+            if job["stop"]:
+                return 0
+            opts = job["options"] + ["--steps", str(job["steps"]), "--warmup", str(job["warmup"]),
+                                     "--eval-every", str(job["eval_every"]), "--save-every", str(job["save_every"])]
+            if job["resume"]:
+                opts.append("--resume")
+            say("Training on %s." % name)
+            wj = r.call("POST", "/train", {"model": model, "data": job["data"], "options": opts})
+            job.update(wjob={"name": name, "id": wj["id"], "offset": 0}, phase="training")
+            with self.lock:
+                self._save_job()
+        else:
+            say("The dashboard restarted: following the run on %s again." % name)
+
+        def on_line(line):
+            measure(line)
+            if line.startswith("Checkpoint saved"):
+                try:
+                    self._pull_model(r, model)
+                except trainpool.PoolError as e:
+                    say("(Couldn't copy the checkpoint here yet: %s)" % e)
+
+        code = self._tail(r, job["wjob"], say, on_line=on_line)
+        job["phase"] = "saving"
+        if self._pull_model(r, model):
+            say("Model copied back to the dashboard.")
+        self._remember_speed(name, seen)
+        return code
+
+    def _delete_remote(self, r, model):
+        try:
+            r.call("POST", "/delete", {"path": "models/" + model})
+        except trainpool.PoolError:
+            pass
+
+    def _run_shared(self, job, say, reattach):
+        model = job["model"]
+        if reattach:
+            say("The dashboard restarted during shared training. The last averaged model is kept; stopping the machines.")
+            for name in job["machines"]:
+                e = self.pool.entry(name)
+                try:
+                    (e["remote"] or self.pool.ready(name, self._machine_node(name), wait=120)).call("POST", "/stop", {})
+                except trainpool.PoolError:
+                    pass
+            return 0
+        names = list(job["machines"])
+        remotes = {}
+        errors = {}
+
+        def up(name):
+            try:
+                remotes[name] = self._remote(name, say)
+                self._sync_data(remotes[name], job["data"], say)
+            except trainpool.PoolError as e:
+                errors[name] = str(e)
+
+        threads = [threading.Thread(target=up, args=(n,)) for n in names]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        for name, err in errors.items():
+            say("%s is left out: %s" % (name, err))
+        active = [n for n in names if n in remotes]
+        if not active:
+            raise trainpool.PoolError("None of the machines could start.")
+        if len(active) == 1:
+            say("Only %s is ready, so it trains alone." % active[0])
+            job.update(mode="single", lead=active[0], machines=active)
+            return self._run_single(job, say, False)
+        job["lead"] = lead_name = active[0]
+        lead = remotes[lead_name]
+        for n in active[1:]:
+            self._delete_remote(remotes[n], model)
+        speeds = job["speeds"]
+        sps = {}
+        done = 0
+
+        # Round 0: one machine warms the model up (and learns the tokenizer), so every copy starts from the same weights.
+        if job["resume"]:
+            self._push_model(lead, model)
+            say("Continuing %s: every machine starts from the saved weights." % model)
+        else:
+            self._delete_remote(lead, model)
+            w0 = max(10, min(job["warmup"] or 10, job["steps"] // 3))
+            job["phase"] = "warm-up"
+            say("Round 0: %s warms the model up alone for %d steps (the learning rate ramps from 0) and learns the tokenizer." % (lead_name, w0))
+            seen, measure = self._measure(lead_name)
+            opts = job["options"] + ["--steps", str(w0), "--warmup", str(w0), "--eval-every", str(w0), "--save-every", "0"]
+            wj = lead.call("POST", "/train", {"model": model, "data": job["data"], "options": opts})
+            if self._tail(lead, {"id": wj["id"], "offset": 0}, say, on_line=measure) != 0:
+                raise trainpool.PoolError("The warm-up on %s failed (see above)." % lead_name)
+            self._remember_speed(lead_name, seen)
+            sps[lead_name] = seen["sps"]
+            self._pull_model(lead, model)
+            done = w0
+        if job["stop"]:
+            return 0
+        sps.setdefault(lead_name, None)
+        if not sps[lead_name]:
+            sps[lead_name] = max(0.05, speeds.get(lead_name, 1e10) / max(1.0, 6.0 * count_parameters(
+                int(_opt(job["options"], "--vocab-size")), int(_opt(job["options"], "--context")), int(_opt(job["options"], "--dim")),
+                int(_opt(job["options"], "--layers"))) * int(_opt(job["options"], "--batch-size")) * int(_opt(job["options"], "--context"))))
+        for n in active[1:]:
+            sps[n] = sps[lead_name] * speeds.get(n, 1.0) / max(1.0, speeds.get(lead_name, 1.0))
+        round_seconds = max(2.0, float(os.environ.get("NODEYARD_TRAIN_ROUND_SECONDS") or 120))
+        per_round = max(10, int(sps[lead_name] * round_seconds))
+        remaining = max(0, job["steps"] - done)
+        rounds = max(1, math.ceil(remaining / per_round))
+        job["rounds"] = rounds
+        for n in active[1:]:
+            for f in ("model.pt", "bpe.json", "model.json"):
+                remotes[n].call("POST", "/pull", {"url": lead.url, "path": "models/%s/%s" % (model, f), "dest": "models/%s/%s" % (model, f)}, timeout=600)
+        tokens_per_step = int(_opt(job["options"], "--batch-size")) * int(_opt(job["options"], "--context"))
+        lead_done = 0
+        for rnd in range(1, rounds + 1):
+            if job["stop"] or len(active) == 0:
+                break
+            k = min(per_round, remaining - lead_done)
+            if k <= 0:
+                break
+            plan = {n: max(5, int(round(k * sps[n] / sps[lead_name]))) for n in active}
+            job.update(round=rnd, phase="training")
+            with self.lock:
+                self._save_job()
+            say("Round %d of %d: %s." % (rnd, rounds, ", ".join("%s trains %d steps" % (n, plan[n]) for n in active)))
+            results = {}
+
+            def run(n, i):
+                seen, measure = self._measure(n)
+                try:
+                    opts = job["options"] + ["--resume", "--steps", str(plan[n]), "--lr-progress", "%.6f" % ((rnd - 1) / rounds), "%.6f" % (rnd / rounds),
+                                             "--seed", str(17 + 1000 * i + rnd), "--eval-every", str(plan[n]), "--save-every", "0"]
+                    wj = remotes[n].call("POST", "/train", {"model": model, "data": job["data"], "options": opts})
+                    code = self._tail(remotes[n], {"id": wj["id"], "offset": 0}, say, prefix="" if n == lead_name else "[%s] " % n, on_line=measure)
+                    results[n] = (code, seen)
+                except trainpool.PoolError as e:
+                    say("[%s] %s" % (n, e))
+                    results[n] = (1, seen)
+
+            threads = [threading.Thread(target=run, args=(n, i)) for i, n in enumerate(active)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            if results.get(lead_name, (1,))[0] != 0:
+                raise trainpool.PoolError("%s (the lead machine) failed in round %d; the last averaged model is kept." % (lead_name, rnd))
+            for n in list(active):
+                code, seen = results[n]
+                if code != 0:
+                    say("%s failed this round and is left out from now on." % n)
+                    active.remove(n)
+                    continue
+                if seen["sps"]:
+                    sps[n] = seen["sps"]
+                self._remember_speed(n, seen)
+            # Average: the lead fetches each copy straight from its machine, averages, and the others fetch the result.
+            job["phase"] = "averaging"
+            parts = [["model.pt", plan[lead_name] * tokens_per_step]]
+            for n in active[1:]:
+                peer = "peer-%s.pt" % re.sub(r"[^A-Za-z0-9-]", "-", n)
+                lead.call("POST", "/pull", {"url": remotes[n].url, "path": "models/%s/model.pt" % model, "dest": "models/%s/%s" % (model, peer)}, timeout=600)
+                parts.append([peer, plan[n] * tokens_per_step])
+            if len(parts) > 1:
+                out = lead.call("POST", "/run", {"cmd": "average", "model": model, "parts": parts, "timeout": 600}, timeout=660)
+                for line in (out.get("out") or "").splitlines():
+                    say(line)
+                if out.get("code") != 0:
+                    raise trainpool.PoolError("Averaging failed: %s" % ((out.get("err") or out.get("out") or "").strip().splitlines() or ["?"])[-1])
+                for n in active[1:]:
+                    remotes[n].call("POST", "/pull", {"url": lead.url, "path": "models/%s/model.pt" % model, "dest": "models/%s/model.pt" % model}, timeout=600)
+            job["phase"] = "saving"
+            self._pull_model(lead, model)
+            lead_done += plan[lead_name]
+        say("Shared training finished after %d round(s) on %s." % (job["round"], ", ".join(active)))
+        return 0
+
+    # -- using a model
+    def _use_worker(self):
+        """A machine whose worker can run the model now: the fastest one already up, else the plan's lead (started)."""
+        machines = self.machines()
+        ready = [m for m in machines if m["usable"] and m["worker"]["state"] == "ready"]
+        pick = ready[0] if ready else next((m for m in machines if m["usable"]), None)
+        if not pick:
+            raise TrainError(self.plan(machines)["notes"][0], 503)
+        try:
+            return self.pool.ready(pick["name"], pick.get("_node"), wait=0)
+        except trainpool.PoolError as e:
+            raise TrainError(str(e), e.code)
+
+    def _run(self, body, timeout=200):
+        r = self._use_worker()
+        model = body.get("model")
+        try:
+            if model and not (self.running() and self.job.get("model") == model and r.name in self.job.get("machines", [])):
+                self._push_model(r, model, ("model.pt", "model.json", "bpe.json"))
+            out = r.call("POST", "/run", dict(body, timeout=timeout), timeout=timeout + 30)
+        except trainpool.PoolError as e:
+            raise TrainError(str(e), e.code)
+        if out.get("code") != 0:
+            err = [l for l in ((out.get("out") or "") + (out.get("err") or "")).splitlines() if l.strip()]
             raise TrainError((err[-1] if err else "The trainer failed.").replace("ERROR: ", ""), 500)
-        return r.stdout
+        return out.get("out") or ""
 
     def chat(self, body):
-        mdir = self._model_dir(body.get("model"))
+        model = body.get("model")
+        mdir = self._model_dir(model)
         if not os.path.isfile(os.path.join(mdir, "model.pt")):
             raise TrainError("That model hasn't been saved yet.", 404)
         prompt = str(body.get("prompt") or "")[:4000]
@@ -713,15 +1074,15 @@ class Trainer:
                     turns.append("%s: %s" % ("User" if turn["role"] == "user" else "Assistant", str(turn.get("content", ""))[:2000]))
             turns.append("User: " + prompt)
             prompt = "\n".join(turns) + "\nAssistant:"
-        args = ["generate", "--app-data", mdir, "--prompt", prompt,
-                "--max-tokens", str(max(8, min(512, int(body.get("max_tokens") or 160)))),
-                "--temperature", repr(max(0.05, min(2.0, float(body.get("temperature") or 0.7)))),
-                "--top-k", str(max(0, min(1000, int(body.get("top_k") or 40)))),
-                "--top-p", repr(max(0.05, min(1.0, float(body.get("top_p") or 0.9)))), "--device", "cpu",
-                "--seed", str(int(time.time()) % 100000)]
+        options = ["--prompt", prompt,
+                   "--max-tokens", str(max(8, min(512, int(body.get("max_tokens") or 160)))),
+                   "--temperature", repr(max(0.05, min(2.0, float(body.get("temperature") or 0.7)))),
+                   "--top-k", str(max(0, min(1000, int(body.get("top_k") or 40)))),
+                   "--top-p", repr(max(0.05, min(1.0, float(body.get("top_p") or 0.9)))),
+                   "--seed", str(int(time.time()) % 100000)]
         if not mode:
-            args.append("--chat-mode")
-        out = self._run(args)
+            options.append("--chat-mode")
+        out = self._run({"cmd": "generate", "model": model, "options": options})
         if not mode:
             m = re.search(r"CHAT_REPLY_BEGIN\n(.*?)\nCHAT_REPLY_END", out, re.S)
             reply = (m.group(1) if m else out).strip()
@@ -730,62 +1091,18 @@ class Trainer:
         return {"reply": reply, "prompt": prompt}
 
     def explain(self, body):
-        args = ["explain", "--prompt", str(body.get("prompt") or "Hello there")[:500],
-                "--max-tokens", str(max(2, min(16, int(body.get("tokens") or 10))))]
+        options = ["--prompt", str(body.get("prompt") or "Hello there")[:500],
+                   "--max-tokens", str(max(2, min(16, int(body.get("tokens") or 10))))]
+        req = {"cmd": "explain", "options": options}
         if body.get("model"):
             mdir = self._model_dir(body["model"])
             if os.path.isfile(os.path.join(mdir, "model.pt")):
-                args += ["--app-data", mdir]
-        out = self._run(args, timeout=120)
+                req["model"] = body["model"]
+        out = self._run(req, timeout=120)
         line = next((l for l in out.splitlines() if l.startswith("EXPLAIN_JSON ")), None)
         if not line:
             raise TrainError("The trainer didn't return the numbers.", 500)
         return {"explain": json.loads(line[len("EXPLAIN_JSON "):])}
-
-    # -- installing torch
-    def setup(self, body=None):
-        with self.lock:
-            if self.setup_state["running"]:
-                raise TrainError("Setup is already running.", 409)
-            self.setup_state = {"running": True, "log": [], "ok": None, "started": time.time()}
-        threading.Thread(target=self._setup, daemon=True).start()
-        return {}
-
-    def _setup(self):
-        st = self.setup_state
-
-        def say(line):
-            st["log"].append(line)
-            del st["log"][:-400]
-
-        def run(cmd):
-            say("$ " + " ".join(cmd))
-            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            for line in p.stdout:
-                say(line.rstrip())
-            return p.wait()
-
-        try:
-            py = os.path.join(self.venv, "bin", "python3")
-            if not os.path.exists(py):
-                if run([sys.executable, "-m", "venv", self.venv]) != 0:
-                    say("Couldn't make the virtual environment. On Debian or Ubuntu run: sudo apt install python3-venv")
-                    st["ok"] = False
-                    return
-            run([py, "-m", "pip", "install", "--upgrade", "pip"])
-            cmd = [py, "-m", "pip", "install", "numpy", "torch"]
-            if sys.platform.startswith("linux") and not shutil.which("nvidia-smi"):
-                cmd += ["--index-url", "https://download.pytorch.org/whl/cpu", "--extra-index-url", "https://pypi.org/simple"]
-                say("No NVIDIA GPU here: installing the smaller CPU-only PyTorch.")
-            code = run(cmd)
-            st["ok"] = code == 0
-            say("Done: PyTorch is ready." if code == 0 else "pip failed (exit %d): see above." % code)
-        except Exception as e:   # noqa: BLE001 - shown to the user
-            say("Setup failed: %s" % e)
-            st["ok"] = False
-        finally:
-            st["running"] = False
-            self.probe_cache = (0.0, None)
 
 
 def _f(x):
@@ -809,9 +1126,11 @@ def _thin(points, limit):
 def register(ctx, args):
     demo = bool(getattr(args, "demo", False))
     try:
-        t = Trainer(getattr(args, "state_dir", "") or "/var/lib/nodeyard/dashboard", demo=demo, store=getattr(ctx, "store", None))
+        t = Trainer(getattr(args, "state_dir", "") or "/var/lib/nodeyard/dashboard", demo=demo, store=getattr(ctx, "store", None),
+                    kubeconfig=getattr(args, "kubeconfig", None))
     except OSError as e:   # an unwritable state folder mustn't stop the dashboard
-        ctx.get_routes["/api/train"] = lambda h, q: h._json({"ok": False, "error": "Can't use the training folder: %s" % e}, 500)
+        msg = "Can't use the training folder: %s" % e
+        ctx.get_routes["/api/train"] = lambda h, q: h._json({"ok": False, "error": msg}, 500)
         return
     ctx.trainer = t
 
@@ -821,10 +1140,11 @@ def register(ctx, args):
                 return h._json(dict({"ok": True}, **(fn(arg) or {})))
             except TrainError as e:
                 return h._json({"ok": False, "error": str(e)}, e.code)
+            except trainpool.PoolError as e:
+                return h._json({"ok": False, "error": str(e)}, e.code)
         return handler
 
     def overview(q):
-        hw = t.hardware()
         hours = _clamp_float((q.get("hours") or ["1"])[0], 0.05, 24 * 30, 1.0)
         chars = None
         names = [n for n in (q.get("data") or [""])[0].split("|") if n]
@@ -836,16 +1156,29 @@ def register(ctx, args):
                 chat = chat or c["chat"]
             except TrainError:
                 pass
+        machines = t.machines()
+        chosen = [n for n in (q.get("machines") or [""])[0].split("|") if n] or None
+        plan = t.plan(machines, chosen)
+        if plan["lead"]:   # get the best machine ready (PyTorch installs itself) while the page is open
+            lead = next(m for m in machines if m["name"] == plan["lead"])
+            t.pool.ensure(lead["name"], lead.get("_node"))
+        hw = t.plan_hardware(machines, plan)
         rec = recommend(dict(hw, chat=chat), chars, hours)
-        cluster = t.cluster()
-        return {"hardware": hw, "recommend": rec, "cluster": cluster, "datasets": t.datasets(), "models": t.models(),
-                "setup": t.setup_state, "running": t.running(), "job": t.job, "hours": hours, "data_dir": t.data_dir}
+        return {"machines": [t.public(m) for m in machines], "plan": plan, "mode": t.pool.mode, "hardware": hw, "recommend": rec,
+                "datasets": t.datasets(), "models": t.models(), "running": t.running(), "job": t.job, "hours": hours, "data_dir": t.data_dir}
+
+    def warm(body):
+        names = body.get("machines") if isinstance(body.get("machines"), list) else []
+        by = {m["name"]: m for m in t.machines()}
+        for n in names[:8]:
+            if n in by and by[n]["usable"]:
+                t.pool.ensure(n, by[n].get("_node"))
+        return {}
 
     ctx.get_routes.update({
         "/api/train": wrap(overview),
         "/api/train/status": wrap(lambda q: t.status(int((q.get("since") or ["0"])[0] or 0))),
         "/api/train/check": wrap(lambda q: {"check": t.check((q.get("name") or [""])[0])}),
-        "/api/train/setup": wrap(lambda q: {"setup": t.setup_state}),
     })
     ctx.post_routes.update({
         "/api/train/upload": wrap(t.upload),
@@ -856,10 +1189,15 @@ def register(ctx, args):
         "/api/train/stop": wrap(t.stop),
         "/api/train/chat": wrap(t.chat),
         "/api/train/explain": wrap(t.explain),
-        "/api/train/setup": wrap(t.setup),
+        "/api/train/warm": wrap(warm),
     })
     ctx.post_limits["/api/train/upload"] = UPLOAD_BODY_MAX
     ctx.post_limits["/api/train/paste"] = PASTE_MAX * 2 + 4096
+
+
+def _opt(options, flag):
+    """The value after a flag in a trainer option list."""
+    return options[options.index(flag) + 1]
 
 
 def _clamp_float(x, lo, hi, default):
