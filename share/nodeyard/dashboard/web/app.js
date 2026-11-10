@@ -22,6 +22,7 @@
     { id: "hardware", label: "Hardware", icon: "hardware", sub: "What every machine is made of, and how fast it really is" },
     { id: "ai", label: "AI", icon: "ai", sub: "Models running on your cluster" },
     { id: "galaxy", label: "AI galaxy", icon: "galaxy", sub: "Your cluster and its AI, live" },
+    { id: "train", label: "Train AI", icon: "ai", sub: "Train your own language model from scratch, and learn exactly how it works" },
     { id: "events", label: "Events", icon: "events", sub: "What Kubernetes has been doing" },
     { id: "alerts", label: "Alerts", icon: "alerts", sub: "Things that need your attention" },
     { id: "doctor", label: "Doctor", icon: "doctor", sub: "Checks for common problems, with one-click fixes" },
