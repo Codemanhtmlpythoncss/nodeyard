@@ -9,6 +9,21 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Train AI teaches the maths first, simply.** *Learn* starts with **Maths you need**, 12 lessons written for a beginner (about age 14):
+  - letters as boxes for numbers (plus negatives, decimals and 1e-3);
+  - Σ;
+  - lists and the dot product;
+  - grids (matrices);
+  - squares and square roots (by guess-and-average);
+  - e and eˣ (worked as a series);
+  - logarithms as the undo button (and −ln p as surprise);
+  - averages and spread;
+  - turning scores into chances;
+  - slopes and the nudge test;
+  - the chain rule as gears;
+  - loaded dice.
+
+  Each has the idea in one sentence, a try-it widget that shows every step of the arithmetic, "where the AI uses this" and a check-yourself question. Every AI lesson now opens with an *In plain words* summary, and the lessons refer to each other by name.
 - **Train AI: every number in the network.** *Inside the model → Every number* runs your text through a model once and keeps every number it computes: embeddings, both layer norms, Q, K and V, every head's scores, softmax weights and outputs, the output projection, residuals, the feed-forward layer and GELU, the final norm, the logits and the probabilities, for every token and layer. A diagram lists every step. Clicking a step shows all its output numbers; clicking any number shows exactly how it was made in + − × ÷: every product of a matrix multiply with its running total, the layer norm's mean, variance and √ (worked by Newton's method), eˣ (halving, a series, then squaring back), erf (its series) and the masked future positions, each ending with PyTorch's own value. *All weights* opens any weight matrix in full, page by page. The dashboard reads model.pt itself, with no PyTorch (`ptread.py`, which never runs anything from the file). The page shows the hand-worked maths and PyTorch agreeing to about 10⁻⁷.
 - **Train AI's live charts update after every step.** The trainer reports every step (it used to report every 10), including the gradient norm, so the gradient chart fills from the first step instead of only at validation checks. Logs are relayed from the training machine twice a second, and the page asks for news every 0.7 s while training.
 - **Train AI: test the model on your own data until it gets every one right.** *Stop when → it's good enough* has a new prompt set, *From my training data*. It picks 20 or more real exchanges from the ticked files (what the person said, and the reply in the data), from the training text or from the held-out 5% the model never trains on. At every check the model answers each one with its most likely words (no randomness), and its reply is compared with the real one: the same words, or 80%+ of the same words. The pass rate defaults to all of them. The live table shows each reply beside the real one with its % of matching words. Fixed: an old saved "give up after" value could show as an empty box.
