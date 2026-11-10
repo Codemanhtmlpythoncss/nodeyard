@@ -13,7 +13,7 @@
     lines: [], pollT: 0, ovT: 0, chat: { model: "", history: [], mode: "chat", temperature: 0.7, top_k: 40, top_p: 0.9, busy: false },
     explain: null, exModel: "", exPrompt: "User: Hello, who are you?", exBusy: false, upload: null, ovPollT: 0,
     mp: { file: "", speakers: null, speaker: "", context: 3 },
-    edited: (() => { try { return JSON.parse(store.get("train.form", "") || "null"); } catch (_) { return null; } })(),
+    edited: null, preset: store.get("train.preset", "") || "",
     q: (() => { try { return JSON.parse(store.get("train.quality", "") || "null"); } catch (_) { return null; } })() || { on: false, preset: "starter", prompts: [], pass: 1, target_loss: "", give_up: 10 },
     machines: JSON.parse(store.get("train.machines", "[]") || "[]"), share: store.get("train.share", "1") !== "0",
   };
@@ -325,8 +325,16 @@
   function qPrompts() { if (!TR.q.prompts.length) TR.q.prompts = Q_PRESETS[TR.q.preset || "starter"].prompts.map(([p, e]) => ({ prompt: p, expect: e })); return TR.q.prompts; }
   function saveQ() { store.set("train.quality", JSON.stringify(TR.q)); }
   function recSettings(ov) { return Object.assign({ save_every: 500, device: "auto", assistant_only: false, dropout: 0 }, (ov || TR.ov).recommend.settings); }
-  function markEdited() { TR.edited = Object.assign({}, TR.form); store.set("train.form", JSON.stringify(TR.edited)); }
-  function resetSettings() { TR.edited = null; store.set("train.form", ""); TR.form = recSettings(); paint(); toast("Settings reset to the recommendation for this hardware."); }
+  function markEdited() { TR.edited = Object.assign({}, TR.form); }
+  function resetSettings() { TR.edited = null; TR.preset = ""; store.set("train.preset", ""); TR.form = recSettings(); paint(); toast("Settings reset to the recommendation for this hardware and data."); }
+  function loadPreset(name) {
+    const p = (TR.ov.presets || []).find((x) => x.name === name); if (!p) return resetSettings();
+    TR.preset = name; store.set("train.preset", name); TR.edited = Object.assign({}, p.settings); TR.form = Object.assign(recSettings(), p.settings); paint(); toast("Loaded “" + name + "”.");
+  }
+  function presetChanged() {
+    const p = TR.preset && (TR.ov.presets || []).find((x) => x.name === TR.preset); if (!p) return false;
+    return Object.keys(p.settings).some((k) => String(p.settings[k]) !== String(TR.form[k]));
+  }
   function curSet() { return TR.form || (TR.ov && TR.ov.recommend.settings) || { vocab_size: 2048, context: 128, dim: 192, layers: 4, heads: 6, batch_size: 32, steps: 2000, learning_rate: 0.001, warmup: 100, weight_decay: 0.1, eval_every: 100 }; }
 
   // ---------- loading ----------
@@ -337,7 +345,10 @@
       if (!r.ok) { toast(r.error || "Couldn't read the trainer."); return; }
       TR.ov = r;
       const names = new Set(r.datasets.map((d) => d.name)); TR.sel = TR.sel.filter((n) => names.has(n));
-      // Settings follow the recommendation for this hardware and data until you edit one; then your edits are kept.
+      // Settings follow the recommendation for this hardware and data until you edit one or load saved settings.
+      const saved = TR.preset && (r.presets || []).find((p) => p.name === TR.preset);
+      if (TR.preset && !saved) { TR.preset = ""; store.set("train.preset", ""); }
+      if (!TR.edited && saved) TR.edited = Object.assign({}, saved.settings);
       if (!TR.form || !TR.edited) TR.form = Object.assign(recSettings(r), TR.edited || {});
       if (!TR.chat.model && r.models.length) TR.chat.model = r.models[r.models.length - 1].name;
       if (!TR.exModel && r.models.length) TR.exModel = r.models[r.models.length - 1].name;
@@ -537,7 +548,15 @@ Assistant: game tonight?</pre></div>
         <div class="tr-why">${r.why.map((w) => html`<details><summary><b>${w.name}</b><span>${w.value}</span></summary><div class="tr-eq small">${w.formula}</div><div class="tr-calc small">${w.numbers}</div><p class="muted small">${w.explain}</p></details>`)}</div>
         <p class="small"><b>Expect:</b> ${r.expect.level}</p>
         ${TR.edited ? html`<button class="btn" data-tr-act="use-rec">Use these settings</button>` : html`<p class="faint small">These are in the settings below.</p>`}</section>
-      <section class="card tr-span2"><h2 class="tr-h">Settings <span class="right small">${TR.edited ? html`<span class="faint">your settings (saved)</span> <button class="btn small" data-tr-act="reset-settings">Reset to recommended</button>` : html`<span class="faint">set for this hardware and data; edit anything and it's kept</span>`}</span></h2>
+      <section class="card tr-span2"><h2 class="tr-h">Settings</h2>
+        <div class="row wrap tr-presets"><label class="tr-field inline"><span>Using</span><select class="select" data-tr-act="preset">
+          <option value="">Recommended for this hardware and data</option>${raw((ov.presets || []).map((p) => '<option value="' + esc(p.name) + '"' + (TR.preset === p.name ? " selected" : "") + ">" + esc(p.name) + "</option>").join(""))}</select></label>
+          ${TR.edited && !TR.preset ? html`<span class="warn-t small">edited, not saved</span>` : TR.preset && presetChanged() ? html`<span class="warn-t small">changed since saved</span>` : ""}
+          <span class="spacer"></span>
+          <button class="btn small primary" data-tr-act="save-settings">${TR.preset ? "Save" : "Save settings…"}</button>
+          ${TR.preset ? html`<button class="btn small" data-tr-act="save-as">Save as…</button><button class="btn small danger" data-tr-act="delete-preset">Delete</button>` : ""}
+          ${TR.edited ? html`<button class="btn small" data-tr-act="reset-settings">Reset to recommended</button>` : ""}</div>
+        <p class="faint small">${TR.edited ? "Recommended would be: " + n0(params(r.settings.vocab_size, r.settings.context, r.settings.dim, r.settings.layers)) + " weights (V " + n0(r.settings.vocab_size) + ", T " + r.settings.context + ", d " + r.settings.dim + ", L " + r.settings.layers + "), " + n0(r.settings.steps) + " steps." : "Worked out from this machine's hardware and the data you ticked (see “Recommended” above for every reason). Change anything; Save keeps it for next time."}</p>
         <div class="tr-form">
           ${field("vocab_size", "Vocabulary V", "tokens the BPE tokenizer learns (≥ 256)")}${field("context", "Context T", "tokens it sees at once")}${field("dim", "Width d", "numbers per token; must divide by heads")}
           ${field("layers", "Layers L", "transformer blocks")}${field("heads", "Heads h", "parallel attention lookups")}${field("batch_size", "Batch B", "windows averaged per update")}
@@ -769,6 +788,15 @@ Assistant: game tonight?</pre></div>
     }
     else if (a === "convert") { const r = await post("/api/train/convert", { name: TR.check.name }); if (r) { toast("Saved " + r.name + " (" + n0(r.records) + " records)"); await loadOverview(); checkData(r.name); } }
     else if (a === "use-rec" || a === "reset-settings") resetSettings();
+    else if (a === "save-settings" || a === "save-as") {
+      let name = a === "save-settings" && TR.preset ? TR.preset : prompt("Name these settings (e.g. “Shakespeare on the GPU”):", TR.preset ? TR.preset + " (copy)" : "");
+      if (!name || !(name = name.trim())) return;
+      const r = await post("/api/train/presets/save", { name, settings: TR.form, note: TR.sel.join(", ") });
+      if (r) { TR.ov.presets = r.presets; TR.preset = name; store.set("train.preset", name); TR.edited = Object.assign({}, TR.form); paint(); toast("Saved “" + name + "”."); }
+    }
+    else if (a === "delete-preset") {
+      if (confirm("Delete the saved settings “" + TR.preset + "”?")) { const r = await post("/api/train/presets/delete", { name: TR.preset }); if (r) { TR.ov.presets = r.presets; resetSettings(); } }
+    }
     else if (a === "start") {
       const body = { data: TR.sel, settings: TR.form, resume: TR.resume, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.share,
         quality: TR.q.on ? { on: true, prompts: qPrompts().filter((p) => p.prompt.trim()).map((p) => ({ prompt: p.prompt, expect: String(p.expect).split(",").map((x) => x.trim()).filter(Boolean) })), pass: TR.q.pass, target_loss: TR.q.target_loss, give_up: TR.q.give_up } : undefined };
@@ -832,6 +860,7 @@ Assistant: game tonight?</pre></div>
       paint();
     }
     else if (d.trAct === "mp-speaker") TR.mp.speaker = t.value;
+    else if (d.trAct === "preset") { if (t.value) loadPreset(t.value); else resetSettings(); }
     else if (d.trAct === "q-preset") { TR.q.preset = t.value; TR.q.prompts = []; qPrompts(); saveQ(); paint(); }
     else if (d.trAct === "q-pass") { TR.q.pass = +t.value; saveQ(); paint(); }
     else if (d.trAct === "mp-context") TR.mp.context = Math.max(1, Math.min(8, +t.value || 3));
