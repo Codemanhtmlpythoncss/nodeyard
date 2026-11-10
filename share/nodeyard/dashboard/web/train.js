@@ -329,7 +329,8 @@
       const mnames = new Set(r.machines.map((m) => m.name)); TR.machines = TR.machines.filter((n) => mnames.has(n));
       // While a machine is starting or installing PyTorch, keep reading its progress.
       clearTimeout(TR.ovPollT);
-      if (r.machines.some((m) => /starting|installing|checking/.test(m.worker.state)) && S.view === "train") TR.ovPollT = setTimeout(loadOverview, 3000);
+      const fetching = (r.catalog || []).some((d) => d.job && d.job.state === "downloading");
+      if ((fetching || r.machines.some((m) => /starting|installing|checking/.test(m.worker.state))) && S.view === "train") TR.ovPollT = setTimeout(loadOverview, fetching ? 1500 : 3000);
     } catch (e) { /* signed out */ }
     paint();
   }
@@ -396,6 +397,7 @@
   function dataTab() {
     const ov = TR.ov, c = TR.check;
     return html`<div class="grid tr-grid2">
+      ${readyMade()}
       <section class="card"><h2 class="tr-h">Where to get training data</h2>
         <ul class="tr-list">${DATA_SOURCES.map(([a, b]) => html`<li><b>${a}</b><span>${b}</span></li>`)}</ul>
         <p class="muted small">Only train on text you have the right to use. More is better: under 1 MB the model mostly memorises; 10–500 MB is a good range for this hardware. Clean it: remove headers, navigation text and duplicates.</p></section>
@@ -415,12 +417,73 @@
         <div class="tr-stats">${[["Format", { text: "plain text", chat: "conversations in text", jsonl: "JSONL", json: "JSON list" }[c.format] || c.format], ["Records", n0(c.records)], ["Skipped", n0(c.skipped)], ["Characters", n0(c.chars)], ["Words", n0(c.words)], ["Tokens (est.)", n0(c.tokens_est)]].map(([a, b]) => html`<div><span>${a}</span><b>${b}</b></div>`)}</div>
         ${c.advice.map(([lvl, t]) => html`<div class="tr-adv ${lvl}">${t}</div>`)}
         ${c.problems.length ? html`<details><summary>${c.problems.length} problem${c.problems.length > 1 ? "s" : ""}</summary><ul class="small">${c.problems.map((p) => html`<li>${p}</li>`)}</ul></details>` : ""}
-        <h3 class="tr-h3">What the model will read (first 1,500 characters)</h3><pre class="tr-pre">${c.preview}</pre></section>` : ""}
+        ${c.examples && c.examples.length ? html`<h3 class="tr-h3">How each record is converted</h3>${c.examples.map((x) => html`<div class="tr-conv"><pre class="tr-pre">${x.raw}</pre><span class="tr-arrow">→</span>${x.text == null ? html`<div class="tr-adv warn">Skipped: no field it knows (see “How to format it”).</div>` : html`<pre class="tr-pre">${x.text}</pre>`}</div>`)}` : ""}
+        <h3 class="tr-h3">What the model will read <span class="faint small">first 2,500 characters, each part labelled</span></h3>
+        ${legend(c.chat)}<pre class="tr-pre tr-anno">${annotate(c.preview, c.chat && TR.form && TR.form.assistant_only)}</pre>
+        <div class="row wrap mt">${/\.train\.txt$/.test(c.name) ? "" : html`<button class="btn small" data-tr-act="convert">Save it as ${c.name.replace(/\.(txt|md|jsonl|json)$/i, "")}.train.txt</button><span class="faint small">a copy in exactly the format above: open it, edit it, train on it</span>`}</div></section>` : ""}
+      ${guide()}
+      ${anatomy()}
       <section class="card tr-span2"><h2 class="tr-h">How to format it</h2>
         <p class="muted small">The format is detected from what's inside the file. Everything chat-shaped becomes <code>User: …</code> / <code>Assistant: …</code> turns, which is what the Chat tab sends the model.</p>
         <div class="tr-formats">${FORMATS.map(([a, b, ex]) => html`<div class="tr-format"><b>${a}</b><span class="muted small">${b}</span><pre class="tr-pre">${ex}</pre></div>`)}</div></section></div>`;
   }
 
+  function readyMade() {
+    const cat = (TR.ov && TR.ov.catalog) || [];
+    return html`<section class="card tr-span2"><h2 class="tr-h">Ready-made datasets <span class="right faint small">one click: added to your files below</span></h2>
+      <div class="tr-cat">${cat.map((d) => { const j = d.job, busy = j && j.state === "downloading";
+        return html`<div class="tr-catitem"><div class="row"><b>${d.name}</b><span class="spacer"></span><span class="faint small">${gb(d.size)} · ${d.format}</span></div>
+          <p class="small">${d.what}</p><p class="small"><b>Good for:</b> ${d.good_for}</p>
+          <p class="faint small">Source: ${d.source} · Licence: ${d.licence}</p>
+          ${busy ? html`<div class="tr-up"><span>${d.id === "starter-chat" ? "Writing…" : "Downloading…"}</span><span class="tr-progress"><i style="width:${Math.round(100 * Math.min(1, j.got / Math.max(1, j.total)))}%"></i></span><span>${gb(j.got)}</span></div>`
+            : j && j.state === "failed" ? html`<div class="tr-adv bad">${j.error}</div>` : ""}
+          <div class="row">${d.have ? html`<span class="good-t small">✓ ${d.file} is in your files</span><button class="btn small" data-tr-check="${d.file}">Check</button>${TR.sel.includes(d.file) ? "" : html`<button class="btn small" data-tr-use="${d.file}">Train on it</button>`}`
+            : html`<button class="btn small primary" data-tr-get="${d.id}" ${busy ? "disabled" : ""}>${d.id === "starter-chat" ? "Add it" : "Download"}</button>`}</div></div>`; })}</div>
+      <p class="faint small">Mixing is fine: tick several files and they're joined with a blank line between them. A good first run: the starter chat set alone (minutes). A better model: TinyStories + the starter chat set.</p></section>`;
+  }
+  function guide() {
+    const steps = [
+      ["Decide what the model should do", "Continue text in a style (stories, your notes, a book) → plain text. Answer like a chatbot → conversations. A model learns only the shape of what it sees: no conversations, no answering."],
+      ["Collect text you're allowed to use", "Your own writing, public-domain books, datasets whose licence allows training (the ready-made ones above say theirs). Keep the source and licence next to it."],
+      ["Clean it", "Remove what you don't want repeated: menus, cookie notices, page numbers, headers and footers, broken characters, duplicate lines or records. Every character is something the model will try to imitate."],
+      ["Put it in one of the formats below", "Plain text needs nothing. For conversations write “User:” and “Assistant:” lines with a blank line between conversations, or one JSON object per line (.jsonl). Most downloaded datasets are already in a format this page reads."],
+      ["Keep each example short", "The model sees T tokens at a time (the context, often 128–256 tokens ≈ 450–900 characters) from random places in the text. A conversation longer than that is only ever seen in pieces, so keep each one to a few exchanges."],
+      ["Make it big enough", "Rule of thumb: about 20 tokens of text per weight (≈ 70 characters per weight). 1 MB ≈ 280,000 tokens trains a ~15,000-weight model properly; 100 MB ≈ 28 million tokens suits ~1.4 million weights. Less text than that, and a smaller model does better."],
+      ["Check it here", "Upload it and press Check: you see the format found, records skipped and why, and exactly what the model will read, labelled."],
+      ["Train, then read the validation loss", "If validation stops falling while training loss keeps falling, the model is memorising: add more (or more varied) text rather than more steps."],
+    ];
+    return html`<section class="card tr-span2"><h2 class="tr-h">Make your own dataset, step by step</h2><ol class="tr-steps">${steps.map(([a, b]) => html`<li><b>${a}.</b> ${b}</li>`)}</ol></section>`;
+  }
+  function anatomy() {
+    const parts = [
+      ["ra-mark", "User:", "Role marker", "Starts a person's turn. The trainer finds turns by it: with “learn only the replies” on, every token from here to the next “Assistant:” gets weight 0 in the loss (read, but never graded). The Chat tab writes it in front of your message."],
+      ["ra-user", " What is a node?", "The person's message", "Context: the model reads it to predict the reply. Without “learn only the replies” the model also learns to write questions like it."],
+      ["ra-sep", "⏎", "New line", "Ends the line. It's a token too: the model learns where lines end."],
+      ["ra-mark", "Assistant:", "Role marker", "Starts the reply. The Chat tab ends its prompt with “Assistant:”, so after training, the most likely continuation is a reply. From here the loss weight is 1."],
+      ["ra-asst", " A machine in the cluster that runs pods.", "The reply", "What the model learns to write. Every token is a prediction graded by cross-entropy: −ln(probability it gave the real next token)."],
+      ["ra-sep", "⏎⏎", "Blank line", "Ends the conversation. Replies stop when the model writes a blank line or a new “User:”, so ending every reply this way teaches it when to stop."],
+    ];
+    return html`<section class="card tr-span2"><h2 class="tr-h">Anatomy of one training example</h2>
+      <pre class="tr-pre tr-anno big">${parts.map(([cls, t]) => raw('<span class="' + cls + '">' + esc(t) + "</span>" + (t === "⏎" ? "\n" : "")))}</pre>
+      <div class="tr-scroll">${keyTable(parts.map(([cls, t, name, what]) => ['<span class="' + cls + '">' + esc(t.trim() || t) + "</span>", "<b>" + esc(name) + "</b> — " + esc(what)]))}</div>
+      <p class="muted small">Everything above becomes tokens: the tokenizer learns “User”, “:”, “Assistant” and the newlines as pieces like any word, and the model learns what tends to follow each. Plain text has no markers: every token is graded, and the model learns to continue it. JSON files are converted to this layout before training (see “How each record is converted” when you check one).</p></section>`;
+  }
+  function legend(chat) {
+    return chat ? html`<p class="small tr-legend"><span class="ra-mark">role marker</span> <span class="ra-user">person's turn${TR.form && TR.form.assistant_only ? " (read, not graded)" : ""}</span> <span class="ra-asst">reply (learned)</span> <span class="ra-sep">⏎⏎ end of conversation</span></p>`
+      : html`<p class="small tr-legend"><span class="ra-asst">text (every token learned)</span> <span class="ra-sep">⏎⏎ blank line</span></p>`;
+  }
+  function annotate(text, userMuted) {
+    let role = "asst", out = "";
+    const span = (cls, t) => '<span class="' + cls + '">' + esc(t) + "</span>";
+    for (const line of String(text).split("\n")) {
+      const m = /^(\s*)(User|Assistant|System):/.exec(line);
+      if (m) { role = m[2] === "Assistant" ? "asst" : "user"; out += span("ra-mark", m[1] + m[2] + ":") + span(role === "user" ? "ra-user" : "ra-asst", line.slice(m[0].length)); }
+      else if (!line.trim()) { out += span("ra-sep", "⏎"); role = "asst"; }
+      else out += span(role === "user" ? "ra-user" : "ra-asst", line);
+      out += "\n";
+    }
+    return raw(out);
+  }
   function trainTab() {
     const ov = TR.ov; if (!ov) return html`<div class="empty"><div class="spin"></div>Reading this machine's hardware…</div>`;
     const hw = ov.hardware, r = ov.recommend, s = TR.form, run = TR.status ? TR.status.running : ov.running;
@@ -610,12 +673,14 @@
 
   document.addEventListener("click", async (e) => {
     if (S.view !== "train" || !e.target.closest("#tr-root")) return;
-    const t = e.target.closest("[data-tr-tab],[data-tr-lesson],[data-tr-act],[data-tr-check],[data-tr-del],[data-tr-delmodel],[data-tr-chatwith],[data-tr-inspect]");
+    const t = e.target.closest("[data-tr-tab],[data-tr-lesson],[data-tr-act],[data-tr-check],[data-tr-del],[data-tr-delmodel],[data-tr-chatwith],[data-tr-inspect],[data-tr-get],[data-tr-use]");
     if (!t || t.tagName === "SELECT" || t.tagName === "INPUT" && t.type !== "button") return;
     const d = t.dataset;
     if (d.trTab) { e.preventDefault(); TR.tab = d.trTab; store.set("train.tab", TR.tab); paint(); window.scrollTo(0, 0); return; }
     if (d.trLesson != null) { TR.lesson = +d.trLesson; store.set("train.lesson", TR.lesson); paint(); const el = $("#tr-lesson"); if (el) el.scrollIntoView({ block: "start" }); return; }
     if (d.trCheck) return checkData(d.trCheck);
+    if (d.trGet) { if (await post("/api/train/datasets/get", { id: d.trGet })) loadOverview(); return; }
+    if (d.trUse) { if (!TR.sel.includes(d.trUse)) TR.sel.push(d.trUse); saveSel(); toast(d.trUse + " ticked for training."); loadOverview(); return; }
     if (d.trDel) { if (confirm("Delete " + d.trDel + "?")) { if (await post("/api/train/data/delete", { name: d.trDel })) { if (TR.check && TR.check.name === d.trDel) TR.check = null; TR.sel = TR.sel.filter((x) => x !== d.trDel); saveSel(); loadOverview(); } } return; }
     if (d.trDelmodel) { if (confirm("Delete the model " + d.trDelmodel + "? This can't be undone.")) { if (await post("/api/train/model/delete", { name: d.trDelmodel })) loadOverview(); } return; }
     if (d.trChatwith) { TR.chat.model = d.trChatwith; TR.chat.history = []; TR.tab = "chat"; store.set("train.tab", "chat"); paint(); return; }
@@ -627,6 +692,7 @@
     else if (a === "sched-mine") { const s = curSet(); Object.assign(L.sched, { peak: +s.learning_rate, warmup: +s.warmup, steps: +s.steps, at: Math.round(s.steps / 3) }); paint(); }
     else if (a === "size-mine") { const s = curSet(); Object.assign(L.size, { V: +s.vocab_size, T: +s.context, d: +s.dim, L: +s.layers, h: +s.heads, B: +s.batch_size }); paint(); }
     else if (a === "paste") { const name = $("#tr-paste-name").value.trim(), text = $("#tr-paste-text").value; const r = await post("/api/train/paste", { name, text }); if (r) { if (!TR.sel.includes(r.name)) TR.sel.push(r.name); saveSel(); toast("Saved " + r.name); await loadOverview(); checkData(r.name); } }
+    else if (a === "convert") { const r = await post("/api/train/convert", { name: TR.check.name }); if (r) { toast("Saved " + r.name + " (" + n0(r.records) + " records)"); await loadOverview(); checkData(r.name); } }
     else if (a === "use-rec") { Object.assign(TR.form, TR.ov.recommend.settings); paint(); toast("Recommended settings filled in."); }
     else if (a === "start") {
       const body = { data: TR.sel, settings: TR.form, resume: TR.resume, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.share };

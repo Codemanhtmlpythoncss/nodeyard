@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 
+import trainsets
 import trainpool
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -38,6 +39,7 @@ UPLOAD_CHUNK_MAX = 4 * 1024 * 1024
 UPLOAD_BODY_MAX = UPLOAD_CHUNK_MAX * 4 // 3 + 4096
 DATA_TOTAL_MAX = 20 * 1024 * 1024 * 1024
 PASTE_MAX = 8 * 1024 * 1024
+CHECK_SAMPLE = 16 * 1024 * 1024   # bigger files are checked from their first 16 MB (the dashboard has 768 MB)
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$")
 STEP_RE = re.compile(r"^Step (\d+)/(\d+) \| train loss ([-\d.eE+naif]+) \| ([\d.]+) steps/sec \| ([\d,]+) tokens/sec \| "
                      r"total training step ([\d,]+) \| learning rate ([-\d.eE+]+)")
@@ -312,6 +314,7 @@ class Trainer:
         self.check_cache = {}
         self.uploads = {}
         self.speeds = self._load_json("speeds.json")
+        self.fetcher = trainsets.Fetcher(self.data_dir, lambda: DATA_TOTAL_MAX - self._data_total())
         self.job = self._load_job()
         if self.job.get("model") and not self.job.get("ended"):
             if self.job.get("machines"):   # the dashboard restarted mid-job: pick it back up
@@ -506,7 +509,7 @@ class Trainer:
         return {}
 
     def check(self, name):
-        """Read a data file the way the trainer will and report what it found."""
+        """Read a data file the way the trainer will and report what it found (big files from a sample)."""
         path = self._data_path(name)
         if not os.path.isfile(path):
             raise TrainError("That file isn't there any more.", 404)
@@ -514,17 +517,23 @@ class Trainer:
         key = (name, st.st_size, st.st_mtime)
         if key in self.check_cache:
             return self.check_cache[key]
-        sys.path.insert(0, JOBS_DIR)
-        try:
-            import training_data
-        finally:
-            sys.path.remove(JOBS_DIR)
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            raw = f.read()
+        training_data = _jobs_module("training_data")
+        with open(path, "rb") as f:
+            data = f.read(CHECK_SAMPLE)
+        sampled = st.st_size > len(data)
+        if sampled:
+            data = data[:data.rfind(b"\n") + 1] or data
+        raw = data.decode("utf-8", errors="replace")
         text, report = training_data.normalize(raw)
-        chars = len(text)
-        words = len(text.split())
+        scale = st.st_size / max(1, len(data)) if sampled else 1.0
+        if sampled and report["format"] == "json":
+            report["problems"].insert(0, "This JSON list is too big to check here (only the first 16 MB was read); the trainer reads all of it.")
+        chars, words = int(len(text) * scale), int(len(text.split()) * scale)
+        for k in ("records", "skipped"):
+            report[k] = int(report[k] * scale)
         advice = []
+        if sampled:
+            advice.append(["ok", "Big file: these numbers are estimated from its first 16 MB."])
         if chars < 1000:
             advice.append(["bad", "Under 1,000 characters: the trainer won't start. Add much more text."])
         elif chars < 1_000_000:
@@ -539,12 +548,53 @@ class Trainer:
             advice.append(["ok", "No conversations found: the model will learn to continue text, not to reply."])
         if report["chat"]:
             advice.append(["good", "Conversations found: tick “learn only the replies” so the model learns to answer, not to ask."])
+        examples = []   # the first records before and after conversion, so you can see what happens to each field
+        if report["format"] == "jsonl":
+            for line in raw.splitlines():
+                if line.strip() and len(examples) < 3:
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    examples.append({"raw": line[:600], "text": training_data.record_to_text(rec)})
+        elif report["format"] == "json" and not sampled:
+            try:
+                items = json.loads(raw)
+                for rec in (items if isinstance(items, list) else [items])[:3]:
+                    examples.append({"raw": json.dumps(rec, ensure_ascii=False)[:600], "text": training_data.record_to_text(rec)})
+            except ValueError:
+                pass
         out = dict(report, name=name, size=st.st_size, chars=chars, words=words, tokens_est=int(chars / CHARS_PER_TOKEN),
-                   preview=text[:1500], advice=advice)
+                   preview=text[:2500], advice=advice, examples=examples, sampled=sampled)
         if len(self.check_cache) > 16:
             self.check_cache.clear()
         self.check_cache[key] = out
         return out
+
+    def convert(self, body):
+        """Save the trained-on text of a file as <name>.train.txt: exactly what the model reads, nothing else."""
+        src = self._data_path(body.get("name"))
+        if not os.path.isfile(src):
+            raise TrainError("That file isn't there any more.", 404)
+        stem = re.sub(r"\.(txt|md|jsonl|json)$", "", os.path.basename(src), flags=re.I)
+        if stem.endswith(".train"):
+            raise TrainError("That file is already in the training format.")
+        dst = self._data_path((stem[:68] + ".train.txt"))
+        if os.path.getsize(src) * 1.2 > DATA_TOTAL_MAX - self._data_total():
+            raise TrainError("Not enough room in your training data (20 GB): delete some files first.", 413)
+        try:
+            rep = trainsets.convert_file(src, dst)
+        except (OSError, ValueError) as e:
+            raise TrainError("Couldn't convert it: %s" % e)
+        return dict(rep, name=os.path.basename(dst), size=os.path.getsize(dst))
+
+    def fetch(self, body):
+        try:
+            return {"job": self.fetcher.start(str(body.get("id") or ""))}
+        except ValueError as e:
+            raise TrainError(str(e), 404)
+        except OverflowError as e:
+            raise TrainError(str(e), 413)
 
     # -- models
     def _model_dir(self, name):
@@ -1165,7 +1215,7 @@ def register(ctx, args):
         hw = t.plan_hardware(machines, plan)
         rec = recommend(dict(hw, chat=chat), chars, hours)
         return {"machines": [t.public(m) for m in machines], "plan": plan, "mode": t.pool.mode, "hardware": hw, "recommend": rec,
-                "datasets": t.datasets(), "models": t.models(), "running": t.running(), "job": t.job, "hours": hours, "data_dir": t.data_dir}
+                "datasets": t.datasets(), "catalog": t.fetcher.catalog(), "models": t.models(), "running": t.running(), "job": t.job, "hours": hours, "data_dir": t.data_dir}
 
     def warm(body):
         names = body.get("machines") if isinstance(body.get("machines"), list) else []
@@ -1179,6 +1229,7 @@ def register(ctx, args):
         "/api/train": wrap(overview),
         "/api/train/status": wrap(lambda q: t.status(int((q.get("since") or ["0"])[0] or 0))),
         "/api/train/check": wrap(lambda q: {"check": t.check((q.get("name") or [""])[0])}),
+        "/api/train/datasets": wrap(lambda q: {"catalog": t.fetcher.catalog()}),
     })
     ctx.post_routes.update({
         "/api/train/upload": wrap(t.upload),
@@ -1190,9 +1241,19 @@ def register(ctx, args):
         "/api/train/chat": wrap(t.chat),
         "/api/train/explain": wrap(t.explain),
         "/api/train/warm": wrap(warm),
+        "/api/train/datasets/get": wrap(t.fetch),
+        "/api/train/convert": wrap(t.convert),
     })
     ctx.post_limits["/api/train/upload"] = UPLOAD_BODY_MAX
     ctx.post_limits["/api/train/paste"] = PASTE_MAX * 2 + 4096
+
+
+def _jobs_module(name):
+    sys.path.insert(0, JOBS_DIR)
+    try:
+        return __import__(name)
+    finally:
+        sys.path.remove(JOBS_DIR)
 
 
 def _opt(options, flag):

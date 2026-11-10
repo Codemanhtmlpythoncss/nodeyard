@@ -1,9 +1,12 @@
 import base64
+import io
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +18,8 @@ sys.path.insert(0, str(ROOT / "share" / "nodeyard" / "jobs"))
 import trainapi  # noqa: E402
 import trainpool  # noqa: E402
 import trainworker  # noqa: E402
+import trainsets  # noqa: E402
+import starter_dataset  # noqa: E402
 import training_data  # noqa: E402
 
 
@@ -252,6 +257,96 @@ class WorkerTests(unittest.TestCase):
         for opt in ("--app-data", "--result-file=/etc/x", "--data-file"):
             with self.assertRaises(trainpool.PoolError):
                 r.call("POST", "/train", {"model": "m", "data": [], "options": [opt, "/tmp/x"]})
+
+
+class DatasetKitTests(unittest.TestCase):
+    def test_starter_set_is_chat_and_every_sum_is_right(self):
+        text = starter_dataset.generate(300_000)
+        self.assertEqual(text, starter_dataset.generate(300_000))   # same every time
+        _, rep = training_data.normalize(text)
+        self.assertEqual((rep["format"], rep["chat"], rep["skipped"]), ("chat", True, 0))
+        checked = 0
+        for a, op, b, ans in re.findall(r"User: .*?(\d+) (plus|minus|times|\+|-|×) (\d+)\?\nAssistant: (.*)", text):
+            want = {"plus": int(a) + int(b), "+": int(a) + int(b), "minus": int(a) - int(b), "-": int(a) - int(b),
+                    "times": int(a) * int(b), "×": int(a) * int(b)}[op]
+            self.assertEqual(int(re.findall(r"-?\d+", ans)[-1]), want, (a, op, b, ans))
+            checked += 1
+        self.assertGreater(checked, 100)
+
+    def test_books_starting_with_a_bracket_are_text_and_dolly_context_is_kept(self):
+        self.assertEqual(training_data.detect_format("[Illustration: a ship]\nCHAPTER I."), "text")
+        self.assertEqual(training_data.detect_format('[{"text": "a"}]'), "json")
+        self.assertEqual(training_data.record_to_text({"instruction": "Summarise.", "context": "The cat sat.", "response": "A cat sat."}),
+                         "User: Summarise.\nThe cat sat.\nAssistant: A cat sat.")
+
+    def test_gutenberg_header_and_footer_go(self):
+        book = "The Project Gutenberg eBook\nlicence\n*** START OF THE PROJECT GUTENBERG EBOOK X ***\n\n\n\nIt was.\n\nThe end.\n*** END OF THE PROJECT GUTENBERG EBOOK X ***\nmore licence"
+        self.assertEqual(trainsets.strip_gutenberg(book), "It was.\n\nThe end.\n")
+
+    def test_tinystories_markers_become_blank_lines_across_any_chunking(self):
+        src = "Once a cat.\nIt slept.\n<|endoftext|>\nA dog ran.\n<|endoftext|>\n\nThe end.\n"
+        for size in (1, 3, 7, 1000):
+            out = io.StringIO()
+            w = trainsets.TinyStoriesWriter(out)
+            for i in range(0, len(src), size):
+                w.feed(src[i:i + size])
+            w.close()
+            self.assertEqual(out.getvalue(), "Once a cat.\nIt slept.\n\nA dog ran.\n\nThe end.\n", size)
+
+    def test_catalog_shows_licences_but_not_urls(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = trainsets.Fetcher(d, lambda: 10 ** 12)
+            for c in f.catalog():
+                self.assertTrue(c["licence"] and c["source"] and c["what"])
+                self.assertNotIn("url", c)
+                self.assertNotIn("urls", c)
+            with self.assertRaises(ValueError):
+                f.start("../../etc")
+            with self.assertRaises(OverflowError):
+                trainsets.Fetcher(d, lambda: 10).start("tinystories")
+
+
+class DataToolsTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.t = trainapi.Trainer(self.dir.name)
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_starter_set_is_added_without_a_download(self):
+        self.t.fetch({"id": "starter-chat"})
+        for _ in range(100):
+            if self.t.fetcher.state["starter-chat"]["state"] != "downloading":
+                break
+            time.sleep(0.1)
+        self.assertEqual(self.t.fetcher.state["starter-chat"]["state"], "done")
+        self.assertIn("starter-chat.txt", [d["name"] for d in self.t.datasets()])
+        self.assertEqual(post(self.t, self.t.fetch, {"id": "nope"})["code"], 404)
+
+    def test_convert_writes_exactly_what_the_model_reads(self):
+        lines = [{"messages": [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello"}]}, {"oops": 1}, {"text": "Plain."}]
+        post(self.t, self.t.paste, {"name": "c.jsonl", "text": "\n".join(json.dumps(x) for x in lines)})
+        check = self.t.check("c.jsonl")
+        self.assertEqual(len(check["examples"]), 3)
+        self.assertIsNone(check["examples"][1]["text"])
+        r = self.t.convert({"name": "c.jsonl"})
+        self.assertEqual((r["name"], r["records"], r["skipped"]), ("c.train.txt", 2, 1))
+        with open(os.path.join(self.t.data_dir, "c.train.txt"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), "User: Hi\nAssistant: Hello\n\nPlain.\n")
+        self.assertIn("already", post(self.t, self.t.convert, {"name": "c.train.txt"})["error"])
+
+    def test_big_files_are_checked_from_a_sample(self):
+        old = trainapi.CHECK_SAMPLE
+        trainapi.CHECK_SAMPLE = 4096
+        try:
+            post(self.t, self.t.paste, {"name": "big.txt", "text": "User: hi\nAssistant: hello there\n\n" * 2000})
+            c = self.t.check("big.txt")
+        finally:
+            trainapi.CHECK_SAMPLE = old
+        self.assertTrue(c["sampled"])
+        self.assertAlmostEqual(c["records"], 2000, delta=40)
+        self.assertTrue(any("estimated" in a[1] for a in c["advice"]))
 
 
 if __name__ == "__main__":
