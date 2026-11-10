@@ -542,6 +542,119 @@ def _stats(t: torch.Tensor) -> dict:
             "min": _r(t.min()), "max": _r(t.max()), "norm": _r(t.norm())}
 
 
+def _g(t) -> list:
+    """A tensor as nested lists, 7 significant digits (float32 holds about 7)."""
+    def one(x):   # masked scores are −∞, which JSON can't hold: null
+        return float("%.7g" % x) if math.isfinite(x) else None
+    if t.dim() == 0:
+        return one(float(t))
+    if t.dim() == 1:
+        return [one(x) for x in t.tolist()]
+    return [[one(x) for x in row] for row in t.tolist()]
+
+
+@torch.no_grad()
+def trace(args) -> int:
+    """Every number of one forward pass, in order, and how each one is made (so the page can expand any number into
+    plain + − × ÷). Steps refer to weights by name; the page reads the weights themselves from model.pt."""
+    app_data = args.app_data.expanduser() if args.app_data else None
+    trained = bool(app_data and (app_data / MODEL_FILE).is_file() and (app_data / CONFIG_FILE).is_file())
+    torch.manual_seed(0)
+    if trained:
+        config = json.loads((app_data / CONFIG_FILE).read_text(encoding="utf-8"))
+        tokenizer = BPETokenizer.load(app_data / TOKENIZER_FILE)
+    else:
+        config = {"vocabulary": 256, "context": 32, "width": 16, "heads": 2, "layers": 1}
+        tokenizer = BPETokenizer([])
+    model = GPT(config["vocabulary"], config["context"], config["width"], config["heads"], config["layers"])
+    if trained:
+        model.load_state_dict(torch.load(app_data / MODEL_FILE, map_location="cpu"))
+    model.eval()
+    ids = (tokenizer.encode(args.prompt or "Hello there") or [ord(" ")])[: max(1, min(args.max_tokens, config["context"]))]
+    T, d, H = len(ids), config["width"], config["heads"]
+    hd = d // H
+    ops: list[dict] = []
+    vectors: dict = {}
+
+    def op(group, title, value, how):
+        ops.append({"id": len(ops), "group": group, "title": title, "shape": list(value.shape), "values": _g(value), "how": how})
+        return len(ops) - 1
+
+    def vec(name, t):
+        vectors[name] = _g(t)
+        return name
+
+    def layernorm(group, title, x, xid, prefix, norm):
+        vec(prefix + ".weight", norm.weight)
+        vec(prefix + ".bias", norm.bias)
+        mu = x.mean(-1, keepdim=True)
+        var = x.var(-1, unbiased=False, keepdim=True)
+        y = (x - mu) / torch.sqrt(var + norm.eps) * norm.weight + norm.bias
+        return y, op(group, title, y, {"kind": "layernorm", "x": xid, "gamma": prefix + ".weight", "beta": prefix + ".bias", "eps": norm.eps})
+
+    def linear(group, title, x, xid, wname, w, bname, b, offset=0, rows=None):
+        rows = rows or w.shape[0]
+        vec(bname, b)
+        y = x @ w[offset:offset + rows].T + b[offset:offset + rows]
+        return y, op(group, title, y, {"kind": "linear", "x": xid, "weight": wname, "bias": bname, "offset": offset, "inputs": int(w.shape[1])})
+
+    tok = model.token_embedding.weight[ids]
+    t_id = op("Embedding", "Token embeddings E[token]", tok, {"kind": "lookup", "weight": "token_embedding.weight", "rows": ids})
+    pos = model.position_embedding.weight[:T]
+    p_id = op("Embedding", "Position embeddings P[t]", pos, {"kind": "lookup", "weight": "position_embedding.weight", "rows": list(range(T))})
+    x = tok + pos
+    x_id = op("Embedding", "x = E[token] + P[t]", x, {"kind": "add", "a": t_id, "b": p_id})
+    mask = torch.triu(torch.full((T, T), float("-inf")), diagonal=1)
+    for i, layer in enumerate(model.blocks.layers):
+        g = "Block %d" % (i + 1)
+        pre = "blocks.layers.%d." % i
+        h, h_id = layernorm(g, "Layer norm 1", x, x_id, pre + "norm1", layer.norm1)
+        W, B = layer.self_attn.in_proj_weight, layer.self_attn.in_proj_bias
+        q, q_id = linear(g, "Queries Q = h·Wq + bq", h, h_id, pre + "self_attn.in_proj_weight", W, pre + "self_attn.in_proj_bias", B, 0, d)
+        k, k_id = linear(g, "Keys K = h·Wk + bk", h, h_id, pre + "self_attn.in_proj_weight", W, pre + "self_attn.in_proj_bias", B, d, d)
+        v, v_id = linear(g, "Values V = h·Wv + bv", h, h_id, pre + "self_attn.in_proj_weight", W, pre + "self_attn.in_proj_bias", B, 2 * d, d)
+        mixes, mixed = [], []
+        for head in range(H):
+            sl = slice(head * hd, (head + 1) * hd)
+            scale = 1 / math.sqrt(hd)
+            scores = q[:, sl] @ k[:, sl].T * scale + mask
+            s_id = op(g, "Head %d scores (Q·K) × %.6g, future masked" % (head + 1, scale), scores,
+                      {"kind": "dot", "a": q_id, "b": k_id, "offset": head * hd, "n": hd, "scale": scale})
+            w = torch.softmax(scores, dim=-1)
+            w_id = op(g, "Head %d attention weights = softmax(scores)" % (head + 1), w, {"kind": "softmax", "x": s_id})
+            mixed.append(w @ v[:, sl])
+            mixes.append(op(g, "Head %d output = weights · V" % (head + 1), mixed[-1], {"kind": "mix", "w": w_id, "v": v_id, "offset": head * hd}))
+        cat = torch.cat(mixed, dim=-1)
+        c_id = op(g, "Heads side by side", cat, {"kind": "concat", "parts": mixes, "width": hd})
+        a, a_id = linear(g, "Attention output = heads·Wo + bo", cat, c_id, pre + "self_attn.out_proj.weight", layer.self_attn.out_proj.weight,
+                         pre + "self_attn.out_proj.bias", layer.self_attn.out_proj.bias)
+        x = x + a
+        x_id = op(g, "Residual: x + attention", x, {"kind": "add", "a": x_id, "b": a_id})
+        h2, h2_id = layernorm(g, "Layer norm 2", x, x_id, pre + "norm2", layer.norm2)
+        f1, f1_id = linear(g, "Feed-forward in = h·W1 + b1", h2, h2_id, pre + "linear1.weight", layer.linear1.weight, pre + "linear1.bias", layer.linear1.bias)
+        act = torch.nn.functional.gelu(f1)
+        g_id = op(g, "GELU", act, {"kind": "gelu", "x": f1_id})
+        f2, f2_id = linear(g, "Feed-forward out = GELU·W2 + b2", act, g_id, pre + "linear2.weight", layer.linear2.weight, pre + "linear2.bias", layer.linear2.bias)
+        x = x + f2
+        x_id = op(g, "Residual: x + feed-forward", x, {"kind": "add", "a": x_id, "b": f2_id})
+    hf, hf_id = layernorm("Output", "Final layer norm", x, x_id, "norm", model.norm)
+    logits, l_id = linear("Output", "Logits = h·Wout + bout (a score for every token)", hf, hf_id, "head.weight", model.head.weight, "head.bias", model.head.bias)
+    probs = torch.softmax(logits, dim=-1)
+    op("Output", "Probabilities = softmax(logits)", probs, {"kind": "softmax", "x": l_id})
+    reference = model(torch.tensor([ids]))[0]
+    out = {"trained": trained, "tokens": [{"id": int(i), "text": tokenizer.decode([int(i)])} for i in ids],
+           "vocab": [tokenizer.decode([i]) for i in range(min(config["vocabulary"], 20000))],
+           "config": {k: config.get(k) for k in ("vocabulary", "context", "width", "heads", "layers", "parameters", "trained_steps")},
+           "ops": ops, "vectors": vectors, "check_max_difference": float((reference - logits).abs().max()),
+           "parameters": [{"name": n, "shape": list(p.shape)} for n, p in model.named_parameters()]}
+    if not trained:   # nothing saved to read the weights from: include them (the demo model is tiny)
+        out["weights"] = {n: _g(p.detach() if p.dim() == 2 else p.detach().unsqueeze(0)) for n, p in model.named_parameters()}
+    Path(args.out).write_text(json.dumps(out, separators=(",", ":")), encoding="utf-8")
+    emit(f"TRACE {len(ops)} steps, {T} tokens, largest difference from PyTorch {out['check_max_difference']:.2e}")
+    return 0
+
+
+@torch.no_grad()
 def explain(args) -> int:
     """Run one real forward and backward pass by hand and print every intermediate value as JSON.
 
@@ -734,6 +847,12 @@ def main() -> int:
     explain_parser.add_argument("--max-tokens", type=int, default=12)
     explain_parser.add_argument("--show-dims", type=int, default=8)
     explain_parser.set_defaults(handler=explain)
+    trace_parser = commands.add_parser("trace", help="write every number of one forward pass to a JSON file")
+    trace_parser.add_argument("--app-data", type=Path, default=None)
+    trace_parser.add_argument("--prompt", default="Hello there")
+    trace_parser.add_argument("--max-tokens", type=int, default=8)
+    trace_parser.add_argument("--out", required=True)
+    trace_parser.set_defaults(handler=trace)
     args, _unknown = parser.parse_known_args()
     return args.handler(args)
 

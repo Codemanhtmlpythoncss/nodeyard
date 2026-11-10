@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 
+import ptread
 import trainsets
 import trainpool
 
@@ -1434,6 +1435,56 @@ class Trainer:
             reply = out.split("Generated continuation:\n", 1)[-1].rstrip()
         return {"reply": reply, "prompt": prompt}
 
+    def trace(self, body):
+        """Every number of one forward pass (run on a worker), saved here so the page can expand any of them."""
+        prompt = str(body.get("prompt") or "Hello there")[:300]
+        tokens = max(1, min(16, int(body.get("tokens") or 8)))
+        model = body.get("model") or None
+        if model:
+            mdir = self._model_dir(model)
+            if not os.path.isfile(os.path.join(mdir, "model.pt")):
+                model = None
+        r = self._use_worker()
+        try:
+            if model and not (self.running() and self.job.get("model") == model and r.name in self.job.get("machines", [])):
+                self._push_model(r, model, ("model.pt", "model.json", "bpe.json"))
+            out = r.call("POST", "/run", {"cmd": "trace", "model": model, "options": ["--prompt", prompt, "--max-tokens", str(tokens)], "timeout": 300},
+                         timeout=330)
+            if out.get("code") != 0:
+                err = [l for l in ((out.get("out") or "") + (out.get("err") or "")).splitlines() if l.strip()]
+                raise TrainError((err[-1] if err else "The trace failed.").replace("ERROR: ", ""), 500)
+            os.makedirs(os.path.join(self.root, "traces"), exist_ok=True)
+            local = os.path.join(self.root, "traces", (model or "untrained-demo") + ".json")
+            r.get_file("models/%s/trace.json" % (model or "untrained-demo"), local)
+        except trainpool.PoolError as e:
+            raise TrainError(str(e), e.code)
+        with open(local, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data["model"] = model
+        return {"trace": data}
+
+    def weights(self, q):
+        """Rows of one weight matrix of a saved model, read straight from model.pt (no PyTorch needed)."""
+        model = (q.get("model") or [""])[0]
+        path = os.path.join(self._model_dir(model), "model.pt")
+        if not os.path.isfile(path):
+            raise TrainError("That model hasn't been saved yet.", 404)
+        try:
+            m = ptread.Model(path)
+        except (OSError, ValueError, KeyError, StopIteration) as e:
+            raise TrainError("Couldn't read the model file: %s" % e, 500)
+        try:
+            name = (q.get("name") or [""])[0]
+            if not name:
+                return {"tensors": m.shapes()}
+            if name not in m.tensors:
+                raise TrainError("No weights called %s." % name, 404)
+            start = max(0, int((q.get("start") or ["0"])[0] or 0))
+            count = max(1, min(256, int((q.get("count") or ["64"])[0] or 64)))
+            return {"name": name, "shape": list(m.tensors[name].shape), "start": start, "rows": m.rows(name, start, count)}
+        finally:
+            m.close()
+
     def explain(self, body):
         options = ["--prompt", str(body.get("prompt") or "Hello there")[:500],
                    "--max-tokens", str(max(2, min(16, int(body.get("tokens") or 10))))]
@@ -1540,6 +1591,7 @@ def register(ctx, args):
         "/api/train": wrap(overview),
         "/api/train/status": wrap(lambda q: t.status(int((q.get("since") or ["0"])[0] or 0))),
         "/api/train/check": wrap(lambda q: {"check": t.check((q.get("name") or [""])[0])}),
+        "/api/train/weights": wrap(t.weights),
         "/api/train/datasets": wrap(lambda q: {"catalog": t.fetcher.catalog()}),
         "/api/train/speakers": wrap(lambda q: t.speakers((q.get("name") or [""])[0])),
         "/api/train/samples": wrap(lambda q: t.samples([n for n in (q.get("data") or [""])[0].split("|") if n],
@@ -1555,6 +1607,7 @@ def register(ctx, args):
         "/api/train/stop": wrap(t.stop),
         "/api/train/chat": wrap(t.chat),
         "/api/train/explain": wrap(t.explain),
+        "/api/train/trace": wrap(t.trace),
         "/api/train/warm": wrap(warm),
         "/api/train/datasets/get": wrap(t.fetch),
         "/api/train/convert": wrap(t.convert),

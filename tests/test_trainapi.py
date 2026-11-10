@@ -193,6 +193,10 @@ class TrainerTests(unittest.TestCase):
         self.assertEqual([p["step"] for p in st["train"]], [1, 2, 3])
         self.assertEqual([(g["step"], g["norm"]) for g in st["grad"]], [(1, 0.5), (2, 1.0), (3, 1.5)])
 
+    def test_weights_need_a_saved_model(self):
+        self.assertEqual(post(self.t, self.t.weights, {"model": ["nope"]})["code"], 404)
+        self.assertIn("error", post(self.t, self.t.weights, {"model": ["../x"]}))
+
     def test_start_checks_settings_before_anything_runs(self):
         post(self.t, self.t.paste, {"name": "d.txt", "text": "x" * 2000})
         bad = post(self.t, self.t.start, {"data": ["d.txt"], "settings": {"dim": 63, "heads": 2, "steps": 10, "batch_size": 1, "context": 8,
