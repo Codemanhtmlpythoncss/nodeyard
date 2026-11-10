@@ -825,6 +825,8 @@ def main():
     temps.register(ctx, a)
     import hwcare        # Hardware > Maintenance, Cooling and Lid: a guide per machine, idle fan settings, the lid action
     hwcare.register(ctx, a)
+    import updates       # Updates: outdated software and drivers per machine, with opt-in automatic updates (off by default)
+    updates.register(ctx, a)
     import cleanup       # pods nobody has used for a while, removed by a policy you control (off by default)
     cleanup.register(ctx, a)
     import quotes        # the Desk's quotes: built-in (checked against their sources) and your own
