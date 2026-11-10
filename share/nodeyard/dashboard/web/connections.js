@@ -62,7 +62,7 @@
         <label class="field-l">Use<select class="select" data-v="preference">${["auto", "lan", "tailscale"].map((v) => raw('<option value="' + v + '"' + (s.preference === v ? " selected" : "") + ">" + (v === "auto" ? "Automatic" : "Prefer " + pathName[v]) + "</option>"))}</select></label>
         <label class="field-l">Check every (s)<input class="input" type="number" min="15" max="3600" data-v="interval" value="${s.interval}"></label>
         <label class="field-l">Timeout (s)<input class="input" type="number" min="0.5" max="10" step="0.5" data-v="timeout" value="${s.timeout}"></label></div>
-      <p class="muted small">Leave an address empty to use what discovery finds. A typed address or host name is never replaced automatically, and is shown as working only after it answers. <label class="check" style="display:inline-flex"><input type="checkbox" data-v="reset"> <span>Reset everything to automatic discovery</span></label></p></div>`);
+      <p class="muted small">Leave an address empty to use what discovery finds. A typed address or host name is used straight away and never replaced automatically — even if the machine is off right now; whether it answers is shown separately. <label class="check" style="display:inline-flex"><input type="checkbox" data-v="reset"> <span>Reset everything to automatic discovery</span></label></p></div>`);
     const ok = $("#confirmok"), cancel = $("#confirmcancel");
     ok.textContent = "Save and test"; ok.className = "btn primary";
     $("#scrim").classList.add("on"); m.classList.add("on");
