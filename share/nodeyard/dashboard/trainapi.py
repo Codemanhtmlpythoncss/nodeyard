@@ -111,11 +111,14 @@ def _pow2_floor(x):
     return 1 << max(0, int(math.floor(math.log2(max(1, x)))))
 
 
-def recommend(hw, data_chars=None, hours=1.0):
-    """Settings for this hardware and this much data, each with the formula, the numbers and why.
+def recommend(hw, data_chars=None, hours=1.0, profile=None):
+    """Settings for this hardware and this data, each with the formula, the numbers and why.
 
     hw: {"device": cuda|mps|cpu, "cores", "arch", "ram_free", "gpu": {"name", "vram"} or None}
+    profile (from checking the data): {"unique_fraction": share of the text that isn't a repeat,
+             "example_chars": typical length of one example (a conversation or paragraph), "chat": conversations?}
     """
+    profile = profile or {}
     device = hw.get("device") or "cpu"
     cores = hw.get("cores") or 1
     ram_free = hw.get("ram_free") or 2 * 1024 ** 3
@@ -135,8 +138,14 @@ def recommend(hw, data_chars=None, hours=1.0):
     seconds = max(60.0, float(hours) * 3600)
     compute = speed * seconds
 
-    tokens = int((data_chars or 4_000_000) / CHARS_PER_TOKEN)
-    if data_chars is None:
+    unique = profile.get("unique_fraction")
+    repeated = data_chars is not None and unique is not None and unique < 0.9
+    tokens = int((data_chars or 4_000_000) * (unique if repeated else 1.0) / CHARS_PER_TOKEN)
+    if repeated:
+        why.append({"name": "Training text", "value": "%s new tokens" % _n(tokens), "formula": "tokens ≈ unique characters ÷ 3.6",
+                    "numbers": "%s characters, but only %d%% isn't a repeat → %s ÷ 3.6 = %s" % (_n(data_chars), round(unique * 100), _n(data_chars * unique), _n(tokens)),
+                    "explain": "Lines that appear more than once (for example every line as both a question and the next reply) teach nothing new the second time, so the model is sized for the text that's actually different."})
+    elif data_chars is None:
         why.append({"name": "Training text", "value": "not chosen yet", "formula": "tokens ≈ characters ÷ 3.6",
                     "numbers": "assuming 4,000,000 characters ≈ %s tokens" % _n(tokens),
                     "explain": "Choose your data in step 2 and these numbers update for it."})
@@ -157,18 +166,25 @@ def recommend(hw, data_chars=None, hours=1.0):
 
     # Three limits on the model size N; the smallest wins.
     n_compute = math.sqrt(compute / 120)
-    n_data = tokens / 5
+    n_data = tokens * 2
     context0 = 128
     n_memory = budget / 20      # 16 bytes per weight for weights+gradients+AdamW m and v, plus room for activations
     caps = [("compute", n_compute), ("data", n_data), ("memory", n_memory)]
     limit_name, target = min(caps, key=lambda c: c[1])
     target = max(50_000, min(target, 300_000_000))
-    why.append({"name": "Model size N (weights)", "value": _n(target), "formula": "N = min(√(C ÷ 120), tokens ÷ 5, memory ÷ 20 bytes)",
-                "numbers": "compute C = %s FLOP/s × %s s = %s → √(C÷120) = %s · data %s ÷ 5 = %s · memory %s ÷ 20 = %s → %s is the limit"
+    why.append({"name": "Model size N (weights)", "value": _n(target), "formula": "N = min(√(C ÷ 120), 2 × tokens, memory ÷ 20 bytes)",
+                "numbers": "compute C = %s FLOP/s × %s s = %s → √(C÷120) = %s · data %s × 2 = %s · memory %s ÷ 20 = %s → %s is the limit"
                            % (_sci(speed), _n(seconds), _sci(compute), _n(n_compute), _n(tokens), _n(n_data), _gb(budget), _n(n_memory), limit_name),
-                "explain": "Compute: the Chinchilla rule says train on about 20 tokens per weight, and training costs 6 FLOPs per weight per token, so C = 6·N·20N = 120·N². Data: repeating text more than about 4 times stops helping, so N ≤ tokens·4 ÷ 20. Memory: float32 weights, gradients and AdamW's two moments are 16 bytes per weight. %s" % ("Speed here is a guess for this hardware (%s FLOP/s); the real tokens/sec shows once training starts." % _sci(speed))})
+                "explain": "Compute: the Chinchilla rule says train on about 20 tokens per weight, and training costs 6 FLOPs per weight per token, so C = 6·N·20N = 120·N². Data: with little text a bigger model still does better as long as dropout stops it memorising and you stop when validation stops falling (nanoGPT's Shakespeare model has about 10 weights per character of text), so this allows up to 2 weights per token. A smaller cap makes a model too small to learn the text, and the loss goes flat early. Memory: float32 weights, gradients and AdamW's two moments are 16 bytes per weight. %s" % ("Speed here is a guess for this hardware (%s FLOP/s); the real tokens/sec shows once training starts." % _sci(speed))})
 
     context = 64 if target < 300_000 else 256 if target > 5_000_000 and device != "cpu" else context0
+    base_context = context
+    example_tokens = (profile.get("example_chars") or 0) / CHARS_PER_TOKEN
+    if example_tokens:   # make room for a whole typical example (plus a quarter), up to 512
+        fit = 64
+        while fit < min(512, example_tokens * 1.25):
+            fit *= 2
+        context = max(context, fit)
     # Keep the vocabulary's two tables (in and out, 2·V·d) to at most half the weights, or the model is all lookup table.
     wanted = vocab
     while True:
@@ -180,8 +196,10 @@ def recommend(hw, data_chars=None, hours=1.0):
         why[1]["value"] = _n(vocab)
         why[1]["numbers"] += " → lowered to %s so the embedding tables (2·V·d) stay under half the model" % _n(vocab)
     width, layers, heads, params = shape["width"], shape["layers"], shape["heads"], shape["parameters"]
-    why.append({"name": "Context length T", "value": str(context), "formula": "64 for tiny models · 128 normally · 256 for > 5M weights on a GPU",
-                "numbers": "N = %s on %s → T = %d" % (_n(target), device, context),
+    why.append({"name": "Context length T", "value": str(context),
+                "formula": "64 for tiny models · 128 normally · 256 for > 5M weights on a GPU; raised to fit a typical example (up to 512)",
+                "numbers": ("N = %s on %s → T = %d" % (_n(target), device, base_context)) + (
+                    " · a typical example is %s characters ≈ %d tokens → %d" % (_n(profile["example_chars"]), example_tokens, context) if example_tokens else ""),
                 "explain": "How many tokens the model can look back at. Attention costs grow with T² and memory with T, so longer context is only worth it once the model is big enough to use it."})
     why.append({"name": "Width d, layers L, heads h", "value": "d=%d · L=%d · h=%d" % (width, layers, heads),
                 "formula": "largest d (step 32) with L ≈ d ÷ 48 and head size 32 (64 from d = 512) where params ≤ N",
@@ -199,13 +217,18 @@ def recommend(hw, data_chars=None, hours=1.0):
 
     per_step = flops_per_step(params, batch, context)
     steps_time = compute / per_step
-    steps_data = 4 * tokens / (batch * context)
+    steps_data = 10 * tokens / (batch * context)
     steps = int(max(200, min(200_000, steps_time, steps_data)) // 50 * 50)
     epochs = steps * batch * context / max(1, tokens)
-    why.append({"name": "Steps", "value": _n(steps), "formula": "min(C ÷ (6·N·B·T), 4 passes over the data)",
-                "numbers": "%s ÷ (6·%s·%d·%d) = %s · 4·%s ÷ (%d·%d) = %s → %s steps ≈ %.1f passes over your text"
+    why.append({"name": "Steps", "value": _n(steps), "formula": "min(C ÷ (6·N·B·T), 10 passes over the data)",
+                "numbers": "%s ÷ (6·%s·%d·%d) = %s · 10·%s ÷ (%d·%d) = %s → %s steps ≈ %.1f passes over your text"
                            % (_sci(compute), _n(params), batch, context, _n(steps_time), _n(tokens), batch, context, _n(steps_data), _n(steps), epochs),
-                "explain": "One step = read a batch, measure the loss, compute gradients, update every weight once."})
+                "explain": "One step = read a batch, measure the loss, compute gradients, update every weight once. Reading text up to 4 times is about as good as new text; more passes still help, less each time (Muennighoff et al., 2023), so this stops at 10. Watch validation: when it stops falling, more steps only memorise."})
+    ratio = target / max(1, tokens)
+    dropout = 0.2 if ratio > 0.5 else 0.1 if ratio > 0.05 else 0.0
+    why.append({"name": "Dropout", "value": "%g" % dropout, "formula": "0.2 above 1 weight per 2 tokens · 0.1 above 1 per 20 · otherwise 0",
+                "numbers": "%s weights ÷ %s tokens = %.2f weights per token → dropout %g" % (_n(target), _n(tokens), ratio, dropout),
+                "explain": "While training, each block zeroes this fraction of its values at random, so the model can't memorise through any one path. Needed when the model is big for its text; with plenty of text it only slows learning."})
 
     lr = 1e-3 if params < 20e6 else 6e-4 if params < 100e6 else 3e-4
     warmup = int(max(20, min(2000, steps * 0.05)))
@@ -215,12 +238,16 @@ def recommend(hw, data_chars=None, hours=1.0):
     eval_every = int(max(25, min(1000, steps // 20)))
     seconds_est = steps * per_step / speed
     total_mem = weights_bytes + batch * act_one
-    expect = expectation(params, tokens, chat=bool(hw.get("chat")))
+    chat = bool(profile.get("chat", hw.get("chat")))
+    why.append({"name": "Learn only the replies", "value": "on" if chat else "off", "formula": "on when the data is conversations",
+                "numbers": "conversations found" if chat else "no User:/Assistant: turns found",
+                "explain": "With conversations, the loss counts only the Assistant's words, so the model learns to answer rather than to write questions. Plain text has no turns: every token is learned."})
+    expect = expectation(params, tokens, chat=chat)
     return {
         "device": device, "speed": speed, "budget": budget, "budget_text": budget_text, "limit": limit_name,
         "settings": {"vocab_size": vocab, "context": context, "dim": width, "layers": layers, "heads": heads,
                      "batch_size": batch, "steps": steps, "learning_rate": lr, "warmup": warmup, "weight_decay": 0.1,
-                     "eval_every": eval_every},
+                     "eval_every": eval_every, "dropout": dropout, "assistant_only": chat},
         "parameters": params, "tokens": tokens, "seconds": seconds_est, "memory": total_mem, "why": why, "expect": expect,
     }
 
@@ -309,7 +336,7 @@ class Trainer:
         self.lock = threading.Lock()
         self.pool = trainpool.Pool(self.root, demo=demo, store=store, kubeconfig=kubeconfig)
         self.thread = None
-        self.parsed = {"path": None, "offset": 0, "train": [], "val": [], "grad": [], "lines": [], "last": {}}
+        self.parsed = {"path": None, "offset": 0, "train": [], "val": [], "grad": [], "lines": [], "last": {}, "quality": [], "verdict": None}
         self.parse_lock = threading.Lock()
         self.check_cache = {}
         self.uploads = {}
@@ -548,6 +575,22 @@ class Trainer:
             advice.append(["ok", "No conversations found: the model will learn to continue text, not to reply."])
         if report["chat"]:
             advice.append(["good", "Conversations found: tick “learn only the replies” so the model learns to answer, not to ask."])
+        # What the data is like, for the recommender: how much is repeated, and how long one example usually is.
+        seen, total_chars, unique_chars = set(), 0, 0
+        for line in text.splitlines():
+            body = line.split(":", 1)[1].strip() if line.startswith(("User:", "Assistant:", "System:")) else line.strip()
+            if not body:
+                continue
+            total_chars += len(body)
+            key = hash(body)
+            if key not in seen:
+                seen.add(key)
+                unique_chars += len(body)
+        blocks = sorted(len(b) for b in text.split("\n\n") if b.strip())
+        example_chars = blocks[len(blocks) // 2] if blocks else 0
+        unique_fraction = unique_chars / total_chars if total_chars else 1.0
+        if unique_fraction < 0.9:
+            advice.append(["warn", "Only %d%% of the lines are different: the rest are repeats. Repeats don't teach anything new, so the model is sized for the unique text." % round(unique_fraction * 100)])
         examples = []   # the first records before and after conversion, so you can see what happens to each field
         if report["format"] == "jsonl":
             for line in raw.splitlines():
@@ -565,7 +608,8 @@ class Trainer:
             except ValueError:
                 pass
         out = dict(report, name=name, size=st.st_size, chars=chars, words=words, tokens_est=int(chars / CHARS_PER_TOKEN),
-                   preview=text[:2500], advice=advice, examples=examples, sampled=sampled)
+                   preview=text[:2500], advice=advice, examples=examples, sampled=sampled,
+                   unique_fraction=round(unique_fraction, 4), example_chars=example_chars)
         if len(self.check_cache) > 16:
             self.check_cache.clear()
         self.check_cache[key] = out
@@ -587,6 +631,73 @@ class Trainer:
         except (OSError, ValueError) as e:
             raise TrainError("Couldn't convert it: %s" % e)
         return dict(rep, name=os.path.basename(dst), size=os.path.getsize(dst))
+
+    def speakers(self, name):
+        path = self._data_path(name)
+        if not os.path.isfile(path):
+            raise TrainError("That file isn't there any more.", 404)
+        return {"speakers": trainsets.speakers(path)}
+
+    def multiparty(self, body):
+        """A script or group chat → chat pairs where one chosen person is the Assistant."""
+        src = self._data_path(body.get("name"))
+        if not os.path.isfile(src):
+            raise TrainError("That file isn't there any more.", 404)
+        speaker = str(body.get("speaker") or "")
+        if speaker not in {s["name"] for s in trainsets.speakers(src)}:
+            raise TrainError("Pick one of the speakers found in the file.")
+        context = max(1, min(8, int(body.get("context") or 3)))
+        stem = re.sub(r"\.(txt|md|jsonl|json)$", "", os.path.basename(src), flags=re.I)[:40]
+        dst = self._data_path("%s-as-%s.jsonl" % (stem, re.sub(r"[^A-Za-z0-9_-]+", "-", speaker).strip("-")[:30] or "speaker"))
+        if os.path.getsize(src) * 2 > DATA_TOTAL_MAX - self._data_total():
+            raise TrainError("Not enough room in your training data (20 GB): delete some files first.", 413)
+        rep = trainsets.multiparty_to_pairs(src, dst, speaker, context, bool(body.get("names", True)))
+        if not rep["examples"]:
+            os.remove(dst)
+            raise TrainError("%s never speaks after someone else, so there's nothing to learn from." % speaker)
+        return dict(rep, name=os.path.basename(dst), size=os.path.getsize(dst))
+
+    # -- saved settings
+    PRESET_KEYS = {"vocab_size": int, "context": int, "dim": int, "layers": int, "heads": int, "batch_size": int, "steps": int,
+                   "learning_rate": float, "warmup": int, "weight_decay": float, "eval_every": int, "save_every": int,
+                   "dropout": float, "assistant_only": bool, "device": str}
+
+    def presets(self):
+        return sorted(self._load_json("presets.json").get("presets", []), key=lambda p: p["name"].lower())
+
+    def save_preset(self, body):
+        name = str(body.get("name") or "").strip()
+        if not re.match(r"^[\w .'()+-]{1,40}$", name):
+            raise TrainError("Name it with up to 40 letters, numbers, spaces or - _ . ( ) +.")
+        given = body.get("settings") if isinstance(body.get("settings"), dict) else {}
+        settings = {}
+        for k, cast in self.PRESET_KEYS.items():
+            if k in given:
+                try:
+                    settings[k] = cast(given[k])
+                except (TypeError, ValueError):
+                    raise TrainError("%s must be a number." % k)
+        if settings.get("device") not in (None, "auto", "cpu", "cuda", "mps"):
+            raise TrainError("Unknown device.")
+        with self.lock:
+            kept = [p for p in self.presets() if p["name"] != name]
+            if len(kept) >= 50:
+                raise TrainError("That's 50 saved settings already: delete one first.")
+            kept.append({"name": name, "settings": settings, "saved_at": time.time(), "note": str(body.get("note") or "")[:200]})
+            self._write_json("presets.json", {"presets": kept})
+        return {"presets": self.presets()}
+
+    def delete_preset(self, body):
+        with self.lock:
+            kept = [p for p in self.presets() if p["name"] != body.get("name")]
+            self._write_json("presets.json", {"presets": kept})
+        return {"presets": self.presets()}
+
+    def _write_json(self, name, obj):
+        tmp = os.path.join(self.root, name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f)
+        os.replace(tmp, os.path.join(self.root, name))
 
     def fetch(self, body):
         try:
@@ -687,10 +798,25 @@ class Trainer:
                        "--vocab-size", str(num("vocab_size", 256, 100_000)),
                        "--learning-rate", repr(num("learning_rate", 1e-7, 1.0, float)),
                        "--weight-decay", repr(num("weight_decay", 0.0, 1.0, float, 0.1)),
+                       "--dropout", repr(num("dropout", 0.0, 0.5, float, 0.0)),
                        "--device", s.get("device") if s.get("device") in ("auto", "cpu", "cuda", "mps") else "auto"]
             if s.get("assistant_only"):
                 options.append("--assistant-only")
             eval_every, save_every = num("eval_every", 1, 1_000_000, int, 250), num("save_every", 0, 1_000_000, int, 500)
+            quality = None
+            q = body.get("quality")
+            if isinstance(q, dict) and q.get("on"):
+                prompts = [{"prompt": str(p.get("prompt") or "")[:500], "expect": [str(e)[:80] for e in (p.get("expect") or [])][:10]}
+                           for p in (q.get("prompts") or [])[:20] if isinstance(p, dict) and str(p.get("prompt") or "").strip()]
+                target = q.get("target_loss")
+                try:
+                    target = float(target) if target not in (None, "") else None
+                except (TypeError, ValueError):
+                    raise TrainError("The target loss must be a number.")
+                if not any(p["expect"] for p in prompts) and target is None:
+                    raise TrainError("To stop when it's good enough, give at least one test prompt an expected word, or a target loss.")
+                quality = json.dumps({"prompts": prompts, "pass": _clamp_float(q.get("pass"), 0.05, 1.0, 1.0), "target_loss": target,
+                                      "give_up": max(0, min(100, int(q.get("give_up") or 10)))})
             chosen = body.get("machines") if isinstance(body.get("machines"), list) and body.get("machines") else None
             machines = self.machines()
             plan = self.plan(machines, chosen)
@@ -701,7 +827,7 @@ class Trainer:
             open(log_path, "a").close()
             self.job = {"model": name, "log": log_path, "started": time.time(), "resume": resume, "data": files, "settings": s,
                         "ended": None, "code": None, "machines": share, "lead": share[0], "mode": "shared" if len(share) > 1 else "single",
-                        "options": options, "steps": steps, "base_steps": base_steps, "warmup": warmup, "eval_every": eval_every, "save_every": save_every,
+                        "options": options, "steps": steps, "base_steps": base_steps, "quality": quality, "warmup": warmup, "eval_every": eval_every, "save_every": save_every,
                         "speeds": {m["name"]: m["speed"] for m in machines if m["name"] in share},
                         "round": 0, "rounds": 0, "phase": "starting", "stop": False, "wjob": None}
             self._save_job()
@@ -728,12 +854,13 @@ class Trainer:
             return self._status(since)
 
     def _status(self, since):
-        job = {k: v for k, v in self.job.items() if k not in ("options", "speeds")}
+        job = {k: v for k, v in self.job.items() if k not in ("options", "speeds", "quality")}
+        job["until_good"] = bool(self.job.get("quality"))
         running = self.running()
         p = self.parsed
         path = job.get("log")
         if path != p["path"]:
-            self.parsed = p = {"path": path, "offset": 0, "train": [], "val": [], "grad": [], "lines": [], "last": {}}
+            self.parsed = p = {"path": path, "offset": 0, "train": [], "val": [], "grad": [], "lines": [], "last": {}, "quality": [], "verdict": None}
         if path and os.path.isfile(path):
             with open(path, "rb") as f:
                 f.seek(p["offset"])
@@ -753,6 +880,15 @@ class Trainer:
                 if m:
                     p["val"].append({"step": int(m.group(3).replace(",", "")), "loss": _f(m.group(2))})
                     continue
+                if line.startswith("QUALITY "):
+                    try:
+                        p["quality"].append(json.loads(line[8:]))
+                        del p["quality"][:-100]
+                    except ValueError:
+                        pass
+                    continue
+                if line.startswith(("Good enough at", "Stopped improving")):
+                    p["verdict"] = line
                 m = GRAD_RE.match(line)
                 if m:
                     p["grad"].append({"local": int(m.group(1)), "norm": _f(m.group(2))})
@@ -763,7 +899,9 @@ class Trainer:
         dropped = p.get("dropped", 0)
         start = max(0, int(since) - dropped)
         return {"job": job, "running": running, "lines": p["lines"][start:], "next": dropped + len(p["lines"]),
-                "train": _thin(p["train"], 1500), "val": p["val"], "grad": p["grad"][-200:], "last": p["last"]}
+                "train": _thin(p["train"], 1500), "val": p["val"], "grad": p["grad"][-200:], "last": p["last"],
+                "quality": [{"step": x["step"], "score": x["score"], "loss": x.get("loss")} for x in p["quality"]],
+                "quality_last": p["quality"][-1] if p["quality"] else None, "verdict": p["verdict"]}
 
     # -- running a job on the workers
     def _orchestrate(self, reattach=False):
@@ -910,6 +1048,8 @@ class Trainer:
                                      "--eval-every", str(job["eval_every"]), "--save-every", str(job["save_every"])]
             if job["resume"]:
                 opts.append("--resume")
+            if job.get("quality"):
+                opts += ["--quality", job["quality"]]
             say("Training on %s." % name)
             wj = r.call("POST", "/train", {"model": model, "data": job["data"], "options": opts})
             job.update(wjob={"name": name, "id": wj["id"], "offset": 0}, phase="training")
@@ -1038,8 +1178,17 @@ class Trainer:
                 try:
                     opts = job["options"] + ["--resume", "--steps", str(plan[n]), "--lr-progress", "%.6f" % ((rnd - 1) / rounds), "%.6f" % (rnd / rounds),
                                              "--seed", str(17 + 1000 * i + rnd), "--eval-every", str(plan[n]), "--save-every", "0"]
+                    if n == lead_name and job.get("quality"):
+                        opts += ["--quality", job["quality"]]
+
+                    def verdict(line, measure=measure):
+                        measure(line)
+                        if line.startswith(("Good enough at", "Stopped improving")):
+                            job["stop"] = True   # the averaged model this round makes is the last
+
                     wj = remotes[n].call("POST", "/train", {"model": model, "data": job["data"], "options": opts})
-                    code = self._tail(remotes[n], {"id": wj["id"], "offset": 0}, say, prefix="" if n == lead_name else "[%s] " % n, on_line=measure)
+                    code = self._tail(remotes[n], {"id": wj["id"], "offset": 0}, say, prefix="" if n == lead_name else "[%s] " % n,
+                                      on_line=verdict if n == lead_name else measure)
                     results[n] = (code, seen)
                 except trainpool.PoolError as e:
                     say("[%s] %s" % (n, e))
@@ -1199,13 +1348,17 @@ def register(ctx, args):
         chars = None
         names = [n for n in (q.get("data") or [""])[0].split("|") if n]
         chat = False
+        unique_chars = example_weighted = 0.0
         for n in names:
             try:
                 c = t.check(n)
                 chars = (chars or 0) + c["chars"]
                 chat = chat or c["chat"]
+                unique_chars += c["chars"] * c.get("unique_fraction", 1.0)
+                example_weighted += c["chars"] * c.get("example_chars", 0)
             except TrainError:
                 pass
+        profile = {"chat": chat, "unique_fraction": unique_chars / chars, "example_chars": example_weighted / chars} if chars else None
         machines = t.machines()
         chosen = [n for n in (q.get("machines") or [""])[0].split("|") if n] or None
         plan = t.plan(machines, chosen)
@@ -1213,9 +1366,9 @@ def register(ctx, args):
             lead = next(m for m in machines if m["name"] == plan["lead"])
             t.pool.ensure(lead["name"], lead.get("_node"))
         hw = t.plan_hardware(machines, plan)
-        rec = recommend(dict(hw, chat=chat), chars, hours)
+        rec = recommend(dict(hw, chat=chat), chars, hours, profile)
         return {"machines": [t.public(m) for m in machines], "plan": plan, "mode": t.pool.mode, "hardware": hw, "recommend": rec,
-                "datasets": t.datasets(), "catalog": t.fetcher.catalog(), "models": t.models(), "running": t.running(), "job": t.job, "hours": hours, "data_dir": t.data_dir}
+                "datasets": t.datasets(), "catalog": t.fetcher.catalog(), "models": t.models(), "presets": t.presets(), "running": t.running(), "job": t.job, "hours": hours, "data_dir": t.data_dir}
 
     def warm(body):
         names = body.get("machines") if isinstance(body.get("machines"), list) else []
@@ -1230,6 +1383,7 @@ def register(ctx, args):
         "/api/train/status": wrap(lambda q: t.status(int((q.get("since") or ["0"])[0] or 0))),
         "/api/train/check": wrap(lambda q: {"check": t.check((q.get("name") or [""])[0])}),
         "/api/train/datasets": wrap(lambda q: {"catalog": t.fetcher.catalog()}),
+        "/api/train/speakers": wrap(lambda q: t.speakers((q.get("name") or [""])[0])),
     })
     ctx.post_routes.update({
         "/api/train/upload": wrap(t.upload),
@@ -1243,6 +1397,9 @@ def register(ctx, args):
         "/api/train/warm": wrap(warm),
         "/api/train/datasets/get": wrap(t.fetch),
         "/api/train/convert": wrap(t.convert),
+        "/api/train/multiparty": wrap(t.multiparty),
+        "/api/train/presets/save": wrap(t.save_preset),
+        "/api/train/presets/delete": wrap(t.delete_preset),
     })
     ctx.post_limits["/api/train/upload"] = UPLOAD_BODY_MAX
     ctx.post_limits["/api/train/paste"] = PASTE_MAX * 2 + 4096
