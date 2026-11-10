@@ -182,6 +182,17 @@ class TrainerTests(unittest.TestCase):
         self.assertEqual(st["grad"][0]["norm"], 0.8)
         self.assertEqual(self.t.status(st["next"])["lines"], [])
 
+    def test_every_step_reports_its_gradient(self):
+        log = os.path.join(self.t.logs_dir, "s.log")
+        with open(log, "w") as f:
+            for i in range(1, 4):
+                f.write("Step %d/3 | train loss 5.0 | 1.00 steps/sec | 100 tokens/sec | total training step %d | learning rate 0.001 | gradient norm %.1f\n" % (i, i, i / 2))
+            f.write("Gradient norm at step 3: 9.9 (clipped to 1.0 when larger)\n")   # the per-check line no longer doubles up
+        self.t.job = {"model": "m", "log": log}
+        st = self.t.status(0)
+        self.assertEqual([p["step"] for p in st["train"]], [1, 2, 3])
+        self.assertEqual([(g["step"], g["norm"]) for g in st["grad"]], [(1, 0.5), (2, 1.0), (3, 1.5)])
+
     def test_start_checks_settings_before_anything_runs(self):
         post(self.t, self.t.paste, {"name": "d.txt", "text": "x" * 2000})
         bad = post(self.t, self.t.start, {"data": ["d.txt"], "settings": {"dim": 63, "heads": 2, "steps": 10, "batch_size": 1, "context": 8,
@@ -455,6 +466,28 @@ class QualityAndMultipartyTests(unittest.TestCase):
         self.assertLess(c["unique_fraction"], 0.55)
         self.assertTrue(any("repeats" in a[1] for a in c["advice"]))
         self.assertGreater(c["example_chars"], 20)
+
+    def test_samples_are_real_exchanges_from_the_data(self):
+        pairs = [{"messages": [{"role": "user", "content": "q%d" % i}, {"role": "assistant", "content": "a%d" % i}]} for i in range(400)]
+        post(self.t, self.t.paste, {"name": "qa.jsonl", "text": "\n".join(json.dumps(x) for x in pairs)})
+        r = self.t.samples(["qa.jsonl"], 20)
+        self.assertEqual(len(r["samples"]), 20)
+        self.assertTrue(r["chat"])
+        for x in r["samples"]:
+            self.assertEqual(x["answer"], "a" + x["prompt"][1:])
+            self.assertLess(int(x["prompt"][1:]), 380)              # from the training part
+        held = self.t.samples(["qa.jsonl"], 20, held_out=True)
+        self.assertTrue(all(int(x["prompt"][1:]) >= 380 for x in held["samples"]))   # the last 5%, never trained on
+        self.assertEqual(post(self.t, self.t.samples, ["nope.txt"])["code"], 404)
+
+    def test_answers_count_as_something_to_check(self):
+        settings = {"dim": 64, "heads": 2, "steps": 10, "batch_size": 1, "context": 8, "layers": 1, "vocab_size": 300, "learning_rate": 0.001}
+        q = {"on": True, "prompts": [{"prompt": "Hi", "answer": "Hello."}], "match": "close"}
+        r = post(self.t, self.t.start, {"data": ["d.txt"], "settings": settings, "quality": q})
+        self.assertNotIn("error", r)
+        spec = json.loads(self.t.job["quality"])
+        self.assertEqual((spec["prompts"][0]["answer"], spec["match"]), ("Hello.", "close"))
+        self.t.job["stop"] = True
 
     def test_group_chat_becomes_pairs_for_one_speaker(self):
         chat = ("12/03/2024, 21:15 - Sam: anyone up?\n12/03/2024, 21:16 - Alex: yep\n[12/03/2024, 21:17:03] Jo: me too\n"

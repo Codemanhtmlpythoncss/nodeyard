@@ -14,7 +14,8 @@
     explain: null, exModel: "", exPrompt: "User: Hello, who are you?", exBusy: false, upload: null, ovPollT: 0,
     mp: { file: "", speakers: null, speaker: "", context: 3 },
     edited: null, preset: store.get("train.preset", "") || "",
-    q: (() => { try { return JSON.parse(store.get("train.quality", "") || "null"); } catch (_) { return null; } })() || { on: false, preset: "starter", prompts: [], pass: 1, target_loss: "", give_up: 10 },
+    q: Object.assign({ on: false, preset: "starter", prompts: [], pass: 1, target_loss: "", give_up: 10, count: 20, held_out: false, match: "exact" },
+      (() => { try { return JSON.parse(store.get("train.quality", "") || "null"); } catch (_) { return null; } })() || {}),
     machines: JSON.parse(store.get("train.machines", "[]") || "[]"), share: store.get("train.share", "1") !== "0", together: store.get("train.together", "share") || "share",
   };
 
@@ -320,9 +321,22 @@
     starter: { label: "Chat basics (starter chat set)", prompts: [["Hello!", "hello, hi"], ["What is 12 plus 7?", "19"], ["Spell cat.", "C-A-T"], ["What day comes after Friday?", "Saturday"], ["What is the opposite of hot?", "cold"]] },
     shakespeare: { label: "Sounds like Shakespeare", prompts: [["What news, my lord?", "lord, thou, thee, thy, sir"], ["Wilt thou come with me?", "thee, thou, ay, nay, will"], ["Good morrow, sweet lady.", "morrow, sir, lord, good"], ["Why dost thou weep?", "thou, my, I"]] },
     stories: { label: "Writes a story (TinyStories)", prompts: [["Once upon a time, there was a little", "she, he, they, was"], ["The dog wanted to", "the, and"]] },
+    data: { label: "From my training data (real exchanges)", prompts: [] },
     own: { label: "My own", prompts: [["", ""]] },
   };
-  function qPrompts() { if (!TR.q.prompts.length) TR.q.prompts = Q_PRESETS[TR.q.preset || "starter"].prompts.map(([p, e]) => ({ prompt: p, expect: e })); return TR.q.prompts; }
+  if (!(+TR.q.give_up >= 3)) TR.q.give_up = 10;     // an old saved value could be empty, which showed a blank box
+  if (!(+TR.q.count >= 20)) TR.q.count = 20;
+  function qPrompts() { if (!TR.q.prompts.length && TR.q.preset !== "data") TR.q.prompts = Q_PRESETS[TR.q.preset || "starter"].prompts.map(([p, e]) => ({ prompt: p, expect: e })); return TR.q.prompts; }
+  async function sampleFromData() {
+    if (!TR.sel.length) { toast("Tick your training data first (step 2)."); return; }
+    const count = Math.max(20, Math.min(100, +TR.q.count || 20));
+    try {
+      const r = await getJSON("/api/train/samples?data=" + encodeURIComponent(TR.sel.join("|")) + "&count=" + count + "&held_out=" + (TR.q.held_out ? 1 : 0));
+      if (!r.ok) { toast(r.error); return; }
+      TR.q.prompts = r.samples.map((x) => ({ prompt: x.prompt, answer: x.answer, expect: "" })); TR.q.pass = 1; saveQ(); paint();
+      toast(r.samples.length + " exchanges picked from " + n0(r.from) + (TR.q.held_out ? " held-out ones" : " in your training text"));
+    } catch (_) { toast("Couldn't read the data."); }
+  }
   function saveQ() { store.set("train.quality", JSON.stringify(TR.q)); }
   function recSettings(ov) { return Object.assign({ save_every: 500, device: "auto", assistant_only: false, dropout: 0 }, (ov || TR.ov).recommend.settings); }
   function markEdited() { TR.edited = Object.assign({}, TR.form); }
@@ -372,7 +386,7 @@
         paintLive();
       }
     } catch (e) { /* offline */ }
-    TR.pollT = setTimeout(poll, TR.status && TR.status.running ? 1500 : 6000);
+    TR.pollT = setTimeout(poll, TR.status && TR.status.running ? 700 : 6000);
   }
   async function post(url, body) {
     try { const r = await postJSON(url, body); if (!r.ok) { toast(r.error || "That didn't work."); return null; } return r; }
@@ -595,9 +609,14 @@ Assistant: game tonight?</pre></div>
       <div class="seg"><button class="${q.on ? "" : "on"}" data-tr-act="q-off">after the steps above</button><button class="${q.on ? "on" : ""}" data-tr-act="q-on">it's good enough</button></div>
       ${!q.on ? html`<p class="faint small">Trains for exactly the steps set above.</p>` : html`
       <p class="small">At every validation check it asks the model these prompts (temperature 0.3) and grades each reply: <b>it passes if the reply contains any of the expected words</b>. Training stops as soon as ${q.target_loss !== "" ? "the pass rate and the target loss are both reached" : "enough pass"}, or when validation hasn't improved for ${q.give_up} checks in a row (then it tells you what's missing). The steps above become the <b>maximum</b>, so set them high.</p>
-      <div class="row wrap"><label class="tr-field inline"><span>Prompts</span><select class="select" data-tr-act="q-preset">${raw(Object.entries(Q_PRESETS).map(([k, v]) => '<option value="' + k + '"' + (q.preset === k ? " selected" : "") + ">" + esc(v.label) + "</option>").join(""))}</select></label></div>
-      <div class="tr-scroll"><table class="tr-key tr-qtable"><tr><th>Test prompt (what you'd type in Chat)</th><th>Pass if the reply contains any of</th><th></th></tr>
-        ${ps.map((p, i) => html`<tr><td><input class="input" data-tr-q="${i}" data-k="prompt" value="${p.prompt}" placeholder="e.g. What is a node?"></td><td><input class="input" data-tr-q="${i}" data-k="expect" value="${p.expect}" placeholder="words, comma separated (empty: just show it)"></td><td><button class="btn small" data-tr-qdel="${i}" aria-label="remove">✕</button></td></tr>`)}</table></div>
+      <div class="row wrap"><label class="tr-field inline"><span>Prompts</span><select class="select" data-tr-act="q-preset">${raw(Object.entries(Q_PRESETS).map(([k, v]) => '<option value="' + k + '"' + (q.preset === k ? " selected" : "") + ">" + esc(v.label) + "</option>").join(""))}</select></label>
+        ${q.preset === "data" ? html`<label class="tr-field inline"><span>how many</span><input class="input" type="number" min="20" max="100" data-tr-act="q-count" value="${q.count}" style="width:70px"></label>
+          <label class="tr-field inline"><span>from</span><select class="select" data-tr-act="q-heldout"><option value="0" ${q.held_out ? "" : "selected"}>the training text</option><option value="1" ${q.held_out ? "selected" : ""}>the held-out 5% (never trained on)</option></select></label>
+          <label class="tr-field inline"><span>a reply is correct when it has</span><select class="select" data-tr-act="q-match"><option value="exact" ${q.match === "exact" ? "selected" : ""}>the same words</option><option value="close" ${q.match === "close" ? "selected" : ""}>80%+ of the same words</option></select></label>
+          <button class="btn small primary" data-tr-act="q-sample">${ps.length ? "Pick new samples" : "Pick samples"}</button>` : ""}</div>
+      ${q.preset === "data" ? html`<p class="faint small">Each check asks the model what the person said and compares its reply (its most likely words, no randomness) with the reply in your data. ${q.held_out ? "Held-out exchanges were never trained on, so passing them means it learned the patterns, not the lines: much harder." : "These are lines it trains on: getting them all right means it has learned (memorised) them. To test real understanding, pick from the held-out 5% instead."}</p>` : ""}
+      <div class="tr-scroll"><table class="tr-key tr-qtable"><tr><th>Test prompt (what you'd type in Chat)</th><th>${q.preset === "data" ? "Correct reply (from your data)" : "Pass if the reply contains any of"}</th><th></th></tr>
+        ${ps.map((p, i) => html`<tr><td><input class="input" data-tr-q="${i}" data-k="prompt" value="${p.prompt}" placeholder="e.g. What is a node?"></td><td>${p.answer != null ? html`<input class="input" data-tr-q="${i}" data-k="answer" value="${p.answer}" placeholder="the reply it must give">` : html`<input class="input" data-tr-q="${i}" data-k="expect" value="${p.expect}" placeholder="words, comma separated (empty: just show it)">`}</td><td><button class="btn small" data-tr-qdel="${i}" aria-label="remove">✕</button></td></tr>`)}</table></div>
       <div class="row wrap mt"><button class="btn small" data-tr-act="q-add">Add a prompt</button><span class="spacer"></span>
         <label class="tr-field inline"><span>pass when</span><select class="select" data-tr-act="q-pass">${raw([[1, "all pass"], [0.8, "80% pass"], [0.6, "60% pass"], [0.5, "half pass"]].map(([v, l]) => '<option value="' + v + '"' + (+q.pass === v ? " selected" : "") + ">" + l + "</option>").join(""))}</select></label>
         <label class="tr-field inline"><span>and validation loss ≤</span><input class="input" data-tr-act="q-target" value="${q.target_loss}" placeholder="optional" style="width:90px"></label>
@@ -615,7 +634,7 @@ Assistant: game tonight?</pre></div>
     const sc = (st.quality || []).filter((x) => x.score != null);
     return html`<div class="tr-quality"><h4>Test replies${ql ? " at step " + n0(ql.step) : ""}${ql && ql.score != null ? html` · <b>${f(ql.score * 100, 3)}% pass</b>` : ""}</h4>
       ${st.verdict ? html`<div class="tr-adv ${/^Good/.test(st.verdict) ? "good" : "warn"}">${st.verdict}</div>` : ""}
-      ${ql ? html`<div class="tr-scroll"><table class="tr-key"><tr><th></th><th>Prompt</th><th>Reply</th><th>Wanted</th></tr>${ql.results.map((r) => html`<tr><td>${r.ok == null ? "·" : r.ok ? html`<span class="good-t">✓</span>` : html`<span class="bad-t">✗</span>`}</td><td class="small">${r.prompt}</td><td class="small"><i>${r.reply || "(nothing)"}</i></td><td class="small faint">${(r.expect || []).join(", ")}</td></tr>`)}</table></div>` : html`<p class="faint small">The first check runs at the first validation.</p>`}
+      ${ql ? html`<div class="tr-scroll"><table class="tr-key"><tr><th></th><th>Prompt</th><th>Reply</th><th>Wanted</th></tr>${ql.results.map((r) => html`<tr><td>${r.ok == null ? "·" : r.ok ? html`<span class="good-t">✓</span>` : html`<span class="bad-t">✗</span>`}</td><td class="small">${r.prompt}</td><td class="small"><i>${r.reply || "(nothing)"}</i></td><td class="small faint">${r.answer != null ? html`${r.answer}${r.similarity != null ? html` <b>(${f(r.similarity * 100, 3)}% same words)</b>` : ""}` : (r.expect || []).join(", ")}</td></tr>`)}</table></div>` : html`<p class="faint small">The first check runs at the first validation.</p>`}
       ${sc.length > 1 ? html`<canvas class="tr-cv short" id="tr-qchart"></canvas>` : ""}</div>`;
   }
   function machinesCard() {
@@ -679,7 +698,7 @@ Assistant: game tonight?</pre></div>
     chart($("#tr-lr"), [{ pts: tr.map((p) => [p.step, p.lr]), color: cssv("--accent2", "#2de") }], { y0: 0, empty: "–" });
     const qs = st ? (st.quality || []).filter((x) => x.score != null) : [];
     if ($("#tr-qchart")) chart($("#tr-qchart"), [{ pts: qs.map((x) => [x.step, x.score * 100]), color: cssv("--good", "#3d9"), dots: true }], { y0: 0, xlabel: "step · % of test prompts passing" });
-    chart($("#tr-grad"), [{ pts: (st ? st.grad : []).map((p) => [p.local, p.norm]), color: cssv("--warn", "#fb2"), dots: true }], { y0: 0, empty: "–" });
+    chart($("#tr-grad"), [{ pts: (st ? st.grad : []).map((p) => [p.step != null ? p.step : p.local, p.norm]), color: cssv("--warn", "#fb2"), dots: st ? st.grad.length < 150 : false }], { y0: 0, empty: "–" });
   }
 
   function workerNote(what) {
@@ -802,7 +821,8 @@ Assistant: game tonight?</pre></div>
     else if (a === "size-mine") { const s = curSet(); Object.assign(L.size, { V: +s.vocab_size, T: +s.context, d: +s.dim, L: +s.layers, h: +s.heads, B: +s.batch_size }); paint(); }
     else if (a === "paste") { const name = $("#tr-paste-name").value.trim(), text = $("#tr-paste-text").value; const r = await post("/api/train/paste", { name, text }); if (r) { if (!TR.sel.includes(r.name)) TR.sel.push(r.name); saveSel(); toast("Saved " + r.name); await loadOverview(); checkData(r.name); } }
     else if (a === "q-on" || a === "q-off") { TR.q.on = a === "q-on"; saveQ(); paint(); }
-    else if (a === "q-add") { qPrompts().push({ prompt: "", expect: "" }); saveQ(); paint(); }
+    else if (a === "q-sample") { sampleFromData(); }
+    else if (a === "q-add") { qPrompts().push(TR.q.preset === "data" ? { prompt: "", answer: "", expect: "" } : { prompt: "", expect: "" }); saveQ(); paint(); }
     else if (a === "mp-make") {
       const r = await post("/api/train/multiparty", { name: TR.mp.file, speaker: TR.mp.speaker, context: TR.mp.context, names: true });
       if (r) { toast("Made " + r.name + ": " + n0(r.examples) + " examples from " + n0(r.turns) + " turns"); if (!TR.sel.includes(r.name)) TR.sel.push(r.name); saveSel(); await loadOverview(); checkData(r.name); }
@@ -820,7 +840,7 @@ Assistant: game tonight?</pre></div>
     }
     else if (a === "start") {
       const body = { data: TR.sel, settings: TR.form, resume: TR.resume, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.together !== "fastest", together: TR.together,
-        quality: TR.q.on ? { on: true, prompts: qPrompts().filter((p) => p.prompt.trim()).map((p) => ({ prompt: p.prompt, expect: String(p.expect).split(",").map((x) => x.trim()).filter(Boolean) })), pass: TR.q.pass, target_loss: TR.q.target_loss, give_up: TR.q.give_up } : undefined };
+        quality: TR.q.on ? { on: true, prompts: qPrompts().filter((p) => p.prompt.trim()).map((p) => ({ prompt: p.prompt, answer: p.answer || "", expect: String(p.expect || "").split(",").map((x) => x.trim()).filter(Boolean) })), pass: TR.q.pass, target_loss: TR.q.target_loss, give_up: TR.q.give_up || 10, match: TR.q.match } : undefined };
       const r = await post("/api/train/start", body);
       if (r) { toast("Training " + r.model); TR.lines = []; TR.since = 0; TR.status = null; TR.model = TR.resume ? TR.model : ""; await loadOverview(); poll(); }
     }
@@ -881,7 +901,10 @@ Assistant: game tonight?</pre></div>
     }
     else if (d.trAct === "mp-speaker") TR.mp.speaker = t.value;
     else if (d.trAct === "preset") { if (t.value) loadPreset(t.value); else resetSettings(); }
-    else if (d.trAct === "q-preset") { TR.q.preset = t.value; TR.q.prompts = []; qPrompts(); saveQ(); paint(); }
+    else if (d.trAct === "q-preset") { TR.q.preset = t.value; TR.q.prompts = []; qPrompts(); saveQ(); paint(); if (t.value === "data") sampleFromData(); }
+    else if (d.trAct === "q-heldout") { TR.q.held_out = t.value === "1"; saveQ(); sampleFromData(); }
+    else if (d.trAct === "q-match") { TR.q.match = t.value; saveQ(); }
+    else if (d.trAct === "q-count") { TR.q.count = Math.max(20, Math.min(100, +t.value || 20)); saveQ(); sampleFromData(); }
     else if (d.trAct === "q-pass") { TR.q.pass = +t.value; saveQ(); paint(); }
     else if (d.trAct === "mp-context") TR.mp.context = Math.max(1, Math.min(8, +t.value || 3));
     else if (d.trAct === "chat-model") { TR.chat.model = t.value; TR.chat.history = []; paint(); }
