@@ -312,13 +312,34 @@ def read_memory():
     return 0, 0
 
 
-def node_speed(node):
-    """(device, estimated FLOP/s, GPU name) for a cluster node, from what the dashboard already knows about it."""
+def node_gpu(node):
+    """The node's NVIDIA GPU as {"name", "vram"} (bytes), or None.
+
+    Prefers the live hardware inventory, but falls back to the durable node labels the AI-split setup puts on a GPU
+    node after it has checked that nvidia-smi works in a container there (nodeyard.io/gpu=nvidia, VRAM in
+    nodeyard.io/gpu-vram-mib). The label survives when a node's agent inventory is momentarily missing (debian-1's
+    server->node path drops out often), so the machine keeps its GPU here instead of being shown as a plain CPU box.
+    This is the same label pod_manifest() provisions the GPU from, so the table and the pod now agree."""
     gpus = (((node.get("hw") or {}).get("hardware") or {}).get("gpus")) or []
     nvidia = [g for g in gpus if (g.get("vendor") or "").lower() == "0x10de" or "nvidia" in (g.get("name_full") or "").lower()]
     if nvidia:
         g = nvidia[0]
-        return "cuda", estimate_speed("cuda", gpu={"vram": g.get("vram") or 4e9}), g.get("name_full") or "NVIDIA GPU"
+        return {"name": g.get("name_full") or "NVIDIA GPU", "vram": g.get("vram") or 4e9}
+    labels = node.get("labels") or {}
+    if labels.get("nodeyard.io/gpu") == "nvidia":
+        try:
+            vram = int(labels.get("nodeyard.io/gpu-vram-mib")) * 1024 ** 2
+        except (TypeError, ValueError):
+            vram = 4e9
+        return {"name": "NVIDIA GPU", "vram": vram}
+    return None
+
+
+def node_speed(node):
+    """(device, estimated FLOP/s, GPU name) for a cluster node, from what the dashboard already knows about it."""
+    g = node_gpu(node)
+    if g:
+        return "cuda", estimate_speed("cuda", gpu={"vram": g["vram"]}), g["name"]
     arch = node.get("arch", "")
     return "cpu", estimate_speed("cpu", node.get("cpu_cores") or 1, "aarch64" if arch.startswith("arm") else arch), ""
 
@@ -365,8 +386,8 @@ class Trainer:
         out = []
         if self.pool.mode == "cluster":
             for n in self.pool.cluster_nodes():
-                device, speed, gpu = node_speed(n)
-                vram = next((g.get("vram") for g in (((n.get("hw") or {}).get("hardware") or {}).get("gpus") or []) if g.get("vram")), None)
+                device, speed, _ = node_speed(n)
+                gpu = node_gpu(n)
                 total, used = n.get("mem_total") or 0, n.get("mem_used") or 0
                 free_disk = (n.get("disk_total") or 0) - (n.get("disk_used") or 0)
                 need_disk = 4e9 if device == "cuda" else 1.5e9
@@ -379,7 +400,7 @@ class Trainer:
                     reason = "only %s of disk free; PyTorch needs about %s" % (_gb(free_disk), _gb(need_disk))
                 elif total and total < 1.5 * 1024 ** 3:
                     reason = "under 1.5 GB of memory"
-                out.append({"name": n.get("name"), "kind": "node", "device": device, "gpu": {"name": gpu, "vram": vram or 4e9} if gpu else None,
+                out.append({"name": n.get("name"), "kind": "node", "device": device, "gpu": gpu,
                             "cores": n.get("cpu_cores") or 1, "arch": n.get("arch", ""), "ram_total": total, "ram_free": max(0, total - used),
                             "speed": speed, "usable": not reason, "reason": reason, "_node": n})
         else:
@@ -395,11 +416,19 @@ class Trainer:
             st = e.get("status") or {}
             probe = st.get("probe") or {}
             if e["state"] == "ready":   # the worker knows what PyTorch can really use there
-                m["device"] = st.get("device") or m["device"]
-                if probe.get("cuda") and probe.get("gpu"):
-                    m["gpu"] = {"name": probe["gpu"]["name"], "vram": probe["gpu"]["vram"]}
-                elif m["device"] != "cuda":
-                    m["gpu"] = None
+                if probe.get("cuda") and probe.get("gpu"):          # really training on the GPU
+                    m["device"], m["gpu"] = "cuda", {"name": probe["gpu"]["name"], "vram": probe["gpu"]["vram"]}
+                elif m["gpu"] and probe.get("gpu"):
+                    # The node has a GPU and this worker can see it, but PyTorch can't use it right now (a CPU-only
+                    # build, or the driver is busy). Keep showing the GPU and its estimate — the worker's cuda_error
+                    # note explains the CPU fall-back — instead of relabelling it a plain CPU box.
+                    m["device"], m["gpu"] = "cuda", {"name": probe["gpu"]["name"], "vram": probe["gpu"]["vram"]}
+                elif m["gpu"] and st.get("device") != "cuda" and not probe.get("torch"):
+                    pass   # worker still starting: keep the node's known GPU until it has really probed
+                else:
+                    m["device"] = st.get("device") or m["device"]
+                    if m["device"] != "cuda":
+                        m["gpu"] = None
                 if m["kind"] == "local" or st.get("ram_free"):
                     m["ram_free"] = st.get("ram_free") or m["ram_free"]
                 m["speed"] = estimate_speed(m["device"], m["cores"], m["arch"], m["gpu"])
