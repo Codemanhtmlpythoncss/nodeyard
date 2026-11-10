@@ -326,7 +326,7 @@
   function saveQ() { store.set("train.quality", JSON.stringify(TR.q)); }
   function recSettings(ov) { return Object.assign({ save_every: 500, device: "auto", assistant_only: false, dropout: 0 }, (ov || TR.ov).recommend.settings); }
   function markEdited() { TR.edited = Object.assign({}, TR.form); }
-  function resetSettings() { TR.edited = null; TR.preset = ""; store.set("train.preset", ""); TR.form = recSettings(); paint(); toast("Settings reset to the recommendation for this hardware and data."); }
+  function resetSettings() { TR.edited = null; TR.preset = ""; store.set("train.preset", ""); TR.form = recSettings(); paint(); toast("Settings configured for this hardware and the training data you ticked."); }
   function loadPreset(name) {
     const p = (TR.ov.presets || []).find((x) => x.name === name); if (!p) return resetSettings();
     TR.preset = name; store.set("train.preset", name); TR.edited = Object.assign({}, p.settings); TR.form = Object.assign(recSettings(), p.settings); paint(); toast("Loaded “" + name + "”.");
@@ -549,13 +549,14 @@ Assistant: game tonight?</pre></div>
         <p class="small"><b>Expect:</b> ${r.expect.level}</p>
         ${TR.edited ? html`<button class="btn" data-tr-act="use-rec">Use these settings</button>` : html`<p class="faint small">These are in the settings below.</p>`}</section>
       <section class="card tr-span2"><h2 class="tr-h">Settings</h2>
-        <div class="row wrap tr-presets"><label class="tr-field inline"><span>Using</span><select class="select" data-tr-act="preset">
-          <option value="">Recommended for this hardware and data</option>${raw((ov.presets || []).map((p) => '<option value="' + esc(p.name) + '"' + (TR.preset === p.name ? " selected" : "") + ">" + esc(p.name) + "</option>").join(""))}</select></label>
-          ${TR.edited && !TR.preset ? html`<span class="warn-t small">edited, not saved</span>` : TR.preset && presetChanged() ? html`<span class="warn-t small">changed since saved</span>` : ""}
+        <div class="row wrap tr-presets">
+          <button class="btn small primary" data-tr-act="reset-settings">Config for hardware and training dataset</button>
+          <button class="btn small" data-tr-act="save-settings">Save settings preset</button>
+          <label class="tr-field inline"><span>Saved presets</span><select class="select" data-tr-act="preset">
+            <option value="">${(ov.presets || []).length ? "— choose a preset —" : "none saved yet"}</option>${raw((ov.presets || []).map((p) => '<option value="' + esc(p.name) + '"' + (TR.preset === p.name ? " selected" : "") + ">" + esc(p.name) + "</option>").join(""))}</select></label>
+          ${TR.preset ? html`<button class="btn small danger" data-tr-act="delete-preset">Delete preset</button>` : ""}
           <span class="spacer"></span>
-          <button class="btn small primary" data-tr-act="save-settings">${TR.preset ? "Save" : "Save settings…"}</button>
-          ${TR.preset ? html`<button class="btn small" data-tr-act="save-as">Save as…</button><button class="btn small danger" data-tr-act="delete-preset">Delete</button>` : ""}
-          ${TR.edited ? html`<button class="btn small" data-tr-act="reset-settings">Reset to recommended</button>` : ""}</div>
+          <span class="small ${TR.edited && (!TR.preset || presetChanged()) ? "warn-t" : "faint"}">${TR.preset ? (presetChanged() ? "“" + TR.preset + "”, changed since saved" : "using “" + TR.preset + "”") : TR.edited ? "edited, not saved" : "configured for this hardware and data"}</span></div>
         <p class="faint small">${TR.edited ? "Recommended would be: " + n0(params(r.settings.vocab_size, r.settings.context, r.settings.dim, r.settings.layers)) + " weights (V " + n0(r.settings.vocab_size) + ", T " + r.settings.context + ", d " + r.settings.dim + ", L " + r.settings.layers + "), " + n0(r.settings.steps) + " steps." : "Worked out from this machine's hardware and the data you ticked (see “Recommended” above for every reason). Change anything; Save keeps it for next time."}</p>
         <div class="tr-form">
           ${field("vocab_size", "Vocabulary V", "tokens the BPE tokenizer learns (≥ 256)")}${field("context", "Context T", "tokens it sees at once")}${field("dim", "Width d", "numbers per token; must divide by heads")}
@@ -788,8 +789,8 @@ Assistant: game tonight?</pre></div>
     }
     else if (a === "convert") { const r = await post("/api/train/convert", { name: TR.check.name }); if (r) { toast("Saved " + r.name + " (" + n0(r.records) + " records)"); await loadOverview(); checkData(r.name); } }
     else if (a === "use-rec" || a === "reset-settings") resetSettings();
-    else if (a === "save-settings" || a === "save-as") {
-      let name = a === "save-settings" && TR.preset ? TR.preset : prompt("Name these settings (e.g. “Shakespeare on the GPU”):", TR.preset ? TR.preset + " (copy)" : "");
+    else if (a === "save-settings") {
+      let name = prompt("Save these settings as a preset. Name (an existing name is replaced):", TR.preset || (TR.sel[0] ? TR.sel[0].replace(/\.[a-z]+$/i, "") + " settings" : ""));
       if (!name || !(name = name.trim())) return;
       const r = await post("/api/train/presets/save", { name, settings: TR.form, note: TR.sel.join(", ") });
       if (r) { TR.ov.presets = r.presets; TR.preset = name; store.set("train.preset", name); TR.edited = Object.assign({}, TR.form); paint(); toast("Saved “" + name + "”."); }
