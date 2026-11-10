@@ -1212,25 +1212,27 @@
     const nodes = S.d ? S.d.nodes : [];
     const notReady = nodes.filter((n) => !n.ready);
     const checks = (FIX.doctor && FIX.doctor.checks) || [];
-    const problems = checks.filter((c) => c.status === "fail" || c.status === "warn");
+    const isBad = (c) => c.status === "fail" || c.status === "issue";   // doctor.sh says "issue"; the demo says "fail"
+    const problems = checks.filter((c) => isBad(c) || c.status === "warn");
     const fixable = problems.filter((c) => c.fix);
     const reachText = (name) => { const r = FIX.reach[String(name).toLowerCase()]; return (r === "both" || r === "lan" || r === "tailscale") ? "answers (online)" : r === "partial" ? "up, agent not answering" : r === "unreachable" ? "no answer (offline)" : "not tested"; };
     const nodeRow = (n) => { const st = nodeState(n); return html`<div class="fix-row"><div class="grow"><b>${n.name} — ${st.label}</b>
       <div class="muted small">Reachability: ${reachText(n.name)}.</div>
-      <div class="faint small">${st.unknown ? "The control plane hasn't heard from it. If it answers above, it's a control-plane/network issue, not a dead node — try Restart Kubernetes (Devices) or check its link." : "The node itself reports NotReady — open it for the exact condition (memory, disk, kubelet)."}</div></div>
-      ${chip(st.label, st.cls)}</div>`; };
-    const checkRow = (c) => html`<div class="fix-row"><div class="grow"><b>${c.status === "fail" ? "✗ " : "⚠ "}${c.title}</b>${c.detail ? html`<div class="muted small">${c.detail}</div>` : ""}
+      <div class="faint small">${st.unknown ? "The control plane hasn't heard from it. If it answers above, it's a control-plane/network issue, not a dead node — try Restart Kubernetes below. If it's offline for good, remove it." : "The node itself reports NotReady — open it for the exact condition (memory, disk, kubelet)."}</div></div>
+      ${chip(st.label, st.cls)}<button class="btn small danger" data-node-remove="${n.name}">Remove node…</button></div>`; };
+    const checkRow = (c) => html`<div class="fix-row"><div class="grow"><b>${isBad(c) ? "✗ " : "⚠ "}${c.title}</b>${c.detail ? html`<div class="muted small">${c.detail}</div>` : ""}
       ${c.fix ? html`<div class="faint small">Fix: ${c.fix}</div>` : html`<div class="faint small">Needs a manual change — no automatic fix.</div>`}</div>
-      ${chip(c.status === "fail" ? "problem" : "warning", c.status === "fail" ? "bad" : "warn")}
+      ${chip(isBad(c) ? "problem" : "warning", isBad(c) ? "bad" : "warn")}
       ${c.fix ? html`<button class="btn small" data-fix="one" data-id="${c.id}">Fix</button>` : ""}</div>`;
     setHTML(body, html`${FIX.error ? html`<div class="note bad">${FIX.error}</div>` : ""}
       <div class="fix-summary"><span class="${notReady.length ? "bad" : "good"}">${nodes.length - notReady.length}/${nodes.length} nodes ready</span>
         <span class="${problems.length ? "warn" : "good"}">${problems.length} problem${problems.length === 1 ? "" : "s"} found</span>
         <span>${fixable.length} auto-fixable</span></div>
       <div class="row wrap" style="gap:8px;margin:10px 0">${fixable.length ? html`<button class="btn primary" data-fix="all">Fix all ${fixable.length} safe problem${fixable.length === 1 ? "" : "s"}</button>` : ""}<button class="btn" data-fix="rerun">Re-check</button></div>
-      ${notReady.length ? html`<div class="section-title">Nodes needing attention</div>${notReady.map(nodeRow)}` : ""}
+      ${notReady.length ? html`<div class="section-title">Nodes needing attention</div>${notReady.map(nodeRow)}
+        <div class="row wrap" style="gap:8px;margin:8px 2px 2px"><button class="btn small danger" data-fix="restart-k8s">Restart Kubernetes on every node…</button><span class="faint small">The usual fix when a node answers but shows “Status unknown”: restarts k3s + nodeyard services on each reachable node (workers first). Offline nodes are skipped; it confirms first.</span></div>` : ""}
       ${problems.length ? html`<div class="section-title">Checks</div>${problems.map(checkRow)}` : html`<div class="note good" style="margin-top:10px">The checks found no problems.</div>`}
-      <p class="faint small" style="margin-top:14px"><b>Fix</b> runs nodeyard's own repair for that check, then re-checks to confirm. Disruptive cluster actions (restart or reboot the cluster, remove a node) are not run from here — use <b>Devices</b> or the node's page, which confirm first.</p>`);
+      <p class="faint small" style="margin-top:14px"><b>Fix</b> runs nodeyard's own repair for that check, then re-checks to confirm. The bigger actions here (Restart Kubernetes, and removing a node from <b>Devices</b>) confirm before they run.</p>`);
   }
   function runPalette(i) { const it = pItems[i]; if (!it) return; closeModals(); it.run(); }
 
@@ -1440,6 +1442,7 @@
       else if (act === "rerun") { runFixDiagnostics(); }
       else if (act === "one") { startJob("doctor-fix", { only: fx.dataset.id }, () => openFix()); }
       else if (act === "all") { if (window.confirm("Apply nodeyard's safe fixes for every auto-fixable problem?\n\nEach is a per-machine repair (enable a service, a sysctl, etc.), re-checked afterwards. Disruptive cluster actions are not included.")) startJob("doctor-fix", {}, () => openFix()); }
+      else if (act === "restart-k8s") { if (window.confirm("Restart Kubernetes on every node to re-register the ones stuck on “Status unknown”?\n\n• Restarts k3s and the nodeyard services on each reachable node, workers first, then this server.\n• Offline nodes are skipped. Containers keep running; the cluster is briefly unreachable.\n• This is the usual fix when a node answers but the control plane hasn't heard from it.")) startJob("restart-cluster", {}, () => openFix()); }
       return;
     }
     const fa = t.closest("[data-act^=full-]");

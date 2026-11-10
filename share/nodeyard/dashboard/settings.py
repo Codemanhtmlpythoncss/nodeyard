@@ -44,6 +44,9 @@ DEMO_DOCTOR = {"ok": True, "issues": 1, "warnings": 2, "fixed": 0, "checks": [
     {"id": "time-sync", "category": "host", "title": "clock is synchronised", "status": "warn", "detail": "systemd-timesyncd is not running", "fix": "enable time sync"},
     {"id": "disk-space", "category": "host", "title": "enough free disk space", "status": "warn", "detail": "/ is 91% full on yard-3", "fix": None},
     {"id": "nodes-ready", "category": "cluster", "title": "every node is Ready", "status": "fail", "detail": "yard-4 is NotReady", "fix": None},
+    {"id": "pods", "category": "cluster", "title": "all pods running", "status": "issue",
+     "detail": "stuck pods to clear: ai-split/rpc-yard-4-7dd5 (ContainerStatusUnknown)",
+     "fix": "force-delete pods stuck Terminating/Unknown (ghosts left on an unreachable node)"},
     {"id": "ip-forward", "category": "host", "title": "IP forwarding enabled", "status": "ok", "detail": None, "fix": "set net.ipv4.ip_forward=1 (persistently)"},
 ]}
 
