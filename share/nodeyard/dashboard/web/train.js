@@ -644,12 +644,13 @@ Assistant: game tonight?</pre></div>
     const lead = ov.machines.find((m) => m.name === p.lead);
     return html`<section class="card"><h2 class="tr-h">Where it trains <span class="right faint small">${ov.mode === "cluster" ? "your cluster, fastest first" : "no cluster here: this machine"}</span></h2>
       ${!p.lead ? html`<div class="tr-adv bad">${p.notes[0]}</div>` : ""}
-      <div class="tr-scroll"><table class="tr-key tr-machines"><tr><th></th><th>Machine</th><th>Hardware</th><th>Speed</th><th>Trainer</th></tr>
+      <div class="tr-scroll"><table class="tr-key tr-machines"><tr><th></th><th>Machine</th><th>Hardware</th><th>Speed</th><th title="round-trip time and bandwidth from the dashboard to this machine">Link</th><th>Trainer</th></tr>
       ${ov.machines.map((m) => html`<tr class="${inPlan.has(m.name) ? "hl" : ""} ${m.usable ? "" : "off"} ${m.variant ? "tr-variant" : ""}">
         <td>${m.variant ? html`<span class="faint" title="trains alongside ${m.parent}" aria-hidden="true">↳</span>` : ov.mode === "cluster" ? html`<input type="checkbox" data-tr-machine="${m.name}" ${TR.machines.length ? (TR.machines.includes(m.name) ? "checked" : "") : (p.share.includes(m.name) ? "checked" : "")} ${m.usable ? "" : "disabled"} aria-label="use ${m.name}">` : ""}</td>
         <td><b>${m.name}</b>${m.name === p.lead ? html` <span class="chip small">fastest</span>` : ""}${m.variant ? html` <span class="chip small">same machine</span>` : ""}</td>
         <td class="small">${m.gpu ? m.gpu.name + " · " + gb(m.gpu.vram) : n0(m.cores) + " CPU cores"} · ${gb(m.ram_total)} RAM</td>
         <td class="small">${m.usable ? "~" + f(m.speed / 1e9, 3) + " GFLOP/s" + (m.measured ? " (measured)" : " (estimate)") : "–"}</td>
+        <td class="small">${m.variant ? "same machine" : m.link && m.link.rtt_ms != null ? f(m.link.rtt_ms, 3) + " ms" + (m.link.mbit ? " · " + f(m.link.mbit, 3) + " Mb/s" : "") : "–"}</td>
         <td class="small">${m.usable ? html`<span class="${m.worker.state === "ready" ? "good-t" : m.worker.state === "failed" ? "bad-t" : ""}">${stateText(m.worker)}</span>${m.worker.state !== "ready" && m.worker.detail ? html`<div class="faint">${m.worker.detail}</div>` : ""}` : html`<span class="faint">${m.reason}</span>`}</td></tr>`)}</table></div>
       ${ov.mode === "cluster" && ov.machines.some((m) => m.gpu && !m.variant) ? html`<label class="tr-both small"><input type="checkbox" data-tr-both ${TR.both ? "checked" : ""}> Also use each GPU machine's CPU at the same time — a second trainer on the same machine, so its idle cores help too (no network cost between the two).</label>` : ""}
       ${lead && /starting|installing|checking/.test(lead.worker.state) ? html`<div class="tr-adv ok">Getting <b>${lead.name}</b> ready: PyTorch installs itself there the first time (${lead.gpu ? "about 3 GB for the GPU version" : "about 200 MB"}), then stays. You can start training now: it begins as soon as it's ready.</div>
