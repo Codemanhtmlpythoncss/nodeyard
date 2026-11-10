@@ -15,7 +15,7 @@
     mp: { file: "", speakers: null, speaker: "", context: 3 },
     edited: null, preset: store.get("train.preset", "") || "",
     q: (() => { try { return JSON.parse(store.get("train.quality", "") || "null"); } catch (_) { return null; } })() || { on: false, preset: "starter", prompts: [], pass: 1, target_loss: "", give_up: 10 },
-    machines: JSON.parse(store.get("train.machines", "[]") || "[]"), share: store.get("train.share", "1") !== "0",
+    machines: JSON.parse(store.get("train.machines", "[]") || "[]"), share: store.get("train.share", "1") !== "0", together: store.get("train.together", "share") || "share",
   };
 
   // ---------- small maths helpers (the same formulas as the trainer) ----------
@@ -571,7 +571,7 @@ Assistant: game tonight?</pre></div>
           <label class="tr-field inline"><span>Model</span><select class="select" data-tr-act="model-pick"><option value="">New model…</option>${raw(ov.models.map((m) => '<option value="' + esc(m.name) + '"' + (TR.resume && TR.model === m.name ? " selected" : "") + ">Continue " + esc(m.name) + "</option>").join(""))}</select></label>
           ${TR.resume ? "" : html`<input class="input" data-tr-act="model-name" placeholder="name (optional)" value="${TR.model}" style="width:180px">`}
           <span class="spacer"></span>
-          ${run ? html`<button class="btn danger" data-tr-act="stop" ${TR.status && TR.status.job && TR.status.job.stop ? "disabled" : ""}>${TR.status && TR.status.job && TR.status.job.stop ? "Stopping…" : "Stop and save"}</button>` : html`<button class="btn primary" data-tr-act="start" ${ov.plan.lead && TR.sel.length ? "" : "disabled"}>${TR.resume ? "Continue training" : "Start training"}${ov.plan.lead ? " on " + (TR.share && ov.plan.share.length > 1 ? ov.plan.share.length + " machines" : ov.plan.lead) : ""}</button>`}</div>
+          ${run ? html`<button class="btn danger" data-tr-act="stop" ${TR.status && TR.status.job && TR.status.job.stop ? "disabled" : ""}>${TR.status && TR.status.job && TR.status.job.stop ? "Stopping…" : "Stop and save"}</button>` : html`<button class="btn primary" data-tr-act="start" ${ov.plan.lead && TR.sel.length ? "" : "disabled"}>${TR.resume ? "Continue training" : "Start training"}${ov.plan.lead ? " on " + (TR.together !== "fastest" && ov.plan.share.length > 1 ? ov.plan.share.length + " machines" + (TR.together === "race" ? " (race)" : "") : ov.plan.lead) : ""}</button>`}</div>
         ${TR.resume ? html`<p class="faint small">Continuing keeps the saved model's shape and tokenizer (V, T, d, L, h) and AdamW's running averages; the other settings apply. The learning rate schedule starts again, so a lower peak (about 30% of the first run's) stops the first steps from undoing what it already learned.</p>` : ""}</section>
       ${stopWhen()}
       <section class="card tr-span2"><h2 class="tr-h">Live <span class="right" id="tr-live-chip"></span></h2><div id="tr-live"></div>
@@ -604,6 +604,12 @@ Assistant: game tonight?</pre></div>
         <label class="tr-field inline"><span>give up after</span><input class="input" type="number" min="3" max="100" data-tr-act="q-giveup" value="${q.give_up}" style="width:70px"><span class="faint small">checks with no progress</span></label></div>
       <p class="faint small">Expected words test <i>what</i> it says, not how well: pick words a good reply must contain (“19”, “Saturday”) or that mark the style you want (“thou”). The check runs every “Check every” steps, so set that to a few hundred.</p>`}</section>`;
   }
+  function raceLive(st) {
+    const j = st.job || {}; if (j.mode !== "race") return "";
+    if (!j.results) return html`<p class="small">Racing: ${(j.machines || []).join(", ")} each train their own copy. The chart shows ${j.lead}; the others' lines are in the log, marked [name].</p>`;
+    return html`<h4>Race result</h4><div class="tr-scroll"><table class="tr-key"><tr><th>Machine</th><th>Best validation loss</th><th>Steps</th><th></th></tr>
+      ${j.results.map((r) => html`<tr class="${r.winner ? "hl" : ""}"><td><b>${r.machine}</b></td><td>${f(r.validation_loss, 4)}</td><td>${n0(r.steps)}</td><td>${r.winner ? html`<span class="good-t">kept</span>` : ""}</td></tr>`)}</table></div>`;
+  }
   function qualityLive(st) {
     const ql = st.quality_last; if (!st.job.until_good && !ql) return "";
     const sc = (st.quality || []).filter((x) => x.score != null);
@@ -613,7 +619,7 @@ Assistant: game tonight?</pre></div>
       ${sc.length > 1 ? html`<canvas class="tr-cv short" id="tr-qchart"></canvas>` : ""}</div>`;
   }
   function machinesCard() {
-    const ov = TR.ov, p = ov.plan, inPlan = new Set(TR.share ? p.share : p.share.slice(0, 1));
+    const ov = TR.ov, p = ov.plan, inPlan = new Set(TR.together !== "fastest" ? p.share : p.share.slice(0, 1));
     const stateText = (w) => ({ off: "off", starting: "starting", "checking PyTorch": "checking PyTorch", "installing PyTorch": "installing PyTorch", ready: "ready", failed: "can't train" })[w.state] || w.state;
     const lead = ov.machines.find((m) => m.name === p.lead);
     return html`<section class="card"><h2 class="tr-h">Where it trains <span class="right faint small">${ov.mode === "cluster" ? "your cluster, fastest first" : "no cluster here: this machine"}</span></h2>
@@ -627,7 +633,11 @@ Assistant: game tonight?</pre></div>
         <td class="small">${m.usable ? html`<span class="${m.worker.state === "ready" ? "good-t" : m.worker.state === "failed" ? "bad-t" : ""}">${stateText(m.worker)}</span>${m.worker.state !== "ready" && m.worker.detail ? html`<div class="faint">${m.worker.detail}</div>` : ""}` : html`<span class="faint">${m.reason}</span>`}</td></tr>`)}</table></div>
       ${lead && /starting|installing|checking/.test(lead.worker.state) ? html`<div class="tr-adv ok">Getting <b>${lead.name}</b> ready: PyTorch installs itself there the first time (${lead.gpu ? "about 3 GB for the GPU version" : "about 200 MB"}), then stays. You can start training now: it begins as soon as it's ready.</div>
         ${lead.worker.log.length ? html`<details><summary class="small">Install progress</summary><pre class="tr-pre tr-log">${lead.worker.log.join("\n")}</pre></details>` : ""}` : ""}
-      ${p.share.length > 1 ? html`<label class="row small mt"><input type="checkbox" data-tr-act="share" ${TR.share ? "checked" : ""}> Share the work across ${p.share.join(" + ")} (~${f(p.speed / 1e9, 3)} GFLOP/s together)</label>` : ""}
+      ${p.share.length > 1 ? html`<h3 class="tr-h3">How ${p.share.join(" + ")} work together</h3>
+        <div class="seg tr-together">${[["share", "Share one model"], ["race", "Race copies, keep the best"], ["fastest", "Fastest only"]].map(([k, l]) => html`<button class="${TR.together === k ? "on" : ""}" data-tr-together="${k}">${l}</button>`)}</div>
+        <p class="faint small">${TR.together === "share" ? "One model, trained faster: each machine trains a copy for ~2 minutes, the copies' weights are averaged, repeat (~" + f(p.speed / 1e9, 3) + " GFLOP/s together)."
+          : TR.together === "race" ? "Each machine trains the whole model on its own, with a different random seed (and so different random windows of text). When " + p.lead + " finishes, the others stop where they are; the copy with the lowest validation loss is saved. Different seeds really do end at different losses: racing picks the luckiest."
+          : "Only " + p.lead + " trains; the others stay idle."}</p>` : ov.mode === "cluster" ? html`<p class="faint small">Tick more machines to share one model between them or race copies.</p>` : ""}
       ${p.notes.filter((n) => p.lead).map((n) => html`<p class="faint small">${n}</p>`)}
       <p class="faint small">Training runs on ${ov.mode === "cluster" ? "the chosen nodes, each in a pod (namespace nodeyard-train)" : "this machine, in a separate worker process"}; models are copied back here. Lesson 13 explains how sharing works.</p></section>`;
   }
@@ -648,13 +658,13 @@ Assistant: game tonight?</pre></div>
     const last = st.last || {}, j = st.job, val = st.val.length ? st.val[st.val.length - 1].loss : null, V0 = +(j.settings || {}).vocab_size || 2048;
     const total = +j.steps || 0, frac = total && last.step ? Math.min(1, (last.step - (+(j.base_steps || 0))) / total) : last.of ? last.local / last.of : 0;
     const eta = last.sps && total ? Math.max(0, total * (1 - frac)) / last.sps : last.sps ? (last.of - last.local) / last.sps : null;
-    const where = (j.machines || []).join(" + "), rounds = j.mode === "shared" && j.rounds ? " · round " + j.round + " of " + j.rounds : "";
+    const where = (j.machines || []).join(" + "), rounds = j.mode === "shared" && j.rounds ? " · round " + j.round + " of " + j.rounds : j.mode === "race" ? " · race" : "";
     if (chip) setHTML(chip, st.running ? html`<span class="chip good"><i class="dot good"></i>${j.phase && j.phase !== "training" ? j.phase : "training"} ${j.model}${where ? " on " + where : ""}${rounds}</span>` : html`<span class="chip">${j.code === 0 ? "finished" : j.code == null ? "stopped" : "failed (exit " + j.code + ")"} · ${j.model}</span>`);
     setHTML(live, html`<div class="tr-progress big"><i style="width:${(frac * 100).toFixed(1)}%"></i></div>
       <div class="tr-stats">${[["Step", last.local ? (total ? n0(Math.round(frac * total)) + " / " + n0(total) : n0(last.local) + " / " + n0(last.of)) : j.phase || "starting…"], ["Time left", st.running && eta != null ? dur(eta) : "–"], ["Training loss", f(last.loss, 4)], ["Validation loss", f(val, 4)],
         ["Perplexity e^ℒ", val != null ? f(Math.exp(val), 4) : "–"], ["Learning rate", f(last.lr, 3)], ["Speed", last.tps ? n0(last.tps) + " tokens/s" : "–"], ["Total steps", n0(last.step)]].map(([a, b]) => html`<div><span>${a}</span><b>${b}</b></div>`)}</div>
       ${val != null ? html`<p class="small">Right now the model is about as unsure as picking among <b>${f(Math.exp(val), 3)}</b> equally likely tokens for each next token (a random guess would be ${n0(V0)}: ln ${n0(V0)} = ${f(Math.log(V0), 4)}). ${st.val.length > 2 && st.val[st.val.length - 1].loss > Math.min(...st.val.map((v) => v.loss)) * 1.02 ? "Validation is rising above its best: the model is starting to memorise; more steps won't help much." : ""}</p>` : ""}`);
-    const qbox = $("#tr-qlive"); if (qbox) setHTML(qbox, qualityLive(st));
+    const qbox = $("#tr-qlive"); if (qbox) setHTML(qbox, html`${raceLive(st)}${qualityLive(st)}`);
     const box = $("#tr-logbox"); if (box) { const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 8; box.textContent = TR.lines.slice(-400).join("\n"); if (atEnd) box.scrollTop = box.scrollHeight; }
     drawLive();
   }
@@ -770,12 +780,13 @@ Assistant: game tonight?</pre></div>
 
   document.addEventListener("click", async (e) => {
     if (S.view !== "train" || !e.target.closest("#tr-root")) return;
-    const t = e.target.closest("[data-tr-tab],[data-tr-lesson],[data-tr-act],[data-tr-check],[data-tr-del],[data-tr-delmodel],[data-tr-chatwith],[data-tr-inspect],[data-tr-get],[data-tr-use],[data-tr-qdel]");
+    const t = e.target.closest("[data-tr-tab],[data-tr-lesson],[data-tr-act],[data-tr-check],[data-tr-del],[data-tr-delmodel],[data-tr-chatwith],[data-tr-inspect],[data-tr-get],[data-tr-use],[data-tr-qdel],[data-tr-together]");
     if (!t || t.tagName === "SELECT" || t.tagName === "INPUT" && t.type !== "button") return;
     const d = t.dataset;
     if (d.trTab) { e.preventDefault(); TR.tab = d.trTab; store.set("train.tab", TR.tab); paint(); window.scrollTo(0, 0); return; }
     if (d.trLesson != null) { TR.lesson = +d.trLesson; store.set("train.lesson", TR.lesson); paint(); const el = $("#tr-lesson"); if (el) el.scrollIntoView({ block: "start" }); return; }
     if (d.trCheck) return checkData(d.trCheck);
+    if (d.trTogether) { TR.together = d.trTogether; store.set("train.together", TR.together); paint(); return; }
     if (d.trQdel != null) { qPrompts().splice(+d.trQdel, 1); saveQ(); paint(); return; }
     if (d.trGet) { if (await post("/api/train/datasets/get", { id: d.trGet })) loadOverview(); return; }
     if (d.trUse) { if (!TR.sel.includes(d.trUse)) TR.sel.push(d.trUse); saveSel(); toast(d.trUse + " ticked for training."); loadOverview(); return; }
@@ -808,7 +819,7 @@ Assistant: game tonight?</pre></div>
       if (confirm("Delete the saved settings “" + TR.preset + "”?")) { const r = await post("/api/train/presets/delete", { name: TR.preset }); if (r) { TR.ov.presets = r.presets; resetSettings(); } }
     }
     else if (a === "start") {
-      const body = { data: TR.sel, settings: TR.form, resume: TR.resume, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.share,
+      const body = { data: TR.sel, settings: TR.form, resume: TR.resume, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.together !== "fastest", together: TR.together,
         quality: TR.q.on ? { on: true, prompts: qPrompts().filter((p) => p.prompt.trim()).map((p) => ({ prompt: p.prompt, expect: String(p.expect).split(",").map((x) => x.trim()).filter(Boolean) })), pass: TR.q.pass, target_loss: TR.q.target_loss, give_up: TR.q.give_up } : undefined };
       const r = await post("/api/train/start", body);
       if (r) { toast("Training " + r.model); TR.lines = []; TR.since = 0; TR.status = null; TR.model = TR.resume ? TR.model : ""; await loadOverview(); poll(); }
@@ -851,7 +862,6 @@ Assistant: game tonight?</pre></div>
       if (t.checked) { if (!TR.machines.includes(d.trMachine)) TR.machines.push(d.trMachine); } else TR.machines = TR.machines.filter((x) => x !== d.trMachine);
       store.set("train.machines", JSON.stringify(TR.machines)); TR.form = null; loadOverview(); return;
     }
-    if (d.trAct === "share") { TR.share = t.checked; store.set("train.share", t.checked ? "1" : "0"); paint(); return; }
     if (d.trSel) { if (t.checked) { if (!TR.sel.includes(d.trSel)) TR.sel.push(d.trSel); } else TR.sel = TR.sel.filter((x) => x !== d.trSel); saveSel(); loadOverview(); }
     else if (d.trSet === "assistant_only") { TR.form.assistant_only = t.checked; markEdited(); paint(); }
     else if (d.trSet === "device") { TR.form.device = t.value; markEdited(); paint(); }
