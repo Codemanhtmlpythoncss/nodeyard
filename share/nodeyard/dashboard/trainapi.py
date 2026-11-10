@@ -49,6 +49,10 @@ STEP_GRAD_RE = re.compile(r"\| gradient norm ([\d.eE+-]+)\s*$")
 GRAD_RE = re.compile(r"^Gradient norm at step (\d+): ([\d.eE+-]+)")
 MODEL_FILES = ("model.pt", "optimizer.pt", "bpe.json", "model.json")
 CHARS_PER_TOKEN = 3.6        # typical for a learned BPE vocabulary on English; the trainer prints the real figure
+PARSED_POINTS_MAX = 3000     # most loss/grad/val points kept in memory per run (the chart thins to ~1500 anyway).
+                             # A long or very fast run (e.g. 30k tokens/sec) appends one point per step forever;
+                             # unbounded, that grew the 768 MB dashboard until it was OOM-killed and systemd
+                             # restarted it mid-run -- the "nodeyard reloaded" that stopped training.
 
 class TrainError(Exception):
     def __init__(self, message, code=400):
@@ -973,6 +977,12 @@ class Trainer:
                 drop = len(p["lines"]) - 4000
                 p["lines"] = p["lines"][drop:]
                 p["dropped"] = p.get("dropped", 0) + drop
+            # Keep the parsed points bounded in memory so a long/fast run can't OOM the dashboard.
+            # Down-sample in place once a list grows past twice the cap -- evenly spaced and always
+            # keeping the latest point, exactly like the chart's own thinning, so the curve is unchanged.
+            for key in ("train", "grad", "val"):
+                if len(p[key]) > 2 * PARSED_POINTS_MAX:
+                    p[key][:] = _thin(p[key], PARSED_POINTS_MAX)
         dropped = p.get("dropped", 0)
         start = max(0, int(since) - dropped)
         return {"job": job, "running": running, "lines": p["lines"][start:], "next": dropped + len(p["lines"]),

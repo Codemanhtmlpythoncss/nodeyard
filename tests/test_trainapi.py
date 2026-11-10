@@ -193,6 +193,32 @@ class TrainerTests(unittest.TestCase):
         self.assertEqual([p["step"] for p in st["train"]], [1, 2, 3])
         self.assertEqual([(g["step"], g["norm"]) for g in st["grad"]], [(1, 0.5), (2, 1.0), (3, 1.5)])
 
+    def test_status_keeps_memory_bounded_on_a_long_fast_run(self):
+        # A fast run (e.g. 30k tokens/sec) logs one step line per step for a long time.
+        # The parsed loss points must stay bounded in memory, or the 768 MB dashboard is
+        # OOM-killed and systemd restarts it mid-run (the "nodeyard reloaded" that stopped training).
+        n = 60000
+        log = os.path.join(self.t.logs_dir, "long.log")
+        with open(log, "w") as f:
+            for i in range(1, n + 1):
+                f.write("Step %d/%d | train loss 5.0 | 7.00 steps/sec | 30,000 tokens/sec | "
+                        "total training step %d | learning rate 0.001 | gradient norm 0.5\n" % (i, n, i))
+        self.t.job = {"model": "m", "log": log, "pid": None}
+        # Drain the log the way the live UI polls it (each read is capped at 4 MB).
+        st, guard = self.t.status(0), 0
+        while st["next"] and guard < 50:
+            nxt = self.t.status(st["next"])
+            if nxt["next"] == st["next"] and not nxt["lines"]:
+                break
+            st, guard = nxt, guard + 1
+        cap = trainapi.PARSED_POINTS_MAX
+        self.assertLessEqual(len(self.t.parsed["train"]), 2 * cap)   # bounded, not growing with n
+        self.assertLessEqual(len(self.t.parsed["grad"]), 2 * cap)
+        self.assertLess(len(self.t.parsed["train"]), n)
+        self.assertLessEqual(len(st["train"]), 1501)                 # chart still thinned for display
+        self.assertEqual(self.t.parsed["last"]["step"], n)           # the newest point is never dropped
+        self.assertEqual(st["train"][-1]["step"], n)
+
     def test_weights_need_a_saved_model(self):
         self.assertEqual(post(self.t, self.t.weights, {"model": ["nope"]})["code"], 404)
         self.assertIn("error", post(self.t, self.t.weights, {"model": ["../x"]}))
