@@ -66,6 +66,17 @@ class RecommendTests(unittest.TestCase):
         self.assertEqual(r["settings"]["dropout"], 0.2)
         self.assertEqual(trainapi.recommend(self.HW[1], 2_000_000_000, 1)["settings"]["dropout"], 0.0)
 
+    def test_settings_follow_the_dataset(self):
+        hw = self.HW[1]
+        plain = trainapi.recommend(hw, 8_000_000, 8)
+        repeats = trainapi.recommend(hw, 8_000_000, 8, {"unique_fraction": 0.5, "example_chars": 190, "chat": True})
+        self.assertLess(repeats["tokens"], plain["tokens"] * 0.55)            # sized for the unique half
+        self.assertTrue(repeats["settings"]["assistant_only"])
+        self.assertFalse(plain["settings"]["assistant_only"])
+        long_examples = trainapi.recommend(hw, 8_000_000, 8, {"unique_fraction": 1.0, "example_chars": 1500, "chat": False})
+        self.assertEqual(long_examples["settings"]["context"], 512)            # 1500 chars ≈ 417 tokens → room for a whole one
+        self.assertTrue(any(w["name"] == "Learn only the replies" for w in repeats["why"]))
+
     def test_embeddings_stay_under_half_the_model_when_the_vocab_can_shrink(self):
         r = trainapi.recommend(self.HW[0], 50_000_000, 1)
         s = r["settings"]
@@ -408,6 +419,23 @@ class QualityAndMultipartyTests(unittest.TestCase):
         self.assertEqual(st["quality_last"]["results"][0]["reply"], "hello")
         self.assertTrue(st["verdict"].startswith("Good enough"))
         self.assertTrue(st["job"]["until_good"])
+
+    def test_saved_settings(self):
+        r = self.t.save_preset({"name": "Shakespeare on the GPU", "settings": {"dim": 256, "heads": 8, "dropout": 0.2, "assistant_only": True, "junk": 1}})
+        self.assertEqual(r["presets"][0]["settings"], {"dim": 256, "heads": 8, "dropout": 0.2, "assistant_only": True})
+        self.t.save_preset({"name": "Shakespeare on the GPU", "settings": {"dim": 320}})   # same name: replaced
+        self.assertEqual([p["settings"] for p in self.t.presets()], [{"dim": 320}])
+        self.assertIn("Name it", post(self.t, self.t.save_preset, {"name": "../x", "settings": {}})["error"])
+        self.assertIn("number", post(self.t, self.t.save_preset, {"name": "x", "settings": {"dim": "wide"}})["error"])
+        self.assertEqual(self.t.delete_preset({"name": "Shakespeare on the GPU"})["presets"], [])
+
+    def test_check_reports_repeats_and_example_length(self):
+        pairs = [{"messages": [{"role": "user", "content": "line %d" % i}, {"role": "assistant", "content": "line %d" % (i + 1)}]} for i in range(200)]
+        post(self.t, self.t.paste, {"name": "pairs.jsonl", "text": "\n".join(json.dumps(x) for x in pairs)})
+        c = self.t.check("pairs.jsonl")
+        self.assertLess(c["unique_fraction"], 0.55)
+        self.assertTrue(any("repeats" in a[1] for a in c["advice"]))
+        self.assertGreater(c["example_chars"], 20)
 
     def test_group_chat_becomes_pairs_for_one_speaker(self):
         chat = ("12/03/2024, 21:15 - Sam: anyone up?\n12/03/2024, 21:16 - Alex: yep\n[12/03/2024, 21:17:03] Jo: me too\n"
