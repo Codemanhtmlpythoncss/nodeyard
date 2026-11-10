@@ -709,8 +709,13 @@ Assistant: game tonight?</pre></div>
     return html`<div class="tr-adv ok">${what} runs on <b>${lead.name}</b>, which is ${lead.worker.state === "failed" ? "unable to: " + lead.worker.detail : "getting ready (PyTorch installs itself the first time; " + (lead.worker.detail || "starting") + ")"}.</div>`;
   }
   function insideTab() {
+    const mode = store.get("train.inside", "every");
+    return html`${workerNote("This")}<div class="seg tr-inside-mode"><button class="${mode === "every" ? "on" : ""}" data-tr-act="inside-every">Every number</button><button class="${mode === "summary" ? "on" : ""}" data-tr-act="inside-summary">Summary + one training step</button></div>
+      ${mode === "every" ? everyNumber() : insideSummary()}`;
+  }
+  function insideSummary() {
     const ov = TR.ov, ms = ov ? ov.models : [], x = TR.explain;
-    return html`${workerNote("This")}<section class="card"><h2 class="tr-h">Inside the model: every value of one real step</h2>
+    return html`<section class="card"><h2 class="tr-h">Inside the model: every value of one real step</h2>
       <p class="small">This runs your text through a saved model <b>by hand</b> — each matrix multiply written out — and checks the result against PyTorch. Then it runs the backward pass and one AdamW update. These are the actual numbers training uses. (Vectors show the first ${x ? x.show_dims : 8} of d numbers; statistics cover all of them.)</p>
       <div class="row wrap"><select class="select" data-tr-act="ex-model"><option value="">A tiny untrained model (no training needed)</option>${raw(ms.map((m) => '<option value="' + esc(m.name) + '"' + (TR.exModel === m.name ? " selected" : "") + ">" + esc(m.name) + "</option>").join(""))}</select>
         <input class="input grow" data-tr-act="ex-prompt" value="${TR.exPrompt}" placeholder="Text to run through the model">
@@ -769,6 +774,194 @@ Assistant: game tonight?</pre></div>
       <p class="faint small">Replies come only from what this model learned from your data. Short, odd or repetitive answers mean it needs more data or training (see lesson 14).</p></section>`;
   }
 
+  // ---------- every number: the whole network, every weight, every calculation in + − × ÷ ----------
+  const EV = { trace: null, op: 0, cell: null, col0: 0, busy: false, tokens: 8, wcache: {}, wname: "", wrow: 0, wcol: 0, explain: null };
+  const fx = (x, p = 7) => (x == null ? "−∞" : !isFinite(x) ? String(x) : (+(+x).toPrecision(p)).toString());
+  const PAGE_COLS = 128, PAGE_ROWS = 64;
+  function evToken(i) { const t = EV.trace.tokens[i]; return t ? vis(t.text) : "#" + i; }
+  async function weightRow(name, row) {
+    const tr = EV.trace;
+    if (tr.weights && tr.weights[name]) return tr.weights[name][row];
+    if (tr.vectors && tr.vectors[name] && row === 0) return tr.vectors[name];
+    const key = name + "@" + Math.floor(row / PAGE_ROWS);
+    if (!EV.wcache[key]) {
+      const r = await getJSON("/api/train/weights?model=" + encodeURIComponent(tr.model) + "&name=" + encodeURIComponent(name) + "&start=" + Math.floor(row / PAGE_ROWS) * PAGE_ROWS + "&count=" + PAGE_ROWS);
+      if (!r.ok) throw new Error(r.error);
+      EV.wcache[key] = r.rows;
+      const keys = Object.keys(EV.wcache); if (keys.length > 60) delete EV.wcache[keys[0]];
+    }
+    return EV.wcache[key][row % PAGE_ROWS];
+  }
+  function vecOf(name) { const tr = EV.trace; return (tr.vectors && tr.vectors[name]) || (tr.weights && tr.weights[name] && tr.weights[name][0]); }
+  // √v by Newton's method: start at v (or 1), then s = (s + v ÷ s) ÷ 2 until it stops changing.
+  function sqrtSteps(v) {
+    let s = v > 1 ? v : 1; const lines = ["√" + fx(v) + " by repeated averaging (Newton): start s = " + fx(s)];
+    for (let i = 0; i < 60; i++) { const n = (s + v / s) / 2; lines.push("s = (" + fx(s) + " + " + fx(v) + " ÷ " + fx(s) + ") ÷ 2 = (" + fx(s) + " + " + fx(v / s) + ") ÷ 2 = " + fx(n)); if (Math.abs(n - s) <= 1e-12 * n) { s = n; break; } s = n; }
+    lines.push("check: " + fx(s) + " × " + fx(s) + " = " + fx(s * s)); return { value: s, lines };
+  }
+  // e^z: halve z until it's small, add up 1 + y + y²/2 + y³/6 + …, then square back up.
+  function expSteps(z) {
+    if (z == null || z === -Infinity) return { value: 0, lines: ["e^(−∞) = 0 (a masked position gets no weight)"] };
+    let k = 0, y = z; while (Math.abs(y) > 0.5) { y /= 2; k++; }
+    const lines = ["e^" + fx(z) + ": halve " + k + " time" + (k === 1 ? "" : "s") + " → y = " + fx(z) + " ÷ " + (2 ** k) + " = " + fx(y)];
+    let term = 1, sum = 1; lines.push("term 0 = 1, sum = 1");
+    for (let n = 1; n < 40; n++) { const t2 = term * y / n; lines.push("term " + n + " = " + fx(term) + " × " + fx(y) + " ÷ " + n + " = " + fx(t2) + ", sum = " + fx(sum) + " + " + fx(t2) + " = " + fx(sum + t2)); term = t2; sum += t2; if (Math.abs(term) < 1e-13 * Math.abs(sum)) break; }
+    for (let i = 0; i < k; i++) { lines.push("square: " + fx(sum) + " × " + fx(sum) + " = " + fx(sum * sum)); sum *= sum; }
+    return { value: sum, lines };
+  }
+  // erf(z) = (2 ÷ √π) × (z − z³/3 + z⁵/(5·2!) − z⁷/(7·3!) + …)
+  function erfSteps(z) {
+    if (Math.abs(z) > 5) return { value: Math.sign(z), lines: ["erf(" + fx(z) + ") = " + Math.sign(z) + " (to 10 decimal places: the series is 1 − a number below 10⁻¹⁰)"] };
+    const lines = ["erf(" + fx(z) + ") = 1.1283792 × (z − z³/3 + z⁵/10 − z⁷/42 + …)   (1.1283792 = 2 ÷ √π)"];
+    let pow = z, fact = 1, sum = 0;
+    for (let n = 0; n < 120; n++) {
+      if (n > 0) { pow *= -z * z; fact *= n; }
+      const t = pow / (fact * (2 * n + 1)); sum += t;
+      lines.push("term " + n + " = " + fx(pow) + " ÷ (" + fact + " × " + (2 * n + 1) + ") = " + fx(t) + ", total " + fx(sum));
+      if (Math.abs(t) < 1e-12) break;
+    }
+    lines.push("× 1.1283792 = " + fx(sum * 1.1283791670955126)); return { value: sum * 1.1283791670955126, lines };
+  }
+  async function expand(op, r, c) {
+    const tr = EV.trace, h = op.how, O = (id) => tr.ops[id].values, out = op.values[r][c], L = [];
+    const sumLines = (terms, label) => { let s = 0; terms.forEach(([a, b, note]) => { const p = a * b; s += p; L.push((note ? note + ": " : "") + fx(a) + " × " + fx(b) + " = " + fx(p) + "   running total " + fx(s)); }); return s; };
+    if (h.kind === "lookup") {
+      L.push("Look up row " + h.rows[r] + " of " + h.weight + (h.weight.startsWith("token") ? " (token “" + evToken(r) + "”)" : " (position " + r + ")") + ", column " + c + ":");
+      L.push(h.weight + "[" + h.rows[r] + "][" + c + "] = " + fx(out) + "   (a weight: learned during training, nothing computed here)");
+    } else if (h.kind === "add") {
+      const a = O(h.a)[r][c], b = O(h.b)[r][c];
+      L.push(fx(a) + " (" + tr.ops[h.a].title + ") + " + fx(b) + " (" + tr.ops[h.b].title + ") = " + fx(a + b));
+    } else if (h.kind === "layernorm") {
+      const x = O(h.x)[r], d = x.length, g = vecOf(h.gamma), be = vecOf(h.beta);
+      let s = 0; L.push("1. Mean μ of the " + d + " numbers of token “" + evToken(r) + "”:");
+      x.forEach((v, i) => { s += v; L.push("   + " + fx(v) + " (x" + i + ")  = " + fx(s)); });
+      const mu = s / d; L.push("   μ = " + fx(s) + " ÷ " + d + " = " + fx(mu));
+      let q = 0; L.push("2. Variance σ² = average of (x − μ)²:");
+      x.forEach((v, i) => { const dd = v - mu; q += dd * dd; L.push("   (" + fx(v) + " − " + fx(mu) + ") × (" + fx(v) + " − " + fx(mu) + ") = " + fx(dd) + " × " + fx(dd) + " = " + fx(dd * dd) + "   total " + fx(q)); });
+      const vr = q / d; L.push("   σ² = " + fx(q) + " ÷ " + d + " = " + fx(vr));
+      const sq = sqrtSteps(vr + h.eps); L.push("3. √(σ² + " + h.eps + ") = √" + fx(vr + h.eps) + ":"); sq.lines.forEach((l) => L.push("   " + l));
+      const nrm = (x[c] - mu) / sq.value;
+      L.push("4. Normalise number " + c + ": (" + fx(x[c]) + " − " + fx(mu) + ") ÷ " + fx(sq.value) + " = " + fx(x[c] - mu) + " ÷ " + fx(sq.value) + " = " + fx(nrm));
+      L.push("5. Scale and shift (learned γ, β): " + fx(nrm) + " × " + fx(g[c]) + " + " + fx(be[c]) + " = " + fx(nrm * g[c]) + " + " + fx(be[c]) + " = " + fx(nrm * g[c] + be[c]));
+    } else if (h.kind === "linear") {
+      const x = O(h.x)[r], w = await weightRow(h.weight, h.offset + c), b = vecOf(h.bias);
+      L.push("Number " + c + " = Σ input × weight, over the " + x.length + " inputs (row " + (h.offset + c) + " of " + h.weight + "), then + bias:");
+      const s = sumLines(x.map((v, k) => [v, w[k], "input " + k]));
+      L.push("+ bias " + h.bias + "[" + (h.offset + c) + "] = " + fx(s) + " + " + fx(b[h.offset + c]) + " = " + fx(s + b[h.offset + c]));
+    } else if (h.kind === "dot") {
+      if (c > r) { L.push("Token " + c + " (“" + evToken(c) + "”) comes after token " + r + " (“" + evToken(r) + "”): the model may not look ahead, so this score is −∞ and its weight becomes e^(−∞) = 0."); }
+      else {
+        const q = O(h.a)[r], k = O(h.b)[c]; L.push("Query of “" + evToken(r) + "” · key of “" + evToken(c) + "” (head numbers " + h.offset + "–" + (h.offset + h.n - 1) + "):");
+        const s = sumLines(Array.from({ length: h.n }, (_, i) => [q[h.offset + i], k[h.offset + i], "q" + i + " × k" + i]));
+        L.push("× scale " + fx(h.scale) + " (1 ÷ √" + h.n + "): " + fx(s) + " × " + fx(h.scale) + " = " + fx(s * h.scale));
+      }
+    } else if (h.kind === "softmax") {
+      const row = O(h.x)[r], fin = row.filter((v) => v != null), m = Math.max(...fin);
+      L.push("Softmax of row " + r + ": e^(score − largest) for each, then divide by their total. Largest = " + fx(m) + ".");
+      const ex = expSteps(row[c] == null ? null : row[c] - m); L.push("This one: e^(" + fx(row[c]) + " − " + fx(m) + ") = e^" + fx(row[c] == null ? null : row[c] - m) + ":"); ex.lines.forEach((l) => L.push("   " + l));
+      let tot = 0; L.push("Total of all " + row.length + ":");
+      row.forEach((v, j) => { const e = v == null ? 0 : Math.exp(v - m); tot += e; L.push("   + e^(" + fx(v) + " − " + fx(m) + ") = " + fx(e) + "   total " + fx(tot) + (j === c ? "   ← this one" : "")); });
+      L.push("Answer: " + fx(ex.value) + " ÷ " + fx(tot) + " = " + fx(ex.value / tot));
+    } else if (h.kind === "mix") {
+      const w = O(h.w)[r], v = O(h.v); L.push("Σ over tokens: attention weight × value number " + (h.offset + c) + ":");
+      const s = sumLines(w.map((wt, u) => [wt, v[u][h.offset + c], "“" + evToken(u) + "”"])); L.push("= " + fx(s));
+    } else if (h.kind === "concat") {
+      const part = Math.floor(c / h.width); L.push("Column " + c + " is head " + (part + 1) + "'s number " + (c % h.width) + ": " + fx(O(h.parts[part])[r][c % h.width]) + " (copied, nothing computed)");
+    } else if (h.kind === "gelu") {
+      const x = O(h.x)[r][c], z = x * 0.7071067811865476, e = erfSteps(z);
+      L.push("GELU(x) = 0.5 × x × (1 + erf(x × 0.7071068))   (0.7071068 = 1 ÷ √2) with x = " + fx(x));
+      L.push("x × 0.7071068 = " + fx(z)); e.lines.forEach((l) => L.push("   " + l));
+      L.push("0.5 × " + fx(x) + " × (1 + " + fx(e.value) + ") = " + fx(0.5 * x) + " × " + fx(1 + e.value) + " = " + fx(0.5 * x * (1 + e.value)));
+    }
+    L.push("PyTorch's value: " + fx(out));
+    return L.join("\n");
+  }
+  function evGrid(op) {
+    const v = op.values, rows = v.length, cols = v[0] ? v[0].length : 0, c0 = Math.min(EV.col0, Math.max(0, cols - 1)), c1 = Math.min(cols, c0 + PAGE_COLS);
+    const label = (i) => (op.how.kind === "lookup" && op.how.weight.startsWith("position") ? "t" + i : "“" + evToken(i) + "”");
+    const head = (op.how.kind === "dot" || op.how.kind === "softmax") && cols === rows ? (j) => evToken(j) : (op.title.startsWith("Probabilities") || op.title.startsWith("Logits")) && EV.trace.vocab ? (j) => vis(EV.trace.vocab[j] || "#" + j) : (j) => String(j);
+    let s = '<table class="tr-ev-grid"><tr><th></th>';
+    for (let j = c0; j < c1; j++) s += "<th>" + esc(head(j)) + "</th>";
+    s += "</tr>";
+    for (let i = 0; i < rows; i++) {
+      s += "<tr><th>" + esc(label(i)) + "</th>";
+      for (let j = c0; j < c1; j++) { const x = v[i][j], on = EV.cell && EV.cell[0] === i && EV.cell[1] === j; s += '<td data-ev-cell="' + i + "," + j + '" class="' + (on ? "on" : "") + (x == null ? " masked" : "") + '">' + (x == null ? "−∞" : esc(f(x, 4))) + "</td>"; }
+      s += "</tr>";
+    }
+    return raw(s + "</table>");
+  }
+  const FORMULAS = {
+    lookup: "copy one row of a weight matrix: no arithmetic", add: "a + b, number by number",
+    layernorm: "μ = (x₀ + … + x_{d−1}) ÷ d;  σ² = ((x₀ − μ)² + …) ÷ d;  out = (x − μ) ÷ √(σ² + ε) × γ + β",
+    linear: "out_j = x₀ × W[j][0] + x₁ × W[j][1] + … + b_j", dot: "score = (q₀ × k₀ + q₁ × k₁ + …) × 1/√(head size); a later token's score is −∞",
+    softmax: "p_j = e^(s_j − max) ÷ (e^(s₀ − max) + e^(s₁ − max) + …)", mix: "out = w₀ × v₀ + w₁ × v₁ + … (one per earlier token)",
+    concat: "the heads' outputs placed side by side", gelu: "0.5 × x × (1 + erf(x × 0.7071068))",
+  };
+  function everyNumber() {
+    const tr = EV.trace, ov = TR.ov, ms = ov ? ov.models : [];
+    const controls = html`<section class="card"><h2 class="tr-h">Every number in the network</h2>
+      <p class="small">Runs your text through the model once and keeps <b>every</b> number it computes: all ${tr ? n0(tr.ops.length) : ""} steps, for every token, every layer and every head. Click a step, then click any number: you get the full calculation in × ÷ + −, with every term written out. Weights are listed in full under “All weights”.</p>
+      <div class="row wrap"><select class="select" data-tr-act="ex-model"><option value="">A tiny untrained model (no training needed)</option>${raw(ms.map((m) => '<option value="' + esc(m.name) + '"' + (TR.exModel === m.name ? " selected" : "") + ">" + esc(m.name) + "</option>").join(""))}</select>
+        <input class="input grow" data-tr-act="ex-prompt" value="${TR.exPrompt}" placeholder="Text to run through the model">
+        <label class="tr-field inline"><span>tokens</span><input class="input" type="number" min="1" max="16" value="${EV.tokens}" data-tr-act="ev-tokens" style="width:64px"></label>
+        <button class="btn primary" data-tr-act="ev-trace" ${EV.busy ? "disabled" : ""}>${EV.busy ? "Working…" : tr ? "Run again" : "Run it"}</button></div>
+      ${tr ? html`<p class="faint small">${tr.trained ? "Model " + tr.model : "Untrained demo model"}: V ${n0(tr.config.vocabulary)} · d ${tr.config.width} · L ${tr.config.layers} · h ${tr.config.heads} · ${n0(tr.parameters.reduce((a, p) => a + p.shape.reduce((x, y) => x * y, 1), 0))} weights. Hand-written maths vs PyTorch: largest difference ${fx(tr.check_max_difference, 2)}.</p>` : ""}</section>`;
+    if (!tr) return controls;
+    const op = tr.ops[EV.op] || tr.ops[0], groups = [];
+    tr.ops.forEach((o) => { const g = groups.find((x) => x.name === o.group); if (g) g.ops.push(o); else groups.push({ name: o.group, ops: [o] }); });
+    const cols = op.values[0] ? op.values[0].length : 0;
+    return html`${controls}<div class="tr-ev">
+      <nav class="card tr-ev-net" aria-label="The network, step by step"><h3 class="tr-h3">The network</h3>
+        ${groups.map((g) => html`<div class="tr-ev-group"><b>${g.name}</b>${g.ops.map((o) => html`<button class="${o.id === op.id && !EV.wname ? "on" : ""}" data-ev-op="${o.id}"><span>${o.title}</span><small>${o.shape.join(" × ")}</small></button>`)}</div>`)}
+        <div class="tr-ev-group"><b>All weights (${tr.parameters.length} matrices)</b>${tr.parameters.map((p) => html`<button class="${EV.wname === p.name ? "on" : ""}" data-ev-w="${p.name}"><span>${p.name}</span><small>${p.shape.join(" × ")}</small></button>`)}</div></nav>
+      <section class="card tr-ev-main">${EV.wname ? weightView() : html`<h3 class="tr-h3">${op.group} · ${op.title}</h3>
+        <div class="tr-eq small">${FORMULAS[op.how.kind] || ""}</div>
+        <p class="faint small">${op.shape.join(" × ")} numbers (rows: tokens). Click any one to see how it was made.</p>
+        ${cols > PAGE_COLS ? html`<div class="row small"><button class="btn small" data-tr-act="ev-left" ${EV.col0 ? "" : "disabled"}>←</button><span>columns ${n0(EV.col0)}–${n0(Math.min(cols, EV.col0 + PAGE_COLS) - 1)} of ${n0(cols)}</span><button class="btn small" data-tr-act="ev-right" ${EV.col0 + PAGE_COLS < cols ? "" : "disabled"}>→</button></div>` : ""}
+        <div class="tr-scroll">${evGrid(op)}</div>
+        ${EV.cell ? html`<h4>How [“${evToken(EV.cell[0])}”, ${EV.cell[1]}] = ${fx(op.values[EV.cell[0]][EV.cell[1]])} was computed</h4><pre class="tr-pre tr-ev-calc">${EV.explain == null ? "Working it out…" : EV.explain}</pre>` : ""}`}</section></div>`;
+  }
+  function weightView() {
+    const p = EV.trace.parameters.find((x) => x.name === EV.wname), rows = p.shape.length > 1 ? p.shape[0] : 1, cols = p.shape.length > 1 ? p.shape[1] : p.shape[0];
+    const block = EV.wblock; const c0 = EV.wcol, c1 = Math.min(cols, c0 + PAGE_COLS);
+    let grid = "Loading…";
+    if (block) {
+      let s = '<table class="tr-ev-grid"><tr><th></th>'; for (let j = c0; j < c1; j++) s += "<th>" + j + "</th>"; s += "</tr>";
+      block.forEach((row, i) => { s += "<tr><th>" + (EV.wrow + i) + "</th>"; for (let j = c0; j < c1; j++) s += "<td>" + esc(f(row[j], 4)) + "</td>"; s += "</tr>"; });
+      grid = raw(s + "</table>");
+    }
+    return html`<h3 class="tr-h3">${p.name}</h3><p class="faint small">${p.shape.join(" × ")} = ${n0(p.shape.reduce((a, b) => a * b, 1))} learned numbers. Rows ${n0(EV.wrow)}–${n0(Math.min(rows, EV.wrow + PAGE_ROWS) - 1)} of ${n0(rows)}, columns ${n0(c0)}–${n0(c1 - 1)} of ${n0(cols)}.</p>
+      <div class="row wrap small"><button class="btn small" data-tr-act="ev-wup" ${EV.wrow ? "" : "disabled"}>↑ rows</button><button class="btn small" data-tr-act="ev-wdown" ${EV.wrow + PAGE_ROWS < rows ? "" : "disabled"}>↓ rows</button>
+        <button class="btn small" data-tr-act="ev-wleft" ${EV.wcol ? "" : "disabled"}>← columns</button><button class="btn small" data-tr-act="ev-wright" ${EV.wcol + PAGE_COLS < cols ? "" : "disabled"}>→ columns</button></div>
+      <div class="tr-scroll">${grid}</div>`;
+  }
+  async function loadWeights() {
+    const tr = EV.trace, name = EV.wname; EV.wblock = null; paint();
+    try {
+      if (tr.weights && tr.weights[name]) EV.wblock = tr.weights[name].slice(EV.wrow, EV.wrow + PAGE_ROWS);
+      else { const r = await getJSON("/api/train/weights?model=" + encodeURIComponent(tr.model) + "&name=" + encodeURIComponent(name) + "&start=" + EV.wrow + "&count=" + PAGE_ROWS); if (!r.ok) { toast(r.error); return; } EV.wblock = r.rows; }
+    } catch (e) { toast("Couldn't read the weights."); }
+    paint();
+  }
+  async function evTrace() {
+    EV.busy = true; paint();
+    const r = await post("/api/train/trace", { model: TR.exModel, prompt: TR.exPrompt, tokens: EV.tokens });
+    EV.busy = false;
+    if (r) { EV.trace = r.trace; EV.op = 0; EV.cell = null; EV.col0 = 0; EV.wname = ""; EV.wcache = {}; EV.explain = null; }
+    paint();
+  }
+  async function evClick(t) {
+    const d = t.dataset;
+    if (d.evOp != null) { EV.op = +d.evOp; EV.wname = ""; EV.cell = null; EV.col0 = 0; paint(); return true; }
+    if (d.evW) { EV.wname = d.evW; EV.wrow = 0; EV.wcol = 0; loadWeights(); return true; }
+    if (d.evCell) {
+      const [i, j] = d.evCell.split(",").map(Number); EV.cell = [i, j]; EV.explain = null; paint();
+      try { EV.explain = await expand(EV.trace.ops[EV.op], i, j); } catch (e) { EV.explain = "Couldn't work it out: " + e.message; }
+      paint(); return true;
+    }
+    return false;
+  }
+
   // ---------- actions ----------
   function setPath(path, value) {
     const parts = path.split("."); let o = parts[0] === "chat" ? TR.chat : L[parts[0]];
@@ -799,6 +992,8 @@ Assistant: game tonight?</pre></div>
 
   document.addEventListener("click", async (e) => {
     if (S.view !== "train" || !e.target.closest("#tr-root")) return;
+    const ev = e.target.closest("[data-ev-op],[data-ev-w],[data-ev-cell]");
+    if (ev) { evClick(ev); return; }
     const t = e.target.closest("[data-tr-tab],[data-tr-lesson],[data-tr-act],[data-tr-check],[data-tr-del],[data-tr-delmodel],[data-tr-chatwith],[data-tr-inspect],[data-tr-get],[data-tr-use],[data-tr-qdel],[data-tr-together]");
     if (!t || t.tagName === "SELECT" || t.tagName === "INPUT" && t.type !== "button") return;
     const d = t.dataset;
@@ -845,6 +1040,11 @@ Assistant: game tonight?</pre></div>
       if (r) { toast("Training " + r.model); TR.lines = []; TR.since = 0; TR.status = null; TR.model = TR.resume ? TR.model : ""; await loadOverview(); poll(); }
     }
     else if (a === "stop") { if (await post("/api/train/stop", {})) toast("Stopping: it saves after the current step."); }
+    else if (a === "inside-every" || a === "inside-summary") { store.set("train.inside", a.slice(7)); paint(); }
+    else if (a === "ev-trace") evTrace();
+    else if (a === "ev-left" || a === "ev-right") { EV.col0 = Math.max(0, EV.col0 + (a === "ev-left" ? -PAGE_COLS : PAGE_COLS)); paint(); }
+    else if (a === "ev-wup" || a === "ev-wdown") { EV.wrow = Math.max(0, EV.wrow + (a === "ev-wup" ? -PAGE_ROWS : PAGE_ROWS)); loadWeights(); }
+    else if (a === "ev-wleft" || a === "ev-wright") { EV.wcol = Math.max(0, EV.wcol + (a === "ev-wleft" ? -PAGE_COLS : PAGE_COLS)); paint(); }
     else if (a === "explain") {
       TR.exBusy = true; paint();
       const r = await post("/api/train/explain", { model: TR.exModel, prompt: TR.exPrompt, tokens: 10 });
@@ -872,6 +1072,7 @@ Assistant: game tonight?</pre></div>
     else if (d.trAct === "q-target") { TR.q.target_loss = t.value.trim(); saveQ(); }
     else if (d.trAct === "q-giveup") { TR.q.give_up = Math.max(3, Math.min(100, +t.value || 10)); saveQ(); }
     else if (d.trAct === "ex-prompt") TR.exPrompt = t.value;
+    else if (d.trAct === "ev-tokens") EV.tokens = Math.max(1, Math.min(16, +t.value || 8));
     else if (d.trAct === "model-name") TR.model = t.value;
   });
   document.addEventListener("change", async (e) => {

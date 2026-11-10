@@ -334,6 +334,14 @@ class Worker:
             if mdir:
                 args += ["--app-data", mdir]
             args += self.check_options(body.get("options") or [])
+        elif cmd == "trace":
+            # Every number of one forward pass, written next to the model (or a tiny untrained one) as trace.json.
+            mdir = mdir or self.resolve("models/untrained-demo")
+            os.makedirs(mdir, exist_ok=True)
+            args += ["trace", "--out", os.path.join(mdir, "trace.json")]
+            if os.path.isfile(os.path.join(mdir, "model.pt")) and body.get("model"):
+                args += ["--app-data", mdir]
+            args += self.check_options(body.get("options") or [])
         elif cmd == "average" and mdir:
             args += ["average", "--out", mdir]
             for name, weight in body.get("parts") or []:
