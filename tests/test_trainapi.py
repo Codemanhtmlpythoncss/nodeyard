@@ -66,6 +66,25 @@ class RecommendTests(unittest.TestCase):
         self.assertEqual(r["settings"]["dropout"], 0.2)
         self.assertEqual(trainapi.recommend(self.HW[1], 2_000_000_000, 1)["settings"]["dropout"], 0.0)
 
+    def test_a_fast_machine_with_hours_gets_a_nanogpt_sized_model(self):
+        prof = {"unique_fraction": 0.5, "example_chars": 190, "chat": True}
+        r = trainapi.recommend(self.HW[1], 7_948_437, 8, prof)          # the GTX 1050 Ti, overnight
+        self.assertGreater(r["parameters"], 8_000_000)
+        quick = trainapi.recommend(self.HW[1], 7_948_437, 0.25, prof)
+        self.assertEqual(quick["limit"], "compute")                     # 15 minutes: time is the limit, said so
+        self.assertLess(quick["parameters"], r["parameters"])
+
+    def test_overview_says_how_to_get_a_bigger_model(self):
+        ctx = SimpleNamespace(get_routes={}, post_routes={}, post_limits={}, store=None)
+        with tempfile.TemporaryDirectory() as d:
+            trainapi.register(ctx, SimpleNamespace(demo=True, state_dir=d))
+            ctx.trainer.pool.ensure = lambda *a, **k: None   # don't start a worker in a unit test
+            got = {}
+            ctx.get_routes["/api/train"](SimpleNamespace(_json=lambda obj, code=200: got.update(obj)), {"hours": ["0.25"]})
+        times = got["recommend"]["bigger"]["times"]
+        self.assertEqual([t["hours"] for t in times], [0.25, 1, 3, 8, 24, 72])
+        self.assertTrue(all(b["parameters"] >= a["parameters"] for a, b in zip(times, times[1:])))
+
     def test_settings_follow_the_dataset(self):
         hw = self.HW[1]
         plain = trainapi.recommend(hw, 8_000_000, 8)

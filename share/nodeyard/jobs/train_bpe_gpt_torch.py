@@ -299,6 +299,11 @@ def train(args) -> int:
     started = time.perf_counter()
     model.train()
     last_validation = None
+    # The saved model is always the one with the best validation so far: if training goes on too long and the
+    # model starts memorising (validation rising), stopping late costs time but never quality.
+    # Compared within this run only: a continued run may use other text, and a shared-training round starts from an
+    # average whose validation hasn't been measured.
+    kept = {"loss": None, "step": None}
     done = 0
     for step in range(1, args.steps + 1):
         if args.lr_progress:
@@ -333,13 +338,18 @@ def train(args) -> int:
             emit(f"Validation at step {step}: loss {validation:.4f} | total training step {total_step:,}")
             emit(f"Gradient norm at step {step}: {grad_norm:.4f} (clipped to 1.0 when larger)")
             last_validation = validation
+            if kept["loss"] is None or validation < kept["loss"]:
+                kept.update(loss=validation, step=total_step)
+                save(step, validation)
+                emit(f"Checkpoint saved at total training step {total_step:,} (best validation so far: {validation:.4f}).")
             if quality:
                 judge_quality(model, tokenizer, args, device, quality, chat_data, validation, total_step, best, stop)
             if args.lr_progress or step > args.warmup:   # during warm-up the rate is still climbing: nothing to judge
                 new_rate = governor.observe(validation, peak, total_step, emit)
                 if new_rate is not None:
                     peak = new_rate
-        if args.save_every and step % args.save_every == 0 and step != args.steps and not stop["asked"]:
+        if args.save_every and step % args.save_every == 0 and step != args.steps and not stop["asked"] \
+                and (kept["loss"] is None or last_validation is None or last_validation <= kept["loss"]):
             save(step, last_validation)
             emit(f"Checkpoint saved at total training step {total_step:,}.")
         if stop["asked"]:
@@ -348,8 +358,15 @@ def train(args) -> int:
     if done == 0:
         emit("Stopped before the first step finished; nothing was changed.")
         return 0
-    final_validation = evaluate(model, valid_tokens, valid_weights, args.context, args.batch_size, device, batches=20)
-    save(done, final_validation)
+    final_validation = evaluate(model, valid_tokens, valid_weights, args.context, args.batch_size, device)
+    if kept["loss"] is not None and final_validation > kept["loss"]:
+        emit(f"The last steps made validation worse ({final_validation:.4f}), so the saved model stays the one from "
+             f"total step {kept['step'] or previous_steps:,} (validation {kept['loss']:.4f}). It had started memorising: "
+             "next time use fewer steps, more dropout, or more text.")
+        final_validation = kept["loss"]
+        done = (kept["step"] - previous_steps) if kept["step"] else 0
+    else:
+        save(done, final_validation)
     if args.result_file:
         Path(args.result_file).write_text(json.dumps({"validation_loss": final_validation,
                                                       "total_steps": previous_steps + done}), encoding="utf-8")

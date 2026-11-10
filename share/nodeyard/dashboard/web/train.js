@@ -545,6 +545,7 @@ Assistant: game tonight?</pre></div>
       <section class="card"><h2 class="tr-h">Recommended for ${ov.plan.share.length > 1 ? "these machines" : ov.plan.lead || "this hardware"}</h2>
         <label class="tr-field"><span>How long can it train?</span><select class="select" data-tr-act="hours">${raw([[0.25, "15 minutes"], [1, "1 hour"], [3, "3 hours"], [8, "overnight (8 h)"], [24, "a day"], [72, "3 days"]].map(([v, l]) => '<option value="' + v + '"' + (+v === +TR.hours ? " selected" : "") + ">" + l + "</option>").join(""))}</select></label>
         <p class="small">${TR.sel.length ? html`For <b>${TR.sel.join(", ")}</b>:` : html`<span class="warn-t">No data chosen yet</span> — <a href="#" data-tr-tab="data">choose it in step 2</a>.`} a <b>${n0(r.parameters)}</b>-weight model, about <b>${dur(r.seconds)}</b>, using ~${gb(r.memory)}. Limited by <b>${r.limit}</b>.</p>
+        ${bigger(r)}
         <div class="tr-why">${r.why.map((w) => html`<details><summary><b>${w.name}</b><span>${w.value}</span></summary><div class="tr-eq small">${w.formula}</div><div class="tr-calc small">${w.numbers}</div><p class="muted small">${w.explain}</p></details>`)}</div>
         <p class="small"><b>Expect:</b> ${r.expect.level}</p>
         ${TR.edited ? html`<button class="btn" data-tr-act="use-rec">Use these settings</button>` : html`<p class="faint small">These are in the settings below.</p>`}</section>
@@ -579,6 +580,14 @@ Assistant: game tonight?</pre></div>
         <div id="tr-qlive"></div>
         <details class="mt"><summary>Training log</summary><pre class="tr-pre tr-log" id="tr-logbox"></pre></details></section>
       ${savedModels()}</div>`;
+  }
+  function bigger(r) {
+    const b = r.bigger; if (!b) return "";
+    const hrs = (h) => (h < 1 ? Math.round(h * 60) + " min" : h + " h");
+    return html`<details class="tr-bigger" ${r.limit === "compute" ? "open" : ""}><summary class="small"><b>How to get a bigger model</b> ${r.limit === "compute" ? html`<span class="warn-t">— limited by compute: time × speed</span>` : r.limit === "data" ? html`<span class="faint">— limited by your text: add more</span>` : html`<span class="faint">— limited by memory</span>`}</summary>
+      <p class="faint small">A model can only learn as much as the arithmetic it gets: weights ≈ √(speed × time ÷ 120). Past that, a bigger model would stay half-trained and do worse.</p>
+      <div class="tr-scroll"><table class="tr-key"><tr><th>Train for</th><th>Model</th><th>Limited by</th></tr>${b.times.map((t) => html`<tr class="${+t.hours === +TR.hours ? "hl" : ""}"><td>${hrs(t.hours)}</td><td>${n0(t.parameters)} weights</td><td class="small faint">${t.limit}</td></tr>`)}</table></div>
+      ${b.faster.map((m) => html`<div class="tr-adv ${m.usable ? "ok" : "warn"} small"><b>${m.name}</b>${m.gpu ? " (" + m.gpu + ")" : ""} is ~${f(m.speed / (r.speed || 1), 2)}× faster: in ${hrs(TR.hours)} it could train <b>${n0(m.parameters)} weights</b>${m.usable ? " — tick it under “Where it trains”." : html` — but it's ${m.reason}. Get it back online (check its kubelet, cable and power: <code>sudo k3s kubectl describe node ${m.name}</code>) and it's picked automatically.`}</div>`)}</details>`;
   }
   function stopWhen() {
     const q = TR.q, ps = qPrompts();

@@ -1176,6 +1176,7 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .tr-legend span { padding: 1px 6px; border-radius: 6px; background: rgba(127, 127, 127, .1); margin-right: 4px; }
 .tr-qtable td { min-width: 180px; } .tr-qtable td:last-child { min-width: 0; } .tr-qtable .input { width: 100%; }
 .tr-quality { margin-top: 12px; }
+.tr-bigger { margin: 8px 0 12px; } .tr-bigger summary { cursor: pointer; }
 .tr-machines tr.off td { opacity: .6; } .tr-machines td:first-child { width: 22px; }
 .tr-two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; align-items: start; }
 .tr-sl { display: flex; flex-direction: column; gap: 3px; margin: 8px 0; font-size: 13px; }
