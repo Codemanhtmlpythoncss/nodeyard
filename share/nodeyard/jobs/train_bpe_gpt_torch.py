@@ -47,11 +47,13 @@ def emit(message: str) -> None:
 
 
 class GPT(nn.Module):
-    def __init__(self, vocab_size: int, context: int, dim: int, heads: int, layers: int):
+    def __init__(self, vocab_size: int, context: int, dim: int, heads: int, layers: int, dropout: float = 0.0):
         super().__init__()
         self.token_embedding = nn.Embedding(vocab_size, dim)
         self.position_embedding = nn.Embedding(context, dim)
-        block = nn.TransformerEncoderLayer(dim, heads, dim_feedforward=4 * dim, dropout=0.0,
+        # Dropout (training only) zeroes a random fraction of values in each block, so the model can't lean on any
+        # one path: it memorises less when the text is small. It has no weights, so it doesn't change the shape.
+        block = nn.TransformerEncoderLayer(dim, heads, dim_feedforward=4 * dim, dropout=dropout,
                                            activation="gelu", batch_first=True, norm_first=True)
         self.blocks = nn.TransformerEncoder(block, num_layers=layers, enable_nested_tensor=False)
         self.norm = nn.LayerNorm(dim)
@@ -241,12 +243,12 @@ def train(args) -> int:
     emit(f"Tokens: {len(tokens):,} ({len(text) / len(tokens):.2f} characters per token); "
          f"{len(train_tokens):,} to train, {len(valid_tokens):,} to validate.")
 
-    model = GPT(tokenizer.vocab_size, args.context, args.dim, args.heads, args.layers).to(device)
+    model = GPT(tokenizer.vocab_size, args.context, args.dim, args.heads, args.layers, args.dropout).to(device)
     if args.resume:
         model.load_state_dict(torch.load(app_data / MODEL_FILE, map_location=device))
     parameters = sum(p.numel() for p in model.parameters())
     emit(f"Model initialized: {parameters:,} trainable parameters; {args.layers} blocks, {args.heads} attention heads, "
-         f"width {args.dim}, context {args.context}.")
+         f"width {args.dim}, context {args.context}{f', dropout {args.dropout:g}' if args.dropout else ''}.")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.95),
                                   weight_decay=args.weight_decay)
     if args.resume and (app_data / OPTIMIZER_FILE).is_file():
@@ -259,6 +261,9 @@ def train(args) -> int:
         emit("No saved optimizer state: AdamW starts fresh, so warm-up protects the model for the first steps.")
     peak = args.learning_rate
     governor = LearningRateGovernor(args.learning_rate)
+    quality = parse_quality(args.quality)
+    chat_data = "\nAssistant:" in "\n" + text
+    best = {"loss": None, "since": 0}
     model_id = (saved.get("model_id") if args.resume else None) or uuid.uuid4().hex[:12]
     stop = {"asked": False}
 
@@ -283,7 +288,7 @@ def train(args) -> int:
             "parameters": parameters, "vocabulary": tokenizer.vocab_size, "layers": args.layers,
             "width": args.dim, "heads": args.heads, "context": args.context, "batch_size": args.batch_size,
             "learning_rate": args.learning_rate, "weight_decay": args.weight_decay,
-            "assistant_only": bool(args.assistant_only), "trained_steps": previous_steps + done_steps,
+            "assistant_only": bool(args.assistant_only), "dropout": args.dropout, "trained_steps": previous_steps + done_steps,
             "validation_loss": validation, "compute_device": str(device),
             "data_files": [Path(p).name for p in args.data_files], "saved_at": time.time(),
         }
@@ -328,9 +333,12 @@ def train(args) -> int:
             emit(f"Validation at step {step}: loss {validation:.4f} | total training step {total_step:,}")
             emit(f"Gradient norm at step {step}: {grad_norm:.4f} (clipped to 1.0 when larger)")
             last_validation = validation
-            new_rate = governor.observe(validation, peak, total_step, emit)
-            if new_rate is not None:
-                peak = new_rate
+            if quality:
+                judge_quality(model, tokenizer, args, device, quality, chat_data, validation, total_step, best, stop)
+            if args.lr_progress or step > args.warmup:   # during warm-up the rate is still climbing: nothing to judge
+                new_rate = governor.observe(validation, peak, total_step, emit)
+                if new_rate is not None:
+                    peak = new_rate
         if args.save_every and step % args.save_every == 0 and step != args.steps and not stop["asked"]:
             save(step, last_validation)
             emit(f"Checkpoint saved at total training step {total_step:,}.")
@@ -366,6 +374,87 @@ def end_of_reply(text: str):
 
 
 @torch.no_grad()
+def judge_quality(model, tokenizer, args, device, quality, chat_data, validation, total_step, best, stop):
+    """After a validation check: test the replies, then stop if the model is good enough, or if it stopped improving."""
+    results, score = check_quality(model, tokenizer, args.context, device, quality, chat_data) if quality["prompts"] else ([], None)
+    emit("QUALITY " + json.dumps({"step": total_step, "score": score, "loss": validation, "results": results}))
+    wanted = []
+    if score is not None:
+        wanted.append(score >= quality["pass"] - 1e-9)
+    if quality["target_loss"] is not None:
+        wanted.append(validation <= quality["target_loss"])
+    if wanted and all(wanted):
+        parts = []
+        if score is not None:
+            parts.append(f"{sum(1 for r in results if r['ok'])} of {sum(1 for r in results if r['ok'] is not None)} test prompts pass")
+        if quality["target_loss"] is not None:
+            parts.append(f"validation loss {validation:.4f} ≤ {quality['target_loss']}")
+        emit(f"Good enough at total training step {total_step:,}: {' and '.join(parts)}.")
+        stop["asked"] = True
+        return
+    if best["loss"] is None or validation < best["loss"] * 0.999:
+        best["loss"], best["since"] = validation, 0
+    else:
+        best["since"] += 1
+    if quality["give_up"] and best["since"] >= quality["give_up"]:
+        emit(f"Stopped improving before it was good enough: validation hasn't beaten {best['loss']:.4f} in {best['since']} checks. "
+             "More steps won't help now: it needs more (or cleaner) data, a bigger model, or an easier target.")
+        stop["asked"] = True
+
+
+@torch.no_grad()
+def write_reply(model, tokenizer, context: int, prompt: str, device, rng, chat: bool, max_tokens: int = 160,
+                temperature: float = 0.7, top_k: int = 40, top_p: float = 0.9, repetition_penalty: float = 1.1) -> str:
+    prompt_ids = tokenizer.encode(prompt) or [ord("\n")]
+    generated: list[int] = []
+    for step in range(1, max_tokens + 1):
+        context_ids = (prompt_ids + generated)[-context:]
+        logits = model(torch.as_tensor([context_ids], device=device))[0, -1].float().cpu().numpy()
+        generated.append(sample_token(logits, rng, recent=generated[-64:], temperature=temperature,
+                                      top_k=top_k, top_p=top_p, repetition_penalty=repetition_penalty))
+        if chat and step % 4 == 0 and end_of_reply(tokenizer.decode(generated)) is not None:
+            break
+    text = tokenizer.decode(generated)
+    cut = end_of_reply(text) if chat else None
+    return (text[:cut] if cut is not None else text).strip()
+
+
+def parse_quality(spec: str | None):
+    """--quality JSON: {"prompts": [{"prompt": "...", "expect": ["word", ...]}], "pass": 0.8, "target_loss": 2.0,
+    "give_up": 10}. A prompt passes when its reply contains any expected word (any case); prompts without
+    expected words are only shown. Training stops when the pass rate and the target loss (whichever are set) are
+    both reached, or after `give_up` checks in a row without a better validation loss."""
+    if not spec:
+        return None
+    q = json.loads(spec)
+    prompts = []
+    for p in (q.get("prompts") or [])[:20]:
+        if isinstance(p, dict) and str(p.get("prompt") or "").strip():
+            prompts.append({"prompt": str(p["prompt"])[:500],
+                            "expect": [str(e).strip() for e in (p.get("expect") or []) if str(e).strip()][:10]})
+    target = q.get("target_loss")
+    return {"prompts": prompts, "pass": min(1.0, max(0.0, float(q.get("pass", 1.0)))),
+            "target_loss": float(target) if target not in (None, "") else None, "give_up": max(0, int(q.get("give_up", 10)))}
+
+
+@torch.no_grad()
+def check_quality(model, tokenizer, context: int, device, quality: dict, chat: bool):
+    """Ask the model every test prompt (low temperature, fixed seed) and grade the replies."""
+    model.eval()
+    rng = np.random.default_rng(0)
+    results = []
+    for p in quality["prompts"]:
+        prompt = f"User: {p['prompt']}\nAssistant:" if chat else p["prompt"]
+        reply = write_reply(model, tokenizer, context, prompt, device, rng, chat, max_tokens=60, temperature=0.3, top_k=10)
+        ok = any(e.lower() in reply.lower() for e in p["expect"]) if p["expect"] else None
+        results.append({"prompt": p["prompt"], "reply": reply[:400], "expect": p["expect"], "ok": ok})
+    model.train()
+    graded = [r for r in results if r["ok"] is not None]
+    score = sum(1 for r in graded if r["ok"]) / len(graded) if graded else None
+    return results, score
+
+
+@torch.no_grad()
 def generate(args) -> int:
     app_data = args.app_data.expanduser()
     config = json.loads((app_data / CONFIG_FILE).read_text(encoding="utf-8"))
@@ -375,18 +464,8 @@ def generate(args) -> int:
     model.load_state_dict(torch.load(app_data / MODEL_FILE, map_location=device))
     model.eval()
     rng = np.random.default_rng(args.seed)
-    prompt_ids = tokenizer.encode(args.prompt) or [ord("\n")]
-    generated: list[int] = []
-    for step in range(1, args.max_tokens + 1):
-        context_ids = (prompt_ids + generated)[-config["context"]:]
-        logits = model(torch.as_tensor([context_ids], device=device))[0, -1].float().cpu().numpy()
-        generated.append(sample_token(logits, rng, recent=generated[-64:], temperature=args.temperature,
-                                      top_k=args.top_k, top_p=args.top_p, repetition_penalty=args.repetition_penalty))
-        if args.chat_mode and step % 4 == 0 and end_of_reply(tokenizer.decode(generated)) is not None:
-            break
-    text = tokenizer.decode(generated)
-    cut = end_of_reply(text) if args.chat_mode else None
-    reply = (text[:cut] if cut is not None else text).strip()
+    reply = write_reply(model, tokenizer, config["context"], args.prompt, device, rng, args.chat_mode, args.max_tokens,
+                        args.temperature, args.top_k, args.top_p, args.repetition_penalty)
     if args.chat_mode:
         emit("CHAT_REPLY_BEGIN")
         emit(reply)
@@ -578,6 +657,8 @@ def main() -> int:
     train_parser.add_argument("--resume", action="store_true")
     train_parser.add_argument("--result-file", default=None)
     train_parser.add_argument("--save-every", type=int, default=500, help="save a checkpoint every N steps (0: only at the end)")
+    train_parser.add_argument("--dropout", type=float, default=0.0, help="fraction of values zeroed while training (0-0.5)")
+    train_parser.add_argument("--quality", default=None, help="JSON: test prompts and when the model is good enough (see parse_quality)")
     train_parser.add_argument("--lr-progress", nargs=2, type=float, default=None, metavar=("FROM", "TO"),
                               help="follow the cosine schedule from FROM to TO (0..1) of a longer job, with no warm-up")
     train_parser.set_defaults(handler=train)

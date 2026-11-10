@@ -233,3 +233,58 @@ def convert_file(src, dst):
                 out.write(line.replace("\r\n", "\n").lstrip("﻿"))
     os.replace(tmp, dst)
     return {"format": kind, "records": records, "skipped": skipped}
+
+
+# -- conversations with more than two people ------------------------------------------------------------------
+# A line of a script, a play or a chat export: "NAME: text", optionally after a WhatsApp-style timestamp
+# ("12/03/2024, 21:15 - Name: text" or "[12/03/2024, 21:15:03] Name: text"). Lines without a name continue the
+# previous speaker's turn.
+TURN_RE = re.compile(r"^\s*(?:\[?[\d/.\-]+,? [\d:]+(?: ?[APap][Mm])?\]?\s*(?:-\s*)?)?([A-Za-z][\w .'’\-]{0,39}?)\s*:\s+(.*\S)\s*$")
+
+
+def read_turns(path, limit_bytes=512 * 1024 * 1024):
+    """[(speaker, text)], with one speaker's consecutive lines merged into one turn."""
+    turns = []
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        read = 0
+        for line in f:
+            read += len(line)
+            if read > limit_bytes:
+                break
+            m = TURN_RE.match(line)
+            if m and len(m.group(1).split()) <= 4:
+                who, text = m.group(1).strip(), m.group(2).strip()
+                if turns and turns[-1][0] == who:
+                    turns[-1] = (who, turns[-1][1] + " " + text)
+                else:
+                    turns.append((who, text))
+            elif line.strip() and turns:
+                turns[-1] = (turns[-1][0], turns[-1][1] + " " + line.strip())
+    return turns
+
+
+def speakers(path):
+    counts = {}
+    for who, _ in read_turns(path):
+        counts[who] = counts.get(who, 0) + 1
+    return sorted(({"name": k, "turns": v} for k, v in counts.items()), key=lambda x: -x["turns"])[:40]
+
+
+def multiparty_to_pairs(src, dst, speaker, context=3, names=True):
+    """Every turn by `speaker` becomes one example: the `context` turns before it as the User side (each with its
+    speaker's name, so the model knows who said what), and the speaker's own words as the Assistant side."""
+    turns = read_turns(src)
+    examples = 0
+    tmp = dst + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as out:
+        for i, (who, text) in enumerate(turns):
+            if who != speaker or i == 0:
+                continue
+            before = turns[max(0, i - context):i]
+            if not before:
+                continue
+            ask = "\n".join(("%s: %s" % (w, t)) if names else t for w, t in before)
+            out.write(json.dumps({"messages": [{"role": "user", "content": ask}, {"role": "assistant", "content": text}]}, ensure_ascii=False) + "\n")
+            examples += 1
+    os.replace(tmp, dst)
+    return {"examples": examples, "turns": len(turns)}
