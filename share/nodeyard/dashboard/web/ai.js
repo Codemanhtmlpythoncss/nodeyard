@@ -25,7 +25,7 @@
     d.max_tokens = Number.isInteger(+d.max_tokens) && +d.max_tokens >= 0 && +d.max_tokens <= 65536 ? +d.max_tokens : DEFAULT_CHAT_SETTINGS.max_tokens;
     d.context_length = Number.isInteger(+d.context_length) && +d.context_length >= 512 && +d.context_length <= 131072 ? +d.context_length : DEFAULT_CHAT_SETTINGS.context_length;
     d.compress = d.compress === "off" ? "off" : "auto";
-    d.web = d.web === true; d.skills_auto = d.skills_auto !== false; d.autofix = d.autofix === true;
+    d.web = d.web === true; d.skills_auto = d.skills_auto !== false; d.autofix = false;  // never auto-run by default; opt in per chat
     d.files = ["ask", "always", "never"].includes(d.files) ? d.files : "ask";
     d.context_max = d.context_max === true;
     return d;
@@ -101,8 +101,9 @@
     if (S.view === "ai") U.queueRender();
   }
   try { A.chats = JSON.parse(store.get("chats", "[]")) || []; } catch (e) { A.chats = []; }
-  // answers the last page was still receiving when it closed: offer to pick them up again
-  A.chats.forEach((c) => (c.messages || []).forEach((m) => { if (m.lost && !m.error) m.error = "This answer was still arriving when the page closed."; }));
+  // answers the last page was still receiving when it closed: offer to pick them up again.
+  // Auto-run never survives a reload: running the model's code is always a deliberate, this-session choice.
+  A.chats.forEach((c) => { c.autofix = false; (c.messages || []).forEach((m) => { if (m.lost && !m.error) m.error = "This answer was still arriving when the page closed."; }); });
   A.cur = store.get("chat.cur", "") || (A.chats[0] && A.chats[0].id) || "";
   const saveChats = () => {
     // attached files are kept too; if that doesn't fit in the browser's storage, only their names are
@@ -295,7 +296,9 @@
     const run = RUNNABLE[(lang || "").toLowerCase()], c = curChat(), m = c && mi != null && mi >= 0 ? c.messages[mi] : null, r = m && m.runs && m.runs[bi];
     if (m && mi >= 0) { (A.blocks[mi] = A.blocks[mi] || [])[bi] = { lang: run || "", code: text }; }
     return '<div class="code" data-mi="' + mi + '" data-bi="' + bi + '" data-lang="' + esc(run || "") + '"><div class="code-head"><span>' + esc(lang || "text") + "</span><span>" + (run && mi != null && mi >= 0 ? '<button class="btn small primary" data-ai="run-code" title="Run it on the server and see what happens">▶ Run</button> ' : "") +
-      '<button class="btn small" data-ai="copy-code">Copy</button> <button class="btn small" data-ai="dl-code">Download</button></span></div><pre><code>' + esc(text) + "</code></pre>" + (r ? runOut(r) : "") + "</div>";
+      '<button class="btn small" data-ai="copy-code">Copy</button> <button class="btn small" data-ai="dl-code">Download</button></span></div><pre><code>' + esc(text) + "</code></pre>" +
+      (run && mi != null && mi >= 0 ? '<label class="run-stdin"><span class="faint small">Input the program will read — one answer per line, if it asks for any (leave empty if it needs none):</span><textarea class="input small" data-ai-stdin rows="2" spellcheck="false" placeholder="e.g. for a rock-paper-scissors loop:&#10;rock&#10;quit">' + esc((r && r.stdin) || "") + "</textarea></label>" : "") +
+      (r ? runOut(r) : "") + "</div>";
   };
   function md(src, mi, pending) {
     if (mi != null && mi >= 0) A.blocks[mi] = [];
@@ -812,18 +815,20 @@
     node.outerHTML = msgHTML(m, i, i === c.messages.length - 1);
     if (near) $("#thread").scrollTop = $("#thread").scrollHeight;
   }
-  async function runCode(c, mi, bi, lang, code) {
+  async function runCode(c, mi, bi, lang, code, stdin) {
     const m = c.messages[mi]; if (!m) return null;
-    m.runs = m.runs || {}; m.runs[bi] = { running: true }; repaintMsg(mi);
+    stdin = stdin || "";
+    m.runs = m.runs || {}; m.runs[bi] = { running: true, stdin }; repaintMsg(mi);
     let res;
-    try { const r = await postJSON("/api/ai/run-code", { lang, code }); res = r.ok ? { rc: r.rc, out: r.out, secs: r.seconds, lang, code } : { rc: -1, failed: true, out: r.error || "Couldn't run it.", lang, code }; }
-    catch (e) { res = { rc: -1, failed: true, out: "Couldn't reach the dashboard.", lang, code }; }
+    try { const r = await postJSON("/api/ai/run-code", { lang, code, stdin }); res = r.ok ? { rc: r.rc, out: r.out, secs: r.seconds, lang, code, stdin } : { rc: -1, failed: true, out: r.error || "Couldn't run it.", lang, code, stdin }; }
+    catch (e) { res = { rc: -1, failed: true, out: "Couldn't reach the dashboard.", lang, code, stdin }; }
     m.runs[bi] = res; saveChats(); repaintMsg(mi);
     return res;
   }
   function runCodeBlock(el) {
     const box = el.closest(".code"), c = curChat(); if (!box || !c) return;
-    runCode(c, +box.dataset.mi, +box.dataset.bi, box.dataset.lang, box.querySelector("pre").textContent);
+    const si = box.querySelector("[data-ai-stdin]");
+    runCode(c, +box.dataset.mi, +box.dataset.bi, box.dataset.lang, box.querySelector("pre").textContent, si ? si.value : "");
   }
   const fixPrompt = (r) => "I ran this " + r.lang + " code:\n```" + (r.lang === "node" ? "javascript" : r.lang) + "\n" + r.code + "\n```\n" + (r.rc === 0 ? "It printed:\n```\n" + (r.out || "(nothing)") + "\n```\nIs that right? If something is wrong, fix it and give me the complete corrected code." :
     "It failed" + (r.failed ? "" : " (exit code " + r.rc + ")") + ":\n```\n" + (r.out || "(no output)") + "\n```\nPlease find the problem and give me the complete corrected code.");
@@ -1430,7 +1435,7 @@
         <div class="plugins"><b>AI skills</b> <label class="check"><input type="checkbox" id="cs-auto-skills" ${c.skills_auto !== false ? raw("checked") : ""}> <span><b>Choose automatically</b>: the AI can use any available skill when it helps. File changes and code still ask before running.</span></label>
           <span class="muted small">Automatic mode sends the available skill list with each message and can add a little delay. Turn it off to select individual skills.</span>
           <div id="plugin-list">${pluginList(c)}</div></div>
-        <label class="check"><input type="checkbox" id="cs-autofix" ${c.autofix ? raw("checked") : ""}> <span><b>Run and fix code automatically</b>: runs the code the AI writes on the server (as your user) and sends errors back so it fixes them, up to 3 tries. Off by default; code only runs when you press ▶ Run.</span></label>
+        <label class="check"><input type="checkbox" id="cs-autofix" ${c.autofix ? raw("checked") : ""}> <span><b>Run and fix code automatically</b>: runs the code the AI writes on the server (as your user) and sends errors back so it fixes them, up to 3 tries. Off by default and resets off each time you reload — code only runs when you turn this on or press ▶ Run.</span></label>
         ${canSpeak() ? html`<div class="plugins"><b>Read aloud</b> <label class="check"><input type="checkbox" id="cs-voice-auto" ${VOICE.auto ? raw("checked") : ""}> <span><b>Read answers aloud</b> as they're written, sentence by sentence (this browser, every chat). Uses your computer's own voices; nothing is sent anywhere.</span></label>
           <div class="row" style="gap:12px;flex-wrap:wrap;align-items:flex-end"><label>Voice<select class="select" id="cs-voice">${raw(voiceOptions())}</select></label>
           <label>Speed<select class="select" id="cs-rate">${raw([0.8, 1, 1.15, 1.3, 1.5, 1.75, 2].map((r) => '<option value="' + r + '"' + (+VOICE.rate === r ? " selected" : "") + ">" + r + "×</option>").join(""))}</select></label>
@@ -2073,7 +2078,7 @@
     const a = el.dataset.ai, c = curChat();
     if (a === "new-chat") { newChat(); buildChat(); }
     else if (a === "open-chat") { A.cur = el.dataset.id; saveChats(); buildChat(); }
-    else if (a === "del-chat") { e.stopPropagation(); const gone = A.chats.find((x) => x.id === el.dataset.id); if (gone && gone.remote) postJSON("/api/v1/chats/delete", { id: gone.remote.id }).catch(() => {}); A.chats = A.chats.filter((x) => x.id !== el.dataset.id); if (A.cur === el.dataset.id) A.cur = (A.chats[0] || {}).id || ""; saveChats(); buildChat(); }
+    else if (a === "del-chat") { e.stopPropagation(); const gone = A.chats.find((x) => x.id === el.dataset.id); if (gone && gone.remote) postJSON("/api/v1/chats/delete", { id: gone.remote.id }).catch(() => {}); postJSON("/api/ai/agent/reset", { chat: el.dataset.id }).catch(() => {});  /* close its AI helper too, so it doesn't hold a slot */ A.chats = A.chats.filter((x) => x.id !== el.dataset.id); if (A.cur === el.dataset.id) A.cur = (A.chats[0] || {}).id || ""; saveChats(); buildChat(); }
     else if (a === "clear-chat" && c) { if (TALK.on) talkEnd(); stopReading(); if (A.stream) A.stream.ctrl.abort(); postJSON("/api/ai/agent/reset", { chat: c.id }).catch(() => {}); c.messages = []; c.summary = ""; c.summaryUpTo = 0; c.title = "New chat"; saveChats(); renderThread(); renderChatList(); refreshChat(); }
     else if (a === "compress-now" && c) { compressChat(c, { manual: true }); }
     else if (a === "agent-allow" || a === "agent-always" || a === "agent-deny") { agentReply(c, a); }
