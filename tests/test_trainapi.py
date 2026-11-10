@@ -20,6 +20,7 @@ import trainpool  # noqa: E402
 import trainworker  # noqa: E402
 import trainsets  # noqa: E402
 import starter_dataset  # noqa: E402
+import lr_governor  # noqa: E402
 import training_data  # noqa: E402
 
 
@@ -56,6 +57,14 @@ class RecommendTests(unittest.TestCase):
         small = trainapi.recommend(hw, 1_000_000, 1)["parameters"]
         self.assertGreaterEqual(trainapi.recommend(hw, 100_000_000, 1)["parameters"], small)
         self.assertGreaterEqual(trainapi.recommend(hw, 100_000_000, 24)["parameters"], trainapi.recommend(hw, 100_000_000, 1)["parameters"])
+
+    def test_small_data_gets_a_model_big_enough_to_learn_it(self):
+        # The complete works of Shakespeare as chat pairs (~8M characters): the old rule (tokens ÷ 5) gave ~400K weights
+        # and the loss went flat early; nanoGPT's Shakespeare model has ~10 weights per character.
+        r = trainapi.recommend(self.HW[1], 7_948_437, 8)
+        self.assertGreater(r["parameters"], 2_000_000)
+        self.assertEqual(r["settings"]["dropout"], 0.2)
+        self.assertEqual(trainapi.recommend(self.HW[1], 2_000_000_000, 1)["settings"]["dropout"], 0.0)
 
     def test_embeddings_stay_under_half_the_model_when_the_vocab_can_shrink(self):
         r = trainapi.recommend(self.HW[0], 50_000_000, 1)
@@ -347,6 +356,71 @@ class DataToolsTests(unittest.TestCase):
         self.assertTrue(c["sampled"])
         self.assertAlmostEqual(c["records"], 2000, delta=40)
         self.assertTrue(any("estimated" in a[1] for a in c["advice"]))
+
+
+class GovernorTests(unittest.TestCase):
+    def test_small_steady_gains_never_cut_the_rate(self):
+        g, rate, said = lr_governor.LearningRateGovernor(1e-3), 1e-3, []
+        loss = 4.0
+        for step in range(200):
+            loss *= 0.9995          # 0.05% better per check: the late-training case that used to flatline
+            new = g.observe(loss, rate, step, said.append)
+            rate = new or rate
+        self.assertEqual(rate, 1e-3)
+
+    def test_a_real_stall_cuts_slowly_and_never_below_a_tenth(self):
+        g, rate, said = lr_governor.LearningRateGovernor(1e-3), 1e-3, []
+        cuts = []
+        for step in range(400):
+            new = g.observe(3.0, rate, step, said.append)
+            if new:
+                cuts.append(step)
+                rate = new
+        self.assertEqual(cuts[0], 4)                 # four checks without progress, not two
+        self.assertAlmostEqual(rate, 1e-4)           # floor: 10% of the start, not 2%
+
+
+class QualityAndMultipartyTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.t = trainapi.Trainer(self.dir.name)
+        post(self.t, self.t.paste, {"name": "d.txt", "text": "User: hi\nAssistant: hello\n\n" * 100})
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_good_enough_needs_something_to_check(self):
+        settings = {"dim": 64, "heads": 2, "steps": 10, "batch_size": 1, "context": 8, "layers": 1, "vocab_size": 300, "learning_rate": 0.001}
+        bad = post(self.t, self.t.start, {"data": ["d.txt"], "settings": settings, "quality": {"on": True, "prompts": [{"prompt": "Hi", "expect": []}]}})
+        self.assertIn("expected word", bad["error"])
+        self.assertFalse(self.t.running())
+
+    def test_status_reads_test_replies_and_the_verdict(self):
+        log = os.path.join(self.t.logs_dir, "q.log")
+        res = [{"prompt": "Hi", "reply": "hello", "expect": ["hello"], "ok": True}]
+        with open(log, "w") as f:
+            f.write("QUALITY " + json.dumps({"step": 500, "score": 0.5, "loss": 2.1, "results": res}) + "\n"
+                    "QUALITY " + json.dumps({"step": 1000, "score": 1.0, "loss": 1.9, "results": res}) + "\n"
+                    "Good enough at total training step 1,000: 1 of 1 test prompts pass.\n")
+        self.t.job = {"model": "m", "log": log, "quality": "{}"}
+        st = self.t.status(0)
+        self.assertEqual([q["score"] for q in st["quality"]], [0.5, 1.0])
+        self.assertEqual(st["quality_last"]["results"][0]["reply"], "hello")
+        self.assertTrue(st["verdict"].startswith("Good enough"))
+        self.assertTrue(st["job"]["until_good"])
+
+    def test_group_chat_becomes_pairs_for_one_speaker(self):
+        chat = ("12/03/2024, 21:15 - Sam: anyone up?\n12/03/2024, 21:16 - Alex: yep\n[12/03/2024, 21:17:03] Jo: me too\n"
+                "what's up\n12/03/2024, 21:18 - Sam: game tonight?\n12/03/2024, 21:18 - Sam: 8pm\n")
+        post(self.t, self.t.paste, {"name": "group.txt", "text": chat})
+        self.assertEqual([x["name"] for x in self.t.speakers("group.txt")["speakers"]], ["Sam", "Alex", "Jo"])
+        r = self.t.multiparty({"name": "group.txt", "speaker": "Sam", "context": 2})
+        self.assertEqual((r["name"], r["examples"]), ("group-as-Sam.jsonl", 1))
+        with open(os.path.join(self.t.data_dir, r["name"]), encoding="utf-8") as f:
+            rec = json.loads(f.readline())
+        self.assertEqual(rec["messages"][0]["content"], "Alex: yep\nJo: me too what's up")
+        self.assertEqual(rec["messages"][1]["content"], "game tonight? 8pm")
+        self.assertIn("speakers", post(self.t, self.t.multiparty, {"name": "group.txt", "speaker": "Nobody"})["error"])
 
 
 if __name__ == "__main__":

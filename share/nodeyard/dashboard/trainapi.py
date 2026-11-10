@@ -157,16 +157,16 @@ def recommend(hw, data_chars=None, hours=1.0):
 
     # Three limits on the model size N; the smallest wins.
     n_compute = math.sqrt(compute / 120)
-    n_data = tokens / 5
+    n_data = tokens * 2
     context0 = 128
     n_memory = budget / 20      # 16 bytes per weight for weights+gradients+AdamW m and v, plus room for activations
     caps = [("compute", n_compute), ("data", n_data), ("memory", n_memory)]
     limit_name, target = min(caps, key=lambda c: c[1])
     target = max(50_000, min(target, 300_000_000))
-    why.append({"name": "Model size N (weights)", "value": _n(target), "formula": "N = min(√(C ÷ 120), tokens ÷ 5, memory ÷ 20 bytes)",
-                "numbers": "compute C = %s FLOP/s × %s s = %s → √(C÷120) = %s · data %s ÷ 5 = %s · memory %s ÷ 20 = %s → %s is the limit"
+    why.append({"name": "Model size N (weights)", "value": _n(target), "formula": "N = min(√(C ÷ 120), 2 × tokens, memory ÷ 20 bytes)",
+                "numbers": "compute C = %s FLOP/s × %s s = %s → √(C÷120) = %s · data %s × 2 = %s · memory %s ÷ 20 = %s → %s is the limit"
                            % (_sci(speed), _n(seconds), _sci(compute), _n(n_compute), _n(tokens), _n(n_data), _gb(budget), _n(n_memory), limit_name),
-                "explain": "Compute: the Chinchilla rule says train on about 20 tokens per weight, and training costs 6 FLOPs per weight per token, so C = 6·N·20N = 120·N². Data: repeating text more than about 4 times stops helping, so N ≤ tokens·4 ÷ 20. Memory: float32 weights, gradients and AdamW's two moments are 16 bytes per weight. %s" % ("Speed here is a guess for this hardware (%s FLOP/s); the real tokens/sec shows once training starts." % _sci(speed))})
+                "explain": "Compute: the Chinchilla rule says train on about 20 tokens per weight, and training costs 6 FLOPs per weight per token, so C = 6·N·20N = 120·N². Data: with little text a bigger model still does better as long as dropout stops it memorising and you stop when validation stops falling (nanoGPT's Shakespeare model has about 10 weights per character of text), so this allows up to 2 weights per token. A smaller cap makes a model too small to learn the text, and the loss goes flat early. Memory: float32 weights, gradients and AdamW's two moments are 16 bytes per weight. %s" % ("Speed here is a guess for this hardware (%s FLOP/s); the real tokens/sec shows once training starts." % _sci(speed))})
 
     context = 64 if target < 300_000 else 256 if target > 5_000_000 and device != "cpu" else context0
     # Keep the vocabulary's two tables (in and out, 2·V·d) to at most half the weights, or the model is all lookup table.
@@ -199,13 +199,18 @@ def recommend(hw, data_chars=None, hours=1.0):
 
     per_step = flops_per_step(params, batch, context)
     steps_time = compute / per_step
-    steps_data = 4 * tokens / (batch * context)
+    steps_data = 10 * tokens / (batch * context)
     steps = int(max(200, min(200_000, steps_time, steps_data)) // 50 * 50)
     epochs = steps * batch * context / max(1, tokens)
-    why.append({"name": "Steps", "value": _n(steps), "formula": "min(C ÷ (6·N·B·T), 4 passes over the data)",
-                "numbers": "%s ÷ (6·%s·%d·%d) = %s · 4·%s ÷ (%d·%d) = %s → %s steps ≈ %.1f passes over your text"
+    why.append({"name": "Steps", "value": _n(steps), "formula": "min(C ÷ (6·N·B·T), 10 passes over the data)",
+                "numbers": "%s ÷ (6·%s·%d·%d) = %s · 10·%s ÷ (%d·%d) = %s → %s steps ≈ %.1f passes over your text"
                            % (_sci(compute), _n(params), batch, context, _n(steps_time), _n(tokens), batch, context, _n(steps_data), _n(steps), epochs),
-                "explain": "One step = read a batch, measure the loss, compute gradients, update every weight once."})
+                "explain": "One step = read a batch, measure the loss, compute gradients, update every weight once. Reading text up to 4 times is about as good as new text; more passes still help, less each time (Muennighoff et al., 2023), so this stops at 10. Watch validation: when it stops falling, more steps only memorise."})
+    ratio = target / max(1, tokens)
+    dropout = 0.2 if ratio > 0.5 else 0.1 if ratio > 0.05 else 0.0
+    why.append({"name": "Dropout", "value": "%g" % dropout, "formula": "0.2 above 1 weight per 2 tokens · 0.1 above 1 per 20 · otherwise 0",
+                "numbers": "%s weights ÷ %s tokens = %.2f weights per token → dropout %g" % (_n(target), _n(tokens), ratio, dropout),
+                "explain": "While training, each block zeroes this fraction of its values at random, so the model can't memorise through any one path. Needed when the model is big for its text; with plenty of text it only slows learning."})
 
     lr = 1e-3 if params < 20e6 else 6e-4 if params < 100e6 else 3e-4
     warmup = int(max(20, min(2000, steps * 0.05)))
@@ -220,7 +225,7 @@ def recommend(hw, data_chars=None, hours=1.0):
         "device": device, "speed": speed, "budget": budget, "budget_text": budget_text, "limit": limit_name,
         "settings": {"vocab_size": vocab, "context": context, "dim": width, "layers": layers, "heads": heads,
                      "batch_size": batch, "steps": steps, "learning_rate": lr, "warmup": warmup, "weight_decay": 0.1,
-                     "eval_every": eval_every},
+                     "eval_every": eval_every, "dropout": dropout},
         "parameters": params, "tokens": tokens, "seconds": seconds_est, "memory": total_mem, "why": why, "expect": expect,
     }
 
@@ -309,7 +314,7 @@ class Trainer:
         self.lock = threading.Lock()
         self.pool = trainpool.Pool(self.root, demo=demo, store=store, kubeconfig=kubeconfig)
         self.thread = None
-        self.parsed = {"path": None, "offset": 0, "train": [], "val": [], "grad": [], "lines": [], "last": {}}
+        self.parsed = {"path": None, "offset": 0, "train": [], "val": [], "grad": [], "lines": [], "last": {}, "quality": [], "verdict": None}
         self.parse_lock = threading.Lock()
         self.check_cache = {}
         self.uploads = {}
@@ -588,6 +593,31 @@ class Trainer:
             raise TrainError("Couldn't convert it: %s" % e)
         return dict(rep, name=os.path.basename(dst), size=os.path.getsize(dst))
 
+    def speakers(self, name):
+        path = self._data_path(name)
+        if not os.path.isfile(path):
+            raise TrainError("That file isn't there any more.", 404)
+        return {"speakers": trainsets.speakers(path)}
+
+    def multiparty(self, body):
+        """A script or group chat → chat pairs where one chosen person is the Assistant."""
+        src = self._data_path(body.get("name"))
+        if not os.path.isfile(src):
+            raise TrainError("That file isn't there any more.", 404)
+        speaker = str(body.get("speaker") or "")
+        if speaker not in {s["name"] for s in trainsets.speakers(src)}:
+            raise TrainError("Pick one of the speakers found in the file.")
+        context = max(1, min(8, int(body.get("context") or 3)))
+        stem = re.sub(r"\.(txt|md|jsonl|json)$", "", os.path.basename(src), flags=re.I)[:40]
+        dst = self._data_path("%s-as-%s.jsonl" % (stem, re.sub(r"[^A-Za-z0-9_-]+", "-", speaker).strip("-")[:30] or "speaker"))
+        if os.path.getsize(src) * 2 > DATA_TOTAL_MAX - self._data_total():
+            raise TrainError("Not enough room in your training data (20 GB): delete some files first.", 413)
+        rep = trainsets.multiparty_to_pairs(src, dst, speaker, context, bool(body.get("names", True)))
+        if not rep["examples"]:
+            os.remove(dst)
+            raise TrainError("%s never speaks after someone else, so there's nothing to learn from." % speaker)
+        return dict(rep, name=os.path.basename(dst), size=os.path.getsize(dst))
+
     def fetch(self, body):
         try:
             return {"job": self.fetcher.start(str(body.get("id") or ""))}
@@ -687,10 +717,25 @@ class Trainer:
                        "--vocab-size", str(num("vocab_size", 256, 100_000)),
                        "--learning-rate", repr(num("learning_rate", 1e-7, 1.0, float)),
                        "--weight-decay", repr(num("weight_decay", 0.0, 1.0, float, 0.1)),
+                       "--dropout", repr(num("dropout", 0.0, 0.5, float, 0.0)),
                        "--device", s.get("device") if s.get("device") in ("auto", "cpu", "cuda", "mps") else "auto"]
             if s.get("assistant_only"):
                 options.append("--assistant-only")
             eval_every, save_every = num("eval_every", 1, 1_000_000, int, 250), num("save_every", 0, 1_000_000, int, 500)
+            quality = None
+            q = body.get("quality")
+            if isinstance(q, dict) and q.get("on"):
+                prompts = [{"prompt": str(p.get("prompt") or "")[:500], "expect": [str(e)[:80] for e in (p.get("expect") or [])][:10]}
+                           for p in (q.get("prompts") or [])[:20] if isinstance(p, dict) and str(p.get("prompt") or "").strip()]
+                target = q.get("target_loss")
+                try:
+                    target = float(target) if target not in (None, "") else None
+                except (TypeError, ValueError):
+                    raise TrainError("The target loss must be a number.")
+                if not any(p["expect"] for p in prompts) and target is None:
+                    raise TrainError("To stop when it's good enough, give at least one test prompt an expected word, or a target loss.")
+                quality = json.dumps({"prompts": prompts, "pass": _clamp_float(q.get("pass"), 0.05, 1.0, 1.0), "target_loss": target,
+                                      "give_up": max(0, min(100, int(q.get("give_up") or 10)))})
             chosen = body.get("machines") if isinstance(body.get("machines"), list) and body.get("machines") else None
             machines = self.machines()
             plan = self.plan(machines, chosen)
@@ -701,7 +746,7 @@ class Trainer:
             open(log_path, "a").close()
             self.job = {"model": name, "log": log_path, "started": time.time(), "resume": resume, "data": files, "settings": s,
                         "ended": None, "code": None, "machines": share, "lead": share[0], "mode": "shared" if len(share) > 1 else "single",
-                        "options": options, "steps": steps, "base_steps": base_steps, "warmup": warmup, "eval_every": eval_every, "save_every": save_every,
+                        "options": options, "steps": steps, "base_steps": base_steps, "quality": quality, "warmup": warmup, "eval_every": eval_every, "save_every": save_every,
                         "speeds": {m["name"]: m["speed"] for m in machines if m["name"] in share},
                         "round": 0, "rounds": 0, "phase": "starting", "stop": False, "wjob": None}
             self._save_job()
@@ -728,12 +773,13 @@ class Trainer:
             return self._status(since)
 
     def _status(self, since):
-        job = {k: v for k, v in self.job.items() if k not in ("options", "speeds")}
+        job = {k: v for k, v in self.job.items() if k not in ("options", "speeds", "quality")}
+        job["until_good"] = bool(self.job.get("quality"))
         running = self.running()
         p = self.parsed
         path = job.get("log")
         if path != p["path"]:
-            self.parsed = p = {"path": path, "offset": 0, "train": [], "val": [], "grad": [], "lines": [], "last": {}}
+            self.parsed = p = {"path": path, "offset": 0, "train": [], "val": [], "grad": [], "lines": [], "last": {}, "quality": [], "verdict": None}
         if path and os.path.isfile(path):
             with open(path, "rb") as f:
                 f.seek(p["offset"])
@@ -753,6 +799,15 @@ class Trainer:
                 if m:
                     p["val"].append({"step": int(m.group(3).replace(",", "")), "loss": _f(m.group(2))})
                     continue
+                if line.startswith("QUALITY "):
+                    try:
+                        p["quality"].append(json.loads(line[8:]))
+                        del p["quality"][:-100]
+                    except ValueError:
+                        pass
+                    continue
+                if line.startswith(("Good enough at", "Stopped improving")):
+                    p["verdict"] = line
                 m = GRAD_RE.match(line)
                 if m:
                     p["grad"].append({"local": int(m.group(1)), "norm": _f(m.group(2))})
@@ -763,7 +818,9 @@ class Trainer:
         dropped = p.get("dropped", 0)
         start = max(0, int(since) - dropped)
         return {"job": job, "running": running, "lines": p["lines"][start:], "next": dropped + len(p["lines"]),
-                "train": _thin(p["train"], 1500), "val": p["val"], "grad": p["grad"][-200:], "last": p["last"]}
+                "train": _thin(p["train"], 1500), "val": p["val"], "grad": p["grad"][-200:], "last": p["last"],
+                "quality": [{"step": x["step"], "score": x["score"], "loss": x.get("loss")} for x in p["quality"]],
+                "quality_last": p["quality"][-1] if p["quality"] else None, "verdict": p["verdict"]}
 
     # -- running a job on the workers
     def _orchestrate(self, reattach=False):
@@ -910,6 +967,8 @@ class Trainer:
                                      "--eval-every", str(job["eval_every"]), "--save-every", str(job["save_every"])]
             if job["resume"]:
                 opts.append("--resume")
+            if job.get("quality"):
+                opts += ["--quality", job["quality"]]
             say("Training on %s." % name)
             wj = r.call("POST", "/train", {"model": model, "data": job["data"], "options": opts})
             job.update(wjob={"name": name, "id": wj["id"], "offset": 0}, phase="training")
@@ -1038,8 +1097,17 @@ class Trainer:
                 try:
                     opts = job["options"] + ["--resume", "--steps", str(plan[n]), "--lr-progress", "%.6f" % ((rnd - 1) / rounds), "%.6f" % (rnd / rounds),
                                              "--seed", str(17 + 1000 * i + rnd), "--eval-every", str(plan[n]), "--save-every", "0"]
+                    if n == lead_name and job.get("quality"):
+                        opts += ["--quality", job["quality"]]
+
+                    def verdict(line, measure=measure):
+                        measure(line)
+                        if line.startswith(("Good enough at", "Stopped improving")):
+                            job["stop"] = True   # the averaged model this round makes is the last
+
                     wj = remotes[n].call("POST", "/train", {"model": model, "data": job["data"], "options": opts})
-                    code = self._tail(remotes[n], {"id": wj["id"], "offset": 0}, say, prefix="" if n == lead_name else "[%s] " % n, on_line=measure)
+                    code = self._tail(remotes[n], {"id": wj["id"], "offset": 0}, say, prefix="" if n == lead_name else "[%s] " % n,
+                                      on_line=verdict if n == lead_name else measure)
                     results[n] = (code, seen)
                 except trainpool.PoolError as e:
                     say("[%s] %s" % (n, e))
@@ -1230,6 +1298,7 @@ def register(ctx, args):
         "/api/train/status": wrap(lambda q: t.status(int((q.get("since") or ["0"])[0] or 0))),
         "/api/train/check": wrap(lambda q: {"check": t.check((q.get("name") or [""])[0])}),
         "/api/train/datasets": wrap(lambda q: {"catalog": t.fetcher.catalog()}),
+        "/api/train/speakers": wrap(lambda q: t.speakers((q.get("name") or [""])[0])),
     })
     ctx.post_routes.update({
         "/api/train/upload": wrap(t.upload),
@@ -1243,6 +1312,7 @@ def register(ctx, args):
         "/api/train/warm": wrap(warm),
         "/api/train/datasets/get": wrap(t.fetch),
         "/api/train/convert": wrap(t.convert),
+        "/api/train/multiparty": wrap(t.multiparty),
     })
     ctx.post_limits["/api/train/upload"] = UPLOAD_BODY_MAX
     ctx.post_limits["/api/train/paste"] = PASTE_MAX * 2 + 4096

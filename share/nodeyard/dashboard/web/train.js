@@ -12,6 +12,9 @@
     sel: JSON.parse(store.get("train.sel", "[]") || "[]"), check: null, form: null, model: "", resume: false, status: null, since: 0,
     lines: [], pollT: 0, ovT: 0, chat: { model: "", history: [], mode: "chat", temperature: 0.7, top_k: 40, top_p: 0.9, busy: false },
     explain: null, exModel: "", exPrompt: "User: Hello, who are you?", exBusy: false, upload: null, ovPollT: 0,
+    mp: { file: "", speakers: null, speaker: "", context: 3 },
+    edited: (() => { try { return JSON.parse(store.get("train.form", "") || "null"); } catch (_) { return null; } })(),
+    q: (() => { try { return JSON.parse(store.get("train.quality", "") || "null"); } catch (_) { return null; } })() || { on: false, preset: "starter", prompts: [], pass: 1, target_loss: "", give_up: 10 },
     machines: JSON.parse(store.get("train.machines", "[]") || "[]"), share: store.get("train.share", "1") !== "0",
   };
 
@@ -313,6 +316,17 @@
     ["Other datasets (.jsonl / .json)", "ShareGPT-style conversations ({from, value}) and {\"text\": …} records also work; a .json file holding a list of these is fine too.", '{"conversations": [{"from": "human", "value": "Hello"}, {"from": "gpt", "value": "Hi there!"}]}\n{"text": "Any plain text record."}'],
   ];
 
+  const Q_PRESETS = {
+    starter: { label: "Chat basics (starter chat set)", prompts: [["Hello!", "hello, hi"], ["What is 12 plus 7?", "19"], ["Spell cat.", "C-A-T"], ["What day comes after Friday?", "Saturday"], ["What is the opposite of hot?", "cold"]] },
+    shakespeare: { label: "Sounds like Shakespeare", prompts: [["What news, my lord?", "lord, thou, thee, thy, sir"], ["Wilt thou come with me?", "thee, thou, ay, nay, will"], ["Good morrow, sweet lady.", "morrow, sir, lord, good"], ["Why dost thou weep?", "thou, my, I"]] },
+    stories: { label: "Writes a story (TinyStories)", prompts: [["Once upon a time, there was a little", "she, he, they, was"], ["The dog wanted to", "the, and"]] },
+    own: { label: "My own", prompts: [["", ""]] },
+  };
+  function qPrompts() { if (!TR.q.prompts.length) TR.q.prompts = Q_PRESETS[TR.q.preset || "starter"].prompts.map(([p, e]) => ({ prompt: p, expect: e })); return TR.q.prompts; }
+  function saveQ() { store.set("train.quality", JSON.stringify(TR.q)); }
+  function recSettings(ov) { return Object.assign({ save_every: 500, device: "auto", assistant_only: false, dropout: 0 }, (ov || TR.ov).recommend.settings); }
+  function markEdited() { TR.edited = Object.assign({}, TR.form); store.set("train.form", JSON.stringify(TR.edited)); }
+  function resetSettings() { TR.edited = null; store.set("train.form", ""); TR.form = recSettings(); paint(); toast("Settings reset to the recommendation for this hardware."); }
   function curSet() { return TR.form || (TR.ov && TR.ov.recommend.settings) || { vocab_size: 2048, context: 128, dim: 192, layers: 4, heads: 6, batch_size: 32, steps: 2000, learning_rate: 0.001, warmup: 100, weight_decay: 0.1, eval_every: 100 }; }
 
   // ---------- loading ----------
@@ -323,7 +337,8 @@
       if (!r.ok) { toast(r.error || "Couldn't read the trainer."); return; }
       TR.ov = r;
       const names = new Set(r.datasets.map((d) => d.name)); TR.sel = TR.sel.filter((n) => names.has(n));
-      if (!TR.form) TR.form = Object.assign({ save_every: 500, device: "auto", assistant_only: false }, r.recommend.settings);
+      // Settings follow the recommendation for this hardware and data until you edit one; then your edits are kept.
+      if (!TR.form || !TR.edited) TR.form = Object.assign(recSettings(r), TR.edited || {});
       if (!TR.chat.model && r.models.length) TR.chat.model = r.models[r.models.length - 1].name;
       if (!TR.exModel && r.models.length) TR.exModel = r.models[r.models.length - 1].name;
       const mnames = new Set(r.machines.map((m) => m.name)); TR.machines = TR.machines.filter((n) => mnames.has(n));
@@ -385,7 +400,7 @@
         ["L", "layers (transformer blocks)", s.layers], ["h", "attention heads", s.heads], ["d<sub>h</sub> = d/h", "size of each head", f(s.dim / s.heads)], ["4d", "feed-forward hidden size", 4 * s.dim],
         ["N", "total weights: V·d + T·d + L·(12d² + 13d) + 2d + d·V + V", n0(N)], ["B", "batch size: text windows per step", s.batch_size], ["B·T", "tokens per step", n0(s.batch_size * s.context)],
         ["η", "peak learning rate", s.learning_rate], ["t<sub>warm</sub>", "warm-up steps", s.warmup], ["steps", "updates to make", n0(s.steps)], ["β₁, β₂", "AdamW moment decay rates", "0.9, 0.95"], ["ε", "AdamW's divide-by-zero guard", "10⁻⁸"],
-        ["λ", "weight decay", s.weight_decay], ["clip", "maximum gradient norm", "1.0"], ["ε<sub>LN</sub>", "layer norm's guard", "10⁻⁵"], ["16·N", "training memory for weights, gradients, m and v", gb(16 * N)],
+        ["λ", "weight decay", s.weight_decay], ["p<sub>drop</sub>", "dropout: share of values zeroed at random while training", s.dropout || 0], ["clip", "maximum gradient norm", "1.0"], ["ε<sub>LN</sub>", "layer norm's guard", "10⁻⁵"], ["16·N", "training memory for weights, gradients, m and v", gb(16 * N)],
         ["6·N·B·T", "FLOPs per step", f(6 * N * s.batch_size * s.context, 3)], ["ln V", "loss of a random guess (where training starts)", f(Math.log(s.vocab_size), 4)],
         ["tokens", "your data, in tokens (estimate)", r ? n0(r.tokens) : "–"],
         ["ℒ<sub>train</sub>", "latest training loss", last ? f(last.loss, 4) : "–"], ["ℒ<sub>val</sub>", "latest validation loss (on held-out 5% of your text)", f(val, 4)],
@@ -422,6 +437,7 @@
         ${legend(c.chat)}<pre class="tr-pre tr-anno">${annotate(c.preview, c.chat && TR.form && TR.form.assistant_only)}</pre>
         <div class="row wrap mt">${/\.train\.txt$/.test(c.name) ? "" : html`<button class="btn small" data-tr-act="convert">Save it as ${c.name.replace(/\.(txt|md|jsonl|json)$/i, "")}.train.txt</button><span class="faint small">a copy in exactly the format above: open it, edit it, train on it</span>`}</div></section>` : ""}
       ${guide()}
+      ${multiparty()}
       ${anatomy()}
       <section class="card tr-span2"><h2 class="tr-h">How to format it</h2>
         <p class="muted small">The format is detected from what's inside the file. Everything chat-shaped becomes <code>User: …</code> / <code>Assistant: …</code> turns, which is what the Chat tab sends the model.</p>
@@ -453,6 +469,30 @@
       ["Train, then read the validation loss", "If validation stops falling while training loss keeps falling, the model is memorising: add more (or more varied) text rather than more steps."],
     ];
     return html`<section class="card tr-span2"><h2 class="tr-h">Make your own dataset, step by step</h2><ol class="tr-steps">${steps.map(([a, b]) => html`<li><b>${a}.</b> ${b}</li>`)}</ol></section>`;
+  }
+  function multiparty() {
+    const ov = TR.ov, mp = TR.mp, files = ov ? ov.datasets.filter((d) => /\.(txt|md)$/i.test(d.name)) : [];
+    return html`<section class="card tr-span2"><h2 class="tr-h">Conversations with more than two people</h2>
+      <p class="small">Group chats, plays, Discord or forum threads have many speakers, but the model plays one role: <b>Assistant</b>. So pick <b>one voice for it to learn</b>, and turn everyone else's lines into what it replies to:</p>
+      <div class="tr-conv"><pre class="tr-pre">Sam: anyone up?
+Alex: yep
+Jo: me too, what's up
+Sam: game tonight?</pre><span class="tr-arrow">→</span><pre class="tr-pre">User: Sam: anyone up?
+Alex: yep
+Jo: me too, what's up
+Assistant: game tonight?</pre></div>
+      <ol class="tr-steps small">
+        <li><b>Choose the speaker</b> whose voice you want: one example per thing they said. (A play: one character; your chats: you.) Several speakers make several datasets; train on one, or on all of them for a model that can be anyone.</li>
+        <li><b>Context = the few lines before it, with names</b> (“Alex: …”), so the model knows who said what and that it's answering a group. 2–4 lines is plenty: more is cut off by the context window anyway.</li>
+        <li><b>Merge one person's consecutive lines</b> into one turn: chats split a thought over several messages.</li>
+        <li><b>Clean it:</b> drop system lines (“joined the group”, “&lt;Media omitted&gt;”), stage directions, timestamps; remove or replace phone numbers, addresses and anything private. Only use chats where the people involved would be fine with it.</li>
+        <li><b>Don't pair every line with the next one blindly.</b> The next line in a play or group chat is often not an answer to the line before it, and each line then appears twice (once as a question, once as a reply), which doubles the text without adding anything.${ov && ov.datasets.some((d) => /pairs/i.test(d.name)) ? " Your “pairs” file is built that way." : ""} For style rather than chat, plain text with the names left in (“ROMEO: …”) is often better: the model learns to write whole scenes.</li></ol>
+      <h3 class="tr-h3">Do it for you</h3>
+      ${!files.length ? html`<p class="faint small">Add a .txt file with lines like “NAME: what they said” (a script, or a WhatsApp/Signal export) and it appears here.</p>` : html`
+      <div class="row wrap"><select class="select" data-tr-act="mp-file"><option value="">Choose a script or chat file…</option>${raw(files.map((d) => '<option' + (mp.file === d.name ? " selected" : "") + ' value="' + esc(d.name) + '">' + esc(d.name) + "</option>").join(""))}</select>
+        ${mp.speakers ? (mp.speakers.length ? html`<select class="select" data-tr-act="mp-speaker">${raw(mp.speakers.map((x) => '<option' + (mp.speaker === x.name ? " selected" : "") + ' value="' + esc(x.name) + '">' + esc(x.name) + " (" + x.turns + " turns)</option>").join(""))}</select>
+          <label class="tr-field inline"><span>context lines</span><input class="input" type="number" min="1" max="8" value="${mp.context}" data-tr-act="mp-context" style="width:70px"></label>
+          <button class="btn primary small" data-tr-act="mp-make">Make chat pairs</button>` : html`<span class="warn-t small">No “NAME: text” lines found in it.</span>`) : ""}</div>`}</section>`;
   }
   function anatomy() {
     const parts = [
@@ -496,13 +536,13 @@
         <p class="small">${TR.sel.length ? html`For <b>${TR.sel.join(", ")}</b>:` : html`<span class="warn-t">No data chosen yet</span> — <a href="#" data-tr-tab="data">choose it in step 2</a>.`} a <b>${n0(r.parameters)}</b>-weight model, about <b>${dur(r.seconds)}</b>, using ~${gb(r.memory)}. Limited by <b>${r.limit}</b>.</p>
         <div class="tr-why">${r.why.map((w) => html`<details><summary><b>${w.name}</b><span>${w.value}</span></summary><div class="tr-eq small">${w.formula}</div><div class="tr-calc small">${w.numbers}</div><p class="muted small">${w.explain}</p></details>`)}</div>
         <p class="small"><b>Expect:</b> ${r.expect.level}</p>
-        <button class="btn" data-tr-act="use-rec">Use these settings</button></section>
-      <section class="card tr-span2"><h2 class="tr-h">Settings <span class="right faint small">every field is explained; change anything</span></h2>
+        ${TR.edited ? html`<button class="btn" data-tr-act="use-rec">Use these settings</button>` : html`<p class="faint small">These are in the settings below.</p>`}</section>
+      <section class="card tr-span2"><h2 class="tr-h">Settings <span class="right small">${TR.edited ? html`<span class="faint">your settings (saved)</span> <button class="btn small" data-tr-act="reset-settings">Reset to recommended</button>` : html`<span class="faint">set for this hardware and data; edit anything and it's kept</span>`}</span></h2>
         <div class="tr-form">
           ${field("vocab_size", "Vocabulary V", "tokens the BPE tokenizer learns (≥ 256)")}${field("context", "Context T", "tokens it sees at once")}${field("dim", "Width d", "numbers per token; must divide by heads")}
           ${field("layers", "Layers L", "transformer blocks")}${field("heads", "Heads h", "parallel attention lookups")}${field("batch_size", "Batch B", "windows averaged per update")}
-          ${field("steps", "Steps", "updates to make")}${field("learning_rate", "Learning rate η", "peak step size (1e-3 is a good start)")}${field("warmup", "Warm-up", "steps to ramp η up from 0")}
-          ${field("weight_decay", "Weight decay λ", "AdamW's shrink per step")}${field("eval_every", "Check every", "steps between validation checks")}${field("save_every", "Save every", "steps between checkpoints (0 = only at the end)")}
+          ${field("steps", TR.q.on ? "Steps (maximum)" : "Steps", TR.q.on ? "the most it may take; it stops sooner when good enough" : "updates to make")}${field("learning_rate", "Learning rate η", "peak step size (1e-3 is a good start)")}${field("warmup", "Warm-up", "steps to ramp η up from 0")}
+          ${field("weight_decay", "Weight decay λ", "AdamW's shrink per step")}${field("eval_every", "Check every", "steps between validation checks")}${field("dropout", "Dropout", "share of values zeroed while training (0–0.5); stops memorising small data")}${field("save_every", "Save every", "steps between checkpoints (0 = only at the end)")}
           <label class="tr-field"><span>Device</span><select class="select" data-tr-set="device">${raw(["auto", "cpu", "cuda", "mps"].map((d) => '<option' + (s.device === d ? " selected" : "") + ">" + d + "</option>").join(""))}</select><span class="faint small">auto: each machine uses its GPU when it has one</span></label>
           <label class="tr-field"><span>Learn only the replies</span><label class="row"><input type="checkbox" data-tr-set="assistant_only" ${s.assistant_only ? "checked" : ""}> on conversations, no loss on User: turns</label><span class="faint small">for chatbots: it learns to answer, not to ask</span></label></div>
         <div class="tr-calc small">N = ${n0(N)} weights · training memory ≈ 16·N + activations = ${gb(16 * N)} + ${gb(act)} = <b>${gb(16 * N + act)}</b> · ${f(fl, 3)} FLOPs per step · ≈ <b>${dur(fl * s.steps / r.speed)}</b> at the estimated speed${+s.dim % +s.heads ? html` · <span class="bad-t">width must divide by heads</span>` : ""}${16 * N + act > (hw.gpu && s.device !== "cpu" ? hw.gpu.vram : hw.ram_free) ? html` · <span class="bad-t">more than the free memory!</span>` : ""}</div>
@@ -512,11 +552,36 @@
           <span class="spacer"></span>
           ${run ? html`<button class="btn danger" data-tr-act="stop" ${TR.status && TR.status.job && TR.status.job.stop ? "disabled" : ""}>${TR.status && TR.status.job && TR.status.job.stop ? "Stopping…" : "Stop and save"}</button>` : html`<button class="btn primary" data-tr-act="start" ${ov.plan.lead && TR.sel.length ? "" : "disabled"}>${TR.resume ? "Continue training" : "Start training"}${ov.plan.lead ? " on " + (TR.share && ov.plan.share.length > 1 ? ov.plan.share.length + " machines" : ov.plan.lead) : ""}</button>`}</div>
         ${TR.resume ? html`<p class="faint small">Continuing keeps the saved model's shape and tokenizer (V, T, d, L, h) and AdamW's running averages; the other settings apply. The learning rate schedule starts again, so a lower peak (about 30% of the first run's) stops the first steps from undoing what it already learned.</p>` : ""}</section>
+      ${stopWhen()}
       <section class="card tr-span2"><h2 class="tr-h">Live <span class="right" id="tr-live-chip"></span></h2><div id="tr-live"></div>
         <div class="tr-charts"><div><h4>Loss (lower is better)</h4><canvas class="tr-cv tall" id="tr-loss"></canvas><p class="faint small"><span class="tr-sw a"></span>training (smoothed) <span class="tr-sw b"></span>validation <span class="tr-sw c"></span>random guess ln V</p></div>
           <div><h4>Learning rate η(t)</h4><canvas class="tr-cv" id="tr-lr"></canvas><h4>Gradient norm (before clipping)</h4><canvas class="tr-cv short" id="tr-grad"></canvas></div></div>
+        <div id="tr-qlive"></div>
         <details class="mt"><summary>Training log</summary><pre class="tr-pre tr-log" id="tr-logbox"></pre></details></section>
       ${savedModels()}</div>`;
+  }
+  function stopWhen() {
+    const q = TR.q, ps = qPrompts();
+    return html`<section class="card tr-span2"><h2 class="tr-h">Stop when</h2>
+      <div class="seg"><button class="${q.on ? "" : "on"}" data-tr-act="q-off">after the steps above</button><button class="${q.on ? "on" : ""}" data-tr-act="q-on">it's good enough</button></div>
+      ${!q.on ? html`<p class="faint small">Trains for exactly the steps set above.</p>` : html`
+      <p class="small">At every validation check it asks the model these prompts (temperature 0.3) and grades each reply: <b>it passes if the reply contains any of the expected words</b>. Training stops as soon as ${q.target_loss !== "" ? "the pass rate and the target loss are both reached" : "enough pass"}, or when validation hasn't improved for ${q.give_up} checks in a row (then it tells you what's missing). The steps above become the <b>maximum</b>, so set them high.</p>
+      <div class="row wrap"><label class="tr-field inline"><span>Prompts</span><select class="select" data-tr-act="q-preset">${raw(Object.entries(Q_PRESETS).map(([k, v]) => '<option value="' + k + '"' + (q.preset === k ? " selected" : "") + ">" + esc(v.label) + "</option>").join(""))}</select></label></div>
+      <div class="tr-scroll"><table class="tr-key tr-qtable"><tr><th>Test prompt (what you'd type in Chat)</th><th>Pass if the reply contains any of</th><th></th></tr>
+        ${ps.map((p, i) => html`<tr><td><input class="input" data-tr-q="${i}" data-k="prompt" value="${p.prompt}" placeholder="e.g. What is a node?"></td><td><input class="input" data-tr-q="${i}" data-k="expect" value="${p.expect}" placeholder="words, comma separated (empty: just show it)"></td><td><button class="btn small" data-tr-qdel="${i}" aria-label="remove">✕</button></td></tr>`)}</table></div>
+      <div class="row wrap mt"><button class="btn small" data-tr-act="q-add">Add a prompt</button><span class="spacer"></span>
+        <label class="tr-field inline"><span>pass when</span><select class="select" data-tr-act="q-pass">${raw([[1, "all pass"], [0.8, "80% pass"], [0.6, "60% pass"], [0.5, "half pass"]].map(([v, l]) => '<option value="' + v + '"' + (+q.pass === v ? " selected" : "") + ">" + l + "</option>").join(""))}</select></label>
+        <label class="tr-field inline"><span>and validation loss ≤</span><input class="input" data-tr-act="q-target" value="${q.target_loss}" placeholder="optional" style="width:90px"></label>
+        <label class="tr-field inline"><span>give up after</span><input class="input" type="number" min="3" max="100" data-tr-act="q-giveup" value="${q.give_up}" style="width:70px"><span class="faint small">checks with no progress</span></label></div>
+      <p class="faint small">Expected words test <i>what</i> it says, not how well: pick words a good reply must contain (“19”, “Saturday”) or that mark the style you want (“thou”). The check runs every “Check every” steps, so set that to a few hundred.</p>`}</section>`;
+  }
+  function qualityLive(st) {
+    const ql = st.quality_last; if (!st.job.until_good && !ql) return "";
+    const sc = (st.quality || []).filter((x) => x.score != null);
+    return html`<div class="tr-quality"><h4>Test replies${ql ? " at step " + n0(ql.step) : ""}${ql && ql.score != null ? html` · <b>${f(ql.score * 100, 3)}% pass</b>` : ""}</h4>
+      ${st.verdict ? html`<div class="tr-adv ${/^Good/.test(st.verdict) ? "good" : "warn"}">${st.verdict}</div>` : ""}
+      ${ql ? html`<div class="tr-scroll"><table class="tr-key"><tr><th></th><th>Prompt</th><th>Reply</th><th>Wanted</th></tr>${ql.results.map((r) => html`<tr><td>${r.ok == null ? "·" : r.ok ? html`<span class="good-t">✓</span>` : html`<span class="bad-t">✗</span>`}</td><td class="small">${r.prompt}</td><td class="small"><i>${r.reply || "(nothing)"}</i></td><td class="small faint">${(r.expect || []).join(", ")}</td></tr>`)}</table></div>` : html`<p class="faint small">The first check runs at the first validation.</p>`}
+      ${sc.length > 1 ? html`<canvas class="tr-cv short" id="tr-qchart"></canvas>` : ""}</div>`;
   }
   function machinesCard() {
     const ov = TR.ov, p = ov.plan, inPlan = new Set(TR.share ? p.share : p.share.slice(0, 1));
@@ -560,6 +625,7 @@
       <div class="tr-stats">${[["Step", last.local ? (total ? n0(Math.round(frac * total)) + " / " + n0(total) : n0(last.local) + " / " + n0(last.of)) : j.phase || "starting…"], ["Time left", st.running && eta != null ? dur(eta) : "–"], ["Training loss", f(last.loss, 4)], ["Validation loss", f(val, 4)],
         ["Perplexity e^ℒ", val != null ? f(Math.exp(val), 4) : "–"], ["Learning rate", f(last.lr, 3)], ["Speed", last.tps ? n0(last.tps) + " tokens/s" : "–"], ["Total steps", n0(last.step)]].map(([a, b]) => html`<div><span>${a}</span><b>${b}</b></div>`)}</div>
       ${val != null ? html`<p class="small">Right now the model is about as unsure as picking among <b>${f(Math.exp(val), 3)}</b> equally likely tokens for each next token (a random guess would be ${n0(V0)}: ln ${n0(V0)} = ${f(Math.log(V0), 4)}). ${st.val.length > 2 && st.val[st.val.length - 1].loss > Math.min(...st.val.map((v) => v.loss)) * 1.02 ? "Validation is rising above its best: the model is starting to memorise; more steps won't help much." : ""}</p>` : ""}`);
+    const qbox = $("#tr-qlive"); if (qbox) setHTML(qbox, qualityLive(st));
     const box = $("#tr-logbox"); if (box) { const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 8; box.textContent = TR.lines.slice(-400).join("\n"); if (atEnd) box.scrollTop = box.scrollHeight; }
     drawLive();
   }
@@ -572,6 +638,8 @@
       { pts: vl.map((p) => [p.step, p.loss]), color: cssv("--good", "#3d9"), width: 2, dots: true }, { pts: xs.length ? [[xs[0], Math.log(V0)], [xs[xs.length - 1], Math.log(V0)]] : [], color: cssv("--faint", "#888"), dash: [4, 4], width: 1 }],
       { empty: "The loss appears here once training starts.", xlabel: "step" });
     chart($("#tr-lr"), [{ pts: tr.map((p) => [p.step, p.lr]), color: cssv("--accent2", "#2de") }], { y0: 0, empty: "–" });
+    const qs = st ? (st.quality || []).filter((x) => x.score != null) : [];
+    if ($("#tr-qchart")) chart($("#tr-qchart"), [{ pts: qs.map((x) => [x.step, x.score * 100]), color: cssv("--good", "#3d9"), dots: true }], { y0: 0, xlabel: "step · % of test prompts passing" });
     chart($("#tr-grad"), [{ pts: (st ? st.grad : []).map((p) => [p.local, p.norm]), color: cssv("--warn", "#fb2"), dots: true }], { y0: 0, empty: "–" });
   }
 
@@ -673,12 +741,13 @@
 
   document.addEventListener("click", async (e) => {
     if (S.view !== "train" || !e.target.closest("#tr-root")) return;
-    const t = e.target.closest("[data-tr-tab],[data-tr-lesson],[data-tr-act],[data-tr-check],[data-tr-del],[data-tr-delmodel],[data-tr-chatwith],[data-tr-inspect],[data-tr-get],[data-tr-use]");
+    const t = e.target.closest("[data-tr-tab],[data-tr-lesson],[data-tr-act],[data-tr-check],[data-tr-del],[data-tr-delmodel],[data-tr-chatwith],[data-tr-inspect],[data-tr-get],[data-tr-use],[data-tr-qdel]");
     if (!t || t.tagName === "SELECT" || t.tagName === "INPUT" && t.type !== "button") return;
     const d = t.dataset;
     if (d.trTab) { e.preventDefault(); TR.tab = d.trTab; store.set("train.tab", TR.tab); paint(); window.scrollTo(0, 0); return; }
     if (d.trLesson != null) { TR.lesson = +d.trLesson; store.set("train.lesson", TR.lesson); paint(); const el = $("#tr-lesson"); if (el) el.scrollIntoView({ block: "start" }); return; }
     if (d.trCheck) return checkData(d.trCheck);
+    if (d.trQdel != null) { qPrompts().splice(+d.trQdel, 1); saveQ(); paint(); return; }
     if (d.trGet) { if (await post("/api/train/datasets/get", { id: d.trGet })) loadOverview(); return; }
     if (d.trUse) { if (!TR.sel.includes(d.trUse)) TR.sel.push(d.trUse); saveSel(); toast(d.trUse + " ticked for training."); loadOverview(); return; }
     if (d.trDel) { if (confirm("Delete " + d.trDel + "?")) { if (await post("/api/train/data/delete", { name: d.trDel })) { if (TR.check && TR.check.name === d.trDel) TR.check = null; TR.sel = TR.sel.filter((x) => x !== d.trDel); saveSel(); loadOverview(); } } return; }
@@ -692,10 +761,17 @@
     else if (a === "sched-mine") { const s = curSet(); Object.assign(L.sched, { peak: +s.learning_rate, warmup: +s.warmup, steps: +s.steps, at: Math.round(s.steps / 3) }); paint(); }
     else if (a === "size-mine") { const s = curSet(); Object.assign(L.size, { V: +s.vocab_size, T: +s.context, d: +s.dim, L: +s.layers, h: +s.heads, B: +s.batch_size }); paint(); }
     else if (a === "paste") { const name = $("#tr-paste-name").value.trim(), text = $("#tr-paste-text").value; const r = await post("/api/train/paste", { name, text }); if (r) { if (!TR.sel.includes(r.name)) TR.sel.push(r.name); saveSel(); toast("Saved " + r.name); await loadOverview(); checkData(r.name); } }
+    else if (a === "q-on" || a === "q-off") { TR.q.on = a === "q-on"; saveQ(); paint(); }
+    else if (a === "q-add") { qPrompts().push({ prompt: "", expect: "" }); saveQ(); paint(); }
+    else if (a === "mp-make") {
+      const r = await post("/api/train/multiparty", { name: TR.mp.file, speaker: TR.mp.speaker, context: TR.mp.context, names: true });
+      if (r) { toast("Made " + r.name + ": " + n0(r.examples) + " examples from " + n0(r.turns) + " turns"); if (!TR.sel.includes(r.name)) TR.sel.push(r.name); saveSel(); await loadOverview(); checkData(r.name); }
+    }
     else if (a === "convert") { const r = await post("/api/train/convert", { name: TR.check.name }); if (r) { toast("Saved " + r.name + " (" + n0(r.records) + " records)"); await loadOverview(); checkData(r.name); } }
-    else if (a === "use-rec") { Object.assign(TR.form, TR.ov.recommend.settings); paint(); toast("Recommended settings filled in."); }
+    else if (a === "use-rec" || a === "reset-settings") resetSettings();
     else if (a === "start") {
-      const body = { data: TR.sel, settings: TR.form, resume: TR.resume, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.share };
+      const body = { data: TR.sel, settings: TR.form, resume: TR.resume, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.share,
+        quality: TR.q.on ? { on: true, prompts: qPrompts().filter((p) => p.prompt.trim()).map((p) => ({ prompt: p.prompt, expect: String(p.expect).split(",").map((x) => x.trim()).filter(Boolean) })), pass: TR.q.pass, target_loss: TR.q.target_loss, give_up: TR.q.give_up } : undefined };
       const r = await post("/api/train/start", body);
       if (r) { toast("Training " + r.model); TR.lines = []; TR.since = 0; TR.status = null; TR.model = TR.resume ? TR.model : ""; await loadOverview(); poll(); }
     }
@@ -722,11 +798,14 @@
     if (S.view !== "train" || !e.target.closest("#tr-root")) return;
     const t = e.target, d = t.dataset;
     if (d.trIn) { setPath(d.trIn, t.value); if (d.trIn.startsWith("chat.")) { const b = t.closest(".tr-sl").querySelector("b"); if (b) b.textContent = f(+t.value, 4); return; } paint(); }
-    else if (d.trSet && t.type !== "checkbox" && t.tagName !== "SELECT") { const v = t.value.trim(); TR.form[d.trSet] = v === "" || isNaN(+v) ? v : +v; clearTimeout(TR.formT); TR.formT = setTimeout(() => { const ae = document.activeElement && document.activeElement.dataset.trSet; paint(); if (ae) { const el = $('[data-tr-set="' + ae + '"]'); if (el) { el.focus(); const n = el.value.length; try { el.setSelectionRange(n, n); } catch (_) { /* number inputs */ } } } }, 400); }
+    else if (d.trSet && t.type !== "checkbox" && t.tagName !== "SELECT") { const v = t.value.trim(); TR.form[d.trSet] = v === "" || isNaN(+v) ? v : +v; markEdited(); clearTimeout(TR.formT); TR.formT = setTimeout(() => { const ae = document.activeElement && document.activeElement.dataset.trSet; paint(); if (ae) { const el = $('[data-tr-set="' + ae + '"]'); if (el) { el.focus(); const n = el.value.length; try { el.setSelectionRange(n, n); } catch (_) { /* number inputs */ } } } }, 400); }
+    else if (d.trQ != null) { qPrompts()[+d.trQ][d.k] = t.value; saveQ(); }
+    else if (d.trAct === "q-target") { TR.q.target_loss = t.value.trim(); saveQ(); }
+    else if (d.trAct === "q-giveup") { TR.q.give_up = Math.max(3, Math.min(100, +t.value || 10)); saveQ(); }
     else if (d.trAct === "ex-prompt") TR.exPrompt = t.value;
     else if (d.trAct === "model-name") TR.model = t.value;
   });
-  document.addEventListener("change", (e) => {
+  document.addEventListener("change", async (e) => {
     if (S.view !== "train" || !e.target.closest("#tr-root")) return;
     const t = e.target, d = t.dataset;
     if (d.trMachine) {
@@ -736,17 +815,26 @@
     }
     if (d.trAct === "share") { TR.share = t.checked; store.set("train.share", t.checked ? "1" : "0"); paint(); return; }
     if (d.trSel) { if (t.checked) { if (!TR.sel.includes(d.trSel)) TR.sel.push(d.trSel); } else TR.sel = TR.sel.filter((x) => x !== d.trSel); saveSel(); loadOverview(); }
-    else if (d.trSet === "assistant_only") { TR.form.assistant_only = t.checked; }
-    else if (d.trSet === "device") { TR.form.device = t.value; }
+    else if (d.trSet === "assistant_only") { TR.form.assistant_only = t.checked; markEdited(); paint(); }
+    else if (d.trSet === "device") { TR.form.device = t.value; markEdited(); paint(); }
     else if (d.trAct === "files") { uploadFiles(Array.from(t.files || [])); t.value = ""; }
     else if (d.trAct === "hours") { TR.hours = +t.value; store.set("train.hours", TR.hours); TR.form = null; loadOverview(); }
     else if (d.trAct === "model-pick") {
       TR.resume = !!t.value; TR.model = t.value;
       const m = TR.ov.models.find((x) => x.name === t.value);
-      if (m) { TR.form.learning_rate = +((m.learning_rate || 1e-3) * 0.3).toPrecision(2); toast("Learning rate lowered to " + TR.form.learning_rate + " for continuing (see the note below Start)."); }
+      if (m) { TR.form.learning_rate = +((m.learning_rate || 1e-3) * 0.3).toPrecision(2); markEdited(); toast("Learning rate lowered to " + TR.form.learning_rate + " for continuing (see the note below Start)."); }
       paint();
     }
     else if (d.trAct === "ex-model") TR.exModel = t.value;
+    else if (d.trAct === "mp-file") {
+      TR.mp.file = t.value; TR.mp.speakers = null; TR.mp.speaker = "";
+      if (t.value) { try { const r = await getJSON("/api/train/speakers?name=" + encodeURIComponent(t.value)); if (r.ok) { TR.mp.speakers = r.speakers; TR.mp.speaker = r.speakers.length ? r.speakers[0].name : ""; } else toast(r.error); } catch (_) { toast("Couldn't read it."); } }
+      paint();
+    }
+    else if (d.trAct === "mp-speaker") TR.mp.speaker = t.value;
+    else if (d.trAct === "q-preset") { TR.q.preset = t.value; TR.q.prompts = []; qPrompts(); saveQ(); paint(); }
+    else if (d.trAct === "q-pass") { TR.q.pass = +t.value; saveQ(); paint(); }
+    else if (d.trAct === "mp-context") TR.mp.context = Math.max(1, Math.min(8, +t.value || 3));
     else if (d.trAct === "chat-model") { TR.chat.model = t.value; TR.chat.history = []; paint(); }
     else if (d.trIn === "ce.target") { L.ce.target = +t.value; paint(); }
   });
