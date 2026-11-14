@@ -6,7 +6,7 @@
   const { esc, html, raw, setHTML } = NY;
   const U = NY.ui;
   const { S, V, $, toast, getJSON, postJSON, store } = U;
-  const TABS = [["learn", "1 · Learn"], ["data", "2 · Your data"], ["train", "3 · Train"], ["inside", "4 · Inside the model"], ["chat", "5 · Chat"]];
+  const TABS = [["learn", "1 · Learn"], ["data", "2 · Your data"], ["train", "3 · Train"], ["inside", "4 · Inside the model"], ["chat", "5 · Chat"], ["any", "6 · Train any AI"]];
   const TR = {
     tab: store.get("train.tab", "learn"), lesson: +store.get("train.lesson", 0) || 0, ov: null, hours: +store.get("train.hours", 1) || 1,
     sel: JSON.parse(store.get("train.sel", "[]") || "[]"), check: null, form: null, model: "", resume: false, keepBest: true, status: null, since: 0,
@@ -97,7 +97,120 @@
     m1: { x: 3 }, msum: { v: [3, 1, 4, 1, 5] }, mdot: { a: [3, 2, 3], b: [2, 1, 3] }, mmat: { x: [1, 0.5, -1] }, msq: { v: 2 },
     mexp: { x: 1 }, mlog: { p: 0.5 }, mavg: { v: [2, 4, 4, 4, 6] }, msoft: { s: [2, 1, 0] }, mslope: { w: 0 }, mchain: { x: 1 },
     mdice: { counts: [0, 0, 0], total: 0, last: null, lastPick: 0 },
+    any: { kind: "circle", seed: 1, hidden: 8, lr: 0.8, activation: "tanh", speed: 5, pts: null, net: null, step: 0, loss: NaN, acc: NaN, hist: [], running: false, timer: 0, pick: 0, capAt: 0 },
   };
+
+  // ---------- Train any AI: a tiny classifier on plain numbers, trained from scratch in your browser ----------
+  // Not a language model — a different kind of AI, the same ingredients: weights, a forward pass, a loss, gradient
+  // descent. Everything here runs in the page (no server, no PyTorch), so you can watch it learn.
+  const AI = L.any;
+  const ANY_COLORS = ["#6c7bf0", "#17b89a", "#e8963a"];
+  const ANY_SETS = [["circle", "Circle in a square"], ["blobs", "Two blobs"], ["xor", "XOR (checkerboard)"], ["spiral", "Spiral (3 classes)"]];
+  function anyData(kind, seed) {
+    const r = rng(seed | 0), pts = [], N = 55, push = (x, y, c) => pts.push({ x, y, c });
+    if (kind === "blobs") { for (let i = 0; i < N; i++) { push(-0.45 + randn(r) * 0.17, -0.38 + randn(r) * 0.17, 0); push(0.45 + randn(r) * 0.17, 0.38 + randn(r) * 0.17, 1); } }
+    else if (kind === "circle") { for (let i = 0; i < 2 * N; i++) { const a = r() * 6.2832, rad = Math.sqrt(r()), inside = rad < 0.6, rr = inside ? rad * 0.5 : 0.62 + rad * 0.42; push(Math.cos(a) * rr + randn(r) * 0.03, Math.sin(a) * rr + randn(r) * 0.03, inside ? 0 : 1); } }
+    else if (kind === "xor") { for (let i = 0; i < 2 * N; i++) { const x = r() * 1.8 - 0.9, y = r() * 1.8 - 0.9; push(x, y, (x > 0) === (y > 0) ? 0 : 1); } }
+    else { for (let c = 0; c < 3; c++) for (let i = 0; i < N; i++) { const t = i / N, rad = 0.08 + t * 0.82, a = c * 2.094 + t * 3.4 + randn(r) * 0.12; push(rad * Math.cos(a), rad * Math.sin(a), c); } }
+    return pts;
+  }
+  function anyClasses(pts) { return pts.reduce((m, p) => Math.max(m, p.c), 0) + 1; }
+  function anyAct(z) { return AI.activation === "relu" ? Math.max(0, z) : Math.tanh(z); }
+  function anyActD(z, a) { return AI.activation === "relu" ? (z > 0 ? 1 : 0) : 1 - a * a; }
+  function anyForward(net, x) {
+    const z1 = net.b1.map((b, i) => b + net.W1[i][0] * x[0] + net.W1[i][1] * x[1]);
+    const a1 = z1.map(anyAct);
+    const z2 = net.b2.map((b, c) => b + net.W2[c].reduce((s, w, i) => s + w * a1[i], 0));
+    return { z1, a1, z2, p: softmax(z2) };
+  }
+  function anyInit() {
+    if (!AI.pts) AI.pts = anyData(AI.kind, AI.seed);
+    const r = rng((AI.seed * 131 + AI.hidden * 7 + (AI.activation === "relu" ? 1 : 0)) | 0), H = AI.hidden, C = anyClasses(AI.pts);
+    AI.net = { H, C, W1: mat(H, 2, r, 0.9), b1: new Array(H).fill(0), W2: mat(C, H, r, 0.9), b2: new Array(C).fill(0) };
+    AI.step = 0; AI.loss = NaN; AI.acc = NaN; AI.hist = []; AI.capAt = 0; if (AI.pick >= AI.pts.length) AI.pick = 0;
+  }
+  function anyStep1() {
+    const net = AI.net, H = net.H, C = net.C, pts = AI.pts, n = pts.length;
+    const gW1 = net.W1.map((row) => row.map(() => 0)), gb1 = net.b1.map(() => 0), gW2 = net.W2.map((row) => row.map(() => 0)), gb2 = net.b2.map(() => 0);
+    let loss = 0, correct = 0;
+    for (const pt of pts) {
+      const x = [pt.x, pt.y], fw = anyForward(net, x), p = fw.p, a1 = fw.a1, z1 = fw.z1;
+      loss += -Math.log(Math.max(1e-12, p[pt.c]));
+      let best = 0; for (let c = 1; c < C; c++) if (p[c] > p[best]) best = c; if (best === pt.c) correct++;
+      const dz2 = p.map((pc, c) => pc - (c === pt.c ? 1 : 0));
+      for (let c = 0; c < C; c++) { gb2[c] += dz2[c]; for (let i = 0; i < H; i++) gW2[c][i] += dz2[c] * a1[i]; }
+      for (let i = 0; i < H; i++) { let da = 0; for (let c = 0; c < C; c++) da += net.W2[c][i] * dz2[c]; const dz = da * anyActD(z1[i], a1[i]); gb1[i] += dz; gW1[i][0] += dz * x[0]; gW1[i][1] += dz * x[1]; }
+    }
+    const s = AI.lr / n;
+    for (let i = 0; i < H; i++) { net.b1[i] -= s * gb1[i]; net.W1[i][0] -= s * gW1[i][0]; net.W1[i][1] -= s * gW1[i][1]; }
+    for (let c = 0; c < C; c++) { net.b2[c] -= s * gb2[c]; for (let i = 0; i < H; i++) net.W2[c][i] -= s * gW2[c][i]; }
+    AI.step++; AI.loss = loss / n; AI.acc = correct / n;
+    if (AI.hist.length === 0 || AI.step - AI.hist[AI.hist.length - 1][0] >= 2) AI.hist.push([AI.step, AI.loss]);
+    if (AI.hist.length > 4000) AI.hist.splice(0, AI.hist.length - 4000);
+  }
+  function anySteps(k) { for (let i = 0; i < k && AI.net; i++) anyStep1(); }
+  function anyStop() { AI.running = false; if (AI.timer) { clearTimeout(AI.timer); AI.timer = 0; } }
+  function anyTick() {
+    if (!AI.running || TR.tab !== "any" || S.view !== "train") { anyStop(); return; }
+    anySteps(AI.speed); anyDraw(); setHTML($("#any-readout"), anyReadout());
+    if (AI.step >= AI.capAt) { anyStop(); paint(); return; }
+    AI.timer = setTimeout(anyTick, 24);
+  }
+  function anyRGBA(hex, a) { const n = parseInt(hex.slice(1), 16); return "rgba(" + (n >> 16 & 255) + "," + (n >> 8 & 255) + "," + (n & 255) + "," + a.toFixed(3) + ")"; }
+  function anyBoard(cv) {
+    if (!cv || !AI.net) return;
+    const dpr = window.devicePixelRatio || 1, w = cv.clientWidth || 300, h = cv.clientHeight || 300;
+    cv.width = w * dpr; cv.height = h * dpr; const c = cv.getContext("2d"); c.scale(dpr, dpr); c.clearRect(0, 0, w, h);
+    const net = AI.net, lo = -1.15, span = 2.3, X = (x) => (x - lo) / span * w, Y = (y) => (1 - (y - lo) / span) * h, G = 44, cw = w / G, ch = h / G;
+    for (let gx = 0; gx < G; gx++) for (let gy = 0; gy < G; gy++) {
+      const px = lo + (gx + 0.5) / G * span, py = lo + (gy + 0.5) / G * span, p = anyForward(net, [px, py]).p;
+      let best = 0; for (let k = 1; k < p.length; k++) if (p[k] > p[best]) best = k;
+      c.fillStyle = anyRGBA(ANY_COLORS[best], 0.1 + 0.22 * p[best]); c.fillRect(Math.floor(gx * cw), Math.floor((G - 1 - gy) * ch), Math.ceil(cw) + 1, Math.ceil(ch) + 1);
+    }
+    AI.pts.forEach((pt, i) => { const sel = i === AI.pick; c.beginPath(); c.arc(X(pt.x), Y(pt.y), sel ? 6 : 3.6, 0, 6.2832); c.fillStyle = ANY_COLORS[pt.c]; c.fill(); c.lineWidth = sel ? 2.5 : 1; c.strokeStyle = sel ? cssv("--text", "#fff") : cssv("--solid", "#fff"); c.stroke(); });
+  }
+  function anyDraw() {
+    anyBoard($("#any-board"));
+    chart($("#any-curve"), [{ pts: AI.hist, color: cssv("--accent", "#7c8cff"), width: 2 }], { y0: 0, xlabel: "step", empty: "Press Train to watch the loss fall" });
+  }
+  function anyLegend() {
+    const C = AI.pts ? anyClasses(AI.pts) : 2;
+    return html`<div class="any-legend">${raw(Array.from({ length: C }, (_, c) => '<span><i style="background:' + ANY_COLORS[c] + '"></i>class ' + c + "</span>").join(""))}<span class="faint">shaded = what the network predicts there</span></div>`;
+  }
+  function anyReadout() {
+    if (!AI.net) return html`<p class="small faint">Press <b>Train</b> or <b>Step</b> to begin.</p>`;
+    const pt = AI.pts[AI.pick] || AI.pts[0], fw = anyForward(AI.net, [pt.x, pt.y]);
+    let best = 0; fw.p.forEach((v, c) => { if (v > fw.p[best]) best = c; });
+    const nw = AI.hidden * 2 + AI.hidden + AI.net.C * AI.hidden + AI.net.C;
+    return html`<div class="tr-stats"><div><span>step</span><b>${n0(AI.step)}</b></div><div><span>loss</span><b>${f(AI.loss, 4)}</b></div><div><span>accuracy</span><b>${isFinite(AI.acc) ? Math.round(AI.acc * 100) + "%" : "–"}</b></div><div><span>weights</span><b>${n0(nw)}</b></div></div>
+      <h4 class="tr-h3">One example, by hand <span class="faint small" style="font-weight:400">point <button class="btn small" data-tr-act="any-pick-prev">‹</button> ${AI.pick + 1} / ${AI.pts.length} <button class="btn small" data-tr-act="any-pick-next">›</button></span></h4>
+      <div class="tr-calc small">inputs <b>x</b> = [${f(pt.x, 3)}, ${f(pt.y, 3)}] · true class <b style="color:${ANY_COLORS[pt.c]}">${pt.c}</b><br>
+        hidden <b>z₁</b> = W₁x + b₁, then <b>a</b> = ${AI.activation}(z₁): ${vec(fw.a1, 6)}<br>
+        outputs <b>z₂</b> = W₂a + b₂: ${vec(fw.z2, 6)}<br>
+        <b>p</b> = softmax(z₂): ${vec(fw.p, 6)}<br>
+        prediction <b style="color:${ANY_COLORS[best]}">class ${best}</b> ${best === pt.c ? "✓ correct" : "✗ (should be " + pt.c + ")"} · loss = −ln p[${pt.c}] = <b>${f(-Math.log(Math.max(1e-12, fw.p[pt.c])), 4)}</b></div>`;
+  }
+  function anyTab() {
+    if (!AI.net) anyInit();
+    const sel = (act, opts, cur) => html`<select class="select" data-tr-act="${act}">${raw(opts.map((o) => { const [v, lab] = Array.isArray(o) ? o : [o, o]; return '<option value="' + esc(v) + '"' + (String(cur) === String(v) ? " selected" : "") + ">" + esc(lab) + "</option>"; }).join(""))}</select>`;
+    return html`<section class="card"><h2 class="tr-h">Train any AI</h2>
+      <p class="small">Not every AI is a language model. This one is a <b>classifier</b>: it looks at two numbers and decides which group a dot belongs to. It is the same machine as the model you trained on text — weights, a forward pass, a loss, and gradient descent — only here the inputs are already numbers, so there is no tokeniser, and it is small enough to train <b>in your browser</b> and watch. (Real non-text models — images, audio, sensors, game moves — work exactly this way: numbers in, a prediction out.)</p>
+      <div class="row wrap">
+        <label class="tr-field inline"><span>data</span>${sel("any-kind", ANY_SETS, AI.kind)}</label>
+        <label class="tr-field inline"><span>hidden neurons</span>${sel("any-hidden", [2, 4, 6, 8, 12, 16, 24], AI.hidden)}</label>
+        <label class="tr-field inline"><span>activation</span>${sel("any-activation", [["tanh", "tanh"], ["relu", "ReLU"]], AI.activation)}</label>
+      </div>
+      <div class="tr-sliders" style="grid-template-columns:repeat(2,minmax(0,1fr))">${slider("any.lr", "learning rate", 0.05, 3, 0.05, AI.lr)}${slider("any.speed", "steps / frame", 1, 30, 1, AI.speed)}</div>
+      <div class="row wrap"><button class="btn primary" data-tr-act="any-train">${AI.running ? "⏸ Stop" : "▶ Train"}</button>
+        <button class="btn" data-tr-act="any-step">Step once</button>
+        <button class="btn" data-tr-act="any-reset">Reset weights</button>
+        <button class="btn" data-tr-act="any-newdata">New data</button></div></section>
+      <section class="card"><div class="any-wrap">
+        <div><canvas id="any-board" class="any-board"></canvas>${anyLegend()}</div>
+        <div><canvas id="any-curve" class="tr-cv"></canvas><div id="any-readout">${anyReadout()}</div></div>
+      </div></section>
+      <section class="card"><p class="small faint">The language model from the other tabs is this same picture, scaled up: millions of weights instead of a few dozen, a forward pass that mixes tokens with attention instead of two coordinates, and the “class” it predicts is the next token out of thousands. Gradient descent is identical. If you can read the one example above, you can read what a GPT does.</p></section>`;
+  }
   const WORDS = [" the", " cat", " sat", " on", " mat"];
 
   // ---------- maths basics: everything the AI lessons use, explained for a beginner ----------
@@ -538,7 +651,7 @@
   // ---------- painting ----------
   function paint() {
     const root = $("#tr-root"); if (!root || S.view !== "train") return;
-    const body = TR.tab === "learn" ? learnTab() : TR.tab === "data" ? dataTab() : TR.tab === "train" ? trainTab() : TR.tab === "inside" ? insideTab() : chatTab();
+    const body = TR.tab === "learn" ? learnTab() : TR.tab === "data" ? dataTab() : TR.tab === "train" ? trainTab() : TR.tab === "inside" ? insideTab() : TR.tab === "any" ? anyTab() : chatTab();
     setHTML(root, html`<div class="tr-tabs" role="tablist">${TABS.map(([id, label]) => html`<button role="tab" class="tr-tab ${TR.tab === id ? "on" : ""}" aria-selected="${TR.tab === id}" data-tr-tab="${id}">${label}</button>`)}</div>
       <div class="tr-body">${body}</div>`);
     drawAll();
@@ -546,6 +659,7 @@
   function drawAll() {
     if (TR.tab === "learn") { const ls = LESSONS[TR.lesson]; if (ls && ls.draw) ls.draw(); }
     if (TR.tab === "train") paintLive();
+    if (TR.tab === "any") anyDraw();
   }
 
   function learnTab() {
@@ -1307,6 +1421,12 @@ Assistant: game tonight?</pre></div>
     else if (a === "stop") { if (await post("/api/train/stop", {})) toast("Stopping: it saves after the current step."); }
     else if (a === "mdice-roll") { const d = L.mdice; for (let n = 0; n < 10; n++) { const r = Math.random(), pick = r < 0.6 ? 0 : r < 0.9 ? 1 : 2; d.counts[pick]++; d.total++; d.last = r; d.lastPick = pick; } paint(); }
     else if (a === "mdice-reset") { Object.assign(L.mdice, { counts: [0, 0, 0], total: 0, last: null }); paint(); }
+    else if (a === "any-train") { if (AI.running) { anyStop(); paint(); } else { if (!AI.net) anyInit(); AI.running = true; AI.capAt = AI.step + 15000; anyTick(); paint(); } }
+    else if (a === "any-step") { anyStop(); if (!AI.net) anyInit(); anySteps(1); paint(); }
+    else if (a === "any-reset") { anyStop(); anyInit(); paint(); }
+    else if (a === "any-newdata") { anyStop(); AI.seed = (AI.seed + 1) | 0; AI.pts = anyData(AI.kind, AI.seed); AI.pick = 0; anyInit(); paint(); }
+    else if (a === "any-pick-prev") { if (AI.pts) { AI.pick = (AI.pick - 1 + AI.pts.length) % AI.pts.length; paint(); } }
+    else if (a === "any-pick-next") { if (AI.pts) { AI.pick = (AI.pick + 1) % AI.pts.length; paint(); } }
     else if (a === "inside-every" || a === "inside-summary" || a === "inside-map") { store.set("train.inside", a.slice(7)); paint(); }
     else if (a === "ev-trace") evTrace();
     else if (a === "nm-left" || a === "nm-right") { EV.ncol0 = Math.max(0, EV.ncol0 + (a === "nm-left" ? -NM_PAGE : NM_PAGE)); paint(); }
@@ -1369,6 +1489,9 @@ Assistant: game tonight?</pre></div>
     }
     else if (d.trAct === "keep-best") { TR.keepBest = t.checked; paint(); }
     else if (d.trAct === "ex-model") TR.exModel = t.value;
+    else if (d.trAct === "any-kind") { anyStop(); AI.kind = t.value; AI.pts = anyData(AI.kind, AI.seed); AI.pick = 0; anyInit(); paint(); }
+    else if (d.trAct === "any-hidden") { anyStop(); AI.hidden = Math.max(1, +t.value || 8); anyInit(); paint(); }
+    else if (d.trAct === "any-activation") { anyStop(); AI.activation = t.value === "relu" ? "relu" : "tanh"; anyInit(); paint(); }
     else if (d.trAct === "mp-file") {
       TR.mp.file = t.value; TR.mp.speakers = null; TR.mp.speaker = "";
       if (t.value) { try { const r = await getJSON("/api/train/speakers?name=" + encodeURIComponent(t.value)); if (r.ok) { TR.mp.speakers = r.speakers; TR.mp.speaker = r.speakers.length ? r.speakers[0].name : ""; } else toast(r.error); } catch (_) { toast("Couldn't read it."); } }
