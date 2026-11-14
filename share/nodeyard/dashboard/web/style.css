@@ -1198,6 +1198,30 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .tr-ev-grid td.masked { color: var(--faint); }
 .tr-ev-calc { max-height: 60vh; overflow: auto; white-space: pre; font-size: 12px; }
 @media (max-width: 800px) { .tr-ev { grid-template-columns: 1fr; } .tr-ev-net { position: static; max-height: 40vh; } }
+.tr-nm-pos { color: #ef804e; font-weight: 600; } .tr-nm-neg { color: #4e96e8; font-weight: 600; }
+.tr-nm-wrap { overflow: auto; max-height: 78vh; border: 1px solid var(--line); border-radius: 12px; background: var(--bg2); margin: 10px 0; }
+.tr-nm-svg { display: block; }
+.tr-nm-edge { fill: none; stroke: var(--line2); stroke-width: 1.2; opacity: .65; }
+.tr-nm-edge.on { stroke: var(--accent); stroke-width: 2.2; opacity: 1; }
+.tr-nm-node > rect { fill: var(--panel); stroke: var(--line2); stroke-width: 1; cursor: pointer; }
+.tr-nm-node:hover > rect { stroke: var(--accent); }
+.tr-nm-node.sel > rect { stroke: var(--accent); stroke-width: 2.2; fill: var(--panel2); }
+.tr-nm-node.feed > rect { stroke: var(--good); stroke-width: 1.6; }
+.tr-nm-title { fill: var(--text); font: 600 12px var(--sans); pointer-events: none; }
+.tr-nm-shape { fill: var(--faint); font: 11px var(--mono); pointer-events: none; }
+.tr-nm-group { fill: var(--faint); font: 600 11px var(--sans); letter-spacing: .04em; text-transform: uppercase; }
+.tr-nm-cell { stroke: var(--line); stroke-width: .5; pointer-events: none; }
+.tr-nm-cell.masked { fill: var(--bg2); }
+.tr-nm-toks { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 12px; }
+.tr-nm-toks button { font: 12.5px var(--mono); padding: 3px 8px; border-radius: 7px; border: 1px solid var(--line); background: none; color: var(--muted); cursor: pointer; white-space: pre; }
+.tr-nm-toks button small { color: var(--faint); font-size: 10px; }
+.tr-nm-toks button.on { border-color: var(--accent); color: var(--text); background: rgba(124, 140, 255, .16); }
+.tr-nm-strip { display: flex; flex-wrap: wrap; gap: 3px; margin: 6px 0 4px; }
+.tr-nm-neuron { min-width: 34px; height: 26px; padding: 0 2px; border: 1px solid var(--line); border-radius: 5px; font: 10.5px var(--mono); color: var(--text); cursor: pointer; }
+.tr-nm-neuron:hover { border-color: var(--accent); }
+.tr-nm-neuron.on { outline: 2px solid var(--accent); outline-offset: -1px; }
+.tr-nm-neuron.masked { color: var(--faint); background: repeating-linear-gradient(45deg, transparent 0 4px, var(--line) 4px 5px) !important; }
+@media (max-width: 860px) { .tr-nm-neuron { min-width: 30px; height: 24px; } }
 .tr-bigger { margin: 8px 0 12px; } .tr-bigger summary { cursor: pointer; }
 .tr-machines tr.off td { opacity: .6; } .tr-machines td:first-child { width: 22px; }
 .tr-two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; align-items: start; }
