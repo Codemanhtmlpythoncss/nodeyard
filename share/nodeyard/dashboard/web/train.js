@@ -9,7 +9,7 @@
   const TABS = [["learn", "1 · Learn"], ["data", "2 · Your data"], ["train", "3 · Train"], ["inside", "4 · Inside the model"], ["chat", "5 · Chat"]];
   const TR = {
     tab: store.get("train.tab", "learn"), lesson: +store.get("train.lesson", 0) || 0, ov: null, hours: +store.get("train.hours", 1) || 1,
-    sel: JSON.parse(store.get("train.sel", "[]") || "[]"), check: null, form: null, model: "", resume: false, status: null, since: 0,
+    sel: JSON.parse(store.get("train.sel", "[]") || "[]"), check: null, form: null, model: "", resume: false, keepBest: true, status: null, since: 0,
     lines: [], pollT: 0, ovT: 0, chat: { model: "", history: [], mode: "chat", temperature: 0.7, top_k: 40, top_p: 0.9, busy: false },
     explain: null, exModel: "", exPrompt: "User: Hello, who are you?", exBusy: false, upload: null, ovPollT: 0,
     mp: { file: "", speakers: null, speaker: "", context: 3 },
@@ -495,7 +495,8 @@
   // ---------- loading ----------
   async function loadOverview() {
     try {
-      const q = "?hours=" + TR.hours + "&data=" + encodeURIComponent(TR.sel.join("|")) + "&machines=" + encodeURIComponent(TR.machines.join("|")) + "&both=" + (TR.both ? "1" : "0");
+      const q = "?hours=" + TR.hours + "&data=" + encodeURIComponent(TR.sel.join("|")) + "&machines=" + encodeURIComponent(TR.machines.join("|")) + "&both=" + (TR.both ? "1" : "0")
+        + (TR.resume && TR.model ? "&resume=" + encodeURIComponent(TR.model) : "");   // time the saved model, not a fresh one
       const r = await getJSON("/api/train" + q);
       if (!r.ok) { toast(r.error || "Couldn't read the trainer."); return; }
       TR.ov = r;
@@ -710,8 +711,15 @@ Assistant: game tonight?</pre></div>
         ${!TR.sel.length ? html`<p class="faint small" style="margin:.5em 0 0">Choose some data in <a href="#" data-tr-tab="data">step 2</a> first.</p>` : ""}</section>
       ${machinesCard()}
       <section class="card"><h2 class="tr-h">Recommended for ${ov.plan.share.length > 1 ? "these machines" : ov.plan.lead || "this hardware"}</h2>
-        <label class="tr-field"><span>How long can it train?</span><select class="select" data-tr-act="hours">${raw([[0.25, "15 minutes"], [1, "1 hour"], [3, "3 hours"], [8, "overnight (8 h)"], [24, "a day"], [72, "3 days"]].map(([v, l]) => '<option value="' + v + '"' + (+v === +TR.hours ? " selected" : "") + ">" + l + "</option>").join(""))}</select></label>
-        <p class="small">${TR.sel.length ? html`For <b>${TR.sel.join(", ")}</b>:` : html`<span class="warn-t">No data chosen yet</span> — <a href="#" data-tr-tab="data">choose it in step 2</a>.`} a <b>${n0(r.parameters)}</b>-weight model, about <b>${dur(r.seconds)}</b>, using ~${gb(r.memory)}. Limited by <b>${r.limit}</b>.</p>
+        <label class="tr-field"><span>How long can it train?</span>
+          <div class="row" style="gap:6px;align-items:center">
+            <select class="select" data-tr-act="hours">${raw([[0.25, "15 minutes"], [1, "1 hour"], [3, "3 hours"], [8, "overnight (8 h)"], [24, "a day"], [72, "3 days"]].map(([v, l]) => '<option value="' + v + '"' + (+v === +TR.hours ? " selected" : "") + ">" + l + "</option>").join("") + '<option value="custom"' + ([0.25, 1, 3, 8, 24, 72].indexOf(+TR.hours) < 0 ? " selected" : "") + ">Custom…</option>")}</select>
+            <input class="input" type="number" min="0.05" max="720" step="0.25" data-tr-act="hours-custom" value="${+TR.hours}" style="width:84px" title="exact hours — for precise time optimisation">
+            <span class="faint small">hours exactly</span>
+          </div></label>
+        <p class="small">${TR.sel.length ? html`For <b>${TR.sel.join(", ")}</b>:` : html`<span class="warn-t">No data chosen yet</span> — <a href="#" data-tr-tab="data">choose it in step 2</a>.`} ${r.resume
+          ? html`continuing this <b>${n0(r.parameters)}</b>-weight model for <b>${n0(r.steps)}</b> more steps, about <b>${dur(r.seconds)}</b>${r.measured ? "" : " (speed is a guess until it runs)"}. Limited by <b>${r.limit}</b>.`
+          : html`a <b>${n0(r.parameters)}</b>-weight model, about <b>${dur(r.seconds)}</b>, using ~${gb(r.memory)}. Limited by <b>${r.limit}</b>.`}</p>
         ${bigger(r)}
         <div class="tr-why">${r.why.map((w) => html`<details><summary><b>${w.name}</b><span>${w.value}</span></summary><div class="tr-eq small">${w.formula}</div><div class="tr-calc small">${w.numbers}</div><p class="muted small">${w.explain}</p></details>`)}</div>
         <p class="small"><b>Expect:</b> ${r.expect.level}</p>
@@ -739,7 +747,13 @@ Assistant: game tonight?</pre></div>
           ${TR.resume ? "" : html`<input class="input" data-tr-act="model-name" placeholder="name (optional)" value="${TR.model}" style="width:180px">`}
           <span class="spacer"></span>
           ${run ? html`<button class="btn danger" data-tr-act="stop" ${TR.status && TR.status.job && TR.status.job.stop ? "disabled" : ""}>${TR.status && TR.status.job && TR.status.job.stop ? "Stopping…" : "Stop and save"}</button>` : html`<button class="btn primary" data-tr-act="start" ${ov.plan.lead && TR.sel.length ? "" : "disabled"}>${TR.resume ? "Continue training" : "Start training"}${ov.plan.lead ? " on " + (TR.together !== "fastest" && ov.plan.share.length > 1 ? ov.plan.share.length + " machines" + (TR.together === "race" ? " (parallel)" : "") : ov.plan.lead) : ""}</button>`}</div>
-        ${TR.resume ? html`<p class="faint small">Continuing keeps the saved model's shape and tokenizer (V, T, d, L, h) and AdamW's running averages; the other settings apply. The learning rate is set from this model's own stats — its size and how far it's already trained (near the full peak when it's barely trained, down to about 30% once it's well-trained) — not from the last run's rate, so continuing many times keeps it learning instead of creeping toward zero. You can still edit it.</p>` : ""}</section>
+        ${TR.resume ? (() => {
+          const cm = (ov.models || []).find((x) => x.name === TR.model) || {}, b = cm.best;
+          return html`
+          <label class="row small" style="margin:.5em 0 0;gap:.4em;align-items:flex-start"><input type="checkbox" data-tr-act="keep-best" ${TR.keepBest ? "checked" : ""}> <span><b>Keep the best</b> — only replace the saved model if this run beats its validation loss${b && b.validation_loss != null ? " of " + f(b.validation_loss, 4) : cm.validation_loss != null ? " of " + f(cm.validation_loss, 4) : ""}. If continuing doesn't help, the earlier (better) model is kept. Untick to keep the latest weights even if they're worse.</span></label>
+          ${b ? html`<p class="faint small">Best parameters saved so far: validation <b>${f(b.validation_loss, 4)}</b>${b.perplexity != null ? " (perplexity " + f(b.perplexity, 3) + ")" : ""}${b.train_loss != null ? " · train " + f(b.train_loss, 4) : ""}${b.total_steps != null ? " · at " + n0(b.total_steps) + " total steps" : ""}.</p>` : ""}
+          <p class="faint small">Continuing keeps the saved model's shape and tokenizer (V, T, d, L, h) and AdamW's running averages; the other settings apply. The learning rate is set from this model's own stats — its size and how far it's already trained (near the full peak when it's barely trained, down to about 30% once it's well-trained) — not from the last run's rate, so continuing many times keeps it learning instead of creeping toward zero. You can still edit it.</p>`;
+        })() : ""}</section>
       ${stopWhen()}
       <section class="card tr-span2"><h2 class="tr-h">Live <span class="right" id="tr-live-chip"></span></h2><div id="tr-live"></div>
         <div class="tr-charts"><div><h4>Loss (lower is better)</h4><canvas class="tr-cv tall" id="tr-loss"></canvas><p class="faint small"><span class="tr-sw a"></span>training (smoothed) <span class="tr-sw b"></span>validation <span class="tr-sw c"></span>random guess ln V</p></div>
@@ -751,6 +765,9 @@ Assistant: game tonight?</pre></div>
   function bigger(r) {
     const b = r.bigger; if (!b) return "";
     const hrs = (h) => (h < 1 ? Math.round(h * 60) + " min" : h + " h");
+    if (r.resume) return html`<details class="tr-bigger"><summary class="small"><b>How much time buys how many steps</b> <span class="faint">— the model's size is fixed; only the number of extra steps changes</span></summary>
+      <p class="faint small">Continuing can't resize the model, so more time just means more steps on the model you have. Each row is timed for this exact model, so the finish time is the real one.</p>
+      <div class="tr-scroll"><table class="tr-key"><tr><th>Train for</th><th>Extra steps</th><th>Limited by</th></tr>${b.times.map((t) => html`<tr class="${+t.hours === +TR.hours ? "hl" : ""}"><td>${hrs(t.hours)}</td><td>${n0(t.steps)} steps</td><td class="small faint">${t.limit}</td></tr>`)}</table></div></details>`;
     return html`<details class="tr-bigger" ${r.limit === "compute" ? "open" : ""}><summary class="small"><b>How to get a bigger model</b> ${r.limit === "compute" ? html`<span class="warn-t">— limited by compute: time × speed</span>` : r.limit === "data" ? html`<span class="faint">— limited by your text: add more</span>` : html`<span class="faint">— limited by memory</span>`}</summary>
       <p class="faint small">A model can only learn as much as the arithmetic it gets: weights ≈ √(speed × time ÷ 120). Past that, a bigger model would stay half-trained and do worse.</p>
       <div class="tr-scroll"><table class="tr-key"><tr><th>Train for</th><th>Model</th><th>Limited by</th></tr>${b.times.map((t) => html`<tr class="${+t.hours === +TR.hours ? "hl" : ""}"><td>${hrs(t.hours)}</td><td>${n0(t.parameters)} weights</td><td class="small faint">${t.limit}</td></tr>`)}</table></div>
@@ -834,9 +851,10 @@ Assistant: game tonight?</pre></div>
     const eta = last.sps && total ? Math.max(0, total * (1 - frac)) / last.sps : last.sps ? (last.of - last.local) / last.sps : null;
     const where = (j.machines || []).join(" + "), rounds = j.mode === "shared" && j.rounds ? " · round " + j.round + " of " + j.rounds : j.mode === "race" ? " · parallel" : "";
     if (chip) setHTML(chip, st.running ? html`<span class="chip good"><i class="dot good"></i>${j.phase && j.phase !== "training" ? j.phase : "training"} ${j.model}${where ? " on " + where : ""}${rounds}</span>` : html`<span class="chip">${j.code === 0 ? "finished" : j.code == null ? "stopped" : "failed (exit " + j.code + ")"} · ${j.model}</span>`);
+    const mt = st.metrics || {}, lph = mt.loss_per_hour;
     setHTML(live, html`<div class="tr-progress big"><i style="width:${(frac * 100).toFixed(1)}%"></i></div>
-      <div class="tr-stats">${[["Step", last.local ? (total ? n0(Math.round(frac * total)) + " / " + n0(total) : n0(last.local) + " / " + n0(last.of)) : j.phase || "starting…"], ["Time left", st.running && eta != null ? dur(eta) : "–"], ["Training loss", f(last.loss, 4)], ["Validation loss", f(val, 4)],
-        ["Perplexity e^ℒ", val != null ? f(Math.exp(val), 4) : "–"], ["Learning rate", f(last.lr, 3)], ["Speed", last.tps ? n0(last.tps) + " tokens/s" : "–"], ["Total steps", n0(last.step)]].map(([a, b]) => html`<div><span>${a}</span><b>${b}</b></div>`)}</div>
+      <div class="tr-stats">${[["Step", last.local ? (total ? n0(Math.round(frac * total)) + " / " + n0(total) : n0(last.local) + " / " + n0(last.of)) : j.phase || "starting…"], ["Time left", st.running && eta != null ? dur(eta) : "–"], ["Training loss", f(last.loss, 4)], ["Avg loss (recent)", mt.avg_loss != null ? f(mt.avg_loss, 4) : "–"], ["Validation loss", f(val, 4)],
+        ["Perplexity e^ℒ", val != null ? f(Math.exp(val), 4) : "–"], ["Loss ↓ in last hour", lph == null ? "–" : (lph >= 0 ? "−" : "+") + f(Math.abs(lph), 3) + (mt.extrapolated ? " (est)" : "")], ["Learning rate", f(last.lr, 3)], ["Speed", last.tps ? n0(last.tps) + " tokens/s" : "–"], ["Total steps", n0(last.step)]].map(([a, b]) => html`<div><span>${a}</span><b>${b}</b></div>`)}</div>
       ${val != null ? html`<p class="small">Right now the model is about as unsure as picking among <b>${f(Math.exp(val), 3)}</b> equally likely tokens for each next token (a random guess would be ${n0(V0)}: ln ${n0(V0)} = ${f(Math.log(V0), 4)}). ${st.val.length > 2 && st.val[st.val.length - 1].loss > Math.min(...st.val.map((v) => v.loss)) * 1.02 ? "Validation is rising above its best: the model is starting to memorise; more steps won't help much." : ""}</p>` : ""}`);
     const qbox = $("#tr-qlive"); if (qbox) setHTML(qbox, html`${raceLive(st)}${qualityLive(st)}`);
     const box = $("#tr-logbox"); if (box) { const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 8; box.textContent = TR.lines.slice(-400).join("\n"); if (atEnd) box.scrollTop = box.scrollHeight; }
@@ -1203,7 +1221,7 @@ Assistant: game tonight?</pre></div>
       toast("Set up on " + (TR.machines.length || 1) + " machine" + (TR.machines.length === 1 ? "" : "s") + (TR.both ? " (GPU + CPU)" : "") + ". Review and press Start.");
     }
     else if (a === "start") {
-      const body = { data: TR.sel, settings: TR.form, resume: TR.resume, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.together !== "fastest", together: TR.together, both: TR.both,
+      const body = { data: TR.sel, settings: TR.form, resume: TR.resume, keep_best: TR.resume ? TR.keepBest : undefined, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.together !== "fastest", together: TR.together, both: TR.both,
         quality: TR.q.on ? { on: true, prompts: qPrompts().filter((p) => p.prompt.trim()).map((p) => ({ prompt: p.prompt, answer: p.answer || "", expect: String(p.expect || "").split(",").map((x) => x.trim()).filter(Boolean) })), pass: TR.q.pass, target_loss: TR.q.target_loss, give_up: TR.q.give_up || 10, match: TR.q.match } : undefined };
       const r = await post("/api/train/start", body);
       if (r) { toast("Training " + r.model); TR.lines = []; TR.since = 0; TR.status = null; TR.model = TR.resume ? TR.model : ""; await loadOverview(); poll(); }
@@ -1259,13 +1277,18 @@ Assistant: game tonight?</pre></div>
     else if (d.trSet === "assistant_only") { TR.form.assistant_only = t.checked; markEdited(); paint(); }
     else if (d.trSet === "device") { TR.form.device = t.value; markEdited(); paint(); }
     else if (d.trAct === "files") { uploadFiles(Array.from(t.files || [])); t.value = ""; }
-    else if (d.trAct === "hours") { TR.hours = +t.value; store.set("train.hours", TR.hours); TR.form = null; loadOverview(); }
+    else if (d.trAct === "hours") { if (t.value === "custom") return; TR.hours = +t.value; store.set("train.hours", TR.hours); TR.form = null; loadOverview(); }
+    else if (d.trAct === "hours-custom") {
+      const h = Math.max(0.05, Math.min(720, +t.value || TR.hours));
+      TR.hours = h; store.set("train.hours", h); TR.form = null; loadOverview();
+    }
     else if (d.trAct === "model-pick") {
       TR.resume = !!t.value; TR.model = t.value;
       const m = TR.ov.models.find((x) => x.name === t.value);
       if (m) { TR.form.learning_rate = m.resume_lr || +((m.learning_rate || 1e-3) * 0.3).toPrecision(2); markEdited(); toast("Learning rate set to " + TR.form.learning_rate + " for continuing, from this model's size and how trained it is (see the note below Start)."); }
-      paint();
+      loadOverview();   // re-estimate time for the model being continued (its real size), not a fresh one
     }
+    else if (d.trAct === "keep-best") { TR.keepBest = t.checked; paint(); }
     else if (d.trAct === "ex-model") TR.exModel = t.value;
     else if (d.trAct === "mp-file") {
       TR.mp.file = t.value; TR.mp.speakers = null; TR.mp.speaker = "";

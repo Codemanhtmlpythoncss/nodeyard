@@ -294,6 +294,94 @@ def recommend(hw, data_chars=None, hours=1.0, profile=None):
     }
 
 
+def recommend_resume(hw, saved, data_chars=None, hours=1.0, profile=None):
+    """Settings and an honest time estimate for *continuing* a saved model, not sizing a new one.
+
+    The shape is locked to the saved model (its weights can't change size), so the only choices are how many more
+    steps to take and at what learning rate. The time estimate is therefore the real one: the saved model's own
+    cost per step divided by this hardware's measured speed, not a guess for a freshly-sized model. This is why a
+    continue used to overshoot its estimate -- it was timing a different, usually smaller, model.
+    """
+    profile = profile or {}
+    hw = dict(hw)
+    device = hw.get("device") or "cpu"
+    speed = hw.get("speed") or estimate_speed(device, hw.get("cores") or 1, hw.get("arch", ""), hw.get("gpu"))
+    measured = bool(hw.get("speed"))
+    seconds_budget = max(60.0, float(hours) * 3600)
+    compute = speed * seconds_budget
+
+    params = int(saved.get("parameters") or 0)
+    vocab = int(saved.get("vocabulary") or 0) or None
+    width = int(saved.get("width") or 0)
+    layers = int(saved.get("layers") or 0)
+    heads = int(saved.get("heads") or 0)
+    context = int(saved.get("context") or 128)
+    batch = int(saved.get("batch_size") or 1)
+    accum = int(saved.get("grad_accum") or 1)
+    eff = max(1, accum * batch)
+    val = saved.get("validation_loss")
+    trained = int(saved.get("trained_steps") or 0)
+
+    unique = profile.get("unique_fraction")
+    repeated = data_chars is not None and unique is not None and unique < 0.9
+    tokens = int((data_chars or 4_000_000) * (unique if repeated else 1.0) / CHARS_PER_TOKEN)
+
+    per_step = flops_per_step(params, eff, context)
+    steps_time = compute / per_step if per_step else 0
+    steps_data = 50 * tokens / (eff * context)          # don't propose more than ~50 fresh passes in one continue
+    steps = int(max(50, min(200_000, steps_time, steps_data)) // 50 * 50)
+    seconds_est = steps * per_step / speed if speed else 0
+    passes = steps * eff * context / max(1, tokens)
+    lr = resume_learning_rate(params, val, vocab)
+    warmup = int(max(20, min(500, steps * 0.03)))       # a short re-warm: the optimizer's averages may start fresh
+    eval_every = int(max(25, min(1000, steps // 20)))
+
+    why = []
+    why.append({"name": "Continuing a saved model", "value": "%s weights, %s steps so far" % (_n(params), _n(trained)),
+                "formula": "the shape is fixed by the saved weights; only the number of extra steps and the rate change",
+                "numbers": "d=%d · L=%d · h=%d · context %d · effective batch %d%s"
+                           % (width, layers, heads, context, eff, (" · validation %.3f" % val) if isinstance(val, (int, float)) else ""),
+                "explain": "A continue can't resize the model, so this times the model you actually have. The learning rate "
+                           "is read from how trained it already is, and the saved model is kept unless this run beats it."})
+    why.append({"name": "Learning rate η", "value": "%g" % lr,
+                "formula": "read from the model's stats: near the fresh peak if barely trained, down to 30% of it if well trained",
+                "numbers": "size peak %g%s → η = %g" % (size_learning_rate(params),
+                           (", validation %.3f vs a random guess of %.3f" % (val, math.log(vocab)) if isinstance(val, (int, float)) and vocab else ""), lr),
+                "explain": "Continuing never re-reads the last run's lowered rate (which would spiral toward zero over "
+                           "several continues); it re-derives the rate from how far the model already is from random."})
+    speed_note = ("measured on this machine (%s FLOP/s)" % _sci(speed)) if measured else ("a guess for this hardware (%s FLOP/s); the real speed shows once it runs" % _sci(speed))
+    why.append({"name": "Extra steps", "value": _n(steps),
+                "formula": "min(time ÷ cost per step, 50 passes over the data)",
+                "numbers": "time %s × %s FLOP/s = %s ÷ (6·%s·%d·%d) = %s · 50 passes = %s → %s steps ≈ %.1f passes, about %s"
+                           % (_n(seconds_budget), _sci(speed), _sci(compute), _n(params), eff, context, _n(steps_time), _n(steps_data), _n(steps), passes, _hms(seconds_est)),
+                "explain": "Cost per step is fixed by the saved model's size, so dividing your time budget by it gives the real "
+                           "number of extra steps and the real finish time. Speed here is %s." % speed_note})
+
+    limit = "your time" if steps_time <= steps_data and steps_time <= 200_000 else "your text" if steps_data <= 200_000 else "a 200k-step cap"
+    settings = {"vocab_size": vocab, "context": context, "dim": width, "layers": layers, "heads": heads,
+                "batch_size": batch, "grad_accum": accum, "steps": steps, "learning_rate": lr, "warmup": warmup,
+                "weight_decay": 0.1, "eval_every": eval_every, "dropout": saved.get("dropout", 0.0) or 0.0,
+                "assistant_only": bool(saved.get("assistant_only"))}
+    return {"device": device, "speed": speed, "measured": measured, "resume": True, "settings": settings, "limit": limit,
+            "parameters": params, "tokens": tokens, "seconds": seconds_est, "steps": steps,
+            "memory": 16 * params + batch * activation_bytes(1, context, width, layers, heads, vocab or 1),
+            "why": why, "expect": expectation(params, tokens, chat=bool(profile.get("chat") or hw.get("chat")))}
+
+
+def _hms(seconds):
+    """A short human time like '2h 5m' or '40s' for an estimate."""
+    s = int(max(0, round(seconds)))
+    if s < 90:
+        return "%ds" % s
+    m = s / 60.0
+    if m < 90:
+        return "%dm" % round(m)
+    h = m / 60.0
+    if h < 48:
+        return "%dh %dm" % (int(h), round((h - int(h)) * 60))
+    return "%.1f days" % (h / 24.0)
+
+
 QWEN_SMALL = {"name": "Qwen2.5-0.5B", "params": 494e6, "tokens": 18e12}
 
 
@@ -968,11 +1056,17 @@ class Trainer:
             except (OSError, ValueError):
                 continue
             size = sum(os.path.getsize(os.path.join(self.models_dir, name, x)) for x in os.listdir(os.path.join(self.models_dir, name)))
-            out.append({"name": name, "size": size,
+            best = None
+            try:
+                with open(os.path.join(self.models_dir, name, "best.json"), "r", encoding="utf-8") as f:
+                    best = json.load(f)
+            except (OSError, ValueError):
+                pass
+            out.append({"name": name, "size": size, "best": best,
                         "resume_lr": resume_learning_rate(info.get("parameters"), info.get("validation_loss"), info.get("vocabulary")),
                         **{k: info.get(k) for k in (
                             "parameters", "vocabulary", "layers", "width", "heads", "context", "trained_steps", "validation_loss",
-                            "assistant_only", "data_files", "saved_at", "compute_device", "learning_rate", "batch_size")}})
+                            "assistant_only", "data_files", "saved_at", "compute_device", "learning_rate", "batch_size", "grad_accum")}})
         return out
 
     def delete_model(self, body):
@@ -1048,6 +1142,8 @@ class Trainer:
                        "--device", s.get("device") if s.get("device") in ("auto", "cpu", "cuda", "mps") else "auto"]
             if s.get("assistant_only"):
                 options.append("--assistant-only")
+            if resume and body.get("keep_best") is False:   # opt out: keep the latest weights even if worse
+                options.append("--allow-regression")
             eval_every, save_every = num("eval_every", 1, 1_000_000, int, 250), num("save_every", 0, 1_000_000, int, 500)
             quality = None
             q = body.get("quality")
@@ -1161,6 +1257,7 @@ class Trainer:
         start = max(0, int(since) - dropped)
         return {"job": job, "running": running, "lines": p["lines"][start:], "next": dropped + len(p["lines"]),
                 "train": _thin(p["train"], 1500), "val": p["val"], "grad": _thin(p["grad"], 1500), "last": p["last"],
+                "metrics": loss_metrics(p["train"]),
                 "quality": [{"step": x["step"], "score": x["score"], "loss": x.get("loss")} for x in p["quality"]],
                 "quality_last": p["quality"][-1] if p["quality"] else None, "verdict": p["verdict"]}
 
@@ -1723,6 +1820,51 @@ def _f(x):
         return None
 
 
+def _current_run(points):
+    """The suffix of training points belonging to the latest run -- where the per-run step keeps increasing.
+
+    A continue or a shared-training round restarts the per-run step at 1, so the whole log's points aren't one
+    timeline. For live 'now' metrics we only want the run in progress, which is the trailing stretch whose
+    'local' step never steps backward.
+    """
+    if not points:
+        return []
+    i = len(points) - 1
+    while i > 0 and (points[i - 1].get("local") or 0) < (points[i].get("local") or 0):
+        i -= 1
+    return points[i:]
+
+
+def loss_metrics(points, window=50, hour=3600.0):
+    """Two live readings from the training loss: a smoothed average of the recent steps, and how much the loss
+    has fallen over the last hour (extrapolated when less than an hour has run). Returns None values when there
+    isn't enough to say. Wall-clock time is taken from each step's own steps/sec (elapsed ≈ step ÷ steps-per-sec),
+    so it needs no timestamps in the log and resets cleanly with each run."""
+    run = _current_run(points)
+    losses = [p["loss"] for p in run if isinstance(p.get("loss"), (int, float))]
+    if not losses:
+        return {"avg_loss": None, "loss_per_hour": None, "window_seconds": None, "extrapolated": None}
+    avg = sum(losses[-window:]) / len(losses[-window:])
+    # Elapsed seconds for each point from its cumulative steps/sec; keep only points with a usable rate.
+    timed = [(p["local"] / p["sps"], p["loss"]) for p in run
+             if p.get("sps") and p["sps"] > 0 and isinstance(p.get("loss"), (int, float)) and p.get("local")]
+    per_hour = window_seconds = extrapolated = None
+    if len(timed) >= 2:
+        now_t, now_loss = timed[-1]
+        ref_t, ref_loss = timed[0]
+        for t, loss in timed:                 # the earliest point still within the last hour
+            if t >= now_t - hour:
+                ref_t, ref_loss = t, loss
+                break
+        span = now_t - ref_t
+        if span > 1e-6:
+            window_seconds = span
+            drop = ref_loss - now_loss        # positive = the loss went down (improving)
+            extrapolated = span < hour
+            per_hour = drop * (hour / span) if extrapolated else drop
+    return {"avg_loss": avg, "loss_per_hour": per_hour, "window_seconds": window_seconds, "extrapolated": extrapolated}
+
+
 def _thin(points, limit):
     """Keep at most `limit` points for the chart (every k-th, always the last)."""
     if len(points) <= limit:
@@ -1775,13 +1917,19 @@ def register(ctx, args):
         machines = t.machines(both=both)
         chosen = [n for n in (q.get("machines") or [""])[0].split("|") if n] or None
         links = t.measure_links(machines) or None
+        # When continuing a saved model its shape is fixed, so size/time it as that exact model, not a fresh one.
+        resume_name = (q.get("resume") or [""])[0].strip()
+        saved = None
+        if resume_name:
+            saved = next((m for m in t.models() if m["name"] == resume_name), None)
         plan = t.plan(machines, chosen, links=links)
         hw = t.plan_hardware(machines, plan)
         rec = recommend(dict(hw, chat=chat), chars, hours, profile)
         # Judge latency against the real model size, then settle the plan and hardware once more.
-        plan = t.plan(machines, chosen, links=links, model_bytes=4 * (rec.get("parameters") or 0))
+        plan = t.plan(machines, chosen, links=links, model_bytes=4 * ((saved or rec).get("parameters") or 0))
         hw = t.plan_hardware(machines, plan)
-        rec = recommend(dict(hw, chat=chat), chars, hours, profile)
+        rec = (recommend_resume(dict(hw, chat=chat), saved, chars, hours, profile) if saved
+               else recommend(dict(hw, chat=chat), chars, hours, profile))
         for m in machines:   # show each machine's latency in the table
             lk = (links or {}).get(m["name"])
             if lk:
@@ -1792,8 +1940,10 @@ def register(ctx, args):
         # What would get a bigger model: more time on these machines, or a faster machine (even one that's down).
         times = []
         for h in (0.25, 1, 3, 8, 24, 72):
-            r = recommend(dict(hw, chat=chat), chars, h, profile)
-            times.append({"hours": h, "parameters": r["parameters"], "limit": r["limit"], "seconds": r["seconds"]})
+            r = (recommend_resume(dict(hw, chat=chat), saved, chars, h, profile) if saved
+                 else recommend(dict(hw, chat=chat), chars, h, profile))
+            times.append({"hours": h, "parameters": r["parameters"], "limit": r.get("limit", "continue"),
+                          "seconds": r["seconds"], "steps": r.get("steps")})
         faster = []
         for m in machines:
             if m["speed"] > 2 * (hw.get("speed") or 1) and m["name"] not in plan["share"]:
