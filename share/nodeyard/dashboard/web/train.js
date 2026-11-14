@@ -739,7 +739,7 @@ Assistant: game tonight?</pre></div>
           ${TR.resume ? "" : html`<input class="input" data-tr-act="model-name" placeholder="name (optional)" value="${TR.model}" style="width:180px">`}
           <span class="spacer"></span>
           ${run ? html`<button class="btn danger" data-tr-act="stop" ${TR.status && TR.status.job && TR.status.job.stop ? "disabled" : ""}>${TR.status && TR.status.job && TR.status.job.stop ? "Stopping…" : "Stop and save"}</button>` : html`<button class="btn primary" data-tr-act="start" ${ov.plan.lead && TR.sel.length ? "" : "disabled"}>${TR.resume ? "Continue training" : "Start training"}${ov.plan.lead ? " on " + (TR.together !== "fastest" && ov.plan.share.length > 1 ? ov.plan.share.length + " machines" + (TR.together === "race" ? " (parallel)" : "") : ov.plan.lead) : ""}</button>`}</div>
-        ${TR.resume ? html`<p class="faint small">Continuing keeps the saved model's shape and tokenizer (V, T, d, L, h) and AdamW's running averages; the other settings apply. The learning rate schedule starts again, so a lower peak (about 30% of the first run's) stops the first steps from undoing what it already learned.</p>` : ""}</section>
+        ${TR.resume ? html`<p class="faint small">Continuing keeps the saved model's shape and tokenizer (V, T, d, L, h) and AdamW's running averages; the other settings apply. The learning rate is set from this model's own stats — its size and how far it's already trained (near the full peak when it's barely trained, down to about 30% once it's well-trained) — not from the last run's rate, so continuing many times keeps it learning instead of creeping toward zero. You can still edit it.</p>` : ""}</section>
       ${stopWhen()}
       <section class="card tr-span2"><h2 class="tr-h">Live <span class="right" id="tr-live-chip"></span></h2><div id="tr-live"></div>
         <div class="tr-charts"><div><h4>Loss (lower is better)</h4><canvas class="tr-cv tall" id="tr-loss"></canvas><p class="faint small"><span class="tr-sw a"></span>training (smoothed) <span class="tr-sw b"></span>validation <span class="tr-sw c"></span>random guess ln V</p></div>
@@ -1263,7 +1263,7 @@ Assistant: game tonight?</pre></div>
     else if (d.trAct === "model-pick") {
       TR.resume = !!t.value; TR.model = t.value;
       const m = TR.ov.models.find((x) => x.name === t.value);
-      if (m) { TR.form.learning_rate = +((m.learning_rate || 1e-3) * 0.3).toPrecision(2); markEdited(); toast("Learning rate lowered to " + TR.form.learning_rate + " for continuing (see the note below Start)."); }
+      if (m) { TR.form.learning_rate = m.resume_lr || +((m.learning_rate || 1e-3) * 0.3).toPrecision(2); markEdited(); toast("Learning rate set to " + TR.form.learning_rate + " for continuing, from this model's size and how trained it is (see the note below Start)."); }
       paint();
     }
     else if (d.trAct === "ex-model") TR.exModel = t.value;

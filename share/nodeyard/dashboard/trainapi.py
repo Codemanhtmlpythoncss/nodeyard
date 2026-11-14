@@ -117,6 +117,30 @@ def _pow2_floor(x):
     return 1 << max(0, int(math.floor(math.log2(max(1, x)))))
 
 
+def size_learning_rate(params):
+    """The fresh peak learning rate for a model with this many weights: bigger models take smaller steps."""
+    return 1e-3 if params < 20e6 else 6e-4 if params < 100e6 else 3e-4
+
+
+def resume_learning_rate(params, validation_loss=None, vocab=None):
+    """Peak learning rate to continue a saved model, read from the model's own stats, not its last run's rate.
+
+    Continuing should keep making progress (enough) without jolting the weights it already learned (not too
+    much). So the rate is anchored to the fresh peak for the model's size and scaled by how far the model
+    already is from a random guess: a barely-trained model continues near the full peak, a well-trained one
+    near 30% of it. It never reads the saved learning rate, so continuing a model many times can't spiral the
+    rate toward zero — each past run saved its already-lowered rate, and taking a fraction of that again (the
+    old behaviour) collapsed it, e.g. 1e-3 → 3e-4 → 9e-5 → … until the model stopped learning.
+    """
+    base = size_learning_rate(params or 0)
+    maturity = 0.5   # unknown stats: pick a middling step
+    if validation_loss is not None and vocab and vocab > 1:
+        random_guess = math.log(vocab)   # the loss of guessing uniformly among the tokens
+        maturity = min(1.0, max(0.0, (random_guess - validation_loss) / random_guess))
+    fraction = 1.0 - 0.7 * maturity      # 1.0 (untrained) down to 0.3 (fully converged)
+    return float("%.2g" % (base * fraction))
+
+
 def recommend(hw, data_chars=None, hours=1.0, profile=None):
     """Settings for this hardware and this data, each with the formula, the numbers and why.
 
@@ -248,7 +272,7 @@ def recommend(hw, data_chars=None, hours=1.0, profile=None):
                 "numbers": "%s weights ÷ %s tokens = %.2f weights per token → dropout %g" % (_n(target), _n(tokens), ratio, dropout),
                 "explain": "While training, each block zeroes this fraction of its values at random, so the model can't memorise through any one path. Needed when the model is big for its text; with plenty of text it only slows learning."})
 
-    lr = 1e-3 if params < 20e6 else 6e-4 if params < 100e6 else 3e-4
+    lr = size_learning_rate(params)
     warmup = int(max(20, min(2000, steps * 0.05)))
     why.append({"name": "Learning rate η", "value": "%g" % lr, "formula": "1e-3 under 20M weights · 6e-4 under 100M · 3e-4 above; warm up for 5% of steps, then cosine decay to 10%",
                 "numbers": "N = %s → η = %g, warm-up %s steps" % (_n(params), lr, _n(warmup)),
@@ -944,9 +968,11 @@ class Trainer:
             except (OSError, ValueError):
                 continue
             size = sum(os.path.getsize(os.path.join(self.models_dir, name, x)) for x in os.listdir(os.path.join(self.models_dir, name)))
-            out.append({"name": name, "size": size, **{k: info.get(k) for k in (
-                "parameters", "vocabulary", "layers", "width", "heads", "context", "trained_steps", "validation_loss",
-                "assistant_only", "data_files", "saved_at", "compute_device", "learning_rate", "batch_size")}})
+            out.append({"name": name, "size": size,
+                        "resume_lr": resume_learning_rate(info.get("parameters"), info.get("validation_loss"), info.get("vocabulary")),
+                        **{k: info.get(k) for k in (
+                            "parameters", "vocabulary", "layers", "width", "heads", "context", "trained_steps", "validation_loss",
+                            "assistant_only", "data_files", "saved_at", "compute_device", "learning_rate", "batch_size")}})
         return out
 
     def delete_model(self, body):

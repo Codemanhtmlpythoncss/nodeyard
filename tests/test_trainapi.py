@@ -153,6 +153,68 @@ class GradientAccumulationTests(unittest.TestCase):
         self.assertEqual(trainapi._opt_int(["--grad-accum", "3"], "--grad-accum", 1), 3)
 
 
+class ResumeLearningRateTests(unittest.TestCase):
+    def test_a_rate_continued_many_times_never_collapses_toward_zero(self):
+        # The old bug: each continue saved its already-lowered rate, and the next continue took 30% of THAT, so
+        # 1e-3 -> 3e-4 -> 9e-5 -> ... until the model stopped moving (the 2.5e-6 the user saw). The rate now comes
+        # from the model's stats, not the last run's rate, so it can't be driven down by continuing again.
+        small_peak = trainapi.size_learning_rate(2_500_000)       # a small model's fresh peak
+        for saved in (1e-3, 3e-4, 9e-5, 2.7e-5, 2.5e-6):          # whatever earlier runs collapsed it to
+            lr = trainapi.resume_learning_rate(2_500_000, validation_loss=4.0, vocab=2048)
+            self.assertEqual(lr, trainapi.resume_learning_rate(2_500_000, 4.0, 2048))   # saved rate is not even an input
+            self.assertGreaterEqual(lr, 0.3 * small_peak - 1e-12)   # always at least the gentle fraction of a healthy peak
+            self.assertGreater(lr, 50 * 2.5e-6)                     # and far above the collapsed value it used to give
+
+    def test_the_real_case_from_the_screenshot_gets_a_usable_rate(self):
+        # Small model, validation loss 4.219 (perplexity ~68), vocab 2048: still far from converged, so it should
+        # continue near its healthy peak — not the 2.5e-6 that had frozen it.
+        lr = trainapi.resume_learning_rate(2_500_000, validation_loss=4.219, vocab=2048)
+        self.assertGreater(lr, 4e-4)
+        self.assertLessEqual(lr, trainapi.size_learning_rate(2_500_000))
+
+    def test_more_trained_models_continue_gentler(self):
+        # Same model size: the lower the validation loss (closer to converged), the smaller the resume rate,
+        # always between 30% and 100% of the fresh peak for that size. Enough to keep learning, not enough to jolt.
+        base = trainapi.size_learning_rate(2_500_000)
+        barely = trainapi.resume_learning_rate(2_500_000, validation_loss=7.5, vocab=2048)   # near random (ln 2048 ≈ 7.62)
+        well = trainapi.resume_learning_rate(2_500_000, validation_loss=1.0, vocab=2048)     # well trained
+        self.assertGreater(barely, well)
+        for lr in (barely, well):
+            self.assertLessEqual(lr / base, 1.0 + 1e-6)
+            self.assertGreaterEqual(lr / base, 0.3 - 1e-6)
+
+    def test_bigger_models_take_smaller_steps(self):
+        # At the same maturity, a larger model continues at a lower rate, mirroring the fresh-peak size rule.
+        at = lambda params: trainapi.resume_learning_rate(params, validation_loss=4.0, vocab=8192)
+        self.assertGreater(at(5_000_000), at(60_000_000))
+        self.assertGreaterEqual(at(60_000_000), at(200_000_000))
+        self.assertEqual(trainapi.size_learning_rate(5_000_000), 1e-3)
+        self.assertEqual(trainapi.size_learning_rate(60_000_000), 6e-4)
+        self.assertEqual(trainapi.size_learning_rate(200_000_000), 3e-4)
+
+    def test_missing_stats_still_give_a_sane_positive_rate(self):
+        # Older saved models may lack validation_loss or vocabulary: fall back to a middling step, never crash or zero.
+        for params in (None, 0, 1_000_000, 250_000_000):
+            lr = trainapi.resume_learning_rate(params, validation_loss=None, vocab=None)
+            base = trainapi.size_learning_rate(params or 0)
+            self.assertGreater(lr, 0.0)
+            self.assertAlmostEqual(lr, float("%.2g" % (0.65 * base)))      # 1 - 0.7*0.5 fraction
+        self.assertGreater(trainapi.resume_learning_rate(1_000_000, validation_loss=3.0, vocab=1), 0.0)   # vocab 1 → no ln
+
+    def test_models_list_carries_a_resume_rate_from_each_model_s_stats(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = trainapi.Trainer(d)
+            mdir = os.path.join(t.models_dir, "m1")
+            os.makedirs(mdir)
+            cfg = {"parameters": 2_500_000, "vocabulary": 2048, "validation_loss": 4.219,
+                   "trained_steps": 36000, "learning_rate": 2.5e-6, "batch_size": 32}
+            with open(os.path.join(mdir, "model.json"), "w", encoding="utf-8") as f:
+                json.dump(cfg, f)
+            (m,) = [x for x in t.models() if x["name"] == "m1"]
+            self.assertEqual(m["resume_lr"], trainapi.resume_learning_rate(2_500_000, 4.219, 2048))
+            self.assertGreater(m["resume_lr"], m["learning_rate"])         # the saved (collapsed) rate is not reused
+
+
 class TrainingDataTests(unittest.TestCase):
     def test_every_supported_shape_becomes_user_assistant_text(self):
         lines = [
