@@ -721,6 +721,10 @@ Assistant: game tonight?</pre></div>
           ? html`continuing this <b>${n0(r.parameters)}</b>-weight model for <b>${n0(r.steps)}</b> more steps, about <b>${dur(r.seconds)}</b>${r.measured ? "" : " (speed is a guess until it runs)"}. Limited by <b>${r.limit}</b>.`
           : html`a <b>${n0(r.parameters)}</b>-weight model, about <b>${dur(r.seconds)}</b>, using ~${gb(r.memory)}. Limited by <b>${r.limit}</b>.`}</p>
         ${bigger(r)}
+        ${ov.best && !r.resume && TR.sel.length ? (() => { const b = ov.best; return html`<details class="tr-bigger tr-best"><summary class="small"><b>Best possible model</b> <span class="faint">— ignores the clock; the strongest this data and hardware can train</span></summary>
+          <p class="small">A <b>${n0(b.parameters)}</b>-weight model, <b>${n0(b.settings.steps)}</b> steps to near-perfect, about <b>${dur(b.seconds)}</b>${b.measured ? "" : " (speed is a guess until it runs)"}. Limited by <b>${b.limit}</b>. <button class="btn small primary" data-tr-act="best-model">Use these settings</button></p>
+          <p class="faint small">Bigger isn't automatically better: past about ten weights per token a larger model overfits your text and scores <i>worse</i>, so this sizes to the data, not to memory, and trains enough passes to reach near its best.</p>
+          <div class="tr-why">${b.why.map((w) => html`<details><summary><b>${w.name}</b><span>${w.value}</span></summary><div class="tr-eq small">${w.formula}</div><div class="tr-calc small">${w.numbers}</div><p class="muted small">${w.explain}</p></details>`)}</div></details>`; })() : ""}
         <div class="tr-why">${r.why.map((w) => html`<details><summary><b>${w.name}</b><span>${w.value}</span></summary><div class="tr-eq small">${w.formula}</div><div class="tr-calc small">${w.numbers}</div><p class="muted small">${w.explain}</p></details>`)}</div>
         <p class="small"><b>Expect:</b> ${r.expect.level}</p>
         ${TR.edited ? html`<button class="btn" data-tr-act="use-rec">Use these settings</button>` : html`<p class="faint small">These are in the settings below.</p>`}</section>
@@ -1197,6 +1201,12 @@ Assistant: game tonight?</pre></div>
     }
     else if (a === "convert") { const r = await post("/api/train/convert", { name: TR.check.name }); if (r) { toast("Saved " + r.name + " (" + n0(r.records) + " records)"); await loadOverview(); checkData(r.name); } }
     else if (a === "use-rec" || a === "reset-settings") resetSettings();
+    else if (a === "best-model") {
+      const b = TR.ov && TR.ov.best; if (!b) { toast("Choose some data in step 2 first."); return; }
+      TR.preset = ""; store.set("train.preset", "");
+      TR.form = Object.assign(recSettings(), b.settings); TR.edited = Object.assign({}, b.settings); paint();
+      toast("Best possible model: " + n0(b.parameters) + " weights, ~" + n0(b.settings.steps) + " steps (about " + dur(b.seconds) + ") to near-perfect. Ignores your time budget — review and press Start.");
+    }
     else if (a === "save-settings") {
       let name = prompt("Save these settings as a preset. Name (an existing name is replaced):", TR.preset || (TR.sel[0] ? TR.sel[0].replace(/\.[a-z]+$/i, "") + " settings" : ""));
       if (!name || !(name = name.trim())) return;

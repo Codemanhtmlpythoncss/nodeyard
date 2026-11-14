@@ -205,7 +205,7 @@ def recommend(hw, data_chars=None, hours=1.0, profile=None):
     why.append({"name": "Model size N (weights)", "value": _n(target), "formula": "N = min(√(C ÷ 120), 10 × tokens, memory ÷ 20 bytes)",
                 "numbers": "compute C = %s FLOP/s × %s s = %s → √(C÷120) = %s · data %s × 10 = %s · memory %s ÷ 20 = %s → %s is the limit"
                            % (_sci(speed), _n(seconds), _sci(compute), _n(n_compute), _n(tokens), _n(n_data), _gb(budget), _n(n_memory), limit_name),
-                "explain": "Compute: the Chinchilla rule says train on about 20 tokens per weight, and training costs 6 FLOPs per weight per token, so C = 6·N·20N = 120·N². Data: with little text a bigger model still does better as long as dropout stops it memorising and you stop when validation stops falling (nanoGPT's Shakespeare model has about 10 weights per character of text), so this allows up to 10 weights per token, and the trainer keeps the checkpoint with the best validation. A smaller cap makes a model too small to learn the text, and the loss goes flat early. Memory: float32 weights, gradients and AdamW's two moments are 16 bytes per weight. %s" % ("Speed here is a guess for this hardware (%s FLOP/s); the real tokens/sec shows once training starts." % _sci(speed))})
+                "explain": "Compute: the Chinchilla rule says train on about 20 tokens per weight, and training costs 6 FLOPs per weight per token, so C = 6·N·20N = 120·N². Data: a bigger model helps on little text only up to about ten weights per token — far enough that dropout and keeping the best-validation checkpoint still hold off memorising (nanoGPT's Shakespeare model has ~10 weights per character). Past that it overfits and does worse, so 'more weights always win at equal steps' is not true once the text runs out; this caps at 10 weights per token and no higher. A much smaller cap, though, makes a model too small to learn the text, and the loss goes flat early. Memory: float32 weights, gradients and AdamW's two moments are 16 bytes per weight. %s" % ("Speed here is a guess for this hardware (%s FLOP/s); the real tokens/sec shows once training starts." % _sci(speed))})
 
     context = 64 if target < 300_000 else 256 if target > 5_000_000 and device != "cpu" else context0
     base_context = context
@@ -380,6 +380,71 @@ def _hms(seconds):
     if h < 48:
         return "%dh %dm" % (int(h), round((h - int(h)) * 60))
     return "%.1f days" % (h / 24.0)
+
+
+def recommend_best(hw, data_chars=None, profile=None):
+    """The strongest model this data and hardware can train, ignoring the clock.
+
+    'Best' is bounded by the *data*, not by memory: past roughly ten weights per token even heavy
+    dropout and best-checkpoint stopping can't keep a bigger model from overfitting a fixed corpus,
+    so a larger model would score *worse*, not better. The familiar "more parameters always win at
+    equal steps" only holds while there is enough fresh text to feed them -- on small data it is not
+    true. So the size is min(10 x tokens, memory), and the number of steps is however many passes it
+    takes to reach near the lowest validation loss this much text allows, not a time budget.
+    """
+    # Size it with the time cap lifted (a huge hours budget), so compute never binds and the model
+    # grows to the data/memory limit instead of to whatever the clock allows.
+    base = recommend(dict(hw), data_chars, hours=10_000_000.0, profile=profile)
+    s = dict(base["settings"])
+    params = int(base["parameters"])
+    tokens = int(base["tokens"])
+    eff = max(1, int(s["grad_accum"]) * int(s["batch_size"]))
+    context = int(s["context"])
+    speed = base["speed"]
+    per_step = flops_per_step(params, eff, context)
+
+    # Passes to near-convergence: a small corpus needs many passes before validation bottoms out
+    # (nanoGPT reads ~1 MB of Shakespeare ~80 times); a large corpus converges in a handful.
+    passes = 80 if tokens < 500_000 else 30 if tokens < 5_000_000 else 10 if tokens < 50_000_000 else 4
+    steps = int(min(300_000, max(2_000, passes * tokens / max(1, eff * context))) // 50 * 50)
+    seconds_est = steps * per_step / speed if speed else 0.0
+    epochs = steps * eff * context / max(1, tokens)
+
+    s["steps"] = steps
+    s["warmup"] = int(max(20, min(2_000, steps * 0.05)))
+    s["eval_every"] = int(max(25, min(1_000, steps // 20)))
+    if s.get("dropout", 0.0) < 0.1 and params >= 2 * max(1, tokens):   # a data-edge model trained for many passes needs regularising
+        s["dropout"] = 0.1
+
+    measured = bool(hw.get("speed"))
+    limit = "your text" if base.get("limit") == "data" else "memory"
+    speed_note = ("Speed is measured on this machine (%s FLOP/s)." % _sci(speed)) if measured else (
+        "Speed is a guess for this hardware (%s FLOP/s); the real figure shows once it runs." % _sci(speed))
+
+    why = [{"name": "Best possible model", "value": "%s weights, to near-perfect" % _n(params),
+            "formula": "size = min(10 x tokens, memory) -- bounded by the data, not the clock",
+            "numbers": "%s tokens -> up to %s weights, %s steps (~%.0f passes) to near its best, about %s"
+                       % (_n(tokens), _n(params), _n(steps), epochs, _hms(seconds_est)),
+            "explain": "This ignores your time budget and sizes the model to what the text can actually support. Past "
+                       "about ten weights per token a bigger model overfits a fixed corpus even with dropout and best-"
+                       "checkpoint stopping, so it would score worse, not better -- 'more parameters always win at equal "
+                       "steps' only holds while there's enough fresh text to feed them, which is why this does not just "
+                       "fill memory. The steps are how many passes it takes to reach near the lowest validation loss this "
+                       "much text allows."}]
+    for w in base["why"]:   # keep recommend's shape reasons; its time-based "Steps" reason is replaced below
+        if w["name"] in ("Vocabulary size V", "Model size N (weights)", "Context length T",
+                         "Width d, layers L, heads h", "Dropout", "Learn only the replies"):
+            why.append(w)
+    why.append({"name": "Steps to near-perfect", "value": _n(steps),
+                "formula": "passes-to-converge x tokens / (B x T), capped at 300,000",
+                "numbers": "%d passes x %s tokens / (%d x %d) = %s steps ~ %.0f passes, about %s"
+                           % (passes, _n(tokens), eff, context, _n(steps), epochs, _hms(seconds_est)),
+                "explain": "Enough updates to drive validation down to near the floor set by how much text there is. %s "
+                           "The trainer keeps the best checkpoint, so overshooting only costs time." % speed_note})
+
+    return {"device": base["device"], "speed": speed, "measured": measured, "best": True,
+            "settings": s, "limit": limit, "parameters": params, "tokens": tokens,
+            "seconds": seconds_est, "memory": base["memory"], "why": why, "expect": base["expect"]}
 
 
 QWEN_SMALL = {"name": "Qwen2.5-0.5B", "params": 494e6, "tokens": 18e12}
@@ -1952,7 +2017,10 @@ def register(ctx, args):
                 faster.append({"name": m["name"], "gpu": (m["gpu"] or {}).get("name"), "speed": m["speed"], "usable": m["usable"], "reason": m["reason"],
                                "parameters": r["parameters"], "limit": r["limit"], "seconds": r["seconds"]})
         rec["bigger"] = {"times": times, "faster": faster[:3]}
-        return {"machines": [t.public(m) for m in machines], "plan": plan, "mode": t.pool.mode, "hardware": hw, "recommend": rec,
+        # The strongest model this data + hardware can train if time is no object (fresh models only;
+        # a continue keeps its fixed shape, so "best" would just be more steps of the same model).
+        best = None if saved else recommend_best(dict(hw, chat=chat), chars, profile)
+        return {"machines": [t.public(m) for m in machines], "plan": plan, "mode": t.pool.mode, "hardware": hw, "recommend": rec, "best": best,
                 "datasets": t.datasets(), "catalog": t.fetcher.catalog(), "models": t.models(), "presets": t.presets(), "running": t.running(), "job": t.job, "hours": hours, "data_dir": t.data_dir}
 
     def warm(body):

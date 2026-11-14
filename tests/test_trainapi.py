@@ -270,6 +270,59 @@ class ResumeEstimateTests(unittest.TestCase):
         self.assertNotIn("resume", r)              # the fresh path is untouched
 
 
+class BestModelTests(unittest.TestCase):
+    # The "Best possible model" button: ignore the clock, size to the data (not just memory), and
+    # estimate the steps to reach near its best. The headline correction is that bigger is NOT always
+    # better -- on small data the best model is bounded by the text, well below what memory could hold.
+    FAST_GPU = {"device": "cuda", "cores": 8, "arch": "x86_64", "ram_free": 32e9,
+                "gpu": {"name": "A100", "vram": 40e9}, "speed": 5e13}
+    SLOW_CPU = {"device": "cpu", "cores": 2, "arch": "aarch64", "ram_free": 2e9, "speed": 1e9}
+
+    def test_best_ignores_time_and_is_at_least_the_time_limited_model(self):
+        # When the clock is the limit, the timed recommendation is small; best lifts that cap, so it is bigger.
+        timed = trainapi.recommend(self.SLOW_CPU, 50_000_000, hours=0.25)
+        best = trainapi.recommend_best(self.SLOW_CPU, 50_000_000)
+        self.assertEqual(timed["limit"], "compute")                 # time really was the binding limit
+        self.assertGreater(best["parameters"], timed["parameters"])  # best removed that cap
+        self.assertTrue(best["best"])
+
+    def test_best_is_bounded_by_the_data_not_by_memory(self):
+        # Tiny corpus, huge GPU memory: best must NOT fill memory. ~10 weights/token is the ceiling.
+        tokens = int(300_000 / trainapi.CHARS_PER_TOKEN)
+        best = trainapi.recommend_best(self.FAST_GPU, 300_000)
+        self.assertEqual(best["limit"], "your text")                 # the text is the limit, not memory
+        self.assertLessEqual(best["parameters"], 15 * tokens)        # near 10x tokens, not the 40 GB memory cap
+        # Doubling memory must not grow a data-bound best model.
+        roomier = dict(self.FAST_GPU, ram_free=64e9, gpu={"name": "A100", "vram": 80e9})
+        self.assertEqual(trainapi.recommend_best(roomier, 300_000)["parameters"], best["parameters"])
+
+    def test_more_data_allows_a_bigger_best_model(self):
+        small = trainapi.recommend_best(self.FAST_GPU, 1_000_000)["parameters"]
+        large = trainapi.recommend_best(self.FAST_GPU, 20_000_000)["parameters"]
+        self.assertGreater(large, small)
+
+    def test_best_estimates_steps_and_time_to_near_perfect(self):
+        best = trainapi.recommend_best(self.FAST_GPU, 4_000_000)
+        s = best["settings"]
+        self.assertGreaterEqual(s["steps"], 2_000)
+        self.assertLessEqual(s["steps"], 300_000)
+        per_step = trainapi.flops_per_step(best["parameters"], max(1, s["grad_accum"] * s["batch_size"]), s["context"])
+        self.assertAlmostEqual(best["seconds"], s["steps"] * per_step / best["speed"], places=3)
+        self.assertGreater(best["seconds"], 0)
+        self.assertIn(best["limit"], ("your text", "memory"))
+        self.assertTrue(all(w["formula"] and w["numbers"] and w["explain"] for w in best["why"]))
+
+    def test_a_guessed_speed_is_marked_not_measured(self):
+        hw = {"device": "cpu", "cores": 4, "arch": "x86_64", "ram_free": 4e9}   # no measured speed
+        best = trainapi.recommend_best(hw, 2_000_000)
+        self.assertFalse(best["measured"])
+        self.assertGreater(best["speed"], 0)
+
+    def test_the_overview_carries_best_for_fresh_and_not_for_resume(self):
+        # recommend_best is only meaningful for a new model; a continue keeps its fixed shape.
+        self.assertTrue(trainapi.recommend_best(self.FAST_GPU, 4_000_000)["best"])
+
+
 class LossNoiseGovernorTests(unittest.TestCase):
     def test_unsteadiness_runs_from_smooth_to_jagged(self):
         self.assertEqual(lr_governor.loss_unsteadiness([5, 4, 3, 2, 1]), 0.0)   # monotone fall
