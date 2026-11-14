@@ -394,7 +394,7 @@
       ${eq("compute C ≈ 6 · N · D &nbsp;&nbsp; (N weights, D training tokens)")}
       <div class="tr-calc">Qwen2.5-0.5B: N = 494 million weights, D ≈ 18 trillion tokens<br>C = 6 × 4.94·10⁸ × 1.8·10¹³ = <b>${f(qc, 3)} FLOPs</b><br>
         This machine trains at about ${f(sp, 2)} FLOP/s → <b>${dur(qc / sp)}</b> of non-stop training.<br>
-        ${r ? html`Your recommended model: N = ${n0(r.parameters)}, ${n0(r.tokens)} tokens of data → C ≈ ${f(6 * r.parameters * r.settings.steps * r.settings.batch_size * r.settings.context, 3)} FLOPs, about ${dur(r.seconds)}.` : ""}</div>
+        ${r ? html`Your recommended model: N = ${n0(r.parameters)}, ${n0(r.tokens)} tokens of data → C ≈ ${f(6 * r.parameters * r.settings.steps * r.settings.batch_size * r.settings.context * (r.settings.grad_accum || 1), 3)} FLOPs, about ${dur(r.seconds)}.` : ""}</div>
       ${r ? html`<p><b>What to expect from your model:</b> ${r.expect.level}</p>` : ""}
       <h4>What makes a small model less stupid</h4>
       <ol class="tr-steps"><li><b>More and better text.</b> The single biggest lever. Clean, varied, well-written data beats clever settings. Remove junk (menus, code you don't want, repeated boilerplate).</li>
@@ -490,7 +490,7 @@
     const p = TR.preset && (TR.ov.presets || []).find((x) => x.name === TR.preset); if (!p) return false;
     return Object.keys(p.settings).some((k) => String(p.settings[k]) !== String(TR.form[k]));
   }
-  function curSet() { return TR.form || (TR.ov && TR.ov.recommend.settings) || { vocab_size: 2048, context: 128, dim: 192, layers: 4, heads: 6, batch_size: 32, steps: 2000, learning_rate: 0.001, warmup: 100, weight_decay: 0.1, eval_every: 100 }; }
+  function curSet() { return TR.form || (TR.ov && TR.ov.recommend.settings) || { vocab_size: 2048, context: 128, dim: 192, layers: 4, heads: 6, batch_size: 32, grad_accum: 1, steps: 2000, learning_rate: 0.001, warmup: 100, weight_decay: 0.1, eval_every: 100 }; }
 
   // ---------- loading ----------
   async function loadOverview() {
@@ -562,17 +562,18 @@
       ${glossary()}`;
   }
   function glossary() {
-    const s = curSet(), N = params(s.vocab_size, s.context, s.dim, s.layers), r = TR.ov && TR.ov.recommend;
+    const s = curSet(), N = params(s.vocab_size, s.context, s.dim, s.layers), r = TR.ov && TR.ov.recommend, a = +s.grad_accum || 1;
     const last = TR.status && TR.status.last, val = TR.status && TR.status.val.length ? TR.status.val[TR.status.val.length - 1].loss : null;
     return html`<section class="card" id="tr-glossary"><h2 class="tr-h">Every variable, with your values</h2>
       <p class="muted small">The settings column follows the Train tab; the live column fills in while a model trains.</p>
       ${keyTable([
         ["V", "vocabulary size: how many different tokens", n0(s.vocab_size)], ["T", "context length: tokens the model sees at once", s.context], ["d", "width: numbers describing each token", s.dim],
         ["L", "layers (transformer blocks)", s.layers], ["h", "attention heads", s.heads], ["d<sub>h</sub> = d/h", "size of each head", f(s.dim / s.heads)], ["4d", "feed-forward hidden size", 4 * s.dim],
-        ["N", "total weights: V·d + T·d + L·(12d² + 13d) + 2d + d·V + V", n0(N)], ["B", "batch size: text windows per step", s.batch_size], ["B·T", "tokens per step", n0(s.batch_size * s.context)],
+        ["N", "total weights: V·d + T·d + L·(12d² + 13d) + 2d + d·V + V", n0(N)], ["B", "batch size: text windows in one batch", s.batch_size], ["B·T", "tokens in one batch", n0(s.batch_size * s.context)],
+        ...(a > 1 ? [["a", "gradient accumulation: batches averaged per update", a], ["a·B", "effective batch: windows averaged per update", n0(s.batch_size * a)], ["a·B·T", "tokens per step (one update)", n0(s.batch_size * s.context * a)]] : []),
         ["η", "peak learning rate", s.learning_rate], ["t<sub>warm</sub>", "warm-up steps", s.warmup], ["steps", "updates to make", n0(s.steps)], ["β₁, β₂", "AdamW moment decay rates", "0.9, 0.95"], ["ε", "AdamW's divide-by-zero guard", "10⁻⁸"],
         ["λ", "weight decay", s.weight_decay], ["p<sub>drop</sub>", "dropout: share of values zeroed at random while training", s.dropout || 0], ["clip", "maximum gradient norm", "1.0"], ["ε<sub>LN</sub>", "layer norm's guard", "10⁻⁵"], ["16·N", "training memory for weights, gradients, m and v", gb(16 * N)],
-        ["6·N·B·T", "FLOPs per step", f(6 * N * s.batch_size * s.context, 3)], ["ln V", "loss of a random guess (where training starts)", f(Math.log(s.vocab_size), 4)],
+        ["6·N·B·T", a > 1 ? "FLOPs per batch" : "FLOPs per step", f(6 * N * s.batch_size * s.context, 3)], ["ln V", "loss of a random guess (where training starts)", f(Math.log(s.vocab_size), 4)],
         ["tokens", "your data, in tokens (estimate)", r ? n0(r.tokens) : "–"],
         ["ℒ<sub>train</sub>", "latest training loss", last ? f(last.loss, 4) : "–"], ["ℒ<sub>val</sub>", "latest validation loss (on held-out 5% of your text)", f(val, 4)],
         ["e<sup>ℒ</sup>", "perplexity: how many tokens it's choosing between", val != null ? f(Math.exp(val), 4) : "–"], ["η(t)", "the learning rate right now", last ? f(last.lr, 3) : "–"],
@@ -698,7 +699,7 @@ Assistant: game tonight?</pre></div>
   function trainTab() {
     const ov = TR.ov; if (!ov) return html`<div class="empty"><div class="spin"></div>Reading this machine's hardware…</div>`;
     const hw = ov.hardware, r = ov.recommend, s = TR.form, run = TR.status ? TR.status.running : ov.running;
-    const N = params(+s.vocab_size, +s.context, +s.dim, +s.layers), act = actBytes(+s.batch_size, +s.context, +s.dim, +s.layers, +s.heads, +s.vocab_size), fl = 6 * N * s.batch_size * s.context;
+    const N = params(+s.vocab_size, +s.context, +s.dim, +s.layers), act = actBytes(+s.batch_size, +s.context, +s.dim, +s.layers, +s.heads, +s.vocab_size), a = +s.grad_accum || 1, fl = 6 * N * s.batch_size * s.context * a;
     const field = (k, label, help, attrs = "") => html`<label class="tr-field"><span>${raw(label)}</span><input class="input" data-tr-set="${k}" value="${s[k]}" ${raw(attrs)}><span class="faint small">${raw(help)}</span></label>`;
     return html`<div class="grid tr-grid2">
       <section class="card tr-span2 tr-autosetup"><div class="row wrap" style="align-items:center;gap:12px">
@@ -727,7 +728,7 @@ Assistant: game tonight?</pre></div>
         <p class="faint small">${TR.edited ? "Recommended would be: " + n0(params(r.settings.vocab_size, r.settings.context, r.settings.dim, r.settings.layers)) + " weights (V " + n0(r.settings.vocab_size) + ", T " + r.settings.context + ", d " + r.settings.dim + ", L " + r.settings.layers + "), " + n0(r.settings.steps) + " steps." : "Worked out from this machine's hardware and the data you ticked (see “Recommended” above for every reason). Change anything; Save keeps it for next time."}</p>
         <div class="tr-form">
           ${field("vocab_size", "Vocabulary V", "tokens the BPE tokenizer learns (≥ 256)")}${field("context", "Context T", "tokens it sees at once")}${field("dim", "Width d", "numbers per token; must divide by heads")}
-          ${field("layers", "Layers L", "transformer blocks")}${field("heads", "Heads h", "parallel attention lookups")}${field("batch_size", "Batch B", "windows averaged per update")}
+          ${field("layers", "Layers L", "transformer blocks")}${field("heads", "Heads h", "parallel attention lookups")}${field("batch_size", "Batch B", "windows in one batch")}${field("grad_accum", "Accumulate ×", "batches averaged per update (steadier; 1 = off)")}
           ${field("steps", TR.q.on ? "Steps (maximum)" : "Steps", TR.q.on ? "the most it may take; it stops sooner when good enough" : "updates to make")}${field("learning_rate", "Learning rate η", "peak step size (1e-3 is a good start)")}${field("warmup", "Warm-up", "steps to ramp η up from 0")}
           ${field("weight_decay", "Weight decay λ", "AdamW's shrink per step")}${field("eval_every", "Check every", "steps between validation checks")}${field("dropout", "Dropout", "share of values zeroed while training (0–0.5); stops memorising small data")}${field("save_every", "Save every", "steps between checkpoints (0 = only at the end)")}
           <label class="tr-field"><span>Device</span><select class="select" data-tr-set="device">${raw(["auto", "cpu", "cuda", "mps"].map((d) => '<option' + (s.device === d ? " selected" : "") + ">" + d + "</option>").join(""))}</select><span class="faint small">auto: each machine uses its GPU when it has one</span></label>
@@ -738,7 +739,7 @@ Assistant: game tonight?</pre></div>
           ${TR.resume ? "" : html`<input class="input" data-tr-act="model-name" placeholder="name (optional)" value="${TR.model}" style="width:180px">`}
           <span class="spacer"></span>
           ${run ? html`<button class="btn danger" data-tr-act="stop" ${TR.status && TR.status.job && TR.status.job.stop ? "disabled" : ""}>${TR.status && TR.status.job && TR.status.job.stop ? "Stopping…" : "Stop and save"}</button>` : html`<button class="btn primary" data-tr-act="start" ${ov.plan.lead && TR.sel.length ? "" : "disabled"}>${TR.resume ? "Continue training" : "Start training"}${ov.plan.lead ? " on " + (TR.together !== "fastest" && ov.plan.share.length > 1 ? ov.plan.share.length + " machines" + (TR.together === "race" ? " (parallel)" : "") : ov.plan.lead) : ""}</button>`}</div>
-        ${TR.resume ? html`<p class="faint small">Continuing keeps the saved model's shape and tokenizer (V, T, d, L, h) and AdamW's running averages; the other settings apply. The learning rate schedule starts again, so a lower peak (about 30% of the first run's) stops the first steps from undoing what it already learned.</p>` : ""}</section>
+        ${TR.resume ? html`<p class="faint small">Continuing keeps the saved model's shape and tokenizer (V, T, d, L, h) and AdamW's running averages; the other settings apply. The learning rate is set from this model's own stats — its size and how far it's already trained (near the full peak when it's barely trained, down to about 30% once it's well-trained) — not from the last run's rate, so continuing many times keeps it learning instead of creeping toward zero. You can still edit it.</p>` : ""}</section>
       ${stopWhen()}
       <section class="card tr-span2"><h2 class="tr-h">Live <span class="right" id="tr-live-chip"></span></h2><div id="tr-live"></div>
         <div class="tr-charts"><div><h4>Loss (lower is better)</h4><canvas class="tr-cv tall" id="tr-loss"></canvas><p class="faint small"><span class="tr-sw a"></span>training (smoothed) <span class="tr-sw b"></span>validation <span class="tr-sw c"></span>random guess ln V</p></div>
@@ -1262,7 +1263,7 @@ Assistant: game tonight?</pre></div>
     else if (d.trAct === "model-pick") {
       TR.resume = !!t.value; TR.model = t.value;
       const m = TR.ov.models.find((x) => x.name === t.value);
-      if (m) { TR.form.learning_rate = +((m.learning_rate || 1e-3) * 0.3).toPrecision(2); markEdited(); toast("Learning rate lowered to " + TR.form.learning_rate + " for continuing (see the note below Start)."); }
+      if (m) { TR.form.learning_rate = m.resume_lr || +((m.learning_rate || 1e-3) * 0.3).toPrecision(2); markEdited(); toast("Learning rate set to " + TR.form.learning_rate + " for continuing, from this model's size and how trained it is (see the note below Start)."); }
       paint();
     }
     else if (d.trAct === "ex-model") TR.exModel = t.value;

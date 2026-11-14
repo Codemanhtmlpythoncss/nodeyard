@@ -298,7 +298,7 @@ def train(args) -> int:
             "backend": "torch", "optimizer": "AdamW", "precision": "float32",
             "parameters": parameters, "vocabulary": tokenizer.vocab_size, "layers": args.layers,
             "width": args.dim, "heads": args.heads, "context": args.context, "batch_size": args.batch_size,
-            "learning_rate": args.learning_rate, "weight_decay": args.weight_decay,
+            "grad_accum": accum, "learning_rate": args.learning_rate, "weight_decay": args.weight_decay,
             "assistant_only": bool(args.assistant_only), "dropout": args.dropout, "trained_steps": previous_steps + done_steps,
             "validation_loss": validation, "compute_device": str(device),
             "data_files": [Path(p).name for p in args.data_files], "saved_at": time.time(),
@@ -309,6 +309,10 @@ def train(args) -> int:
 
     started = time.perf_counter()
     model.train()
+    # Gradient accumulation: average the gradients of several micro-batches before each weight update, so one update
+    # is based on a bigger, less noisy sample without needing memory for all of it at once. The reported train loss
+    # is the mean over the micro-batches, which is far smoother than a single batch's.
+    accum = max(1, int(getattr(args, "grad_accum", 1) or 1))
     last_validation = None
     # The saved model is always the one with the best validation so far: if training goes on too long and the
     # model starts memorising (validation rising), stopping late costs time but never quality.
@@ -327,14 +331,18 @@ def train(args) -> int:
             rate = learning_rate(step, args.steps, peak, args.warmup)
         for group in optimizer.param_groups:
             group["lr"] = rate
-        inputs, targets, target_weights = sample_windows(train_tokens, train_weights, args.context,
-                                                         args.batch_size, rng, device)
-        loss = loss_fn(model, inputs, targets, target_weights)
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        value = 0.0
+        for _ in range(accum):
+            inputs, targets, target_weights = sample_windows(train_tokens, train_weights, args.context,
+                                                             args.batch_size, rng, device)
+            # Scale each micro-batch by 1/accum so the summed gradients equal the average over the whole
+            # effective batch; the summed losses then give that same mean loss to report.
+            loss = loss_fn(model, inputs, targets, target_weights) / accum
+            loss.backward()
+            value += float(loss.item())
         grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0))
         optimizer.step()
-        value = float(loss.item())
         done = step
         if not math.isfinite(value):
             raise RuntimeError(f"Training diverged at step {step} (loss {value}). Nothing was saved.")
@@ -342,7 +350,7 @@ def train(args) -> int:
         # Every step, so the page's charts move with each update (the gradient norm is before clipping).
         elapsed = max(1e-9, time.perf_counter() - started)
         emit(f"Step {step}/{args.steps} | train loss {value:.4f} | {step / elapsed:.2f} steps/sec | "
-             f"{step * args.batch_size * args.context / elapsed:,.0f} tokens/sec | "
+             f"{step * accum * args.batch_size * args.context / elapsed:,.0f} tokens/sec | "
              f"total training step {total_step:,} | learning rate {rate:.8g} | gradient norm {grad_norm:.4f}")
         if step % args.eval_every == 0 or step == args.steps:
             validation = evaluate(model, valid_tokens, valid_weights, args.context, args.batch_size, device)
@@ -830,6 +838,9 @@ def main() -> int:
     train_parser.add_argument("--app-data", required=True, type=Path)
     train_parser.add_argument("--steps", type=int, default=3000)
     train_parser.add_argument("--batch-size", type=int, default=64)
+    train_parser.add_argument("--grad-accum", dest="grad_accum", type=int, default=1,
+                              help="micro-batches averaged into one optimizer step (steadier gradients; 1 = off). "
+                                   "The effective batch is grad-accum × batch-size, at no extra memory.")
     train_parser.add_argument("--context", type=int, default=128)
     train_parser.add_argument("--dim", type=int, default=200)
     train_parser.add_argument("--heads", type=int, default=5)

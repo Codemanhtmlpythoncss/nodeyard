@@ -117,6 +117,30 @@ def _pow2_floor(x):
     return 1 << max(0, int(math.floor(math.log2(max(1, x)))))
 
 
+def size_learning_rate(params):
+    """The fresh peak learning rate for a model with this many weights: bigger models take smaller steps."""
+    return 1e-3 if params < 20e6 else 6e-4 if params < 100e6 else 3e-4
+
+
+def resume_learning_rate(params, validation_loss=None, vocab=None):
+    """Peak learning rate to continue a saved model, read from the model's own stats, not its last run's rate.
+
+    Continuing should keep making progress (enough) without jolting the weights it already learned (not too
+    much). So the rate is anchored to the fresh peak for the model's size and scaled by how far the model
+    already is from a random guess: a barely-trained model continues near the full peak, a well-trained one
+    near 30% of it. It never reads the saved learning rate, so continuing a model many times can't spiral the
+    rate toward zero — each past run saved its already-lowered rate, and taking a fraction of that again (the
+    old behaviour) collapsed it, e.g. 1e-3 → 3e-4 → 9e-5 → … until the model stopped learning.
+    """
+    base = size_learning_rate(params or 0)
+    maturity = 0.5   # unknown stats: pick a middling step
+    if validation_loss is not None and vocab and vocab > 1:
+        random_guess = math.log(vocab)   # the loss of guessing uniformly among the tokens
+        maturity = min(1.0, max(0.0, (random_guess - validation_loss) / random_guess))
+    fraction = 1.0 - 0.7 * maturity      # 1.0 (untrained) down to 0.3 (fully converged)
+    return float("%.2g" % (base * fraction))
+
+
 def recommend(hw, data_chars=None, hours=1.0, profile=None):
     """Settings for this hardware and this data, each with the formula, the numbers and why.
 
@@ -218,25 +242,37 @@ def recommend(hw, data_chars=None, hours=1.0, profile=None):
     room = max(act_one, budget - weights_bytes)
     batch = max(1, min(64, _pow2_floor(room / act_one), _pow2_floor(16384 / context)))
     why.append({"name": "Batch size B", "value": str(batch), "formula": "largest power of 2 ≤ (memory − 16·N) ÷ activation memory per sequence, at most 16,384 tokens per step",
-                "numbers": "(%s − %s) ÷ %s per sequence → B = %d (%s tokens per step)" % (_gb(budget), _gb(weights_bytes), _mb(act_one), batch, _n(batch * context)),
+                "numbers": "(%s − %s) ÷ %s per sequence → B = %d (%s tokens per batch)" % (_gb(budget), _gb(weights_bytes), _mb(act_one), batch, _n(batch * context)),
                 "explain": "How many text windows are averaged into one update. Bigger batches give a less noisy gradient but need memory for every token's intermediate values."})
 
-    per_step = flops_per_step(params, batch, context)
+    # Gradient accumulation: when one batch is below the ~16k-token comfort level the batch cap uses, average a few
+    # micro-batches into each weight update so the gradient is steadier (the loss stops zig-zagging) at no extra
+    # memory. The step count divides by this below, so total compute and passes over the data are unchanged.
+    accum = max(1, min(8, round(16384 / max(1, batch * context))))
+    eff = accum * batch
+    if accum > 1:
+        why.append({"name": "Gradient accumulation", "value": "%d × %d = %d" % (accum, batch, eff),
+                    "formula": "round(16,384 ÷ (B·T)), at most 8 — on only when one batch is under 16,384 tokens",
+                    "numbers": "16,384 ÷ (%d·%d) → average %d batches per update → effective batch %d (%s tokens per update)"
+                               % (batch, context, accum, eff, _n(eff * context)),
+                    "explain": "A small batch gives a jumpy gradient, so the training loss zig-zags and can stall. This averages the gradients of %d batches before each weight update: a steadier step, like a bigger batch but with no extra memory. The step count below is divided by %d to match, so the model still sees your text the same number of times." % (accum, accum)})
+
+    per_step = flops_per_step(params, eff, context)
     steps_time = compute / per_step
-    steps_data = 50 * tokens / (batch * context)
+    steps_data = 50 * tokens / (eff * context)
     steps = int(max(200, min(200_000, steps_time, steps_data)) // 50 * 50)
-    epochs = steps * batch * context / max(1, tokens)
-    why.append({"name": "Steps", "value": _n(steps), "formula": "min(C ÷ (6·N·B·T), 50 passes over the data)",
+    epochs = steps * eff * context / max(1, tokens)
+    why.append({"name": "Steps", "value": _n(steps), "formula": "min(C ÷ (6·N·B·T), 50 passes over the data) — B is the effective batch",
                 "numbers": "%s ÷ (6·%s·%d·%d) = %s · 50·%s ÷ (%d·%d) = %s → %s steps ≈ %.1f passes over your text"
-                           % (_sci(compute), _n(params), batch, context, _n(steps_time), _n(tokens), batch, context, _n(steps_data), _n(steps), epochs),
-                "explain": "One step = read a batch, measure the loss, compute gradients, update every weight once. Reading text up to 4 times is about as good as new text; more passes still help, less each time (Muennighoff et al., 2023; nanoGPT's Shakespeare run reads its text about 80 times), so this stops at 50. If validation starts rising, the model is memorising: the trainer keeps the best checkpoint, so stopping late costs nothing but time."})
+                           % (_sci(compute), _n(params), eff, context, _n(steps_time), _n(tokens), eff, context, _n(steps_data), _n(steps), epochs),
+                "explain": "One step = read the batch, measure the loss, compute gradients, update every weight once. Reading text up to 4 times is about as good as new text; more passes still help, less each time (Muennighoff et al., 2023; nanoGPT's Shakespeare run reads its text about 80 times), so this stops at 50. If validation starts rising, the model is memorising: the trainer keeps the best checkpoint, so stopping late costs nothing but time."})
     ratio = target / max(1, tokens)
     dropout = 0.2 if ratio > 0.5 else 0.1 if ratio > 0.05 else 0.0
     why.append({"name": "Dropout", "value": "%g" % dropout, "formula": "0.2 above 1 weight per 2 tokens · 0.1 above 1 per 20 · otherwise 0 (nanoGPT uses 0.2 on Shakespeare)",
                 "numbers": "%s weights ÷ %s tokens = %.2f weights per token → dropout %g" % (_n(target), _n(tokens), ratio, dropout),
                 "explain": "While training, each block zeroes this fraction of its values at random, so the model can't memorise through any one path. Needed when the model is big for its text; with plenty of text it only slows learning."})
 
-    lr = 1e-3 if params < 20e6 else 6e-4 if params < 100e6 else 3e-4
+    lr = size_learning_rate(params)
     warmup = int(max(20, min(2000, steps * 0.05)))
     why.append({"name": "Learning rate η", "value": "%g" % lr, "formula": "1e-3 under 20M weights · 6e-4 under 100M · 3e-4 above; warm up for 5% of steps, then cosine decay to 10%",
                 "numbers": "N = %s → η = %g, warm-up %s steps" % (_n(params), lr, _n(warmup)),
@@ -252,7 +288,7 @@ def recommend(hw, data_chars=None, hours=1.0, profile=None):
     return {
         "device": device, "speed": speed, "budget": budget, "budget_text": budget_text, "limit": limit_name,
         "settings": {"vocab_size": vocab, "context": context, "dim": width, "layers": layers, "heads": heads,
-                     "batch_size": batch, "steps": steps, "learning_rate": lr, "warmup": warmup, "weight_decay": 0.1,
+                     "batch_size": batch, "grad_accum": accum, "steps": steps, "learning_rate": lr, "warmup": warmup, "weight_decay": 0.1,
                      "eval_every": eval_every, "dropout": dropout, "assistant_only": chat},
         "parameters": params, "tokens": tokens, "seconds": seconds_est, "memory": total_mem, "why": why, "expect": expect,
     }
@@ -864,7 +900,8 @@ class Trainer:
         return dict(rep, name=os.path.basename(dst), size=os.path.getsize(dst))
 
     # -- saved settings
-    PRESET_KEYS = {"vocab_size": int, "context": int, "dim": int, "layers": int, "heads": int, "batch_size": int, "steps": int,
+    PRESET_KEYS = {"vocab_size": int, "context": int, "dim": int, "layers": int, "heads": int, "batch_size": int,
+                   "grad_accum": int, "steps": int,
                    "learning_rate": float, "warmup": int, "weight_decay": float, "eval_every": int, "save_every": int,
                    "dropout": float, "assistant_only": bool, "device": str}
 
@@ -931,9 +968,11 @@ class Trainer:
             except (OSError, ValueError):
                 continue
             size = sum(os.path.getsize(os.path.join(self.models_dir, name, x)) for x in os.listdir(os.path.join(self.models_dir, name)))
-            out.append({"name": name, "size": size, **{k: info.get(k) for k in (
-                "parameters", "vocabulary", "layers", "width", "heads", "context", "trained_steps", "validation_loss",
-                "assistant_only", "data_files", "saved_at", "compute_device", "learning_rate", "batch_size")}})
+            out.append({"name": name, "size": size,
+                        "resume_lr": resume_learning_rate(info.get("parameters"), info.get("validation_loss"), info.get("vocabulary")),
+                        **{k: info.get(k) for k in (
+                            "parameters", "vocabulary", "layers", "width", "heads", "context", "trained_steps", "validation_loss",
+                            "assistant_only", "data_files", "saved_at", "compute_device", "learning_rate", "batch_size")}})
         return out
 
     def delete_model(self, body):
@@ -999,7 +1038,8 @@ class Trainer:
                 raise TrainError("The width (%d) must divide evenly by the number of heads (%d)." % (dim, heads))
             steps, warmup = num("steps", 1, 10_000_000), num("warmup", 0, 1_000_000, int, 100)
             # Options every machine gets; steps, warm-up, checks and saves are added per run.
-            options = ["--batch-size", str(num("batch_size", 1, 4096)), "--context", str(num("context", 8, 8192)),
+            options = ["--batch-size", str(num("batch_size", 1, 4096)), "--grad-accum", str(num("grad_accum", 1, 64, int, 1)),
+                       "--context", str(num("context", 8, 8192)),
                        "--dim", str(dim), "--heads", str(heads), "--layers", str(num("layers", 1, 128)),
                        "--vocab-size", str(num("vocab_size", 256, 100_000)),
                        "--learning-rate", repr(num("learning_rate", 1e-7, 1.0, float)),
@@ -1467,7 +1507,8 @@ class Trainer:
         if not sps[lead_name]:
             sps[lead_name] = max(0.05, speeds.get(lead_name, 1e10) / max(1.0, 6.0 * count_parameters(
                 int(_opt(job["options"], "--vocab-size")), int(_opt(job["options"], "--context")), int(_opt(job["options"], "--dim")),
-                int(_opt(job["options"], "--layers"))) * int(_opt(job["options"], "--batch-size")) * int(_opt(job["options"], "--context"))))
+                int(_opt(job["options"], "--layers"))) * int(_opt(job["options"], "--batch-size")) * int(_opt(job["options"], "--context"))
+                * _opt_int(job["options"], "--grad-accum", 1)))
         for n in active[1:]:
             sps[n] = sps[lead_name] * speeds.get(n, 1.0) / max(1.0, speeds.get(lead_name, 1.0))
         round_seconds = max(2.0, float(os.environ.get("NODEYARD_TRAIN_ROUND_SECONDS") or 120))
@@ -1478,7 +1519,8 @@ class Trainer:
         for n in active[1:]:
             for f in ("model.pt", "bpe.json", "model.json"):
                 remotes[n].call("POST", "/pull", {"url": lead.url, "path": "models/%s/%s" % (model, f), "dest": "models/%s/%s" % (model, f)}, timeout=600)
-        tokens_per_step = int(_opt(job["options"], "--batch-size")) * int(_opt(job["options"], "--context"))
+        tokens_per_step = int(_opt(job["options"], "--batch-size")) * int(_opt(job["options"], "--context")) \
+            * _opt_int(job["options"], "--grad-accum", 1)
         lead_done = 0
         for rnd in range(1, rounds + 1):
             if job["stop"] or len(active) == 0:
@@ -1815,6 +1857,14 @@ def _jobs_module(name):
 def _opt(options, flag):
     """The value after a flag in a trainer option list."""
     return options[options.index(flag) + 1]
+
+
+def _opt_int(options, flag, default):
+    """The integer after a flag, or a default when the flag is absent (older presets/resumed jobs)."""
+    try:
+        return int(options[options.index(flag) + 1])
+    except (ValueError, IndexError, TypeError):
+        return default
 
 
 def _clamp_float(x, lo, hi, default):
