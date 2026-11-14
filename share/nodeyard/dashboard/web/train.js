@@ -720,6 +720,7 @@ Assistant: game tonight?</pre></div>
         <p class="small">${TR.sel.length ? html`For <b>${TR.sel.join(", ")}</b>:` : html`<span class="warn-t">No data chosen yet</span> — <a href="#" data-tr-tab="data">choose it in step 2</a>.`} ${r.resume
           ? html`continuing this <b>${n0(r.parameters)}</b>-weight model for <b>${n0(r.steps)}</b> more steps, about <b>${dur(r.seconds)}</b>${r.measured ? "" : " (speed is a guess until it runs)"}. Limited by <b>${r.limit}</b>.`
           : html`a <b>${n0(r.parameters)}</b>-weight model, about <b>${dur(r.seconds)}</b>, using ~${gb(r.memory)}. Limited by <b>${r.limit}</b>.`}</p>
+        ${!r.resume && r.seconds && +TR.hours && r.seconds < 0.6 * +TR.hours * 3600 ? html`<p class="small tr-timecap">You allowed <b>${dur(+TR.hours * 3600)}</b>, but this model is fully trained in about <b>${dur(r.seconds)}</b> — it's limited by how much text you have, not by the clock. After about 50 passes over your text (<b>${n0(r.settings.steps)}</b> steps) more training only memorises it and scores <i>worse</i>, so the rest of the budget is left unused on purpose. To make a longer run pay off, <a href="#" data-tr-tab="data">add more text</a>.</p>` : ""}
         ${bigger(r)}
         <div class="tr-why">${r.why.map((w) => html`<details><summary><b>${w.name}</b><span>${w.value}</span></summary><div class="tr-eq small">${w.formula}</div><div class="tr-calc small">${w.numbers}</div><p class="muted small">${w.explain}</p></details>`)}</div>
         <p class="small"><b>Expect:</b> ${r.expect.level}</p>
