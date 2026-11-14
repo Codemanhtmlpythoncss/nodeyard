@@ -887,8 +887,8 @@ Assistant: game tonight?</pre></div>
   }
   function insideTab() {
     const mode = store.get("train.inside", "every");
-    return html`${workerNote("This")}<div class="seg tr-inside-mode"><button class="${mode === "every" ? "on" : ""}" data-tr-act="inside-every">Every number</button><button class="${mode === "summary" ? "on" : ""}" data-tr-act="inside-summary">Summary + one training step</button></div>
-      ${mode === "every" ? everyNumber() : insideSummary()}`;
+    return html`${workerNote("This")}<div class="seg tr-inside-mode"><button class="${mode === "map" ? "on" : ""}" data-tr-act="inside-map">Network map</button><button class="${mode === "every" ? "on" : ""}" data-tr-act="inside-every">Every number</button><button class="${mode === "summary" ? "on" : ""}" data-tr-act="inside-summary">Summary + one training step</button></div>
+      ${mode === "map" ? networkMap() : mode === "every" ? everyNumber() : insideSummary()}`;
   }
   function insideSummary() {
     const ov = TR.ov, ms = ov ? ov.models : [], x = TR.explain;
@@ -952,7 +952,7 @@ Assistant: game tonight?</pre></div>
   }
 
   // ---------- every number: the whole network, every weight, every calculation in + − × ÷ ----------
-  const EV = { trace: null, op: 0, cell: null, col0: 0, busy: false, tokens: 8, wcache: {}, wname: "", wrow: 0, wcol: 0, explain: null };
+  const EV = { trace: null, op: 0, cell: null, col0: 0, busy: false, tokens: 8, wcache: {}, wname: "", wrow: 0, wcol: 0, explain: null, tok: 0, ncol0: 0 };
   const fx = (x, p = 7) => (x == null ? "−∞" : !isFinite(x) ? String(x) : (+(+x).toPrecision(p)).toString());
   const PAGE_COLS = 128, PAGE_ROWS = 64;
   function evToken(i) { const t = EV.trace.tokens[i]; return t ? vis(t.text) : "#" + i; }
@@ -1074,15 +1074,82 @@ Assistant: game tonight?</pre></div>
     softmax: "p_j = e^(s_j − max) ÷ (e^(s₀ − max) + e^(s₁ − max) + …)", mix: "out = w₀ × v₀ + w₁ × v₁ + … (one per earlier token)",
     concat: "the heads' outputs placed side by side", gelu: "0.5 × x × (1 + erf(x × 0.7071068))",
   };
-  function everyNumber() {
+  // ---------- network map: the forward pass as a diagram of boxes, wires and neuron values ----------
+  const NM_PAGE = 64;
+  function nmInputs(op) {
+    const h = (op && op.how) || {}, ids = [];
+    ["x", "a", "b", "w", "v"].forEach((k) => { if (typeof h[k] === "number") ids.push(h[k]); });
+    if (Array.isArray(h.parts)) h.parts.forEach((p) => { if (typeof p === "number") ids.push(p); });
+    return ids;
+  }
+  function nmWeightsUsed(h) { const w = []; ["weight", "gamma", "beta", "bias"].forEach((k) => { if (typeof h[k] === "string") w.push(h[k]); }); return w; }
+  function nmHeat(v, m) { if (v == null) return null; const a = m > 0 ? Math.min(1, Math.abs(v) / m) : 0, al = (0.1 + 0.82 * a).toFixed(3); return (v >= 0 ? "rgba(239,128,78," : "rgba(78,150,232,") + al + ")"; }
+  function nmSvg(tr) {
+    const PADX = 118, NX = PADX, NW = 348, NH = 46, ROWH = 60, GH = 26, W = PADX + NW + 14;
+    const ops = tr.ops, tok = Math.min(EV.tok, tr.tokens.length - 1), sel = EV.op, selIn = new Set(nmInputs(ops[sel] || ops[0]));
+    const cy = [], bands = []; let y = 12, last = null;
+    ops.forEach((o, i) => { if (o.group !== last) { bands.push({ name: o.group, y: y + 14 }); y += GH; last = o.group; } cy[i] = y + NH / 2; y += ROWH; });
+    const H = y + 8;
+    let edges = "", nodes = "";
+    ops.forEach((o, i) => nmInputs(o).forEach((u) => {
+      if (u < 0 || u >= ops.length) return;
+      const bow = 18 + Math.min(72, (i - u) * 5), on = i === sel ? " on" : "";
+      edges += '<path class="tr-nm-edge' + on + '" d="M' + NX + " " + cy[u].toFixed(1) + " C" + (NX - bow) + " " + cy[u].toFixed(1) + " " + (NX - bow) + " " + cy[i].toFixed(1) + " " + NX + " " + cy[i].toFixed(1) + '"/>';
+    }));
+    bands.forEach((b) => { nodes += '<text class="tr-nm-group" x="6" y="' + b.y + '">' + esc(b.name) + "</text>"; });
+    ops.forEach((o, i) => {
+      const top = cy[i] - NH / 2, cls = i === sel ? " sel" : selIn.has(i) ? " feed" : "";
+      const row = o.values[tok] || [], mabs = Math.max(1e-9, ...row.filter((x) => x != null).map((x) => Math.abs(x)));
+      const title = o.title.length > 32 ? o.title.slice(0, 31) + "…" : o.title;
+      const cols = row.length, sx = NX + 10, sw = NW - 20, K = Math.min(cols, 46), step = Math.max(1, Math.ceil(cols / K)), shown = Math.ceil(cols / Math.max(1, step)), cw = shown ? sw / shown : sw;
+      let strip = "";
+      for (let j = 0; j < shown; j++) { const c = j * step, v = row[c], col = nmHeat(v, mabs), x = sx + j * cw; strip += '<rect class="tr-nm-cell' + (v == null ? " masked" : "") + '" x="' + x.toFixed(1) + '" y="' + (top + 26) + '" width="' + Math.max(1, cw - 0.6).toFixed(1) + '" height="12"' + (col ? ' fill="' + col + '"' : "") + "/>"; }
+      nodes += '<g class="tr-nm-node' + cls + '" data-ev-op="' + i + '">'
+        + '<rect x="' + NX + '" y="' + top + '" width="' + NW + '" height="' + NH + '" rx="9"/>'
+        + '<text class="tr-nm-title" x="' + (NX + 10) + '" y="' + (top + 17) + '">' + esc(title) + "</text>"
+        + '<text class="tr-nm-shape" x="' + (NX + NW - 10) + '" y="' + (top + 17) + '" text-anchor="end">' + esc(o.shape.join("×")) + "</text>"
+        + strip + "</g>";
+    });
+    return raw('<svg class="tr-nm-svg" viewBox="0 0 ' + W + " " + H + '" width="' + W + '" height="' + H + '" xmlns="http://www.w3.org/2000/svg">' + edges + nodes + "</svg>");
+  }
+  function networkMap() {
+    const controls = traceControls(html`<h2 class="tr-h">Network map</h2>
+      <p class="small">The whole forward pass as a diagram: each box is one step, the wires on the left show which earlier boxes feed it, and the colour strip is one token's numbers after that step (<span class="tr-nm-pos">warm = positive</span>, <span class="tr-nm-neg">cool = negative</span>). Click a box for its formula and inputs, pick a token, then click a single number to see its whole calculation in + − × ÷.</p>`);
+    const tr = EV.trace;
+    if (!tr) return controls;
+    const op = tr.ops[EV.op] || tr.ops[0], tok = Math.min(EV.tok, tr.tokens.length - 1);
+    const ins = nmInputs(op).map((u) => tr.ops[u] && tr.ops[u].title).filter(Boolean), wts = nmWeightsUsed(op.how);
+    const row = op.values[tok] || [], cols = row.length, c0 = Math.min(EV.ncol0, Math.max(0, cols - NM_PAGE), Math.max(0, cols - 1)), c1 = Math.min(cols, c0 + NM_PAGE);
+    const mabs = Math.max(1e-9, ...row.filter((x) => x != null).map((x) => Math.abs(x)));
+    const header = (op.how.kind === "dot" || op.how.kind === "softmax") && cols === tr.tokens.length ? (j) => "“" + evToken(j) + "”" : (op.title.startsWith("Probabilities") || op.title.startsWith("Logits")) && tr.vocab ? (j) => vis(tr.vocab[j] || "#" + j) : (j) => "#" + j;
+    return html`${controls}
+      <div class="tr-nm-wrap">${nmSvg(tr)}</div>
+      <section class="card tr-nm-detail"><h3 class="tr-h3">${op.group} · ${op.title}</h3>
+        <div class="tr-eq small">${FORMULAS[op.how.kind] || ""}</div>
+        <p class="faint small">${op.shape.join(" × ")} numbers (one row per token).${ins.length ? " Reads from: " + ins.map((t) => "“" + t + "”").join(", ") + "." : " A lookup of learned weights — nothing earlier feeds it."}${wts.length ? " Uses weights: " + wts.join(", ") + "." : ""}</p>
+        <p class="small">Token whose numbers are shown below:</p>
+        <div class="tr-nm-toks">${tr.tokens.map((t, i) => html`<button class="${i === tok ? "on" : ""}" data-ev-tok="${i}">${vis(t.text)}<small> #${i}</small></button>`)}</div>
+        ${cols > NM_PAGE ? html`<div class="row small"><button class="btn small" data-tr-act="nm-left" ${c0 ? "" : "disabled"}>←</button><span>numbers ${n0(c0)}–${n0(c1 - 1)} of ${n0(cols)}</span><button class="btn small" data-tr-act="nm-right" ${c1 < cols ? "" : "disabled"}>→</button></div>` : ""}
+        <p class="small">Every number after this step for token “${vis(tr.tokens[tok].text)}” — click one:</p>
+        <div class="tr-nm-strip">${raw(Array.from({ length: c1 - c0 }, (_, k) => {
+          const j = c0 + k, v = row[j], on = EV.cell && EV.cell[0] === tok && EV.cell[1] === j, col = nmHeat(v, mabs);
+          return '<button class="tr-nm-neuron' + (on ? " on" : "") + (v == null ? " masked" : "") + '" data-ev-cell="' + tok + "," + j + '" title="' + esc(header(j)) + '"' + (col ? ' style="background:' + col + '"' : "") + ">" + (v == null ? "·" : esc(f(v, 2))) + "</button>";
+        }).join(""))}</div>
+        ${EV.cell && EV.cell[0] === tok ? html`<h4>How [“${evToken(EV.cell[0])}”, ${EV.cell[1]}] = ${fx(op.values[EV.cell[0]][EV.cell[1]])} was computed</h4><pre class="tr-pre tr-ev-calc">${EV.explain == null ? "Working it out…" : EV.explain}</pre>` : ""}</section>`;
+  }
+  function traceControls(intro) {
     const tr = EV.trace, ov = TR.ov, ms = ov ? ov.models : [];
-    const controls = html`<section class="card"><h2 class="tr-h">Every number in the network</h2>
-      <p class="small">Runs your text through the model once and keeps <b>every</b> number it computes: all ${tr ? n0(tr.ops.length) : ""} steps, for every token, every layer and every head. Click a step, then click any number: you get the full calculation in × ÷ + −, with every term written out. Weights are listed in full under “All weights”.</p>
+    return html`<section class="card">${intro}
       <div class="row wrap"><select class="select" data-tr-act="ex-model"><option value="">A tiny untrained model (no training needed)</option>${raw(ms.map((m) => '<option value="' + esc(m.name) + '"' + (TR.exModel === m.name ? " selected" : "") + ">" + esc(m.name) + "</option>").join(""))}</select>
         <input class="input grow" data-tr-act="ex-prompt" value="${TR.exPrompt}" placeholder="Text to run through the model">
         <label class="tr-field inline"><span>tokens</span><input class="input" type="number" min="1" max="16" value="${EV.tokens}" data-tr-act="ev-tokens" style="width:64px"></label>
         <button class="btn primary" data-tr-act="ev-trace" ${EV.busy ? "disabled" : ""}>${EV.busy ? "Working…" : tr ? "Run again" : "Run it"}</button></div>
       ${tr ? html`<p class="faint small">${tr.trained ? "Model " + tr.model : "Untrained demo model"}: V ${n0(tr.config.vocabulary)} · d ${tr.config.width} · L ${tr.config.layers} · h ${tr.config.heads} · ${n0(tr.parameters.reduce((a, p) => a + p.shape.reduce((x, y) => x * y, 1), 0))} weights. Hand-written maths vs PyTorch: largest difference ${fx(tr.check_max_difference, 2)}.</p>` : ""}</section>`;
+  }
+  function everyNumber() {
+    const controls = traceControls(html`<h2 class="tr-h">Every number in the network</h2>
+      <p class="small">Runs your text through the model once and keeps <b>every</b> number it computes: all ${EV.trace ? n0(EV.trace.ops.length) : ""} steps, for every token, every layer and every head. Click a step, then click any number: you get the full calculation in × ÷ + −, with every term written out. Weights are listed in full under “All weights”.</p>`);
+    const tr = EV.trace;
     if (!tr) return controls;
     const op = tr.ops[EV.op] || tr.ops[0], groups = [];
     tr.ops.forEach((o) => { const g = groups.find((x) => x.name === o.group); if (g) g.ops.push(o); else groups.push({ name: o.group, ops: [o] }); });
@@ -1124,12 +1191,13 @@ Assistant: game tonight?</pre></div>
     EV.busy = true; paint();
     const r = await post("/api/train/trace", { model: TR.exModel, prompt: TR.exPrompt, tokens: EV.tokens });
     EV.busy = false;
-    if (r) { EV.trace = r.trace; EV.op = 0; EV.cell = null; EV.col0 = 0; EV.wname = ""; EV.wcache = {}; EV.explain = null; }
+    if (r) { EV.trace = r.trace; EV.op = 0; EV.cell = null; EV.col0 = 0; EV.ncol0 = 0; EV.tok = Math.max(0, (r.trace.tokens || []).length - 1); EV.wname = ""; EV.wcache = {}; EV.explain = null; }
     paint();
   }
   async function evClick(t) {
     const d = t.dataset;
-    if (d.evOp != null) { EV.op = +d.evOp; EV.wname = ""; EV.cell = null; EV.col0 = 0; paint(); return true; }
+    if (d.evTok != null) { EV.tok = +d.evTok; EV.cell = null; EV.explain = null; EV.ncol0 = 0; paint(); return true; }
+    if (d.evOp != null) { EV.op = +d.evOp; EV.wname = ""; EV.cell = null; EV.col0 = 0; EV.ncol0 = 0; paint(); return true; }
     if (d.evW) { EV.wname = d.evW; EV.wrow = 0; EV.wcol = 0; loadWeights(); return true; }
     if (d.evCell) {
       const [i, j] = d.evCell.split(",").map(Number); EV.cell = [i, j]; EV.explain = null; paint();
@@ -1169,7 +1237,7 @@ Assistant: game tonight?</pre></div>
 
   document.addEventListener("click", async (e) => {
     if (S.view !== "train" || !e.target.closest("#tr-root")) return;
-    const ev = e.target.closest("[data-ev-op],[data-ev-w],[data-ev-cell]");
+    const ev = e.target.closest("[data-ev-op],[data-ev-w],[data-ev-cell],[data-ev-tok]");
     if (ev) { evClick(ev); return; }
     const t = e.target.closest("[data-tr-tab],[data-tr-lesson],[data-tr-act],[data-tr-check],[data-tr-del],[data-tr-delmodel],[data-tr-chatwith],[data-tr-inspect],[data-tr-get],[data-tr-use],[data-tr-qdel],[data-tr-together]");
     if (!t || t.tagName === "SELECT" || t.tagName === "INPUT" && t.type !== "button") return;
@@ -1239,8 +1307,9 @@ Assistant: game tonight?</pre></div>
     else if (a === "stop") { if (await post("/api/train/stop", {})) toast("Stopping: it saves after the current step."); }
     else if (a === "mdice-roll") { const d = L.mdice; for (let n = 0; n < 10; n++) { const r = Math.random(), pick = r < 0.6 ? 0 : r < 0.9 ? 1 : 2; d.counts[pick]++; d.total++; d.last = r; d.lastPick = pick; } paint(); }
     else if (a === "mdice-reset") { Object.assign(L.mdice, { counts: [0, 0, 0], total: 0, last: null }); paint(); }
-    else if (a === "inside-every" || a === "inside-summary") { store.set("train.inside", a.slice(7)); paint(); }
+    else if (a === "inside-every" || a === "inside-summary" || a === "inside-map") { store.set("train.inside", a.slice(7)); paint(); }
     else if (a === "ev-trace") evTrace();
+    else if (a === "nm-left" || a === "nm-right") { EV.ncol0 = Math.max(0, EV.ncol0 + (a === "nm-left" ? -NM_PAGE : NM_PAGE)); paint(); }
     else if (a === "ev-left" || a === "ev-right") { EV.col0 = Math.max(0, EV.col0 + (a === "ev-left" ? -PAGE_COLS : PAGE_COLS)); paint(); }
     else if (a === "ev-wup" || a === "ev-wdown") { EV.wrow = Math.max(0, EV.wrow + (a === "ev-wup" ? -PAGE_ROWS : PAGE_ROWS)); loadWeights(); }
     else if (a === "ev-wleft" || a === "ev-wright") { EV.wcol = Math.max(0, EV.wcol + (a === "ev-wleft" ? -PAGE_COLS : PAGE_COLS)); paint(); }
