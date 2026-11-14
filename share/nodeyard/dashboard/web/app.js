@@ -20,6 +20,7 @@
     { id: "access", label: "Network access", icon: "network", sub: "Tailnet, LAN and secure tunnels for this dashboard and API" },
     { id: "storage", label: "Storage", icon: "storage", sub: "Disks and volumes" },
     { id: "hardware", label: "Hardware", icon: "hardware", sub: "What every machine is made of, and how fast it really is" },
+    { id: "updates", label: "Updates", icon: "refresh", sub: "Outdated software and drivers on each machine, and what to keep updated automatically" },
     { id: "ai", label: "AI", icon: "ai", sub: "Models running on your cluster" },
     { id: "galaxy", label: "AI galaxy", icon: "galaxy", sub: "Your cluster and its AI, live" },
     { id: "train", label: "Train AI", icon: "ai", sub: "Train your own language model from scratch, and learn exactly how it works" },
