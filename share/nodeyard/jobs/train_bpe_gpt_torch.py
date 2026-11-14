@@ -42,6 +42,7 @@ OPTIMIZER_FILE = "optimizer.pt"
 CONFIG_FILE = "model.json"
 TOKENIZER_FILE = "bpe.json"
 RESULT_FILE = "result.json"
+BEST_FILE = "best.json"
 
 
 def emit(message: str) -> None:
@@ -186,6 +187,15 @@ def learning_rate(step: int, total: int, peak: float, warmup: int) -> float:
     return peak * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(1.0, progress))))
 
 
+def best_record(val_loss, total_steps, train_loss=None):
+    """The best-so-far scorecard written to best.json: validation loss, its perplexity, the training loss
+    at that point, and when the model reached it. Perplexity = e^loss is how many tokens the model is, in
+    effect, choosing between -- lower is better -- and is the figure people recognise, so it is saved too."""
+    rec = {"validation_loss": val_loss, "perplexity": (math.exp(val_loss) if val_loss is not None else None),
+           "train_loss": train_loss, "total_steps": int(total_steps), "saved_at": time.time()}
+    return rec
+
+
 @torch.no_grad()
 def evaluate(model, tokens, weights, context, batch, device, batches=10) -> float:
     rng = random.Random(1234)
@@ -307,6 +317,14 @@ def train(args) -> int:
         tmp.write_text(json.dumps(config, indent=2), encoding="utf-8")
         os.replace(tmp, app_data / CONFIG_FILE)
 
+    def write_best(val_loss, total_steps, train_loss=None):
+        """Record the best scorecard so far, so the page can show it and a later continue can compare against it."""
+        rec = best_record(val_loss, total_steps, train_loss)
+        tmp = app_data / (BEST_FILE + ".tmp")
+        tmp.write_text(json.dumps(rec, indent=2), encoding="utf-8")
+        os.replace(tmp, app_data / BEST_FILE)
+        return rec
+
     started = time.perf_counter()
     model.train()
     # Gradient accumulation: average the gradients of several micro-batches before each weight update, so one update
@@ -316,9 +334,17 @@ def train(args) -> int:
     last_validation = None
     # The saved model is always the one with the best validation so far: if training goes on too long and the
     # model starts memorising (validation rising), stopping late costs time but never quality.
-    # Compared within this run only: a continued run may use other text, and a shared-training round starts from an
-    # average whose validation hasn't been measured.
-    kept = {"loss": None, "step": None}
+    # When continuing, start the bar at the model you continued from (its saved validation), so a continue that
+    # doesn't help leaves the better earlier model in place -- "return to the first parameters" happens on its own.
+    # --allow-regression opts out of that, keeping the latest weights even when they're worse.
+    # A shared-training round starts from an average whose validation hasn't been measured, so there the bar stays
+    # open (lr_progress runs); and a continue onto different text is still only compared within this run.
+    kept = {"loss": None, "step": None, "train": None}
+    if args.resume and not args.allow_regression and not args.lr_progress:
+        prior = saved.get("validation_loss")
+        if isinstance(prior, (int, float)):
+            kept.update(loss=float(prior), step=previous_steps)
+            emit(f"Keeping the best: this run only replaces the saved model if it beats its validation of {prior:.4f}.")
     done = 0
     for step in range(1, args.steps + 1):
         if args.lr_progress:
@@ -346,6 +372,7 @@ def train(args) -> int:
         done = step
         if not math.isfinite(value):
             raise RuntimeError(f"Training diverged at step {step} (loss {value}). Nothing was saved.")
+        governor.note_train_loss(value)   # so a stall after a jumpy loss is cut harder than one after a smooth loss
         total_step = previous_steps + step
         # Every step, so the page's charts move with each update (the gradient norm is before clipping).
         elapsed = max(1e-9, time.perf_counter() - started)
@@ -358,9 +385,11 @@ def train(args) -> int:
             emit(f"Gradient norm at step {step}: {grad_norm:.4f} (clipped to 1.0 when larger)")
             last_validation = validation
             if kept["loss"] is None or validation < kept["loss"]:
-                kept.update(loss=validation, step=total_step)
+                kept.update(loss=validation, step=total_step, train=value)
                 save(step, validation)
-                emit(f"Checkpoint saved at total training step {total_step:,} (best validation so far: {validation:.4f}).")
+                rec = write_best(validation, total_step, value)
+                emit(f"Checkpoint saved at total training step {total_step:,} (best validation so far: {validation:.4f}, "
+                     f"perplexity {rec['perplexity']:.1f}).")
             if quality:
                 judge_quality(model, tokenizer, args, device, quality, chat_data, validation, total_step, best, stop)
             if args.lr_progress or step > args.warmup:   # during warm-up the rate is still climbing: nothing to judge
@@ -379,13 +408,17 @@ def train(args) -> int:
         return 0
     final_validation = evaluate(model, valid_tokens, valid_weights, args.context, args.batch_size, device)
     if kept["loss"] is not None and final_validation > kept["loss"]:
-        emit(f"The last steps made validation worse ({final_validation:.4f}), so the saved model stays the one from "
-             f"total step {kept['step'] or previous_steps:,} (validation {kept['loss']:.4f}). It had started memorising: "
+        from_continue = args.resume and kept["step"] == previous_steps
+        where = ("the model you continued from" if from_continue
+                 else f"total step {kept['step'] or previous_steps:,}")
+        emit(f"The last steps made validation worse ({final_validation:.4f}), so the saved model stays {where} "
+             f"(validation {kept['loss']:.4f}). It had started memorising: "
              "next time use fewer steps, more dropout, or more text.")
         final_validation = kept["loss"]
         done = (kept["step"] - previous_steps) if kept["step"] else 0
     else:
         save(done, final_validation)
+        write_best(final_validation, previous_steps + done, kept.get("train"))
     if args.result_file:
         Path(args.result_file).write_text(json.dumps({"validation_loss": final_validation,
                                                       "total_steps": previous_steps + done}), encoding="utf-8")
@@ -855,6 +888,9 @@ def main() -> int:
     train_parser.add_argument("--threads", type=int, default=int(os.environ.get("NODEYARD_THREADS", "0")))
     train_parser.add_argument("--assistant-only", action="store_true")
     train_parser.add_argument("--resume", action="store_true")
+    train_parser.add_argument("--allow-regression", dest="allow_regression", action="store_true",
+                              help="when continuing, keep the latest weights even if they are worse than the "
+                                   "model you started from (default: keep the best, so a continue can't make it worse)")
     train_parser.add_argument("--result-file", default=None)
     train_parser.add_argument("--save-every", type=int, default=500, help="save a checkpoint every N steps (0: only at the end)")
     train_parser.add_argument("--dropout", type=float, default=0.0, help="fraction of values zeroed while training (0-0.5)")

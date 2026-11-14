@@ -215,6 +215,160 @@ class ResumeLearningRateTests(unittest.TestCase):
             self.assertGreater(m["resume_lr"], m["learning_rate"])         # the saved (collapsed) rate is not reused
 
 
+class ResumeEstimateTests(unittest.TestCase):
+    # Continuing a saved model times THAT model, not a freshly-sized one. This is the fix for "the time it says
+    # rarely matches": the old plan sized a new model and timed that, while the continue ran the saved shape.
+    SAVED = {"parameters": trainapi.count_parameters(2048, 128, 192, 4), "vocabulary": 2048, "width": 192,
+             "layers": 4, "heads": 4, "context": 128, "batch_size": 32, "grad_accum": 1,
+             "validation_loss": 4.219, "trained_steps": 36000, "dropout": 0.0, "assistant_only": False}
+
+    def test_the_shape_is_locked_to_the_saved_model(self):
+        hw = {"device": "cpu", "cores": 4, "arch": "x86_64", "ram_free": 3e9, "speed": 2e10}
+        r = trainapi.recommend_resume(hw, self.SAVED, 2_000_000, hours=1.0)
+        s = r["settings"]
+        for key, attr in (("dim", "width"), ("layers", "layers"), ("heads", "heads"), ("context", "context"),
+                          ("batch_size", "batch_size"), ("grad_accum", "grad_accum"), ("vocab_size", "vocabulary")):
+            self.assertEqual(s[key], self.SAVED[attr], key)
+        self.assertEqual(r["parameters"], self.SAVED["parameters"])
+        self.assertEqual(s["learning_rate"], trainapi.resume_learning_rate(self.SAVED["parameters"], 4.219, 2048))
+        self.assertTrue(r["resume"])
+
+    def test_the_estimate_is_the_saved_model_s_real_cost(self):
+        # seconds = steps × (6·N·eff·T) ÷ speed, N and T from the saved model: no freshly-sized stand-in.
+        hw = {"device": "cpu", "cores": 4, "arch": "x86_64", "ram_free": 3e9, "speed": 2e10}
+        r = trainapi.recommend_resume(hw, self.SAVED, 5_000_000, hours=2.0)
+        per_step = trainapi.flops_per_step(self.SAVED["parameters"], 32 * 1, 128)
+        self.assertAlmostEqual(r["seconds"], r["steps"] * per_step / 2e10, places=3)
+        self.assertTrue(r["measured"])            # a measured machine speed was given
+
+    def test_more_time_means_more_steps_and_longer_but_the_same_model(self):
+        hw = {"device": "cpu", "cores": 8, "arch": "x86_64", "ram_free": 6e9, "speed": 5e10}
+        one = trainapi.recommend_resume(hw, self.SAVED, 20_000_000, hours=1.0)
+        four = trainapi.recommend_resume(hw, self.SAVED, 20_000_000, hours=4.0)
+        self.assertGreater(four["steps"], one["steps"])
+        self.assertGreater(four["seconds"], one["seconds"])
+        self.assertEqual(one["parameters"], four["parameters"])     # continuing never resizes
+
+    def test_a_typed_time_budget_scales_the_estimate(self):
+        # The custom time box just sends hours=<any float>; every value from a few minutes to weeks is handled.
+        hw = {"device": "cpu", "cores": 8, "arch": "x86_64", "ram_free": 6e9, "speed": 5e10}
+        for lo, hi in ((0.1, 0.5), (0.5, 2.0), (2.0, 10.0)):
+            a = trainapi.recommend_resume(hw, self.SAVED, 20_000_000, hours=lo)
+            b = trainapi.recommend_resume(hw, self.SAVED, 20_000_000, hours=hi)
+            self.assertGreaterEqual(b["steps"], a["steps"])
+            self.assertGreater(b["seconds"], a["seconds"])
+
+    def test_a_guessed_speed_is_marked_not_measured(self):
+        hw = {"device": "cpu", "cores": 4, "arch": "x86_64", "ram_free": 3e9}   # no "speed" -> a guess
+        r = trainapi.recommend_resume(hw, self.SAVED, 2_000_000, hours=1.0)
+        self.assertFalse(r["measured"])
+        self.assertGreater(r["speed"], 0)
+
+    def test_without_a_resume_model_it_sizes_a_fresh_one(self):
+        hw = {"device": "cpu", "cores": 4, "arch": "x86_64", "ram_free": 3e9}
+        r = trainapi.recommend(hw, 2_000_000, 1.0)
+        self.assertNotIn("resume", r)              # the fresh path is untouched
+
+
+class LossNoiseGovernorTests(unittest.TestCase):
+    def test_unsteadiness_runs_from_smooth_to_jagged(self):
+        self.assertEqual(lr_governor.loss_unsteadiness([5, 4, 3, 2, 1]), 0.0)   # monotone fall
+        self.assertEqual(lr_governor.loss_unsteadiness([3.0]), 0.0)             # too short
+        self.assertGreater(lr_governor.loss_unsteadiness([4, 3, 4, 3, 4, 3, 4, 3]), 0.8)  # zig-zag, no net progress
+        mixed = lr_governor.loss_unsteadiness([5, 4.6, 4.8, 4.2, 4.4, 3.9])     # declining but bumpy
+        self.assertTrue(0.0 < mixed < 0.8)
+
+    def _cut_after(self, train_losses):
+        g, rate, said = lr_governor.LearningRateGovernor(1e-3), 1e-3, []
+        for v in train_losses:
+            g.note_train_loss(v)
+        new = None
+        for _ in range(5):                 # one improve + four stalls = one cut
+            out = g.observe(3.0, rate, 0, said.append)
+            new = out if out is not None else new
+        return new
+
+    def test_a_jumpy_loss_is_cut_harder_than_a_steady_one(self):
+        jumpy = self._cut_after([4, 3, 4, 3, 4, 3, 4, 3, 4, 3, 4, 3])        # unsteadiness ~1 -> firm cut
+        steady = self._cut_after([4.0, 3.9, 3.8, 3.7, 3.6, 3.5, 3.4, 3.3, 3.2, 3.1])  # smooth -> gentle cut
+        self.assertLess(jumpy, steady)
+        self.assertLess(jumpy, 0.7e-3)          # firmer than the plain 0.7 factor
+        self.assertGreater(steady, 0.7e-3)      # gentler than it
+
+    def test_with_no_training_loss_the_cut_is_the_plain_factor(self):
+        # Backward compatible: a caller that only reports validation gets exactly the old ×0.7 behaviour.
+        g, rate, said = lr_governor.LearningRateGovernor(1e-3), 1e-3, []
+        new = None
+        for _ in range(5):
+            out = g.observe(3.0, rate, 0, said.append)
+            new = out if out is not None else new
+        self.assertAlmostEqual(new, 0.7e-3)
+
+
+class LiveMetricsTests(unittest.TestCase):
+    @staticmethod
+    def _pts(losses, sps=1.0, step0=1, stride=1):
+        return [{"local": step0 + i * stride, "step": step0 + i * stride, "loss": L, "sps": sps}
+                for i, L in enumerate(losses)]
+
+    def test_average_is_the_recent_mean(self):
+        pts = self._pts([5.0] * 10 + [3.0] * 10)       # window 50 covers all 20 here
+        m = trainapi.loss_metrics(pts)
+        self.assertAlmostEqual(m["avg_loss"], 4.0)
+
+    def test_loss_per_hour_is_extrapolated_under_an_hour(self):
+        losses = [4.0 - 0.01 * i for i in range(120)]   # 120 steps at 1 step/sec = 119 s of data
+        m = trainapi.loss_metrics(self._pts(losses))
+        self.assertTrue(m["extrapolated"])
+        self.assertLess(m["window_seconds"], 3600)
+        # drop over 119 s is ~1.19; per hour extrapolates to much more, and stays positive (improving)
+        self.assertGreater(m["loss_per_hour"], 1.19)
+
+    def test_loss_per_hour_uses_a_real_hour_when_there_is_one(self):
+        losses = [5.0 - 0.0002 * i for i in range(300)]
+        m = trainapi.loss_metrics(self._pts(losses, sps=1.0, stride=40))   # 300×40 = 12000 s ≈ 3.3 h
+        self.assertFalse(m["extrapolated"])
+        self.assertAlmostEqual(m["window_seconds"], 3600, delta=120)
+        self.assertGreater(m["loss_per_hour"], 0)
+
+    def test_only_the_current_run_counts(self):
+        old = self._pts([99.0] * 50, step0=1)                  # an earlier run, high loss
+        new = self._pts([3.0] * 60, step0=1)                   # the current run restarts local at 1
+        m = trainapi.loss_metrics(old + new)
+        self.assertAlmostEqual(m["avg_loss"], 3.0)             # the old run is excluded
+
+    def test_no_usable_rate_still_gives_an_average(self):
+        pts = [{"local": i, "step": i, "loss": 2.0, "sps": 0} for i in range(1, 6)]
+        m = trainapi.loss_metrics(pts)
+        self.assertAlmostEqual(m["avg_loss"], 2.0)
+        self.assertIsNone(m["loss_per_hour"])
+
+
+class BestParamsFileTests(unittest.TestCase):
+    def test_models_list_carries_the_best_scorecard(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = trainapi.Trainer(d)
+            mdir = os.path.join(t.models_dir, "m1")
+            os.makedirs(mdir)
+            with open(os.path.join(mdir, "model.json"), "w", encoding="utf-8") as f:
+                json.dump({"parameters": 2_500_000, "vocabulary": 2048, "validation_loss": 4.0}, f)
+            best = {"validation_loss": 3.8, "perplexity": 44.7, "train_loss": 3.6, "total_steps": 40000}
+            with open(os.path.join(mdir, "best.json"), "w", encoding="utf-8") as f:
+                json.dump(best, f)
+            (m,) = [x for x in t.models() if x["name"] == "m1"]
+            self.assertEqual(m["best"], best)
+
+    def test_a_model_without_a_best_file_reports_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            t = trainapi.Trainer(d)
+            mdir = os.path.join(t.models_dir, "m1")
+            os.makedirs(mdir)
+            with open(os.path.join(mdir, "model.json"), "w", encoding="utf-8") as f:
+                json.dump({"parameters": 1_000_000, "vocabulary": 2048, "validation_loss": 4.0}, f)
+            (m,) = [x for x in t.models() if x["name"] == "m1"]
+            self.assertIsNone(m["best"])
+
+
 class TrainingDataTests(unittest.TestCase):
     def test_every_supported_shape_becomes_user_assistant_text(self):
         lines = [
@@ -740,6 +894,27 @@ class QualityAndMultipartyTests(unittest.TestCase):
         self.assertEqual(rec["messages"][0]["content"], "Alex: yep\nJo: me too what's up")
         self.assertEqual(rec["messages"][1]["content"], "game tonight? 8pm")
         self.assertIn("speakers", post(self.t, self.t.multiparty, {"name": "group.txt", "speaker": "Nobody"})["error"])
+
+
+try:
+    import train_bpe_gpt_torch as _trainer    # needs PyTorch + numpy; present on the training nodes and in CI
+except ImportError:
+    _trainer = None
+
+
+@unittest.skipIf(_trainer is None, "the trainer needs PyTorch, which isn't installed here")
+class BestRecordTests(unittest.TestCase):
+    def test_scorecard_has_perplexity_and_the_metrics(self):
+        import math as _m
+        rec = _trainer.best_record(2.5, 40000, train_loss=2.3)
+        self.assertAlmostEqual(rec["perplexity"], _m.exp(2.5))
+        self.assertEqual((rec["validation_loss"], rec["train_loss"], rec["total_steps"]), (2.5, 2.3, 40000))
+        self.assertIn("saved_at", rec)
+
+    def test_missing_validation_leaves_perplexity_empty(self):
+        rec = _trainer.best_record(None, 10, train_loss=None)
+        self.assertIsNone(rec["perplexity"])
+        self.assertIsNone(rec["validation_loss"])
 
 
 if __name__ == "__main__":
