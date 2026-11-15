@@ -1199,6 +1199,8 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .tr-ev-calc { max-height: 60vh; overflow: auto; white-space: pre; font-size: 12px; }
 @media (max-width: 800px) { .tr-ev { grid-template-columns: 1fr; } .tr-ev-net { position: static; max-height: 40vh; } }
 .tr-bigger { margin: 8px 0 12px; } .tr-bigger summary { cursor: pointer; }
+.tr-timecap { margin: 6px 0 10px; padding: .55em .75em; border-left: 3px solid var(--accent); background: var(--panel2); border-radius: 0 6px 6px 0; line-height: 1.5; }
+.tr-timecap b { color: var(--text); }
 .tr-machines tr.off td { opacity: .6; } .tr-machines td:first-child { width: 22px; }
 .tr-two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; align-items: start; }
 .tr-sl { display: flex; flex-direction: column; gap: 3px; margin: 8px 0; font-size: 13px; }
