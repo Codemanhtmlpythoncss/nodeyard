@@ -1270,5 +1270,30 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .tr-msg.user { align-self: flex-end; background: rgba(124, 140, 255, .18); }
 .tr-msg .spin { width: 16px; height: 16px; margin: 0; border-width: 2px; }
 .tr-sliders { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+/* "A whole network" — clickable neural-net diagram */
+.nn-svg { display: block; width: 100%; height: auto; max-width: 660px; margin: 10px auto 2px; overflow: visible; }
+.nn-edge { stroke: var(--faint); transition: opacity .15s ease, stroke .15s ease; }
+.nn-edge.pos { stroke: var(--accent); } .nn-edge.neg { stroke: var(--bad); }
+.nn-neuron { cursor: pointer; outline: none; }
+.nn-dot { stroke: var(--bg2); stroke-width: 2; transition: filter .15s ease, stroke .15s ease; }
+.nn-dot.in { fill: color-mix(in srgb, var(--warn) 62%, var(--bad)); }
+.nn-dot.hid { fill: var(--accent); } .nn-dot.out { fill: var(--bad); }
+.nn-neuron:hover .nn-dot { filter: brightness(1.14); }
+.nn-neuron:focus-visible .nn-dot, .nn-dot.sel { stroke: var(--text); stroke-width: 3; filter: drop-shadow(0 0 6px var(--glow)); }
+.nn-val { fill: var(--muted); font: 500 11px ui-monospace, Menlo, monospace; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
+.nn-tag { fill: var(--faint); font-size: 12.5px; text-anchor: middle; pointer-events: none; }
+.nn-cap { fill: var(--faint); font-size: 12px; font-weight: 600; text-anchor: middle; letter-spacing: .02em; }
+.nn-cap.in { fill: color-mix(in srgb, var(--warn) 62%, var(--bad)); } .nn-cap.hid { fill: var(--accent); } .nn-cap.out { fill: var(--bad); }
+.tr-netnote { text-align: center; margin: 2px 0 14px; }
+.nn-k { font-weight: 700; }
+.nn-k.in { color: color-mix(in srgb, var(--warn) 62%, var(--bad)); }
+.nn-k.hid, .nn-k.pos { color: var(--accent); } .nn-k.out, .nn-k.neg { color: var(--bad); }
+.nn-inputs { display: flex; flex-direction: column; gap: 10px; }
+.nn-out-read { margin-top: 6px; padding: 8px 12px; border-radius: 9px; background: var(--panel2); border-left: 3px solid var(--bad); font-size: 14px; }
+.nn-out-read b { font-family: ui-monospace, Menlo, monospace; }
+.nn-detail { height: 100%; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.nn-detail.empty { display: flex; align-items: center; color: var(--muted); }
+.nn-detail h4 { margin: 0 0 6px; font-size: 14px; }
+.nn-detail .tr-calc { margin: 8px 0; background: var(--bg2); }
 @media (max-width: 1100px) { .tr-learn { grid-template-columns: 1fr; } .tr-lessons { position: static; flex-direction: row; overflow-x: auto; } .tr-lessons button { white-space: nowrap; } }
 @media (max-width: 860px) { .tr-grid2, .tr-two, .tr-charts, .tr-sliders { grid-template-columns: 1fr; } .tr-msg { max-width: 95%; } }

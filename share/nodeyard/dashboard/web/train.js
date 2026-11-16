@@ -84,6 +84,7 @@
   // ---------- lessons ----------
   const L = {
     neuron: { x1: 1, x2: -0.5, w1: 0.8, w2: 0.3, b: 0.1 },
+    net: { sel: null, x: [0.6, -0.4, 0.9] },     // "A whole network": selected neuron [layer, index] + the inputs you feed in
     bpe: { text: "the cat sat on the mat. the cat ate the rat.", merges: 6 },
     attn: { seed: 7, focus: 1 },
     norm: { v: [2, -1, 0.5, 3.5] },
@@ -236,6 +237,86 @@
     multi: "Several computers can each train a copy, then average the copies, so the work is shared.",
     scale: "Big models like Qwen use exactly this recipe, just with far more numbers and far more text, which takes far more computing.",
   };
+  // ---- "A whole network": a small feed-forward net you can click through ----
+  const NN_SIZES = [3, 4, 4, 1];                 // inputs → two hidden layers → one output
+  const sub = (n) => String(n).replace(/[0-9]/g, (d) => "₀₁₂₃₄₅₆₇₈₉"[+d]);
+  function nnWeights() {                          // deterministic, so the picture is stable between renders
+    let s = 0x2f6e2b1 >>> 0;
+    const rnd = () => { s = (s + 0x6D2B79F5) >>> 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    const r2 = () => Math.round((rnd() * 2 - 1) * 100) / 100;   // a clean 2-dp weight in [-1, 1]
+    const W = [], B = [];
+    for (let l = 1; l < NN_SIZES.length; l++) {
+      const wl = [], bl = [];
+      for (let j = 0; j < NN_SIZES[l]; j++) { const row = []; for (let i = 0; i < NN_SIZES[l - 1]; i++) row.push(r2()); wl.push(row); bl.push(r2()); }
+      W.push(wl); B.push(bl);
+    }
+    return { W, B };
+  }
+  function nnForward(x) {                          // every neuron's pre-activation z and output a, left to right
+    if (!L.net.W) Object.assign(L.net, nnWeights());
+    const acts = [x.slice()], zs = [null];
+    for (let l = 0; l < L.net.W.length; l++) {
+      const prev = acts[l], z = [], a = [], out = l === L.net.W.length - 1;
+      for (let j = 0; j < L.net.W[l].length; j++) {
+        let s = L.net.B[l][j];
+        for (let i = 0; i < prev.length; i++) s += L.net.W[l][j][i] * prev[i];
+        z.push(s); a.push(out ? s : gelu(s));     // hidden neurons bend with GELU; the output reads out linearly
+      }
+      zs.push(z); acts.push(a);
+    }
+    return { acts, zs };
+  }
+  function nnSVG(fwd) {
+    const VW = 660, VH = 300, padX = 94, r = 17, cols = NN_SIZES.length, sel = L.net.sel;
+    const colX = (c) => padX + c * (VW - 2 * padX) / (cols - 1);
+    const rowY = (n, j) => VH / 2 + (j - (n - 1) / 2) * 56;
+    const kind = (l) => l === 0 ? "in" : l === cols - 1 ? "out" : "hid";
+    let edges = "", nodes = "", caps = "";
+    for (let l = 0; l < cols - 1; l++) {                           // edges first, so neurons sit on top
+      for (let j = 0; j < NN_SIZES[l + 1]; j++) {
+        for (let i = 0; i < NN_SIZES[l]; i++) {
+          const w = L.net.W[l][j][i];
+          const hot = sel && (sel[0] === 0 ? l === 0 && i === sel[1] : sel[0] === l + 1 && sel[1] === j), dim = sel && !hot;
+          const x1 = colX(l) + r, y1 = rowY(NN_SIZES[l], i), x2 = colX(l + 1) - r, y2 = rowY(NN_SIZES[l + 1], j);
+          edges += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" class="nn-edge ${w >= 0 ? "pos" : "neg"}" style="stroke-width:${(0.5 + 2.3 * Math.min(1, Math.abs(w))).toFixed(2)};opacity:${hot ? 0.95 : dim ? 0.1 : 0.4}"/>`;
+        }
+      }
+    }
+    for (let l = 0; l < cols; l++) {
+      for (let j = 0; j < NN_SIZES[l]; j++) {
+        const cx = colX(l), cy = rowY(NN_SIZES[l], j), a = fwd.acts[l][j], on = sel && sel[0] === l && sel[1] === j;
+        const name = l === 0 ? "x" + sub(j + 1) : l === cols - 1 ? "ŷ" : "";
+        nodes += `<g class="nn-neuron" data-tr-neuron="${l},${j}" tabindex="0" role="button" aria-label="${l === 0 ? "input " + name : l === cols - 1 ? "output" : "hidden neuron"}, value ${f(a, 3)}">`
+          + `<circle cx="${cx}" cy="${cy.toFixed(1)}" r="${r}" class="nn-dot ${kind(l)}${on ? " sel" : ""}"/>`
+          + `<text x="${cx}" y="${(cy + r + 13).toFixed(1)}" class="nn-val">${f(a, 2)}</text>`
+          + (name ? `<text x="${cx}" y="${(cy - r - 7).toFixed(1)}" class="nn-tag">${name}</text>` : "")
+          + `</g>`;
+      }
+    }
+    caps += `<text x="${colX(0)}" y="24" class="nn-cap in">Input layer</text>`;
+    caps += `<text x="${((colX(1) + colX(2)) / 2).toFixed(1)}" y="24" class="nn-cap hid">Hidden layers</text>`;
+    caps += `<text x="${colX(cols - 1)}" y="24" class="nn-cap out">Output layer</text>`;
+    return `<svg viewBox="0 0 ${VW} ${VH}" class="nn-svg" role="group" aria-label="A small neural network; click a neuron to see its calculation">${edges}${nodes}${caps}</svg>`;
+  }
+  function nnDetail(fwd) {
+    const sel = L.net.sel, cols = NN_SIZES.length;
+    if (!sel) return html`<div class="nn-detail empty small">Click any neuron to see the exact calculation its inputs go through. <b class="nn-k in">Orange</b> are the inputs you feed in, <b class="nn-k hid">blue</b> are hidden neurons, <b class="nn-k out">red</b> is the output.</div>`;
+    const [l, j] = sel;
+    if (l === 0) return html`<div class="nn-detail"><h4>Input x${sub(j + 1)} = ${f(fwd.acts[0][j])}</h4>
+      <p class="small">One of the numbers you feed in — set it with the slider. In a language model these inputs are the numbers that describe the current token (its embedding). Every arrow leaving this neuron carries this value, times a weight, to the next layer.</p></div>`;
+    const prev = fwd.acts[l - 1], row = L.net.W[l - 1][j], b = L.net.B[l - 1][j], z = fwd.zs[l][j], a = fwd.acts[l][j], out = l === cols - 1;
+    const names = prev.map((_, i) => (l - 1 === 0 ? "x" + sub(i + 1) : "a" + sub(i + 1)));
+    const terms = row.map((w, i) => `${f(w)}×${f(prev[i])}`).join(" + ");
+    const prods = row.map((w, i) => f(w * prev[i])).join(" + ");
+    return html`<div class="nn-detail"><h4>${out ? "Output neuron ŷ" : "Hidden neuron a" + sub(j + 1) + " · layer " + l}</h4>
+      <p class="small">It takes every value from the layer on its left, multiplies each by its own weight, adds them up with a bias, then ${out ? "reads out the score" : "bends the result with GELU"}. The numbers below are the exact ones — rounded to 4 figures, so the parts add up to the total.</p>
+      <div class="tr-calc">z = b + ${raw(names.map((nm, i) => "w" + sub(i + 1) + "·" + nm).join(" + "))}<br>
+        z = ${f(b)} + ${terms}<br>
+        z = ${f(b)} + ${prods} = <b>${f(z)}</b><br>
+        ${out ? raw(`ŷ = z = <b>${f(a)}</b> <span class="faint">(a linear read-out)</span>`) : raw(`a = GELU(z) = ${f(z)} · Φ(${f(z)}) = <b>${f(a)}</b>`)}</div>
+      ${keyTable(row.map((w, i) => ["w" + sub(i + 1), "weight on " + names[i], f(w) + " × " + f(prev[i]) + " = " + f(w * prev[i])]).concat([["b", "bias (learned shift)", f(b)], [out ? "ŷ" : "a" + sub(j + 1), out ? "the network's output" : "this neuron's output", f(a)]]))}
+      ${out ? html`<p class="muted small">A real language model has one output neuron <b>per vocabulary word</b> — thousands of them — and softmax turns that whole row of scores into probabilities that add to 1. This demo shows a single output to match the classic picture.</p>` : ""}</div>`;
+  }
   const AI_LESSONS = [
     { id: "big", title: "The big picture", body: () => html`
       <p>A language model is one function with millions of adjustable numbers (<b>weights</b>). Give it some text and it returns, for every possible next piece of text, a probability. <b>Training</b> nudges the weights so that the piece that really came next gets a higher probability. That's all — everything else is how to do that well.</p>
@@ -261,6 +342,17 @@
       <p class="muted small">A layer is many neurons at once, written as a matrix: <code>a = GELU(xW + b)</code>. Your model's feed-forward layers have 4·d neurons each.</p>`;
     }, draw: () => { const p = []; for (let x = -4; x <= 4; x += 0.1) p.push([x, gelu(x)]); const z = L.neuron.w1 * L.neuron.x1 + L.neuron.w2 * L.neuron.x2 + L.neuron.b;
       chart($('[data-tr-chart="gelu"]'), [{ pts: p, color: cssv("--accent", "#7c8cff") }], { mark: [z, gelu(z)], xlabel: "z → GELU(z)" }); } },
+    { id: "network", title: "A whole network", body: () => {
+      const fwd = nnForward(L.net.x), out = fwd.acts[fwd.acts.length - 1][0];
+      return html`<p>A neuron on its own isn't much. Stack neurons into <b>layers</b> and connect every neuron to every neuron in the next layer, and you have a network. Numbers flow left to right: the <b class="nn-k in">inputs</b> you feed in, through the <b class="nn-k hid">hidden</b> layers that mix and bend them, to the <b class="nn-k out">output</b>.</p>
+      ${raw(nnSVG(fwd))}
+      <p class="faint small tr-netnote">Click any neuron to see the exact calculation its inputs go through. Arrow thickness shows the size of each weight; <b class="nn-k pos">blue</b> arrows add, <b class="nn-k neg">red</b> arrows subtract.</p>
+      <div class="tr-two"><div class="nn-inputs"><div class="small" style="margin-bottom:4px"><b>Inputs</b> — feed the network different numbers and watch every value update:</div>
+        ${slider("net.x.0", "x₁", -3, 3, 0.1, L.net.x[0])}${slider("net.x.1", "x₂", -3, 3, 0.1, L.net.x[1])}${slider("net.x.2", "x₃", -3, 3, 0.1, L.net.x[2])}
+        <div class="nn-out-read">Output ŷ = <b>${f(out)}</b></div></div>
+        <div>${nnDetail(fwd)}</div></div>
+      <p class="muted small">This is exactly what your model does, only far larger: its feed-forward layers have 4·d neurons and there are many of them, with attention layers in between. The arithmetic inside each neuron is the same multiply, add, then bend you see here. To watch the real numbers of one real step on your own model, open <a href="#" data-tr-tab="inside">4 · Inside the model</a>.</p>`;
+    } },
     { id: "bpe", title: "Tokens: byte-pair encoding", body: () => {
       const s = L.bpe; const steps = bpeDemo(s.text, s.merges);
       return html`<p>The model works on numbers, so text is cut into <b>tokens</b>. The text is first split into word pieces (a word keeps the space in front of it). BPE starts with every single byte as a token (256 of them) and, inside those pieces, repeatedly <b>merges the most frequent neighbouring pair</b> into a new token, until the vocabulary has V entries. Common words become one token; rare words are spelled from pieces, so nothing is ever unknown.</p>
@@ -1184,11 +1276,12 @@ Assistant: game tonight?</pre></div>
     if (S.view !== "train" || !e.target.closest("#tr-root")) return;
     const ev = e.target.closest("[data-ev-op],[data-ev-w],[data-ev-cell]");
     if (ev) { evClick(ev); return; }
-    const t = e.target.closest("[data-tr-tab],[data-tr-lesson],[data-tr-act],[data-tr-check],[data-tr-del],[data-tr-delmodel],[data-tr-chatwith],[data-tr-inspect],[data-tr-get],[data-tr-use],[data-tr-qdel],[data-tr-together]");
+    const t = e.target.closest("[data-tr-tab],[data-tr-lesson],[data-tr-neuron],[data-tr-act],[data-tr-check],[data-tr-del],[data-tr-delmodel],[data-tr-chatwith],[data-tr-inspect],[data-tr-get],[data-tr-use],[data-tr-qdel],[data-tr-together]");
     if (!t || t.tagName === "SELECT" || t.tagName === "INPUT" && t.type !== "button") return;
     const d = t.dataset;
     if (d.trTab) { e.preventDefault(); TR.tab = d.trTab; store.set("train.tab", TR.tab); paint(); window.scrollTo(0, 0); return; }
     if (d.trLesson != null) { TR.lesson = +d.trLesson; store.set("train.lesson", TR.lesson); paint(); const el = $("#tr-lesson"); if (el) el.scrollIntoView({ block: "start" }); return; }
+    if (d.trNeuron) { const [l, j] = d.trNeuron.split(",").map(Number), s = L.net; s.sel = s.sel && s.sel[0] === l && s.sel[1] === j ? null : [l, j]; paint(); return; }
     if (d.trCheck) return checkData(d.trCheck);
     if (d.trTogether) { TR.together = d.trTogether; store.set("train.together", TR.together); paint(); return; }
     if (d.trQdel != null) { qPrompts().splice(+d.trQdel, 1); saveQ(); paint(); return; }
