@@ -1312,6 +1312,22 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .bn-tip[hidden] { display: none; }
 .bn-zoom button { min-width: 34px; }
 .bn-zl { min-width: 44px; font-variant-numeric: tabular-nums; }
+/* full screen: the tabs and zoom on top, the network filling the rest, the clicked neuron's formula beside it (under it on a phone) */
+.bn-stage.full { position: fixed; inset: 0; z-index: 80; display: flex; flex-direction: column; gap: 8px; margin: 0; padding: max(10px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left)); background: var(--bg); overflow: hidden; }
+.bn-stage.full > .nn-bar { flex: none; margin: 0; }
+.bn-stage.full > .bn-desc, .bn-stage.full .tr-netnote { display: none; }
+.bn-stage.full .bn-main { flex: 1; min-height: 0; display: flex; gap: 12px; }
+.bn-stage.full .bn-wrap { flex: 1; min-width: 0; min-height: 0; margin: 0; }
+.bn-stage.full .bn-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.bn-stage.full .nn-detail { flex: 0 0 min(420px, 36%); min-width: 0; height: auto; margin: 0; overflow: auto; }
+html:has(.bn-stage.full) { overflow: hidden; }
+/* a transform, filter or backdrop blur on a parent would trap the fixed picture inside it (as for galaxy-mode) */
+#view:has(.bn-stage.full), .card:has(.bn-stage.full) { animation: none; transform: none; filter: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
+@media (max-width: 760px) {
+  .bn-stage.full .bn-main { flex-direction: column; gap: 8px; }
+  .bn-stage.full .nn-detail { flex: 0 1 auto; max-height: 42%; }
+  .bn-stage.full .nn-detail.empty { flex: none; padding: 8px 12px; }
+}
 .bn-detail { margin-top: 10px; height: auto; }
 .bn-f { font: 16px/2 "Times New Roman", Georgia, serif; margin: 8px 0; padding: 6px 12px; background: var(--bg2); border-radius: 8px; overflow-x: auto; }
 .bn-f > div { white-space: nowrap; }

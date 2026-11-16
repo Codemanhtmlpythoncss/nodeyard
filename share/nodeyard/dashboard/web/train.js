@@ -91,7 +91,7 @@
     neuron: { x1: 1, x2: -0.5, w1: 0.8, w2: 0.3, b: 0.1 },
     net: { sel: null, x: [0.6, -0.4, 0.9],      // "A whole network": selected neuron [layer, index] + the inputs you feed in
       src: store.get("train.netsrc", ""),       // "" = the demo network, else one of your models (its real weights)
-      tok: null, busy: false, t: null },        // t: which token of the text the picture follows
+      tok: null, busy: false, t: null, full: false },   // t: which token of the text the picture follows; full: the picture fills the screen
     bpe: { text: "the cat sat on the mat. the cat ate the rat.", merges: 6 },
     attn: { seed: 7, focus: 1 },
     norm: { v: [2, -1, 0.5, 3.5] },
@@ -593,6 +593,18 @@
     if (BN.sel && BN.sel.ci === h.ci && BN.sel.k === h.k) return;
     BN.sel = h; BN.calc = null; paint(); bnLoad();
   }
+  const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement || null;
+  function bnFull(on) {                               // full screen: the browser's own where it allows it (not on iPhone), else the picture fills the page
+    const s = L.net; on = on == null ? !s.full : !!on; if (s.full === on) return;
+    s.full = on; paint();
+    const st = $("#bn-stage"), req = st && (st.requestFullscreen || st.webkitRequestFullscreen);
+    if (on && req && !fsEl()) { try { const p = req.call(st); if (p && p.catch) p.catch(() => {}); } catch (e) { } }
+    else if (!on && fsEl()) { const ex = document.exitFullscreen || document.webkitExitFullscreen; try { const p = ex.call(document); if (p && p.catch) p.catch(() => {}); } catch (e) { } }
+    const cv = $("[data-tr-bignet]"); if (cv) cv.focus({ preventScroll: true });
+  }
+  ["fullscreenchange", "webkitfullscreenchange"].forEach((ev) => document.addEventListener(ev, () => {
+    if (!fsEl() && L.net.full) bnFull(false);      // left the browser's full screen (Esc, or its own button): back to the page too
+  }));
   function bnFit() { if (BN.view) { BN.view.z = 1; BN.view.ox = BNM.left; BN.view.oy = BNM.top; bnKick(true); } }
   // The calculation a neuron does, written as maths: Σ, fractions, and a placeholder for every input.
   const SIG = (lo, hi) => '<span class="bn-sig"><small>' + hi + "</small><b>Σ</b><small>" + lo + "</small></span>";
@@ -717,17 +729,19 @@
         <label class="tr-field inline"><span>tokens</span><input class="input" type="number" min="1" max="16" value="${EV.tokens}" data-tr-act="ev-tokens" style="width:64px"></label>
         <button class="btn primary" data-tr-act="net-run" ${s.busy ? "disabled" : ""}>${s.busy ? "Working…" : ready || k ? "Run again" : "Run it"}</button></div>
       ${ready ? html`<h3 class="tr-h3 nn-h">The whole network, every neuron</h3>
+        <div class="bn-stage${s.full ? " full" : ""}" id="bn-stage">
         <div class="row wrap small nn-bar"><span class="seg bn-tabs" role="tablist">${tab("net", "Placeholders", "The feed-forward network on its own, every value a letter")}${tab("values", "Live values", "Each neuron's number for your text")}${tab("weights", "Biases & formulas", "Each neuron's learned bias, written above it")}</span>
-          <span class="grow"></span><span class="seg bn-zoom"><button data-tr-act="bn-out" aria-label="Zoom out" title="Zoom out">−</button><button data-tr-act="bn-fit" title="Show the whole network">Fit</button><button data-tr-act="bn-in" aria-label="Zoom in" title="Zoom in">+</button></span><span class="faint bn-zl" data-bn-zoom>×1</span></div>
-        <p class="small">${ph ? html`Just the part your data goes into and comes out of, in one piece: the <b class="nn-k in">input</b> x (the ${net.d} numbers a token becomes), then block after block a <b>hidden</b> layer of ${n0(hidN)} GELU neurons and an <b>out</b> layer of ${net.d}, and finally the <b class="nn-k out">output</b>, one neuron for each of the ${n0(net.V)} tokens it knows. Each neuron is joined to every neuron of the next layer. Every value is a letter: click a neuron for the calculation it does. (Attention and layer norm, which your model runs between the blocks, are left out here; the other tabs show them.)`
+          <span class="grow"></span><span class="seg bn-zoom"><button data-tr-act="bn-out" aria-label="Zoom out" title="Zoom out">−</button><button data-tr-act="bn-fit" title="Show the whole network">Fit</button><button data-tr-act="bn-in" aria-label="Zoom in" title="Zoom in">+</button></span><span class="faint bn-zl" data-bn-zoom>×1</span>
+          <button class="btn small bn-fs" data-tr-act="bn-full" aria-pressed="${s.full ? "true" : "false"}" title="${s.full ? "Back to the page (Esc)" : "Fill the screen with the network"}">${s.full ? "Exit full screen" : "Full screen"}</button></div>
+        <p class="small bn-desc">${ph ? html`Just the part your data goes into and comes out of, in one piece: the <b class="nn-k in">input</b> x (the ${net.d} numbers a token becomes), then block after block a <b>hidden</b> layer of ${n0(hidN)} GELU neurons and an <b>out</b> layer of ${net.d}, and finally the <b class="nn-k out">output</b>, one neuron for each of the ${n0(net.V)} tokens it knows. Each neuron is joined to every neuron of the next layer. Every value is a letter: click a neuron for the calculation it does. (Attention and layer norm, which your model runs between the blocks, are left out here; the other tabs show them.)`
           : html`Left to right: the <b class="nn-k in">input</b> (the ${net.d} numbers a token becomes), then each block's feed-forward layer (${net.d} numbers in → ${n0(hidN)} hidden GELU neurons → ${net.d} out), the final layer norm, and the <b class="nn-k out">output</b>: one neuron for each of the ${n0(net.V)} tokens it knows. Attention and layer norm happen in the shaded gaps.`}</p>
         ${vals ? html`<div class="row wrap small nn-bar"><span>Input token:</span><span class="tr-toks inline">${tr.tokens.map((x, i) => html`<button class="tr-tok${i === s.t ? " on" : ""}" data-tr-nett="${i}"><b>${vis(x.text)}</b><small>#${x.id}</small></button>`)}</span></div>` : ""}
-        <div class="bn-wrap" id="bn-wrap" data-keep><canvas class="bn-canvas" data-tr-bignet tabindex="0" role="img" aria-label="Every neuron of the network. Click one for its calculation. Zoom with the buttons, pinch, Ctrl or Command and scroll, or double-click."></canvas><div class="bn-tip" hidden></div></div>
+        <div class="bn-main"><div class="bn-wrap" id="bn-wrap" data-keep><canvas class="bn-canvas" data-tr-bignet tabindex="0" role="img" aria-label="Every neuron of the network. Click one for its calculation. Zoom with the buttons, pinch, Ctrl or Command and scroll, or double-click."></canvas><div class="bn-tip" hidden></div></div>
         <p class="faint small tr-netnote">${ph ? html`Zoom in and each neuron shows its letter, with its bias's letter above it. The grey lines show which neuron feeds which; ${sampled || part.length ? html`there are too many to draw them all, so it shows ${sampled ? "an even sample" : "the strongest few into each neuron"}, and a clicked neuron shows every one of its own.` : "every one is drawn."}`
           : html`${vals ? html`Each neuron's number for “${evToken(s.t)}”: <b class="nn-k pos">blue</b> positive, <b class="nn-k neg">red</b> negative, brighter is bigger (each column on its own scale; the output is probability).` : html`Each neuron's colour is its bias; zoom in and the bias is written above it. Click one for its formula.`}
           Lines are weights: <b class="nn-k pos">blue</b> adds, <b class="nn-k neg">red</b> subtracts. ${lines ? (part.length ? "Where there are too many to draw, it shows the strongest: " + part.join(", ") + ". A clicked neuron shows all of its own." : "Every weight is drawn.") : "This run has no lines yet (the training machine needs the update, then Run again); a clicked neuron still shows all of its weights."}`}
-          Zoom: pinch, ⌘/Ctrl + scroll, double-click, or − Fit +. Drag to move.</p>
-        ${bnDetail()}
+          Zoom: pinch, ⌘/Ctrl + scroll, double-click, or − Fit +. Drag to move. <b>Full screen</b> (or F) gives it the whole screen.</p>
+        ${bnDetail()}</div></div>
         <p class="muted small">The same run as tables of every number and every weight matrix, attention included: <a href="#" data-tr-tab="inside" data-tr-inside="every">4 · Inside the model → Every number</a>.</p>`
       : s.busy ? html`<p class="small"><span class="spin"></span> Running the text through ${s.src}…</p>` : ""}
       ${k ? html`<details class="nn-tokdetails"><summary>How ${k.model}'s tokenizer turned the text into tokens</summary>${netTokens(k)}</details>` : ""}`;
@@ -1855,6 +1869,7 @@ Assistant: game tonight?</pre></div>
     else if (a === "bignet-net" || a === "bignet-values" || a === "bignet-weights") { store.set("train.netmode", a.slice(7)); paint(); bnLoad(); }
     else if (a === "bn-in" || a === "bn-out") { const cv = $("[data-tr-bignet]"); if (cv) bnZoom(cv, a === "bn-in" ? 2 : 0.5); }
     else if (a === "bn-fit") bnFit();
+    else if (a === "bn-full") bnFull();
     else if (a === "ev-left" || a === "ev-right") { EV.col0 = Math.max(0, EV.col0 + (a === "ev-left" ? -PAGE_COLS : PAGE_COLS)); paint(); }
     else if (a === "ev-wup" || a === "ev-wdown") { EV.wrow = Math.max(0, EV.wrow + (a === "ev-wup" ? -PAGE_ROWS : PAGE_ROWS)); loadWeights(); }
     else if (a === "ev-wleft" || a === "ev-wright") { EV.wcol = Math.max(0, EV.wcol + (a === "ev-wleft" ? -PAGE_COLS : PAGE_COLS)); paint(); }
@@ -1997,18 +2012,22 @@ Assistant: game tonight?</pre></div>
     if (e.shiftKey && !dx) { dx = dy; dy = 0; }
     if (bnPan(cv, -dx, -dy)) e.preventDefault();   // at the edge, let the page scroll instead
   }, { passive: false });
+  document.addEventListener("keydown", (e) => {     // Esc anywhere leaves the page-filling picture (the browser's own full screen handles Esc itself)
+    if (e.key === "Escape" && L.net.full && !fsEl() && !bnCv(e)) bnFull(false);
+  });
   document.addEventListener("keydown", (e) => {
     const cv = bnCv(e); if (!cv || !BN.view) return;
     const k = e.key, step = 80;
     if (k === "+" || k === "=") bnZoom(cv, 1.6); else if (k === "-" || k === "_") bnZoom(cv, 1 / 1.6); else if (k === "0") bnFit();
     else if (k === "ArrowLeft") bnPan(cv, step, 0); else if (k === "ArrowRight") bnPan(cv, -step, 0);
     else if (k === "ArrowUp") bnPan(cv, 0, step); else if (k === "ArrowDown") bnPan(cv, 0, -step);
-    else if (k === "Escape") bnSelect(null); else return;
+    else if (k === "Escape") { if (BN.sel || !L.net.full) bnSelect(null); else bnFull(false); }
+    else if ((k === "f" || k === "F") && !e.metaKey && !e.ctrlKey && !e.altKey) bnFull(); else return;
     e.preventDefault();
   });
 
   V.train = {
-    build() { NY.freshHTML($("#view"), html`<div id="tr-root"></div>`); paint(); loadOverview(); TR.since = 0; TR.lines = []; poll(); },
+    build() { L.net.full = false; NY.freshHTML($("#view"), html`<div id="tr-root"></div>`); paint(); loadOverview(); TR.since = 0; TR.lines = []; poll(); },
     update() { },
   };
 })();
