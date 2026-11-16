@@ -909,8 +909,15 @@ class QualityAndMultipartyTests(unittest.TestCase):
         self.assertEqual((r["name"], r["examples"]), ("group-as-Sam.jsonl", 1))
         with open(os.path.join(self.t.data_dir, r["name"]), encoding="utf-8") as f:
             rec = json.loads(f.readline())
-        self.assertEqual(rec["messages"][0]["content"], "Alex: yep\nJo: me too what's up")
+        # Names are dropped by default so the model never learns to emit a "NAME:" prefix in its replies.
+        self.assertEqual(rec["messages"][0]["content"], "yep\nme too what's up")
         self.assertEqual(rec["messages"][1]["content"], "game tonight? 8pm")
+        # Opt-in: names=True keeps the "NAME: …" labels on the context side (group-chat case).
+        r2 = self.t.multiparty({"name": "group.txt", "speaker": "Sam", "context": 2, "names": True})
+        with open(os.path.join(self.t.data_dir, r2["name"]), encoding="utf-8") as f:
+            rec2 = json.loads(f.readline())
+        self.assertEqual(rec2["messages"][0]["content"], "Alex: yep\nJo: me too what's up")
+        self.assertEqual(rec2["messages"][1]["content"], "game tonight? 8pm")
         self.assertIn("speakers", post(self.t, self.t.multiparty, {"name": "group.txt", "speaker": "Nobody"})["error"])
 
 

@@ -12,7 +12,7 @@
     sel: JSON.parse(store.get("train.sel", "[]") || "[]"), check: null, form: null, model: "", resume: false, keepBest: true, status: null, since: 0,
     lines: [], pollT: 0, ovT: 0, chat: { model: "", history: [], mode: "chat", temperature: 0.7, top_k: 40, top_p: 0.9, busy: false },
     explain: null, exModel: "", exPrompt: "User: Hello, who are you?", exBusy: false, upload: null, ovPollT: 0,
-    mp: { file: "", speakers: null, speaker: "", context: 3 },
+    mp: { file: "", speakers: null, speaker: "", context: 3, names: false },
     edited: null, preset: store.get("train.preset", "") || "",
     q: Object.assign({ on: false, preset: "starter", prompts: [], pass: 1, target_loss: "", give_up: 10, count: 20, held_out: false, match: "exact" },
       (() => { try { return JSON.parse(store.get("train.quality", "") || "null"); } catch (_) { return null; } })() || {}),
@@ -742,21 +742,21 @@
       <div class="tr-conv"><pre class="tr-pre">Sam: anyone up?
 Alex: yep
 Jo: me too, what's up
-Sam: game tonight?</pre><span class="tr-arrow">→</span><pre class="tr-pre">User: Sam: anyone up?
-Alex: yep
-Jo: me too, what's up
+Sam: game tonight?</pre><span class="tr-arrow">→</span><pre class="tr-pre">${mp.names ? "User: Sam: anyone up?\nAlex: yep\nJo: me too, what's up" : "User: anyone up?\nyep\nme too, what's up"}
 Assistant: game tonight?</pre></div>
+      <p class="faint small">${mp.names ? "Names kept — only do this for a group chat where who said what matters." : "Names are dropped, so the model learns to reply without ever writing a “Name:” label in front of its own lines."}</p>
       <ol class="tr-steps small">
         <li><b>Choose the speaker</b> whose voice you want: one example per thing they said. (A play: one character; your chats: you.) Several speakers make several datasets; train on one, or on all of them for a model that can be anyone.</li>
-        <li><b>Context = the few lines before it, with names</b> (“Alex: …”), so the model knows who said what and that it's answering a group. 2–4 lines is plenty: more is cut off by the context window anyway.</li>
+        <li><b>Context = the few lines before it.</b> By default the other speakers' names are <b>stripped out</b>, because a model trained on “<i>Name:</i> …” lines learns to blurt a name prefix (“Bene:”, “Pedro:”) in front of its own replies. Dropping them keeps it a clean chatbot. 2–4 lines is plenty: more is cut off by the context window anyway. Tick <b>keep speaker names</b> below only for a group chat where who said what really matters.</li>
         <li><b>Merge one person's consecutive lines</b> into one turn: chats split a thought over several messages.</li>
         <li><b>Clean it:</b> drop system lines (“joined the group”, “&lt;Media omitted&gt;”), stage directions, timestamps; remove or replace phone numbers, addresses and anything private. Only use chats where the people involved would be fine with it.</li>
-        <li><b>Don't pair every line with the next one blindly.</b> The next line in a play or group chat is often not an answer to the line before it, and each line then appears twice (once as a question, once as a reply), which doubles the text without adding anything.${ov && ov.datasets.some((d) => /pairs/i.test(d.name)) ? " Your “pairs” file is built that way." : ""} For style rather than chat, plain text with the names left in (“ROMEO: …”) is often better: the model learns to write whole scenes.</li></ol>
+        <li><b>Don't pair every line with the next one blindly.</b> The next line in a play or group chat is often not an answer to the line before it, and each line then appears twice (once as a question, once as a reply), which doubles the text without adding anything.${ov && ov.datasets.some((d) => /pairs/i.test(d.name)) ? " Your “pairs” file is built that way." : ""} If you want a model that writes whole scenes in a style (not a chatbot), skip this tool and train on the <b>plain text</b> with the names left in (“ROMEO: …”) — then those “<i>Name:</i>” prefixes are the point, and the model learns to write each character.</li></ol>
       <h3 class="tr-h3">Do it for you</h3>
       ${!files.length ? html`<p class="faint small">Add a .txt file with lines like “NAME: what they said” (a script, or a WhatsApp/Signal export) and it appears here.</p>` : html`
       <div class="row wrap"><select class="select" data-tr-act="mp-file"><option value="">Choose a script or chat file…</option>${raw(files.map((d) => '<option' + (mp.file === d.name ? " selected" : "") + ' value="' + esc(d.name) + '">' + esc(d.name) + "</option>").join(""))}</select>
         ${mp.speakers ? (mp.speakers.length ? html`<select class="select" data-tr-act="mp-speaker">${raw(mp.speakers.map((x) => '<option' + (mp.speaker === x.name ? " selected" : "") + ' value="' + esc(x.name) + '">' + esc(x.name) + " (" + x.turns + " turns)</option>").join(""))}</select>
           <label class="tr-field inline"><span>context lines</span><input class="input" type="number" min="1" max="8" value="${mp.context}" data-tr-act="mp-context" style="width:70px"></label>
+          <label class="tr-field inline" title="Only for a group chat where who said what matters. Leave off for a clean chatbot."><input type="checkbox" data-tr-act="mp-names" ${mp.names ? "checked" : ""}><span>keep speaker names</span></label>
           <button class="btn primary small" data-tr-act="mp-make">Make chat pairs</button>` : html`<span class="warn-t small">No “NAME: text” lines found in it.</span>`) : ""}</div>`}</section>`;
   }
   function anatomy() {
@@ -1302,7 +1302,7 @@ Assistant: game tonight?</pre></div>
     else if (a === "q-sample") { sampleFromData(); }
     else if (a === "q-add") { qPrompts().push(TR.q.preset === "data" ? { prompt: "", answer: "", expect: "" } : { prompt: "", expect: "" }); saveQ(); paint(); }
     else if (a === "mp-make") {
-      const r = await post("/api/train/multiparty", { name: TR.mp.file, speaker: TR.mp.speaker, context: TR.mp.context, names: true });
+      const r = await post("/api/train/multiparty", { name: TR.mp.file, speaker: TR.mp.speaker, context: TR.mp.context, names: TR.mp.names });
       if (r) { toast("Made " + r.name + ": " + n0(r.examples) + " examples from " + n0(r.turns) + " turns"); if (!TR.sel.includes(r.name)) TR.sel.push(r.name); saveSel(); await loadOverview(); checkData(r.name); }
     }
     else if (a === "convert") { const r = await post("/api/train/convert", { name: TR.check.name }); if (r) { toast("Saved " + r.name + " (" + n0(r.records) + " records)"); await loadOverview(); checkData(r.name); } }
@@ -1417,6 +1417,7 @@ Assistant: game tonight?</pre></div>
     else if (d.trAct === "q-count") { TR.q.count = Math.max(20, Math.min(100, +t.value || 20)); saveQ(); sampleFromData(); }
     else if (d.trAct === "q-pass") { TR.q.pass = +t.value; saveQ(); paint(); }
     else if (d.trAct === "mp-context") TR.mp.context = Math.max(1, Math.min(8, +t.value || 3));
+    else if (d.trAct === "mp-names") { TR.mp.names = t.checked; paint(); }
     else if (d.trAct === "chat-model") { TR.chat.model = t.value; TR.chat.history = []; paint(); }
     else if (d.trIn === "ce.target") { L.ce.target = +t.value; paint(); }
   });

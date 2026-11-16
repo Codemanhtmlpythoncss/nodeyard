@@ -270,9 +270,12 @@ def speakers(path):
     return sorted(({"name": k, "turns": v} for k, v in counts.items()), key=lambda x: -x["turns"])[:40]
 
 
-def multiparty_to_pairs(src, dst, speaker, context=3, names=True):
-    """Every turn by `speaker` becomes one example: the `context` turns before it as the User side (each with its
-    speaker's name, so the model knows who said what), and the speaker's own words as the Assistant side."""
+def multiparty_to_pairs(src, dst, speaker, context=3, names=False):
+    """Every turn by `speaker` becomes one example: the `context` turns before it as the User side, and the
+    speaker's own words as the Assistant side. By default the other speakers' names are dropped from the User
+    side, so the model never sees the "NAME: text" pattern and never learns to write a "NAME:" prefix in front
+    of its own replies. Pass names=True to keep the "NAME: …" labels (only useful for a group chat where who
+    said what matters); the Assistant side is always just the words, with no name."""
     turns = read_turns(src)
     examples = 0
     tmp = dst + ".tmp"
