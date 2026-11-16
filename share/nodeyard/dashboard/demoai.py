@@ -243,6 +243,8 @@ class DemoAI:
                       "  debian-1         freed 13.6 GiB, now 862.4 GiB free", "  archlinux-2      freed 8.8 GiB, now 39.1 GiB free", "OK Freed about 22.4 GiB."],
             "pull": ["-- yard-1 --", "pulling manifest", "pulling 8eeb52dfb3bb... 100%", "success", "OK Done."],
             "agent-install": ["> Setting up the node agent on every node", "daemon set \"nodeyard-agent\" successfully rolled out", "OK The node agent is installed."],
+            "relink": ["> yard-4 (192.168.1.13)", "  removed a hand-pinned network entry for 192.168.1.13 (192.168.1.13 lladdr c8:d9:d2:a5:72:ea PERMANENT); a pinned entry never updates, so the machine stayed unreachable",
+                       "  dropped 14 old connection-tracking entries for 192.168.1.13", "  yard-4 answers on eth0.", "> Waiting up to 45 s for yard-4 to report in", "OK yard-4 is Ready again.", "OK Reconnected: yard-4."],
         }.get(action, ["(demo) " + " ".join(argv), "Done."])
         for line in script:
             time.sleep(0.5)

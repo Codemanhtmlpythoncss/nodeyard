@@ -15,6 +15,12 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   - **The exact calculation behind any neuron**: click it to see every input × weight (named `W[row][column]`) with its running total, plus the bias, the dot products and softmax for attention, and the GELU series, each ending with PyTorch's own value.
 
   The weights come straight from `model.pt`, fetched a few rows at a time with the new `rows=` option of `/api/train/weights`. Traces now keep 9 significant digits, enough to give back every float32 value exactly.
+- **Nodes come back after their cable is unplugged and plugged in, without a reboot.** `nodeyard relink` clears the server's old network state for a node that isn't Ready, then restarts k3s on the server only if the node answers but still doesn't report in. The old state it clears:
+  - its neighbour (ARP) entry, including one pinned by hand;
+  - connection tracking;
+  - flannel's forwarding entry, neighbour and route.
+
+  It also warns when two machines answer for the node's address. On a worker it re-announces the machine and unsticks `k3s-agent`. `relink-watch` runs it every 20 s on servers and workers; k3s installs set it up, and on existing machines `doctor --fix` installs it. In the dashboard, Fix → **Reconnect** (one node) and **Reconnect missing nodes** run it, and the not-Ready-nodes check now has this as its fix.
 - **Train AI teaches the maths first, simply.** *Learn* starts with **Maths you need**, 12 lessons written for a beginner (about age 14):
   - letters as boxes for numbers (plus negatives, decimals and 1e-3);
   - Σ;

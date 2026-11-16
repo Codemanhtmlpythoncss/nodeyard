@@ -130,6 +130,43 @@ unreachable for a while. It never changes the cluster by itself. With
 three servers the cluster keeps working when one fails; automatic failover
 of a single address (a virtual IP) arrives in 0.4.
 
+### When a node drops off after its cable was unplugged
+
+A node whose network cable is pulled and plugged back in can stay
+`NotReady` ("Status unknown") until the server reboots: the server still
+holds old network state for it. `sudo nodeyard relink` on the server
+brings it back without a reboot. For each node that isn't Ready (or each
+`NODE` named) it:
+
+- clears the server's neighbour (ARP) entry for the node, including one
+  pinned by hand (`ip neigh replace ... nud permanent`), which never
+  updates by itself;
+- drops old connection-tracking entries for its address;
+- sets the pod network's (flannel) forwarding entry, neighbour and route
+  for it again from the values the node published;
+- asks the wired network who answers for the node's address, and warns
+  when two machines do (an IP conflict, which makes a node come and go);
+- waits for it to report in, and if it answers on the network and its
+  kubelet listens (port 10250) but it still hasn't, restarts k3s on the
+  server (running containers keep running; `--no-restart` skips this);
+- if no wired node answers at all while they are up another way (over
+  Tailscale), switches the server's wired port off and on (`--no-link-reset`
+  skips this).
+
+On a worker, `sudo nodeyard relink` checks its own link and connection to
+the server, announces itself again, and restarts `k3s-agent` if the server
+answers but Kubernetes doesn't.
+
+`relink-watch install` runs the same thing every 20 seconds
+(`nodeyard-relink.timer`; it logs to `journalctl -t nodeyard-relink`). It
+waits until a node has been NotReady for 40 s, restarts k3s on the server
+at most every 30 minutes and on a worker at most every 10 minutes.
+`install master` and `install worker` set it up, and `uninstall k3s`
+removes it. On a machine set up before this, `sudo nodeyard doctor --fix`
+(or **Fix → Fix all** in the dashboard) installs it. In the dashboard's Fix
+dialog, **Reconnect** does the same for one node, and **Reconnect missing
+nodes** does it for all of them.
+
 ## Removing k3s
 
 ```bash
