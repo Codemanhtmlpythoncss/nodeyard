@@ -981,7 +981,7 @@ class Trainer:
         dst = self._data_path("%s-as-%s.jsonl" % (stem, re.sub(r"[^A-Za-z0-9_-]+", "-", speaker).strip("-")[:30] or "speaker"))
         if os.path.getsize(src) * 2 > DATA_TOTAL_MAX - self._data_total():
             raise TrainError("Not enough room in your training data (20 GB): delete some files first.", 413)
-        rep = trainsets.multiparty_to_pairs(src, dst, speaker, context, bool(body.get("names", True)))
+        rep = trainsets.multiparty_to_pairs(src, dst, speaker, context, bool(body.get("names", False)))
         if not rep["examples"]:
             os.remove(dst)
             raise TrainError("%s never speaks after someone else, so there's nothing to learn from." % speaker)
