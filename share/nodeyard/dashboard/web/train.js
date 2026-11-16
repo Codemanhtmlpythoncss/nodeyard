@@ -1327,7 +1327,7 @@ Assistant: game tonight?</pre></div>
       ${stopWhen()}
       <section class="card tr-span2"><h2 class="tr-h">Live <span class="right" id="tr-live-chip"></span></h2><div id="tr-live"></div>
         <div class="tr-charts"><div><h4>Loss (lower is better)</h4><canvas class="tr-cv tall" id="tr-loss"></canvas><p class="faint small"><span class="tr-sw a"></span>training (smoothed) <span class="tr-sw b"></span>validation <span class="tr-sw c"></span>random guess ln V</p></div>
-          <div><h4>Learning rate η(t)</h4><canvas class="tr-cv" id="tr-lr"></canvas><h4>Gradient norm (before clipping)</h4><canvas class="tr-cv short" id="tr-grad"></canvas></div></div>
+          <div><h4>Learning rate η(t)</h4><canvas class="tr-cv" id="tr-lr"></canvas><p class="faint small" id="tr-lr-note"></p><h4>Gradient norm (before clipping)</h4><canvas class="tr-cv short" id="tr-grad"></canvas></div></div>
         <div id="tr-qlive"></div>
         <details class="mt"><summary>Training log</summary><pre class="tr-pre tr-log" id="tr-logbox"></pre></details></section>
       ${savedModels()}</div>`;
@@ -1465,9 +1465,24 @@ Assistant: game tonight?</pre></div>
       <div class="tr-stats">${[["Step", last.local ? (total ? n0(Math.round(frac * total)) + " / " + n0(total) : n0(last.local) + " / " + n0(last.of)) : j.phase || "starting…"], ["Time left", st.running && eta != null ? dur(eta) : "–"], ["Training loss", f(last.loss, 4)], ["Avg loss (recent)", mt.avg_loss != null ? f(mt.avg_loss, 4) : "–"], ["Validation loss", f(val, 4)],
         ["Perplexity e^ℒ", val != null ? f(Math.exp(val), 4) : "–"], ["Loss ↓ in last hour", lph == null ? "–" : (lph >= 0 ? "−" : "+") + f(Math.abs(lph), 3) + (mt.extrapolated ? " (est)" : "")], ["Learning rate", f(last.lr, 3)], ["Speed", last.tps ? n0(last.tps) + " tokens/s" : "–"], ["Total steps", n0(last.step)]].map(([a, b]) => html`<div><span>${a}</span><b>${b}</b></div>`)}</div>
       ${val != null ? html`<p class="small">Right now the model is about as unsure as picking among <b>${f(Math.exp(val), 3)}</b> equally likely tokens for each next token (a random guess would be ${n0(V0)}: ln ${n0(V0)} = ${f(Math.log(V0), 4)}). ${st.val.length > 2 && st.val[st.val.length - 1].loss > Math.min(...st.val.map((v) => v.loss)) * 1.02 ? "Validation is rising above its best: the model is starting to memorise; more steps won't help much." : ""}</p>` : ""}${fixPanel(st)}`);
+    const lp = lrPlan(st), lrn = $("#tr-lr-note");
+    if (lrn) setHTML(lrn, lp ? html`Now <b>${f(lp.now, 3)}</b>, ${f(100 * lp.now / lp.peak, 3)}% of the peak (${f(lp.peak, 3)}). The dashed line is the whole plan: a cosine over all ${n0(lp.total)} steps, and this run is ${f(100 * lp.through, 2)}% of the way along${lp.through < 0.1 ? html`, so it has <b>barely started to fall</b>` : ""}. It is 55% of the peak halfway (step ${n0(lp.mid)}) and ${f(lp.peak * 0.1, 3)} at the end. Validation not improving for 4 checks in a row also cuts the peak${j.lr_cuts ? html` (cut <b>${j.lr_cuts}</b> time${j.lr_cuts === 1 ? "" : "s"} so far)` : j.mode === "shared" ? " (no cuts so far)" : ""}.` : "");
     const qbox = $("#tr-qlive"); if (qbox) setHTML(qbox, html`${raceLive(st)}${qualityLive(st)}`);
     const box = $("#tr-logbox"); if (box) { const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 8; box.textContent = TR.lines.slice(-400).join("\n"); if (atEnd) box.scrollTop = box.scrollHeight; }
     drawLive();
+  }
+  // The learning-rate plan of the whole job (the trainer's warm-up + cosine to 10% of the peak), at the current
+  // peak: in a long job the rate falls so slowly at first that the live line looks flat. Shared training warms up
+  // in round 0 only (none when continuing) and spreads one cosine over every round.
+  function lrPlan(st) {
+    const j = st && st.job, last = (st && st.last) || {}; if (!j || !(+j.steps > 0) || !(last.lr > 0)) return null;
+    const total = +j.steps, base = +(j.base_steps || 0);
+    const w = j.mode === "shared" ? (j.resume ? 0 : Math.max(10, Math.min(+j.warmup || 10, Math.floor(total / 3)))) : Math.min(+j.warmup || 0, total);
+    const shape = (s) => s <= w && w > 0 ? s / w : 0.1 + 0.45 * (1 + Math.cos(Math.PI * Math.min(1, (s - w) / Math.max(1, total - w))));
+    const at = Math.max(0, Math.min(total, (+last.step || base) - base)), k = shape(at);
+    const peak = at > w && k > 0 ? last.lr / k : +j.lr_peak || +(j.settings || {}).learning_rate || last.lr;
+    const pts = []; for (let i = 0; i <= 160; i++) { const s = total * i / 160; pts.push([base + s, peak * shape(s)]); }
+    return { pts, peak, now: last.lr, total, through: at / total, mid: Math.round(base + w + (total - w) / 2) };
   }
   function drawLive() {
     const st = TR.status; const tr = st ? st.train : [], vl = st ? st.val : [];
@@ -1477,7 +1492,8 @@ Assistant: game tonight?</pre></div>
     chart($("#tr-loss"), [{ pts: tr.map((p) => [p.step, p.loss]), color: cssv("--accent", "#7c8cff"), alpha: 0.35, width: 1 }, { pts: sm, color: cssv("--accent", "#7c8cff"), width: 2 },
       { pts: vl.map((p) => [p.step, p.loss]), color: cssv("--good", "#3d9"), width: 2, dots: true }, { pts: xs.length ? [[xs[0], Math.log(V0)], [xs[xs.length - 1], Math.log(V0)]] : [], color: cssv("--faint", "#888"), dash: [4, 4], width: 1 }],
       { empty: "The loss appears here once training starts.", xlabel: "step" });
-    chart($("#tr-lr"), [{ pts: tr.map((p) => [p.step, p.lr]), color: cssv("--accent2", "#2de") }], { y0: 0, empty: "–" });
+    const lp = tr.length ? lrPlan(st) : null;
+    chart($("#tr-lr"), [{ pts: lp ? lp.pts : [], color: cssv("--faint", "#888"), dash: [4, 4], width: 1 }, { pts: tr.map((p) => [p.step, p.lr]), color: cssv("--accent2", "#2de") }], { y0: 0, empty: "–" });
     const qs = st ? (st.quality || []).filter((x) => x.score != null) : [];
     if ($("#tr-qchart")) chart($("#tr-qchart"), [{ pts: qs.map((x) => [x.step, x.score * 100]), color: cssv("--good", "#3d9"), dots: true }], { y0: 0, xlabel: "step · % of test prompts passing" });
     chart($("#tr-grad"), [{ pts: (st ? st.grad : []).map((p) => [p.step != null ? p.step : p.local, p.norm]), color: cssv("--warn", "#fb2"), dots: st ? st.grad.length < 150 : false }], { y0: 0, empty: "–" });

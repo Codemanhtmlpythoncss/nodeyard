@@ -12,7 +12,7 @@ jobs runner copies every file as data.txt):
       {"instruction": "...", "input": "...", "output": "..."}       (input optional)
       {"instruction": "...", "context": "...", "response": "..."}   (Dolly; context optional)
       {"prompt": "...", "completion": "..."}   or  {"question": "...", "answer": "..."}
-      {"text": "..."}
+      {"text": "..."}   (ChatML in it -- <|im_start|>user ... <|im_end|> -- is turned into User:/Assistant:)
   * A JSON file holding a list of the objects above.
 
 Every chat-shaped record becomes:
@@ -23,12 +23,19 @@ Every chat-shaped record becomes:
 with a blank line after it, which is the layout the trainer's --assistant-only
 option and the chat window expect. This module only uses the standard library so it
 can be copied to any node next to the trainer.
+
+load_split() is what the trainer uses. It holds back the last 5% of *every* file for
+validation (not just the end of the last file, which made the validation loss measure
+one file only), and it leaves out conversations that only repeat replies seen many
+times already: a generated set where the same few hundred answers recur hundreds of
+times teaches the model to give those canned answers to everything.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from pathlib import Path
 
 ROLE_NAMES = {
@@ -37,10 +44,29 @@ ROLE_NAMES = {
     "system": "System",
 }
 MAX_REPORTED_PROBLEMS = 20
+HOLD_OUT = 0.05            # fraction of each file kept back to measure validation loss
+MAX_REPEATS = 3            # a reply may recur this often; a conversation adding only over-used replies is left out
+MIN_COUNTED_REPLY = 24     # shorter replies ("Yes.", "Positive") are labels, not canned text: never capped
+CHATML_TURN = re.compile(r"<\|im_start\|>[ \t]*([A-Za-z_]+)[ \t]*\n?(.*?)(?=<\|im_end\|>|<\|im_start\|>|\Z)", re.S)
+ROLE_LINE = re.compile(r"^(User|Assistant|System):", re.M)
 
 
 def _clean(value) -> str:
     return str(value if value is not None else "").replace("\r\n", "\n").strip()
+
+
+def chatml_to_text(text: str) -> str | None:
+    """'<|im_start|>user\nHi<|im_end|><|im_start|>assistant\nHello<|im_end|>' -> 'User: Hi\nAssistant: Hello'.
+    None when the text isn't ChatML, so the caller keeps it as it is."""
+    if "<|im_start|>" not in text:
+        return None
+    lines = []
+    for role, content in CHATML_TURN.findall(text):
+        name = ROLE_NAMES.get(role.lower())
+        content = _clean(content)
+        if name and content:
+            lines.append(f"{name}: {content}")
+    return "\n".join(lines) or None
 
 
 def record_to_text(record) -> str | None:
@@ -74,7 +100,7 @@ def record_to_text(record) -> str | None:
             return None
     for key in ("text", "content", "body"):
         if isinstance(record.get(key), str):
-            return _clean(record[key]) or None
+            return chatml_to_text(record[key]) or _clean(record[key]) or None
     return None
 
 
@@ -92,12 +118,12 @@ def detect_format(text: str) -> str:
     return "text"
 
 
-def normalize(text: str) -> tuple[str, dict]:
-    """Raw file contents -> (training text, report). The report says what was found and what was skipped."""
-    text = text.replace("\r\n", "\n").lstrip("﻿")
+def normalize_pieces(text: str) -> tuple[list[str], dict]:
+    """Raw file contents -> (training pieces, report). A piece is one record or conversation; plain text is one
+    piece. The report says what was found and what was skipped."""
+    text = text.replace("\r\n", "\n").lstrip("\ufeff")
     kind = detect_format(text)
     problems: list[str] = []
-    records = 0
     skipped = 0
     if kind in ("json", "jsonl"):
         pieces = []
@@ -105,7 +131,7 @@ def normalize(text: str) -> tuple[str, dict]:
             try:
                 items = json.loads(text)
             except ValueError as error:
-                return "", {"format": kind, "records": 0, "skipped": 0, "chat": False,
+                return [], {"format": kind, "records": 0, "skipped": 0, "chat": False,
                             "problems": [f"The file starts with [ but isn't valid JSON: {error}"]}
             numbered = list(enumerate(items if isinstance(items, list) else [items], 1))
         else:
@@ -127,14 +153,128 @@ def normalize(text: str) -> tuple[str, dict]:
                     keys = ", ".join(sorted(item)[:6]) if isinstance(item, dict) else type(item).__name__
                     problems.append(f"{'Line' if kind == 'jsonl' else 'Item'} {number}: no field I can train on (found: {keys}).")
                 continue
-            records += 1
             pieces.append(converted)
-        out = "\n\n".join(pieces) + ("\n" if pieces else "")
+        records = len(pieces)
+    elif kind == "chat":
+        pieces = [block.strip() for block in text.split("\n\n") if block.strip()]
+        records = len(pieces)
     else:
-        out = text.strip() + "\n"
-        records = sum(1 for block in out.split("\n\n") if block.strip())
-    chat = "\nAssistant:" in "\n" + out and "\nUser:" in "\n" + out
-    return out, {"format": kind, "records": records, "skipped": skipped, "chat": chat, "problems": problems}
+        pieces = [text.strip()] if text.strip() else []
+        records = sum(1 for block in text.split("\n\n") if block.strip())
+    chat = any("\nAssistant:" in "\n" + p for p in pieces) and any("\nUser:" in "\n" + p for p in pieces)
+    return pieces, {"format": kind, "records": records, "skipped": skipped, "chat": chat, "problems": problems}
+
+
+def normalize(text: str) -> tuple[str, dict]:
+    """Raw file contents -> (training text, report). The report says what was found and what was skipped."""
+    pieces, report = normalize_pieces(text)
+    return ("\n\n".join(pieces) + "\n") if pieces else ("" if report["format"] in ("json", "jsonl") else "\n"), report
+
+
+def replies(piece: str) -> list[str]:
+    """The Assistant turns of one conversation, each with its continuation lines."""
+    out = []
+    marks = list(ROLE_LINE.finditer(piece))
+    for mark, nxt in zip(marks, marks[1:] + [None]):
+        if mark.group(1) == "Assistant":
+            out.append(piece[mark.end():nxt.start() if nxt else len(piece)].strip())
+    return out
+
+
+def exchanges(piece: str) -> list[str]:
+    """One conversation -> its exchanges, each running up to and including an Assistant turn (a leading System
+    turn stays with the first). Text after the last reply is a final piece of its own."""
+    out, start = [], 0
+    marks = list(ROLE_LINE.finditer(piece))
+    for mark, nxt in zip(marks, marks[1:] + [None]):
+        if mark.group(1) == "Assistant":
+            end = nxt.start() if nxt else len(piece)
+            out.append(piece[start:end].strip())
+            start = end
+    if piece[start:].strip():
+        out.append(piece[start:].strip())
+    return out
+
+
+def thin_repeats(pieces, seen: set, counts: Counter, max_repeats: int = MAX_REPEATS) -> tuple[list[str], int]:
+    """Leave out what only repeats: a conversation identical to an earlier one, and inside conversations each
+    exchange (question + reply) that has already appeared max_repeats times, or whose reply (of at least
+    MIN_COUNTED_REPLY characters) has, whatever the question. Short replies to different questions ("Positive",
+    "4.") are labels and stay. A conversation left with no reply is dropped. `seen` and `counts` carry over
+    between files; plain text passes through untouched. Returns (kept pieces, exchanges left out)."""
+    kept, dropped = [], 0
+    for piece in pieces:
+        if "Assistant:" not in piece or not ROLE_LINE.search(piece):
+            kept.append(piece)
+            continue
+        if piece in seen:
+            dropped += max(1, len(replies(piece)))
+            continue
+        seen.add(piece)
+        if not max_repeats:
+            kept.append(piece)
+            continue
+        keep = []
+        for part in exchanges(piece):
+            said = replies(part)
+            if not said:
+                keep.append(part)
+                continue
+            reply = said[-1]
+            if counts[("x", part)] >= max_repeats or (len(reply) >= MIN_COUNTED_REPLY and counts[("r", reply)] >= max_repeats):
+                dropped += 1
+                continue
+            counts[("x", part)] += 1
+            counts[("r", reply)] += 1
+            keep.append(part)
+        if any(replies(part) for part in keep):
+            kept.append("\n".join(keep))
+    return kept, dropped
+
+
+def hold_out(pieces, fraction: float = HOLD_OUT) -> tuple[str, str]:
+    """One file's pieces -> (training text, validation text): its last `fraction`, by characters. Many records:
+    whole records from the end. One long text (a book): cut near the end at a paragraph, else a line, else a word
+    break."""
+    text = "\n\n".join(pieces)
+    if fraction <= 0 or not text:
+        return text, ""
+    want = len(text) * fraction
+    if len(pieces) >= 20:
+        i, taken = len(pieces), 0
+        while i > 1 and taken < want:
+            i -= 1
+            taken += len(pieces[i]) + 2
+        return "\n\n".join(pieces[:i]), "\n\n".join(pieces[i:])
+    cut = int(len(text) - want)
+    floor = int(len(text) * (1 - 3 * fraction))
+    for sep in ("\n\n", "\n", " "):
+        at = text.rfind(sep, floor, cut + 1)
+        if at > 0:
+            return text[:at].strip(), text[at:].strip()
+    return text[:cut], text[cut:]
+
+
+def load_split(paths, fraction: float = HOLD_OUT, max_repeats: int = MAX_REPEATS):
+    """Several files -> (training text, [(file name, validation text)], reports). The last `fraction` of every
+    file is held out, so the validation loss measures all of them; repeated conversations are thinned across
+    all files (see thin_repeats). Each report gains "repeats_dropped"."""
+    train_parts, valid_parts, reports = [], [], []
+    seen: set = set()
+    counts: Counter = Counter()
+    for path in paths:
+        path = Path(path).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f"Training data does not exist: {path}")
+        pieces, report = normalize_pieces(path.read_text(encoding="utf-8", errors="replace"))
+        pieces, report["repeats_dropped"] = thin_repeats(pieces, seen, counts, max_repeats)
+        report["file"] = path.name
+        reports.append(report)
+        train, valid = hold_out(pieces, fraction)
+        if train.strip():
+            train_parts.append(train.strip())
+        valid_parts.append((path.name, valid.strip()))
+    return "\n\n".join(train_parts) + "\n\n", valid_parts, reports
 
 
 def load_files(paths) -> tuple[str, list[dict]]:

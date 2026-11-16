@@ -35,10 +35,13 @@ from torch import nn
 from bpe_tokenizer import BPETokenizer
 from lr_governor import LearningRateGovernor
 from sampling import sample_token
-from training_data import load_files
+from training_data import MAX_REPEATS, load_split
 
 MODEL_FILE = "model.pt"
 OPTIMIZER_FILE = "optimizer.pt"
+# How the validation text is chosen, saved in model.json: a continue only compares against a saved validation loss
+# measured the same way (the old split held out just the end of the last file).
+VALIDATION_SPLIT = "per-file-5pct"
 CONFIG_FILE = "model.json"
 TOKENIZER_FILE = "bpe.json"
 RESULT_FILE = "result.json"
@@ -106,32 +109,34 @@ def encode_with_roles(tokenizer: BPETokenizer, text: str, assistant_only: bool):
     return np.asarray(ids, dtype=np.int64), np.asarray(weights, dtype=np.float32)
 
 
-def cached_tokens(app_data: Path, tokenizer_path: Path, data_files, assistant_only: bool, encode):
+def cached_tokens(app_data: Path, tokenizer_path: Path, data_files, assistant_only: bool, encode, extra: str = ""):
     """Encoding with BPE is slow in Python, and a resumed or round-based run reads the same text again: keep the
-    token ids next to the model, keyed by the tokenizer, the data files (name, size, time) and assistant-only."""
+    token ids next to the model, keyed by the tokenizer, the data files (name, size, time), assistant-only and
+    `extra` (how the text was prepared). encode() returns (tokens, weights, bounds)."""
     key = hashlib.sha256()
     key.update(tokenizer_path.read_bytes())
     for name in data_files:
         st = os.stat(name)
         key.update(f"{Path(name).name}|{st.st_size}|{int(st.st_mtime)}|".encode())
     key.update(b"assistant-only-v2" if assistant_only else b"all")   # v2: role markers aren't graded
+    key.update(extra.encode())
     digest = key.hexdigest()[:16]
     cache = app_data / "tokens.npz"
     try:
         with np.load(cache) as saved:
             if str(saved["key"]) == digest:
                 emit("Using the tokens cached from the last run (same text and tokenizer).")
-                return saved["tokens"], saved["weights"]
+                return saved["tokens"], saved["weights"], saved["bounds"]
     except (OSError, KeyError, ValueError):
         pass
-    tokens, weights = encode()
+    tokens, weights, bounds = encode()
     try:
         tmp = app_data / "tokens.tmp.npz"
-        np.savez(tmp, key=np.array(digest), tokens=tokens, weights=weights)
+        np.savez(tmp, key=np.array(digest), tokens=tokens, weights=weights, bounds=bounds)
         os.replace(tmp, cache)
     except OSError:
         pass
-    return tokens, weights
+    return tokens, weights, bounds
 
 
 def average(args) -> int:
@@ -214,11 +219,16 @@ def train(args) -> int:
         torch.set_num_threads(args.threads)
     device = pick_device(args.device)
     rng = random.Random(args.seed)
-    text, reports = load_files(args.data_files)
+    train_text, valid_parts, reports = load_split(args.data_files, max_repeats=max(0, args.max_repeats))
+    text = train_text + "".join(part + "\n\n" for _, part in valid_parts)   # all of it, for the tokenizer
     for report in reports:
         emit(f"Data {report['file']}: {report['format']} format, {report['records']:,} records"
              f"{', ' + format(report['skipped'], ',') + ' skipped' if report['skipped'] else ''}"
              f"{', conversations found' if report['chat'] else ''}.")
+        if report.get("repeats_dropped"):
+            emit(f"  {report['repeats_dropped']:,} repeated exchanges left out: the same question and answer (or the same "
+                 f"long answer) already appeared {args.max_repeats} times. Seeing it hundreds of times would only teach "
+                 "the model to give that answer to everything.")
         for problem in report["problems"][:5]:
             emit(f"  skipped: {problem}")
     if len(text) < 1000:
@@ -247,9 +257,19 @@ def train(args) -> int:
         tokenizer = BPETokenizer.train(text, args.vocab_size)
         tokenizer.save(tokenizer_path)
 
-    tokens, weights = cached_tokens(app_data, tokenizer_path, args.data_files, args.assistant_only,
-                                    lambda: encode_with_roles(tokenizer, text, args.assistant_only))
-    split = int(len(tokens) * 0.95)
+    def encode_split():
+        """Training text, then each file's held-out tail; bounds[0] is where validation starts and bounds[i + 1]
+        where file i's validation part ends."""
+        ids, ws = [], []
+        for part in [train_text] + [part + "\n\n" if part else "" for _, part in valid_parts]:
+            a, b = encode_with_roles(tokenizer, part, args.assistant_only) if part else (np.zeros(0, np.int64), np.zeros(0, np.float32))
+            ids.append(a)
+            ws.append(b)
+        return np.concatenate(ids), np.concatenate(ws), np.cumsum([len(a) for a in ids]).astype(np.int64)
+
+    tokens, weights, bounds = cached_tokens(app_data, tokenizer_path, args.data_files, args.assistant_only, encode_split,
+                                            extra=f"split-per-file-v1|repeats{max(0, args.max_repeats)}")
+    split = int(bounds[0])
     if len(tokens) - split < args.context + 2:
         if args.resume:
             raise ValueError(f"Not enough text to check the model: the held-out 5% is {len(tokens) - split:,} tokens, "
@@ -262,7 +282,18 @@ def train(args) -> int:
     train_tokens, valid_tokens = tokens[:split], tokens[split:]
     train_weights, valid_weights = weights[:split], weights[split:]
     emit(f"Tokens: {len(tokens):,} ({len(text) / len(tokens):.2f} characters per token); "
-         f"{len(train_tokens):,} to train, {len(valid_tokens):,} to validate.")
+         f"{len(train_tokens):,} to train, {len(valid_tokens):,} to validate (the last 5% of every file).")
+    segments = [(Path(f).name, int(a), int(b)) for f, a, b in zip(args.data_files, bounds[:-1], bounds[1:])]
+
+    def by_file(batches: int = 4) -> str:
+        """Validation loss of each file on its own: one far below the rest is being memorised, one far above isn't
+        being learned. Files whose held-out part is shorter than a window (or ungraded) are left out."""
+        parts = []
+        for name, a, b in segments:
+            if b - a >= args.context + 2 and float(weights[a:b].sum()) > 0:
+                loss = evaluate(model, tokens[a:b], weights[a:b], args.context, args.batch_size, device, batches)
+                parts.append(f"{name} {loss:.3f}")
+        return " · ".join(parts) if len(parts) > 1 else ""
 
     model = GPT(tokenizer.vocab_size, args.context, args.dim, args.heads, args.layers, args.dropout).to(device)
     if args.resume:
@@ -312,6 +343,7 @@ def train(args) -> int:
             "assistant_only": bool(args.assistant_only), "dropout": args.dropout, "trained_steps": previous_steps + done_steps,
             "validation_loss": validation, "compute_device": str(device),
             "data_files": [Path(p).name for p in args.data_files], "saved_at": time.time(),
+            "validation_split": VALIDATION_SPLIT,
         }
         tmp = app_data / (CONFIG_FILE + ".tmp")
         tmp.write_text(json.dumps(config, indent=2), encoding="utf-8")
@@ -342,7 +374,10 @@ def train(args) -> int:
     kept = {"loss": None, "step": None, "train": None}
     if args.resume and not args.allow_regression and not args.lr_progress:
         prior = saved.get("validation_loss")
-        if isinstance(prior, (int, float)):
+        if isinstance(prior, (int, float)) and saved.get("validation_split") != VALIDATION_SPLIT:
+            emit(f"The saved validation ({prior:.4f}) was measured on the end of the last file only; it is now measured "
+                 "on the last 5% of every file, so the two can't be compared. This run keeps its own best.")
+        elif isinstance(prior, (int, float)):
             kept.update(loss=float(prior), step=previous_steps)
             emit(f"Keeping the best: this run only replaces the saved model if it beats its validation of {prior:.4f}.")
     done = 0
@@ -407,6 +442,12 @@ def train(args) -> int:
         emit("Stopped before the first step finished; nothing was changed.")
         return 0
     final_validation = evaluate(model, valid_tokens, valid_weights, args.context, args.batch_size, device)
+    # Per file, at the end of a run (in a long shared job, about every 5% of it, so the rounds stay quick).
+    lp = args.lr_progress
+    if not lp or int(lp[0] * 20) != int(lp[1] * 20) or lp[1] >= 1.0:
+        split_losses = by_file()
+        if split_losses:
+            emit(f"Validation by file: {split_losses}")
     if kept["loss"] is not None and final_validation > kept["loss"]:
         from_continue = args.resume and kept["step"] == previous_steps
         where = ("the model you continued from" if from_continue
@@ -923,6 +964,8 @@ def main() -> int:
     train_parser.add_argument("--save-every", type=int, default=500, help="save a checkpoint every N steps (0: only at the end)")
     train_parser.add_argument("--dropout", type=float, default=0.0, help="fraction of values zeroed while training (0-0.5)")
     train_parser.add_argument("--quality", default=None, help="JSON: test prompts and when the model is good enough (see parse_quality)")
+    train_parser.add_argument("--max-repeats", type=int, default=MAX_REPEATS,
+                              help="keep an identical exchange (or long reply) at most this many times (0: keep all)")
     train_parser.add_argument("--lr-progress", nargs=2, type=float, default=None, metavar=("FROM", "TO"),
                               help="follow the cosine schedule from FROM to TO (0..1) of a longer job, with no warm-up")
     train_parser.set_defaults(handler=train)

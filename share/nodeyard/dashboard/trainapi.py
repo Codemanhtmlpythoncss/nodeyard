@@ -1006,8 +1006,9 @@ class Trainer:
 
     def samples(self, names, count=20, held_out=False):
         """Real exchanges from the ticked files to test the model with: (what the person said, the reply in the data).
-        Plain text gives (the start of a line, how it goes on). held_out: from the last 5%, which the trainer never
-        trains on, so passing means it learned the patterns rather than these lines."""
+        Plain text gives (the start of a line, how it goes on). held_out: from the end of each file the trainer
+        holds back (training_data.hold_out, the last 5%), so passing means it learned the patterns rather than
+        these lines."""
         import random
         training_data = _jobs_module("training_data")
         pairs, chat = [], False
@@ -1015,12 +1016,18 @@ class Trainer:
             path = self._data_path(name)
             if not os.path.isfile(path):
                 continue
-            with open(path, "rb") as f:
-                raw = f.read(CHECK_SAMPLE)
-            text, rep = training_data.normalize(raw.decode("utf-8", errors="replace"))
-            blocks = [b for b in text.split("\n\n") if b.strip()]
-            cut = int(len(blocks) * 0.95)
-            blocks = blocks[cut:] if held_out else blocks[:cut]
+            pieces, rep = [], {"chat": False}
+            if held_out and os.path.getsize(path) > CHECK_SAMPLE:   # the held-back part is the end: read the end
+                with open(path, "rb") as f:
+                    f.seek(os.path.getsize(path) - CHECK_SAMPLE)
+                    raw = f.read()
+                pieces, rep = training_data.normalize_pieces(raw[raw.find(b"\n") + 1:].decode("utf-8", errors="replace"))
+            if not pieces:
+                with open(path, "rb") as f:
+                    raw = f.read(CHECK_SAMPLE)
+                pieces, rep = training_data.normalize_pieces(raw.decode("utf-8", errors="replace"))
+            train, valid = training_data.hold_out(pieces)
+            blocks = [b for b in (valid if held_out else train).split("\n\n") if b.strip()]
             for b in blocks:
                 lines = b.split("\n")
                 for a, c in zip(lines, lines[1:]):
@@ -1700,6 +1707,8 @@ class Trainer:
                 remotes[n].call("POST", "/pull", {"url": lead.url, "path": "models/%s/%s" % (model, f), "dest": "models/%s/%s" % (model, f)}, timeout=600)
         tokens_per_step = int(_opt(job["options"], "--batch-size")) * int(_opt(job["options"], "--context")) \
             * _opt_int(job["options"], "--grad-accum", 1)
+        rate = RoundRate(job["options"])
+        job["lr_peak"] = rate.peak
         lead_done = 0
         for rnd in range(1, rounds + 1):
             if job["stop"] or len(active) == 0:
@@ -1718,12 +1727,14 @@ class Trainer:
                 seen, measure = self._measure(n)
                 try:
                     opts = job["options"] + ["--resume", "--steps", str(plan[n]), "--lr-progress", "%.6f" % ((rnd - 1) / rounds), "%.6f" % (rnd / rounds),
-                                             "--seed", str(17 + 1000 * i + rnd), "--eval-every", str(plan[n]), "--save-every", "0"]
+                                             "--seed", str(17 + 1000 * i + rnd), "--eval-every", str(plan[n]), "--save-every", "0",
+                                             "--learning-rate", repr(rate.peak)]
                     if n == lead_name and job.get("quality"):
                         opts += ["--quality", job["quality"]]
 
                     def verdict(line, measure=measure):
                         measure(line)
+                        rate.line(line)
                         if line.startswith(("Good enough at", "Stopped improving")):
                             job["stop"] = True   # the averaged model this round makes is the last
 
@@ -1769,6 +1780,8 @@ class Trainer:
             job["phase"] = "saving"
             self._pull_model(lead, model)
             lead_done += plan[lead_name]
+            if rate.end_round(say):
+                job.update(lr_peak=rate.peak, lr_cuts=rate.governor.reductions)
         say("Shared training finished after %d round(s) on %s." % (job["round"], ", ".join(active)))
         return 0
 
@@ -2201,6 +2214,41 @@ def _jobs_module(name):
         return __import__(name)
     finally:
         sys.path.remove(JOBS_DIR)
+
+
+class RoundRate:
+    """The peak learning rate of a shared job, across its rounds.
+
+    Each round is a fresh trainer run that checks validation once, so the governor inside it never sees the 4
+    stalled checks in a row it needs: in shared training the plateau cuts never happened. This one governor lasts
+    the whole job: line() reads the lead's log (train losses, its validation check), end_round() judges that check
+    and, when validation has stalled, lowers `peak`, which every machine gets as --learning-rate next round.
+    """
+
+    def __init__(self, options):
+        self.peak = float(_opt(options, "--learning-rate"))
+        self.governor = _jobs_module("lr_governor").LearningRateGovernor(self.peak)
+        self.check = None
+
+    def line(self, line):
+        m = STEP_RE.match(line)
+        if m:
+            self.governor.note_train_loss(_f(m.group(3)))
+            return
+        m = VAL_RE.match(line)
+        if m and _f(m.group(2)) is not None and math.isfinite(_f(m.group(2))):
+            self.check = (_f(m.group(2)), int(m.group(3).replace(",", "")))
+
+    def end_round(self, say):
+        """Judge this round's check; True when the peak was lowered."""
+        check, self.check = self.check, None
+        if check is None:
+            return False
+        lower = self.governor.observe(check[0], self.peak, check[1], say)
+        if lower is None:
+            return False
+        self.peak = lower
+        return True
 
 
 def _opt(options, flag):
