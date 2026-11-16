@@ -9,6 +9,19 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Train AI: your whole network in one zoomable picture.** *Your model's network* (in *4 · Inside the model* and *Learn → A whole network*) now draws every neuron of the feed-forward network at once, left to right:
+  - the **input** (the numbers the token becomes);
+  - each block's feed-forward layer (in → hidden GELU neurons → out);
+  - the final layer norm;
+  - the **output**, one neuron per token with its name and probability.
+
+  Attention and layer norm sit in labelled gaps between them. Lines are the real weights, blue adding and red subtracting: every weight where there's room, otherwise the strongest into each neuron.
+  - Two modes. **Live values** colours each neuron by its number for the token you choose. **Biases & formulas** colours it by its bias and writes the bias above it.
+  - Click any neuron for the calculation it does, written with Σ, fractions and a placeholder for every input (for example *h*ⱼ = GELU(Σᵢ *a*ᵢ · W₁[*j*, *i*] + *b*ⱼ)), then the same with its own numbers: its bias, all of its real weights and, in *Live values*, every step worked out.
+  - Zoom from the whole network down to single neurons, for nets of any size: pinch, ⌘/Ctrl + scroll, double-click (Shift to zoom out), the **− Fit +** buttons, or + − 0 and the arrow keys. Drag to move around.
+
+  The tokenisation now sits in a collapsed section underneath. The worker sends the lines with the trace, as compact top-k weights per matrix, so after updating the training machines press **Run again** to see them.
+
 - **Train AI: your model's network in *4 · Inside the model*.** The tab has a new first view, **Your model's network**, with its own **Model** dropdown listing every model you trained. Opening it picks your model and runs some text through it straight away, then shows the same neuron-by-neuron view as *Learn → A whole network*: the exact tokenisation from its `bpe.json`, every neuron of every layer with its real weights, and the full calculation behind any neuron you click. *Every number* and *Summary + one training step* are still there, one click away.
 - **Train AI: Auto-setup to continue.** The *Auto-setup* card in step 3 now has a second button with a dropdown of your saved models (each shown with its weights, steps and loss). Pick one and press **Auto-setup to continue**: it chooses and warms up the machines as before, but plans for the model as it already is. Its shape and tokenizer stay fixed, *Auto* time is what it needs to read the text fully, the learning rate comes from how trained it already is, and *Keep the best* stays on. With no data ticked, it continues on the files the model was trained on, skipping any you've since deleted. If they're all gone, it tells you to choose some in step 2. Then press **Continue training**.
 

@@ -68,6 +68,35 @@ class TraceTests(unittest.TestCase):
         w = t["weights"][h["weight"]][h["offset"] + 2]
         b = t["vectors"][h["bias"]][h["offset"] + 2]
         self.assertAlmostEqual(sum(a * c for a, c in zip(x, w)) + b, q["values"][1][2], places=5)   # the page's sum of products
+        g = t["graph"]                           # the whole-network picture's lines: every feed-forward matrix and the head
+        self.assertIn("head.weight", g)
+        self.assertIn("blocks.layers.0.linear1.weight", g)
+        self.assertIn("blocks.layers.0.linear2.weight", g)
+
+    def test_graph_edges_keep_the_strongest_weights_into_each_neuron(self):
+        import base64
+        import numpy as np
+        torch.manual_seed(0)
+        w = torch.randn(6, 40)
+
+        def decode(e):
+            idx = np.frombuffer(base64.b64decode(e["idx"]), dtype="<u2" if e["ib"] == 2 else "<u4").reshape(e["shape"][0], e["k"])
+            q = np.frombuffer(base64.b64decode(e["w"]), dtype=np.int8).reshape(e["shape"][0], e["k"])
+            return idx, q
+
+        e = T.graph_edges(w, 6 * 5)              # 30 lines for 6 neurons: the 5 biggest |w| into each
+        self.assertEqual((e["shape"], e["k"], e["ib"]), ([6, 40], 5, 2))
+        idx, q = decode(e)
+        for r in range(6):
+            self.assertEqual(set(idx[r].tolist()), set(w[r].abs().topk(5).indices.tolist()))
+            for i, c in zip(idx[r], q[r]):       # int8 of w / scale: within half a step
+                self.assertLessEqual(abs(c / 127 * e["scale"] - float(w[r, i])), e["scale"] / 254 + 1e-6)
+        self.assertAlmostEqual(e["scale"], float(w.abs().max()), places=5)
+        full = T.graph_edges(w, 10 ** 6)          # budget for every weight: all 40 into each, in order
+        idx, q = decode(full)
+        self.assertEqual(full["k"], 40)
+        self.assertEqual(idx.tolist(), [list(range(40))] * 6)
+        self.assertEqual(T.graph_edges(torch.randn(3, 70000), 3)["ib"], 4)   # more than 65535 inputs: 32-bit indices
 
 
 if __name__ == "__main__":

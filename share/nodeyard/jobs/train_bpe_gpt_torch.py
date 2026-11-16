@@ -620,6 +620,29 @@ def _g(t) -> list:
     return [[one(x) for x in row] for row in t.tolist()]
 
 
+GRAPH_EDGES = 12000         # lines per weight matrix in the whole-network picture (the strongest into each neuron)
+GRAPH_TOTAL = 360000        # and at most this many in all, however big the model
+
+
+def graph_edges(w: torch.Tensor, budget: int) -> dict:
+    """The strongest incoming weights of every output neuron of one weight matrix ([outputs, inputs]), packed small
+    for the page's whole-network picture: for each output row its k largest |w|, as input indices (uint16, or uint32
+    past 65,535 inputs, little-endian) and the weights rounded to int8 (× scale ÷ 127 gives them back to about 1%).
+    The page reads the exact weights from model.pt when you click a neuron; these only draw the lines."""
+    import base64
+    w = w.detach().float().cpu()
+    n_out, n_in = int(w.shape[0]), int(w.shape[1])
+    k = max(1, min(n_in, budget // max(1, n_out)))
+    idx = w.abs().topk(k, dim=1).indices if k < n_in else torch.arange(n_in).expand(n_out, n_in)
+    vals = torch.gather(w, 1, idx)
+    scale = float(vals.abs().max()) or 1.0
+    q = torch.clamp(torch.round(vals / scale * 127), -127, 127).to(torch.int8).numpy()
+    wide = n_in > 65535
+    ix = idx.numpy().astype("<u4" if wide else "<u2")
+    return {"shape": [n_out, n_in], "k": k, "scale": float("%.9g" % scale), "ib": 4 if wide else 2,
+            "idx": base64.b64encode(ix.tobytes()).decode("ascii"), "w": base64.b64encode(q.tobytes()).decode("ascii")}
+
+
 @torch.no_grad()
 def trace(args) -> int:
     """Every number of one forward pass, in order, and how each one is made (so the page can expand any number into
@@ -714,6 +737,11 @@ def trace(args) -> int:
            "config": {k: config.get(k) for k in ("vocabulary", "context", "width", "heads", "layers", "parameters", "trained_steps")},
            "ops": ops, "vectors": vectors, "check_max_difference": float((reference - logits).abs().max()),
            "parameters": [{"name": n, "shape": list(p.shape)} for n, p in model.named_parameters()]}
+    lines = [x for i, layer in enumerate(model.blocks.layers) for x in
+             (("blocks.layers.%d.linear1.weight" % i, layer.linear1.weight), ("blocks.layers.%d.linear2.weight" % i, layer.linear2.weight))]
+    lines.append(("head.weight", model.head.weight))
+    per = max(1, min(GRAPH_EDGES, GRAPH_TOTAL // len(lines)))
+    out["graph"] = {name: graph_edges(w, per) for name, w in lines}   # the lines of the whole-network picture
     if not trained:   # nothing saved to read the weights from: include them (the demo model is tiny)
         out["weights"] = {n: _g(p.detach() if p.dim() == 2 else p.detach().unsqueeze(0)) for n, p in model.named_parameters()}
     Path(args.out).write_text(json.dumps(out, separators=(",", ":")), encoding="utf-8")

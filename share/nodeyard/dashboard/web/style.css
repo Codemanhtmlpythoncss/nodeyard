@@ -1303,16 +1303,33 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .nn-pick > .tr-field.inline { min-width: 0; max-width: 100%; }
 .nn-pick .tr-field.inline .select { min-width: 0; flex: 1 1 auto; text-overflow: ellipsis; }
 .card .tr-h3.nn-h { margin: 18px 0 8px; }
-.nn-svg.nn-real { max-width: 780px; }
-.nn-idx { fill: var(--bg); font: 600 9px ui-monospace, Menlo, monospace; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
-.nn-idx.tiny { font-size: 7.5px; letter-spacing: -.03em; }
-.nn-tok { fill: var(--text); font: 500 11.5px ui-monospace, Menlo, monospace; dominant-baseline: middle; pointer-events: none; white-space: pre; }
-.nn-tok.l { text-anchor: end; } .nn-tok.r { text-anchor: start; }
-.nn-range { fill: var(--faint); font-size: 10.5px; text-anchor: middle; }
-.nn-page { cursor: pointer; outline: none; }
-.nn-page rect { fill: var(--panel2); stroke: var(--line2); }
-.nn-page text { fill: var(--muted); font-size: 10px; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
-.nn-page:hover rect, .nn-page:focus-visible rect { stroke: var(--accent); }
+/* the whole network of a model you trained, on one zoomable canvas */
+.bn-wrap { position: relative; margin: 8px 0 4px; }
+.bn-canvas { display: block; width: 100%; height: clamp(340px, 68vh, 760px); background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; touch-action: none; cursor: crosshair; outline: none; }
+.bn-canvas:focus-visible { border-color: var(--accent); }
+.bn-canvas.grab { cursor: grabbing; }
+.bn-tip { position: absolute; z-index: 2; pointer-events: none; max-width: min(340px, 90%); padding: 4px 8px; border-radius: 6px; background: var(--solid); border: 1px solid var(--line2); color: var(--text); font: 500 11.5px ui-monospace, Menlo, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: 0 4px 14px rgba(0, 0, 0, .25); }
+.bn-tip[hidden] { display: none; }
+.bn-zoom button { min-width: 34px; }
+.bn-zl { min-width: 44px; font-variant-numeric: tabular-nums; }
+.bn-detail { margin-top: 10px; height: auto; }
+.bn-f { font: 16px/2 "Times New Roman", Georgia, serif; margin: 8px 0; padding: 6px 12px; background: var(--bg2); border-radius: 8px; overflow-x: auto; }
+.bn-f > div { white-space: nowrap; }
+.bn-f sub, .bn-f sup { font-size: .7em; }
+.bn-n { font: 13px ui-monospace, Menlo, monospace; color: var(--warn); }
+.bn-c { font: 12.5px system-ui, sans-serif; color: var(--muted); }
+.bn-sig { display: inline-flex; flex-direction: column; align-items: center; vertical-align: middle; line-height: 1; margin: 0 3px 0 1px; }
+.bn-sig b { font-size: 1.55em; font-weight: 400; line-height: .95; }
+.bn-sig small { font-size: .6em; font-style: italic; }
+.bn-fr { display: inline-flex; flex-direction: column; align-items: center; vertical-align: middle; line-height: 1.25; margin: 0 2px; }
+.bn-fr > span:first-child { border-bottom: 1px solid currentColor; padding: 0 3px; }
+.bn-fr > span:last-child { padding: 0 3px; }
+.bn-terms { margin: 8px 0 0; }
+.bn-terms > summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+.bn-terms > div { max-height: 220px; overflow: auto; margin-top: 6px; padding: 8px 10px; background: var(--bg2); border-radius: 8px; font: 12px/1.75 ui-monospace, Menlo, monospace; overflow-wrap: anywhere; }
+.bn-terms sub { font-size: .75em; }
+.nn-tokdetails { margin-top: 14px; }
+.nn-tokdetails > summary { cursor: pointer; font-weight: 600; margin-bottom: 6px; }
 .nn-bar { align-items: center; gap: 8px; margin: 8px 0; }
 .nn-bar .select { max-width: 100%; }
 .nn-exact { font-family: ui-monospace, Menlo, monospace; }
