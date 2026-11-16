@@ -9,6 +9,12 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Train AI: full screen for the whole network.** A **Full screen** button next to the zoom controls (or F on the picture) lets the network fill the screen:
+  - the tabs and zoom stay along the top;
+  - the clicked neuron's formula sits beside the network, or under it on a phone;
+  - it uses the browser's own full screen where it can, and fills the page where it can't (iPhone);
+  - Esc clears the clicked neuron first, then leaves full screen.
+
 - **Train AI: a Placeholders tab for the whole network.** *The whole network, every neuron* now has three tabs, and **Placeholders** opens first:
   - it draws only the part your data goes into and comes out of, in one unbroken piece: input x → Block 1 hidden → Block 1 out → Block 2 hidden → … → output, with no layer-norm columns and no attention gaps;
   - every value is a letter: each neuron is labelled x₇, h₁₀₆, o₂₂ or p₄₄₃, its bias's letter (b₁₀₆) sits above it, and the lines are plain grey (they show which neuron feeds which, not the weights);
