@@ -9,6 +9,13 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Train AI: a Placeholders tab for the whole network.** *The whole network, every neuron* now has three tabs, and **Placeholders** opens first:
+  - it draws only the part your data goes into and comes out of, in one unbroken piece: input x → Block 1 hidden → Block 1 out → Block 2 hidden → … → output, with no layer-norm columns and no attention gaps;
+  - every value is a letter: each neuron is labelled x₇, h₁₀₆, o₂₂ or p₄₄₃, its bias's letter (b₁₀₆) sits above it, and the lines are plain grey (they show which neuron feeds which, not the weights);
+  - clicking a neuron gives its calculation with Σ and letters only, for example hⱼ = GELU(Σᵢ oᵢ · W₁[j, i] + bⱼ), then that one neuron's sum written out, and draws its lines to every neuron on each side;
+  - if a run has no line data (from a training machine without the update), it draws an even sample of the connections;
+  - **Live values** and **Biases & formulas** are the same as before.
+
 - **Train AI: your whole network in one zoomable picture.** *Your model's network* (in *4 · Inside the model* and *Learn → A whole network*) now draws every neuron of the feed-forward network at once, left to right:
   - the **input** (the numbers the token becomes);
   - each block's feed-forward layer (in → hidden GELU neurons → out);

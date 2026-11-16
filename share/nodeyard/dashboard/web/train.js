@@ -330,17 +330,21 @@
   // against it); the lines from the trace's "graph" (each neuron's strongest incoming weights, packed small); a clicked
   // neuron's exact weights from the model's model.pt (/api/train/weights); the tokenisation from its bpe.json.
   const fx9 = (x) => fx(x, 9);                        // 9 significant digits give a float32 value back exactly
-  const BN = { tr: null, net: null, view: null, sel: null, calc: null, row: null, hover: null, cmax: {}, ptr: new Map(), moved: false, moving: 0, raf: 0, idleT: 0 };
+  const BN = { tr: null, net: null, nets: null, flat: false, view: null, sel: null, calc: null, row: null, hover: null, cmax: {}, ptr: new Map(), moved: false, moving: 0, raf: 0, idleT: 0 };
   const BNM = { top: 44, bottom: 14, left: 34, right: 108 };   // room around the neurons: captions above, token names on the right
-  const bnMode = () => (store.get("train.netmode", "values") === "weights" ? "weights" : "values");
+  const bnMode = () => { const m = store.get("train.netmode", "net"); return m === "values" || m === "weights" ? m : "net"; };   // the tab: "net" (placeholders), "values" or "weights"
   const subs = (n) => String(n).replace(/\d/g, (c) => "₀₁₂₃₄₅₆₇₈₉"[c]);
   const bnTok = (v) => vis(EV.trace.vocab && EV.trace.vocab[v] != null ? EV.trace.vocab[v] : "#" + v);
   function bnBytes(s, Arr) { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return new Arr(u.buffer); }
   function bnModel() {                                // the columns of neurons, the gaps (attention, layer norm) and the weights between
     const tr = EV.trace;
     if (!tr) return null;
-    if (BN.tr === tr) return BN.net;
-    Object.assign(BN, { tr, sel: null, calc: null, row: null, hover: null, view: null, cmax: {} });
+    const flat = bnMode() === "net";
+    if (BN.tr === tr) {                               // same run: switching to or from the placeholder tab swaps the picture
+      if (BN.flat !== flat) { Object.assign(BN, { flat, sel: null, calc: null, row: null, hover: null, view: null, cmax: {} }); BN.net = flat ? BN.nets.flat : BN.nets.full; }
+      return BN.net;
+    }
+    Object.assign(BN, { tr, flat, sel: null, calc: null, row: null, hover: null, view: null, cmax: {} });
     const ops = tr.ops, c = tr.config, d = c.width, cols = [], links = [], gaps = [];
     const grp = (g) => ops.filter((o) => o.group === g), kind = (g, k) => g.filter((o) => o.how.kind === k);
     const lin = (g, end) => g.find((o) => o.how.kind === "linear" && o.how.weight.endsWith(end));
@@ -370,7 +374,24 @@
       l.k = g.k; l.src = bnBytes(g.idx, g.ib === 4 ? Uint32Array : Uint16Array); l.q = bnBytes(g.w, Int8Array);
       l.ord = new Uint32Array(l.q.length).map((_, i) => i).sort((a, b) => Math.abs(l.q[b]) - Math.abs(l.q[a]));
     });
-    return (BN.net = { cols, links, gaps, d, V: LG.shape[1] });
+    const full = { cols, links, gaps, d, V: LG.shape[1] };
+    BN.nets = { full, flat: bnFlat(full) };
+    return (BN.net = flat ? BN.nets.flat : full);
+  }
+  function bnFlat(full) {                             // the placeholder tab: only the feed-forward layers, one straight into the next (input → hidden → out → … → output)
+    const cols = full.cols.filter((c) => c.role !== "ln"), links = [];
+    cols.forEach((c, i) => {
+      if (!i || !c.w) return;
+      const A = cols[i - 1], l = full.links.find((x) => x.name === c.w);
+      links.push(l && l.q ? Object.assign({}, l, { from: i - 1, to: i, nA: A.n }) : bnSample(i - 1, i, A.n, c.n, c.w));
+    });
+    return { cols, links, gaps: [], d: full.d, V: full.V, flat: true };
+  }
+  function bnSample(from, to, nA, nB, name) {         // a run without lines: each neuron is joined to all of the layer before, so draw an even sample of them
+    const k = Math.max(1, Math.min(nA, Math.floor(3000 / nB))), n = nB * k, src = new Uint32Array(n), ord = new Uint32Array(n), q = new Int8Array(n).fill(64);
+    for (let j = 0; j < nB; j++) { const off = (j * 0.6180339887) % 1; for (let e = 0; e < k; e++) src[j * k + e] = Math.min(nA - 1, Math.floor((e + off) / k * nA)); }
+    for (let i = 0; i < n; i++) ord[i] = (i % nB) * k + Math.floor(i / nB);   // round-robin over the neurons, so a quick frame still reaches every one
+    return { from, to, name, nA, nB, k, src, q, ord, sample: true };
   }
   function bnT() { const tr = EV.trace, t = L.net.t; return t == null ? tr.tokens.length - 1 : Math.max(0, Math.min(tr.tokens.length - 1, t)); }
   function bnMax(ci, t) {                             // the biggest |number| in a column (t ≥ 0) or |bias| (t = −1): what full colour means
@@ -401,7 +422,7 @@
     const dpr = window.devicePixelRatio || 1, PW = Math.round(W * dpr), PH = Math.round(H * dpr);
     if (cv.width !== PW || cv.height !== PH) { cv.width = PW; cv.height = PH; }
     const G = bnGeom(cv), v = BN.view || (BN.view = { z: 1, ox: BNM.left, oy: BNM.top }); bnClamp(G, v);
-    const { sx, sy } = bnScale(G, v.z), ctx = cv.getContext("2d"), cols = net.cols, vals = bnMode() === "values", t = bnT();
+    const { sx, sy } = bnScale(G, v.z), ctx = cv.getContext("2d"), cols = net.cols, mode = bnMode(), vals = mode === "values", ph = mode === "net", t = bnT();
     const fast = performance.now() - BN.moving < 140, sel = BN.sel, top = BNM.top - 6, TAU = Math.PI * 2;
     const C = { pos: cssv("--accent", "#7c8cff"), neg: cssv("--bad", "#f87171"), text: cssv("--text", "#e9edf7"), muted: cssv("--muted", "#9ba5bf"),
       line: cssv("--line2", "rgba(255,255,255,.16)"), bg: cssv("--bg2", "#0e1427"), warn: cssv("--warn", "#fbbf24") };
@@ -430,12 +451,24 @@
       ctx.lineWidth = 1;
       bk.forEach((ys, j) => {                         // weakest first, blue and red taking turns so neither paints over the other
         if (!ys.length) return;
-        ctx.strokeStyle = j % 2 ? C.neg : C.pos; ctx.globalAlpha = lv[j >> 1] * dens; ctx.beginPath();
-        for (let i = 0; i < ys.length; i += 2) { ctx.moveTo(xa, ys[i]); ctx.lineTo(xb, ys[i + 1]); }
+        ctx.strokeStyle = ph ? C.muted : j % 2 ? C.neg : C.pos; ctx.globalAlpha = ph ? 0.5 * dens * dens : lv[j >> 1] * dens; ctx.beginPath();   // placeholders: no weights, just which neuron feeds which
+        for (let i = 0; i < ys.length; i += 2) {
+          ctx.moveTo(xa, ys[i]); ctx.lineTo(xb, ys[i + 1]);
+          if (ph && i % 1200 === 1198) { ctx.stroke(); ctx.beginPath(); }   // one grey bucket: stroke in batches so crossing lines still build up instead of one flat wash
+        }
         ctx.stroke();
       });
     });
-    if (sel) {                                        // the clicked neuron: all of its incoming weights (exact), and its lines out
+    if (sel && ph) {                                  // placeholders: the clicked neuron is joined to every neuron on its left and on its right
+      const c = cols[sel.ci], ys = Y(c, sel.k); ctx.strokeStyle = C.text; ctx.lineWidth = 0.8;
+      [-1, 1].forEach((dir) => {
+        const ai = sel.ci + dir, A = cols[ai]; if (!A) return;
+        const xa = X(ai) - dir * R(A), xc = X(sel.ci) + dir * R(c); ctx.globalAlpha = Math.max(0.12, Math.min(0.7, 40 / A.n)); ctx.beginPath();
+        for (let i = 0; i < A.n; i++) { const y = Y(A, i); if ((y < top && ys < top) || (y > H && ys > H)) continue; ctx.moveTo(xc, ys); ctx.lineTo(xa, y); }
+        ctx.stroke();
+      });
+    }
+    if (sel && !ph) {                                 // the clicked neuron: all of its incoming weights (exact), and its lines out
       const c = cols[sel.ci], ys = Y(c, sel.k), line = (x1, y1, x2, y2, w, mx) => {
         if ((y1 < top && y2 < top) || (y1 > H && y2 > H)) return;
         const a = Math.min(1, Math.abs(w) / mx); ctx.strokeStyle = w < 0 ? C.neg : C.pos; ctx.globalAlpha = 0.3 + 0.65 * a; ctx.lineWidth = 0.6 + 2.4 * a;
@@ -453,7 +486,7 @@
     cols.forEach((c, ci) => {
       const x = X(ci); if (x < -40 || x > W + 140) return;
       const p = sy / c.n, r = R(c), k0 = Math.max(0, Math.floor((top - v.oy) / sy * c.n) - 1), k1 = Math.min(c.n - 1, Math.ceil((H - v.oy) / sy * c.n));
-      const bias = c.bias ? vecOf(c.bias) : null, row = vals ? c.op.values[t] : bias, mx = vals ? bnMax(ci, t) : bnMax(ci, -1);
+      const bias = c.bias ? vecOf(c.bias) : null, row = vals ? c.op.values[t] : ph ? null : bias, mx = vals ? bnMax(ci, t) : bnMax(ci, -1);
       for (let k = k0; k <= k1; k++) {
         const y = v.oy + (k + 0.5) * p, val = row ? row[k] || 0 : 0, a = Math.min(1, c.pct && vals ? Math.sqrt(val / mx) : Math.abs(val) / mx);
         const fill = val < 0 ? C.neg : C.pos;
@@ -478,13 +511,16 @@
       if (r >= 7.5) { ctx.font = "600 8px ui-monospace, Menlo, monospace"; const s = String(k); if (ctx.measureText(s).width <= 2 * r - 2) { ctx.textAlign = "center"; ctx.fillStyle = C.text; ctx.fillText(s, x, y + 0.5); } }
       if (c.role === "logit") {
         let s = "“" + bnTok(k) + "”"; if (s.length > 16) s = s.slice(0, 15) + "…”";
-        text(vals ? s + " " + f(val * 100, 3) + "%" : s, x + r + 5, y, C.text, "left", "500 11px ui-monospace, Menlo, monospace");
+        text(vals ? s + " " + f(val * 100, 3) + "%" : ph ? c.sym + subs(k) + " " + s : s, x + r + 5, y, C.text, "left", "500 11px ui-monospace, Menlo, monospace");
       } else if (vals && p >= 18 && sx >= 64) text(f(val, 3), x + r + 4, y, C.muted, "left", "10px ui-monospace, Menlo, monospace");
-      if (!vals && b != null && p >= 26 && sx >= 56) { ctx.textBaseline = "bottom"; text(c.bsym + " = " + f(b, 3), x, y - r - 2, C.warn, "center", "600 9.5px ui-monospace, Menlo, monospace"); }
+      else if (ph && p >= 18 && sx >= 48) text(c.sym + subs(k), x + r + 4, y, C.text, "left", "italic 12px Georgia, 'Times New Roman', serif");
+      if (!vals && b != null && p >= 26 && sx >= 56) {   // the bias above the neuron: its letter (placeholders) or its learned number
+        ctx.textBaseline = "bottom"; text(ph ? c.bsym + subs(k) : c.bsym + " = " + f(b, 3), x, y - r - 2, C.warn, "center", ph ? "italic 600 11px Georgia, 'Times New Roman', serif" : "600 9.5px ui-monospace, Menlo, monospace");
+      }
     });
-    if (vals && X(0) > 14) {                          // what goes in: the token, written up the left edge
+    if ((vals || ph) && X(0) > 14) {                 // what goes in, written up the left edge
       ctx.save(); ctx.translate(X(0) - R(cols[0]) - 12, BNM.top + G.ah / 2); ctx.rotate(-Math.PI / 2);
-      ctx.textBaseline = "middle"; text("in: “" + evToken(t) + "” → x", 0, 0, C.warn, "center", "600 11px system-ui, sans-serif"); ctx.restore();
+      ctx.textBaseline = "middle"; text(vals ? "in: “" + evToken(t) + "” → x" : "input goes in → x", 0, 0, C.warn, "center", "600 11px system-ui, sans-serif"); ctx.restore();
     }
     // captions stay at the top while you move around
     ctx.globalAlpha = 1; ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, top);
@@ -537,14 +573,14 @@
   function bnTip(cv, h, px, py) {
     const tip = cv.parentNode && cv.parentNode.querySelector(".bn-tip"); if (!tip) return;
     if (!h) { tip.hidden = true; return; }
-    const c = BN.net.cols[h.ci], b = c.bias ? vecOf(c.bias)[h.k] : null, x = c.op.values[bnT()][h.k];
+    const c = BN.net.cols[h.ci], b = c.bias ? vecOf(c.bias)[h.k] : null, x = c.op.values[bnT()][h.k], mode = bnMode();
     tip.textContent = c.cap + " · " + c.sym + subs(h.k) + (c.role === "logit" ? " “" + bnTok(h.k) + "”" : "")
-      + (bnMode() === "values" ? " = " + (c.pct ? f(x * 100, 4) + "%" : f(x, 5)) : "") + (b != null ? " · " + c.bsym + " = " + f(b, 4) : "");
+      + (mode === "values" ? " = " + (c.pct ? f(x * 100, 4) + "%" : f(x, 5)) : "") + (b != null ? " · " + c.bsym + (mode === "net" ? subs(h.k) : " = " + f(b, 4)) : "");
     tip.hidden = false;
     tip.style.left = Math.max(4, Math.min(px + 14, cv.clientWidth - tip.offsetWidth - 4)) + "px"; tip.style.top = Math.min(py + 16, cv.clientHeight - 26) + "px";
   }
   async function bnLoad() {                          // what the clicked neuron's panel needs: its exact weights, and (values) its calculation
-    const h = BN.sel; if (!h || !BN.net) return;
+    const h = BN.sel; if (!h || !BN.net || bnMode() === "net") return;   // placeholders need no numbers
     const c = BN.net.cols[h.ci], t = bnT(), jobs = [];
     if (c.w && !(BN.row && BN.row.ci === h.ci && BN.row.k === h.k)) jobs.push(weightRow(c.w, h.k).then((vals) => { if (BN.sel === h) { BN.row = { ci: h.ci, k: h.k, vals }; bnKick(false); } }));
     if (bnMode() === "values" && !(BN.calc && BN.calc.h === h && BN.calc.t === t)) jobs.push(c.calc(t, h.k).then((text) => { if (BN.sel === h && bnT() === t) BN.calc = { h, t, text }; }));
@@ -599,9 +635,37 @@
       key: [[vv(P, "j"), "the " + prev.n + " numbers of the final layer norm", ""], [c.wsym, c.w + " (" + n0(c.n) + " × " + prev.n + "); row " + k + " is token “" + esc(bnTok(k)) + "”'s weights", ""],
         [vv("b", k), "its bias (" + c.bias + ")", fx9(b)], [vv("p", "v"), "the probability that token <i>v</i> comes next: all " + n0(net.V) + " add up to 1", ""]] };
   }
+  function bnFormulaPh(c, k, prev) {                  // the placeholder tab: the same sums with every number left as a letter
+    const n = prev.n, P = prev.sym, W = c.wsym, B = c.bsym, tok = c.role === "logit" ? "“" + esc(bnTok(k)) + "”" : "";
+    const term = (row, i) => vv(P, i) + " · " + W + "[" + row + ", " + i + "]";
+    const long = (row) => (n <= 3 ? Array.from({ length: n }, (_, i) => term(row, i)).join(" + ") : term(row, 0) + " + " + term(row, 1) + " + … + " + term(row, n - 1)) + " + " + vv(B, row);
+    const into = { hid: " (in your model, attention and layer norm adjust them on the way in: the other tabs show that)", logit: " (in your model, the final layer norm adjusts them first)", out: "" }[c.role];
+    const key = [[vv(P, c.role === "out" || c.role === "logit" ? "j" : "i"), "the " + n0(n) + " numbers coming in from " + esc(prev.cap) + into, ""],
+      [W, "the weights into this layer (" + c.w + ", " + n0(c.n) + " × " + n0(n) + "): one learned number for every line; row " + k + " is this neuron's " + n0(n), ""],
+      [vv(B, k), "this neuron's bias: one learned number added at the end", ""]];
+    if (c.role === "hid") return { lines: [
+      vv("h", "j") + " = GELU(" + vv("z", "j") + "), &nbsp; " + vv("z", "j") + " = " + SIG("i=0", n - 1) + vv(P, "i") + " · " + W + "[<i>j</i>, <i>i</i>] + " + vv(B, "j"),
+      "GELU(<i>z</i>) = ½ · <i>z</i> · (1 + erf(" + FRAC("<i>z</i>", "√2") + "))",
+      "this one: " + vv("h", k) + " = GELU(" + long(k) + ")"],
+      key: key.concat([["erf", "the error function: the S-shaped curve that makes GELU bend", ""]]) };
+    if (c.role === "out") return { lines: [
+      vv("o", "i") + " = " + SIG("j=0", n - 1) + vv(P, "j") + " · " + W + "[<i>i</i>, <i>j</i>] + " + vv(B, "i"),
+      "this one: " + vv("o", k) + " = " + long(k)], key };
+    return { lines: [                                 // the output: a score per token, then softmax
+      vv("z", "v") + " = " + SIG("j=0", n - 1) + vv(P, "j") + " · " + W + "[<i>v</i>, <i>j</i>] + " + vv(B, "v") + ", &nbsp; " + vv("p", "v") + " = " + FRAC("<i>e</i><sup>" + vv("z", "v") + "</sup>", SIG("u=0", BN.net.V - 1) + "<i>e</i><sup>" + vv("z", "u") + "</sup>"),
+      "this one (" + tok + "): " + vv("p", k) + " = " + FRAC("<i>e</i><sup>" + vv("z", k) + "</sup>", SIG("u=0", BN.net.V - 1) + "<i>e</i><sup>" + vv("z", "u") + "</sup>") + ", &nbsp; " + vv("z", k) + " = " + long(k)],
+      key: key.concat([[vv("p", "v"), "the chance that token <i>v</i> comes next: all " + n0(BN.net.V) + " add up to 1", ""]]) };
+  }
   function bnDetail() {
-    const h = BN.sel, net = BN.net, vals = bnMode() === "values";
-    if (!h || !net || !net.cols[h.ci]) return html`<div class="nn-detail empty small">Click any neuron to see the calculation it does, written with Σ and a placeholder for every input, its bias and its real weights${vals ? ", then every step worked out with this text's numbers" : ""}.</div>`;
+    const h = BN.sel, net = BN.net, mode = bnMode(), vals = mode === "values";
+    if (!h || !net || !net.cols[h.ci]) return html`<div class="nn-detail empty small">${mode === "net" ? "Click any neuron to see the calculation it does, written with Σ and a letter for every value." : html`Click any neuron to see the calculation it does, written with Σ and a placeholder for every input, its bias and its real weights${vals ? ", then every step worked out with this text's numbers" : ""}.`}</div>`;
+    if (mode === "net") {                             // placeholders: just the maths
+      const c = net.cols[h.ci], F = c.role === "in" ? bnFormula(c, h.k) : bnFormulaPh(c, h.k, net.cols[h.ci - 1]);
+      return html`<div class="nn-detail bn-detail"><h4>${c.cap} · ${c.sym + subs(h.k)}${c.role === "logit" ? " · token “" + bnTok(h.k) + "” (#" + h.k + ")" : ""}</h4>
+        <div class="bn-f">${raw(F.lines.map((l) => "<div>" + l + "</div>").join(""))}</div>
+        ${keyTable(F.key)}
+        <p class="faint small">Every value here is a letter. <b>Live values</b> fills them in with the numbers for your text, and <b>Biases &amp; formulas</b> shows the learned ones.</p></div>`;
+    }
     const c = net.cols[h.ci], k = h.k, t = bnT(), tr = EV.trace, x = c.op.values[t][k], F = bnFormula(c, k), prev = net.cols[h.ci - 1];
     const row = c.w && BN.row && BN.row.ci === h.ci && BN.row.k === k ? BN.row.vals : null, b = c.bias ? vecOf(c.bias)[k] : 0;
     const lhs = c.role === "hid" || c.role === "logit" ? vv("z", k) : vv(c.sym, k);
@@ -641,22 +705,27 @@
   function netModelView(inside) {
     const s = L.net, tr = EV.trace, m = (TR.ov ? TR.ov.models : []).find((x) => x.name === s.src);
     const ready = tr && tr.trained && tr.model === s.src, k = s.tok && s.tok.model === s.src ? s.tok : null;
-    const net = ready && bnModel(), vals = bnMode() === "values";
+    const net = ready && bnModel(), mode = bnMode(), vals = mode === "values", ph = mode === "net";
     if (ready) s.t = bnT();
-    const part = net ? net.links.filter((l) => l.q && l.k < l.nA).map((l) => net.cols[l.to].cap + " (its " + l.k + " strongest of " + l.nA + " each)") : [];
+    const into = { hid: "hidden", out: "out", logit: "output" }, seen = new Map(), hidN = net ? (net.cols.find((c) => c.role === "hid") || { n: 4 * net.d }).n : 0;
+    if (net) net.links.forEach((l) => { const r = net.cols[l.to].role; if (l.q && !l.sample && l.k < l.nA && !seen.has(r)) seen.set(r, l.k + " of " + n0(l.nA) + " into each " + into[r] + " neuron"); });
+    const part = Array.from(seen.values()), sampled = net && net.links.some((l) => l.sample), lines = net && net.links.some((l) => l.q && !l.sample);
+    const tab = (id, label, title) => html`<button class="${mode === id ? "on" : ""}" data-tr-act="bignet-${id}" role="tab" aria-selected="${mode === id ? "true" : "false"}" title="${title}">${label}</button>`;
     return html`${inside ? "" : workerNote("Running your model")}
       <p>This is <b>${s.src}</b>, the model you trained${m ? html`: ${n0(m.vocabulary)} tokens, ${m.layers} block${m.layers === 1 ? "" : "s"} of width ${m.width} with ${m.heads} attention heads, ${n0(m.parameters)} weights${m.trained_steps ? ", trained " + n0(m.trained_steps) + " steps" : ""}` : ""}. Type some text and run it: you'll see every neuron of its network at once, with its real weights and biases.</p>
       <div class="row wrap"><input class="input grow" data-tr-act="ex-prompt" value="${TR.exPrompt}" placeholder="Text to run through your model">
         <label class="tr-field inline"><span>tokens</span><input class="input" type="number" min="1" max="16" value="${EV.tokens}" data-tr-act="ev-tokens" style="width:64px"></label>
         <button class="btn primary" data-tr-act="net-run" ${s.busy ? "disabled" : ""}>${s.busy ? "Working…" : ready || k ? "Run again" : "Run it"}</button></div>
       ${ready ? html`<h3 class="tr-h3 nn-h">The whole network, every neuron</h3>
-        <p class="small">Left to right: the <b class="nn-k in">input</b> (the ${net.d} numbers a token becomes), then each block's feed-forward layer (${net.d} numbers in → ${n0(4 * net.d)} hidden GELU neurons → ${net.d} out), the final layer norm, and the <b class="nn-k out">output</b>: one neuron for each of the ${n0(net.V)} tokens it knows. Attention and layer norm happen in the shaded gaps.</p>
-        <div class="row wrap small nn-bar"><span class="seg"><button class="${vals ? "on" : ""}" data-tr-act="bignet-values">Live values</button><button class="${vals ? "" : "on"}" data-tr-act="bignet-weights">Biases &amp; formulas</button></span>
+        <div class="row wrap small nn-bar"><span class="seg bn-tabs" role="tablist">${tab("net", "Placeholders", "The feed-forward network on its own, every value a letter")}${tab("values", "Live values", "Each neuron's number for your text")}${tab("weights", "Biases & formulas", "Each neuron's learned bias, written above it")}</span>
           <span class="grow"></span><span class="seg bn-zoom"><button data-tr-act="bn-out" aria-label="Zoom out" title="Zoom out">−</button><button data-tr-act="bn-fit" title="Show the whole network">Fit</button><button data-tr-act="bn-in" aria-label="Zoom in" title="Zoom in">+</button></span><span class="faint bn-zl" data-bn-zoom>×1</span></div>
+        <p class="small">${ph ? html`Just the part your data goes into and comes out of, in one piece: the <b class="nn-k in">input</b> x (the ${net.d} numbers a token becomes), then block after block a <b>hidden</b> layer of ${n0(hidN)} GELU neurons and an <b>out</b> layer of ${net.d}, and finally the <b class="nn-k out">output</b>, one neuron for each of the ${n0(net.V)} tokens it knows. Each neuron is joined to every neuron of the next layer. Every value is a letter: click a neuron for the calculation it does. (Attention and layer norm, which your model runs between the blocks, are left out here; the other tabs show them.)`
+          : html`Left to right: the <b class="nn-k in">input</b> (the ${net.d} numbers a token becomes), then each block's feed-forward layer (${net.d} numbers in → ${n0(hidN)} hidden GELU neurons → ${net.d} out), the final layer norm, and the <b class="nn-k out">output</b>: one neuron for each of the ${n0(net.V)} tokens it knows. Attention and layer norm happen in the shaded gaps.`}</p>
         ${vals ? html`<div class="row wrap small nn-bar"><span>Input token:</span><span class="tr-toks inline">${tr.tokens.map((x, i) => html`<button class="tr-tok${i === s.t ? " on" : ""}" data-tr-nett="${i}"><b>${vis(x.text)}</b><small>#${x.id}</small></button>`)}</span></div>` : ""}
         <div class="bn-wrap" id="bn-wrap" data-keep><canvas class="bn-canvas" data-tr-bignet tabindex="0" role="img" aria-label="Every neuron of the network. Click one for its calculation. Zoom with the buttons, pinch, Ctrl or Command and scroll, or double-click."></canvas><div class="bn-tip" hidden></div></div>
-        <p class="faint small tr-netnote">${vals ? html`Each neuron's number for “${evToken(s.t)}”: <b class="nn-k pos">blue</b> positive, <b class="nn-k neg">red</b> negative, brighter is bigger (each column on its own scale; the output is probability).` : html`Each neuron's colour is its bias; zoom in and the bias is written above it. Click one for its formula.`}
-          Lines are weights: <b class="nn-k pos">blue</b> adds, <b class="nn-k neg">red</b> subtracts. ${net.links.some((l) => l.q) ? (part.length ? "Every weight is drawn except into " + part.join(", ") + "; a clicked neuron shows all of its own." : "Every weight is drawn.") : "This run has no lines yet (the training machine needs the update, then Run again); a clicked neuron still shows all of its weights."}
+        <p class="faint small tr-netnote">${ph ? html`Zoom in and each neuron shows its letter, with its bias's letter above it. The grey lines show which neuron feeds which; ${sampled || part.length ? html`there are too many to draw them all, so it shows ${sampled ? "an even sample" : "the strongest few into each neuron"}, and a clicked neuron shows every one of its own.` : "every one is drawn."}`
+          : html`${vals ? html`Each neuron's number for “${evToken(s.t)}”: <b class="nn-k pos">blue</b> positive, <b class="nn-k neg">red</b> negative, brighter is bigger (each column on its own scale; the output is probability).` : html`Each neuron's colour is its bias; zoom in and the bias is written above it. Click one for its formula.`}
+          Lines are weights: <b class="nn-k pos">blue</b> adds, <b class="nn-k neg">red</b> subtracts. ${lines ? (part.length ? "Where there are too many to draw, it shows the strongest: " + part.join(", ") + ". A clicked neuron shows all of its own." : "Every weight is drawn.") : "This run has no lines yet (the training machine needs the update, then Run again); a clicked neuron still shows all of its weights."}`}
           Zoom: pinch, ⌘/Ctrl + scroll, double-click, or − Fit +. Drag to move.</p>
         ${bnDetail()}
         <p class="muted small">The same run as tables of every number and every weight matrix, attention included: <a href="#" data-tr-tab="inside" data-tr-inside="every">4 · Inside the model → Every number</a>.</p>`
@@ -1783,7 +1852,7 @@ Assistant: game tonight?</pre></div>
     else if (a === "inside-every" || a === "inside-summary" || a === "inside-network") { store.set("train.inside", a.slice(7)); paint(); if (a === "inside-network") netAuto(); }
     else if (a === "ev-trace") evTrace();
     else if (a === "net-run") netRun();
-    else if (a === "bignet-values" || a === "bignet-weights") { store.set("train.netmode", a.slice(7)); paint(); bnLoad(); }
+    else if (a === "bignet-net" || a === "bignet-values" || a === "bignet-weights") { store.set("train.netmode", a.slice(7)); paint(); bnLoad(); }
     else if (a === "bn-in" || a === "bn-out") { const cv = $("[data-tr-bignet]"); if (cv) bnZoom(cv, a === "bn-in" ? 2 : 0.5); }
     else if (a === "bn-fit") bnFit();
     else if (a === "ev-left" || a === "ev-right") { EV.col0 = Math.max(0, EV.col0 + (a === "ev-left" ? -PAGE_COLS : PAGE_COLS)); paint(); }
