@@ -1297,5 +1297,31 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .nn-detail.empty { display: flex; align-items: center; color: var(--muted); }
 .nn-detail h4 { margin: 0 0 6px; font-size: 14px; }
 .nn-detail .tr-calc { margin: 8px 0; background: var(--bg2); }
+/* "A whole network" on a model you trained: its real tokenizer, weights and calculations */
+.nn-pick { margin: 0 0 12px; padding-bottom: 10px; border-bottom: 1px solid var(--line); gap: 10px; }
+.nn-pick .select { max-width: 100%; }
+.nn-svg.nn-real { max-width: 780px; }
+.nn-idx { fill: var(--bg); font: 600 9px ui-monospace, Menlo, monospace; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
+.nn-idx.tiny { font-size: 7.5px; letter-spacing: -.03em; }
+.nn-tok { fill: var(--text); font: 500 11.5px ui-monospace, Menlo, monospace; dominant-baseline: middle; pointer-events: none; white-space: pre; }
+.nn-tok.l { text-anchor: end; } .nn-tok.r { text-anchor: start; }
+.nn-range { fill: var(--faint); font-size: 10.5px; text-anchor: middle; }
+.nn-page { cursor: pointer; outline: none; }
+.nn-page rect { fill: var(--panel2); stroke: var(--line2); }
+.nn-page text { fill: var(--muted); font-size: 10px; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
+.nn-page:hover rect, .nn-page:focus-visible rect { stroke: var(--accent); }
+.nn-bar { align-items: center; gap: 8px; margin: 8px 0; }
+.nn-bar .select { max-width: 100%; }
+.nn-exact { font-family: ui-monospace, Menlo, monospace; }
+.nn-detail .tr-ev-calc { max-height: 50vh; }
+.tr-toks.inline { display: inline-flex; margin: 2px 0; vertical-align: middle; }
+button.tr-tok { cursor: pointer; color: var(--text); }
+button.tr-tok:hover { border-color: var(--accent); }
+.tr-tok.on { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.tr-tok.on small { color: inherit; opacity: .8; }
+.tr-tok.hot { background: rgba(124, 140, 255, .3); border-color: var(--accent); }
+.nn-piece { margin: 6px 0; }
+.nn-piece summary { cursor: pointer; font-size: 13px; }
+.nn-piece .tr-calc { margin: 6px 0 0; white-space: normal; }
 @media (max-width: 1100px) { .tr-learn { grid-template-columns: 1fr; } .tr-lessons { position: static; flex-direction: row; overflow-x: auto; } .tr-lessons button { white-space: nowrap; } }
 @media (max-width: 860px) { .tr-grid2, .tr-two, .tr-charts, .tr-sliders { grid-template-columns: 1fr; } .tr-msg { max-width: 95%; } }

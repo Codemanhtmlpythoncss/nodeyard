@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "share" / "nodeyard" / "dashboard"))
 sys.path.insert(0, str(ROOT / "share" / "nodeyard" / "jobs"))
 import ptread  # noqa: E402
+import trainapi  # noqa: E402
 
 try:
     import torch
@@ -31,6 +32,24 @@ class TraceTests(unittest.TestCase):
                 self.assertEqual(flat, v.reshape(-1).tolist(), name)
             self.assertEqual(m.rows("blocks.layers.0.linear1.weight", 3, 2), model.state_dict()["blocks.layers.0.linear1.weight"][3:5].tolist())
             m.close()
+
+    def test_weights_endpoint_gives_chosen_rows_exactly(self):
+        # The network diagram fetches just the rows its lines need (e.g. the output rows of the likeliest tokens).
+        with tempfile.TemporaryDirectory() as d:
+            t = trainapi.Trainer(d)
+            os.makedirs(os.path.join(t.models_dir, "m"))
+            model = T.GPT(50, 8, 16, 2, 1)
+            sd = {k: v.detach() for k, v in model.state_dict().items()}
+            torch.save(sd, os.path.join(t.models_dir, "m", "model.pt"))
+            r = t.weights({"model": ["m"], "name": ["head.weight"], "rows": ["7,0,49,7"]})
+            self.assertEqual(r["index"], [7, 0, 49, 7])
+            self.assertEqual(r["rows"], [sd["head.weight"][i].tolist() for i in (7, 0, 49, 7)])
+            self.assertEqual(t.weights({"model": ["m"], "name": ["head.bias"], "rows": ["0"]})["rows"], [sd["head.bias"].tolist()])
+            for bad in ("50", "-1", "a,b"):
+                with self.assertRaises(trainapi.TrainError):
+                    t.weights({"model": ["m"], "name": ["head.weight"], "rows": [bad]})
+            many = ",".join(["1"] * 500)
+            self.assertEqual(len(t.weights({"model": ["m"], "name": ["head.weight"], "rows": [many]})["rows"]), trainapi.WEIGHT_ROWS_MAX)
 
     def test_trace_has_every_step_and_matches_pytorch(self):
         with tempfile.TemporaryDirectory() as d:

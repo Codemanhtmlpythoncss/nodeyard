@@ -19,6 +19,7 @@ import binascii
 import json
 import math
 import os
+import pathlib
 import platform
 import re
 import shutil
@@ -49,7 +50,10 @@ STEP_GRAD_RE = re.compile(r"\| gradient norm ([\d.eE+-]+)\s*$")
 GRAD_RE = re.compile(r"^Gradient norm at step (\d+): ([\d.eE+-]+)")
 MODEL_FILES = ("model.pt", "optimizer.pt", "bpe.json", "model.json")
 CHARS_PER_TOKEN = 3.6        # typical for a learned BPE vocabulary on English; the trainer prints the real figure
-PARSED_POINTS_MAX = 3000     # most loss/grad/val points kept in memory per run (the chart thins to ~1500 anyway).
+TOKENIZE_CHARS = 300         # the most text the tokenisation walk-through (and the trace) takes
+TOKENIZE_CANDIDATES = 8      # pairs listed per merge step (the count says how many there were)
+WEIGHT_ROWS_MAX = 64         # most scattered rows one /api/train/weights?rows= call returns
+PARSED_POINTS_MAX = 3000    # most loss/grad/val points kept in memory per run (the chart thins to ~1500 anyway).
                              # A long or very fast run (e.g. 30k tokens/sec) appends one point per step forever;
                              # unbounded, that grew the 768 MB dashboard until it was OOM-killed and systemd
                              # restarted it mid-run -- the "nodeyard reloaded" that stopped training.
@@ -531,6 +535,7 @@ class Trainer:
         self.parsed = {"path": None, "offset": 0, "train": [], "val": [], "grad": [], "lines": [], "last": {}, "quality": [], "verdict": None}
         self.parse_lock = threading.Lock()
         self.check_cache = {}
+        self._tok_cache = (None, None)   # ((bpe.json path, mtime, size), BPETokenizer): the last tokenizer read
         self.uploads = {}
         self._probing = set()        # machines whose link is being measured right now (one probe at a time each)
         self._probe_lock = threading.Lock()
@@ -1838,11 +1843,50 @@ class Trainer:
                 return {"tensors": m.shapes()}
             if name not in m.tensors:
                 raise TrainError("No weights called %s." % name, 404)
+            shape = list(m.tensors[name].shape)
+            pick = (q.get("rows") or [""])[0]
+            if pick:   # just these rows (e.g. the output rows of a few chosen tokens), in this order
+                try:
+                    want = [int(x) for x in pick.split(",") if x.strip()][:WEIGHT_ROWS_MAX]
+                except ValueError:
+                    raise TrainError("rows is a list of row numbers.")
+                n_rows = shape[0] if len(shape) >= 2 else 1
+                bad = next((r for r in want if not 0 <= r < n_rows), None)
+                if bad is not None:
+                    raise TrainError("%s has no row %d." % (name, bad))
+                return {"name": name, "shape": shape, "index": want, "rows": [m.rows(name, r, 1)[0] for r in want]}
             start = max(0, int((q.get("start") or ["0"])[0] or 0))
             count = max(1, min(256, int((q.get("count") or ["64"])[0] or 64)))
             return {"name": name, "shape": list(m.tensors[name].shape), "start": start, "rows": m.rows(name, start, count)}
         finally:
             m.close()
+
+    def tokenize(self, body):
+        """How a saved model's own tokenizer (its bpe.json) turns text into token IDs, one merge at a time. Plain
+        Python on the dashboard: no worker, no PyTorch."""
+        model = body.get("model")
+        path = os.path.join(self._model_dir(model), "bpe.json")
+        if not os.path.isfile(path):
+            raise TrainError("That model has no saved tokenizer (bpe.json).", 404)
+        text = str(body.get("text") or "")[:TOKENIZE_CHARS]
+        if not text:
+            raise TrainError("Type some text to tokenise.")
+        try:
+            st = os.stat(path)
+            stamp = (path, st.st_mtime_ns, st.st_size)
+            if self._tok_cache[0] != stamp:
+                self._tok_cache = (stamp, _jobs_module("bpe_tokenizer").BPETokenizer.load(pathlib.Path(path)))
+            tok = self._tok_cache[1]
+        except (OSError, ValueError, KeyError, TypeError, IndexError) as e:
+            raise TrainError("Couldn't read the tokenizer: %s" % e, 500)
+        out = bpe_steps(tok, text)
+        try:
+            with open(os.path.join(self._model_dir(model), "model.json"), "r", encoding="utf-8") as f:
+                out["context"] = int(json.load(f).get("context") or 0) or None
+        except (OSError, ValueError, TypeError):
+            out["context"] = None
+        out["model"] = model
+        return {"tokenize": out}
 
     def explain(self, body):
         options = ["--prompt", str(body.get("prompt") or "Hello there")[:500],
@@ -2059,6 +2103,7 @@ def register(ctx, args):
         "/api/train/chat": wrap(t.chat),
         "/api/train/explain": wrap(t.explain),
         "/api/train/trace": wrap(t.trace),
+        "/api/train/tokenize": wrap(t.tokenize),
         "/api/train/warm": wrap(warm),
         "/api/train/datasets/get": wrap(t.fetch),
         "/api/train/convert": wrap(t.convert),
@@ -2068,6 +2113,55 @@ def register(ctx, args):
     })
     ctx.post_limits["/api/train/upload"] = UPLOAD_BODY_MAX
     ctx.post_limits["/api/train/paste"] = PASTE_MAX * 2 + 4096
+
+
+def bpe_steps(tok, text):
+    """Encode text with a BPETokenizer the way its encode() does, writing down every step: the pieces the
+    pre-tokenisation pattern cuts, each piece's UTF-8 bytes (the first 256 token IDs), and every merge in the order it
+    is applied. At each step the pairs of neighbours that the tokenizer learned are the candidates; the one learned
+    earliest (lowest rank) merges everywhere it occurs in the piece, into token 256 + rank. The final IDs are exactly
+    tok.encode(text)."""
+    pieces, ids_all, seen = [], [], set()
+    for chunk in tok_pattern(tok).findall(text):
+        ids = list(chunk.encode("utf-8"))
+        piece = {"text": chunk, "start": ids[:], "steps": []}
+        seen.update(ids)
+        while len(ids) > 1:
+            cands = sorted({(tok.ranks[p], p) for p in zip(ids, ids[1:]) if p in tok.ranks})
+            if not cands:
+                break
+            rank, best = cands[0]
+            new_id = 256 + rank
+            merged, i, times = [], 0, 0
+            while i < len(ids):
+                if i + 1 < len(ids) and (ids[i], ids[i + 1]) == best:
+                    merged.append(new_id)
+                    i += 2
+                    times += 1
+                else:
+                    merged.append(ids[i])
+                    i += 1
+            ids = merged
+            shown = cands[:TOKENIZE_CANDIDATES]
+            piece["steps"].append({"rank": rank, "pair": list(best), "id": new_id, "times": times, "tokens": ids[:],
+                                   "candidates": [[r, a, b] for r, (a, b) in shown], "candidate_count": len(cands)})
+            seen.add(new_id)
+            for _r, (a, b) in shown:
+                seen.update((a, b, 256 + _r))
+        piece["ids"] = ids
+        pieces.append(piece)
+        ids_all.extend(ids)
+
+    def entry(i):
+        raw = tok.vocab[i]
+        return {"text": raw.decode("utf-8", errors="replace"), "hex": raw.hex(" ")}
+    return {"text": text, "pattern": tok_pattern(tok).pattern, "vocabulary": tok.vocab_size, "merges": len(tok.merges),
+            "pieces": pieces, "ids": ids_all, "vocab": {str(i): entry(i) for i in sorted(seen)}}
+
+
+def tok_pattern(tok):
+    """The pre-tokenisation pattern of the module tok came from (bpe_tokenizer.PRETOKEN_PATTERN)."""
+    return sys.modules[type(tok).__module__].PRETOKEN_PATTERN
 
 
 def _jobs_module(name):

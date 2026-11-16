@@ -88,7 +88,9 @@
   // ---------- lessons ----------
   const L = {
     neuron: { x1: 1, x2: -0.5, w1: 0.8, w2: 0.3, b: 0.1 },
-    net: { sel: null, x: [0.6, -0.4, 0.9] },     // "A whole network": selected neuron [layer, index] + the inputs you feed in
+    net: { sel: null, x: [0.6, -0.4, 0.9],      // "A whole network": selected neuron [layer, index] + the inputs you feed in
+      src: store.get("train.netsrc", ""),       // "" = the demo network, else one of your models (its real weights)
+      tok: null, busy: false, stage: 0, t: null, head: 0, win: {}, nsel: null, ncalc: null, rows: {} },
     bpe: { text: "the cat sat on the mat. the cat ate the rat.", merges: 6 },
     attn: { seed: 7, focus: 1 },
     norm: { v: [2, -1, 0.5, 3.5] },
@@ -321,6 +323,231 @@
       ${keyTable(row.map((w, i) => ["w" + sub(i + 1), "weight on " + names[i], f(w) + " × " + f(prev[i]) + " = " + f(w * prev[i])]).concat([["b", "bias (learned shift)", f(b)], [out ? "ŷ" : "a" + sub(j + 1), out ? "the network's output" : "this neuron's output", f(a)]]))}
       ${out ? html`<p class="muted small">A real language model has one output neuron <b>per vocabulary word</b> — thousands of them — and softmax turns that whole row of scores into probabilities that add to 1. This demo shows a single output to match the classic picture.</p>` : ""}</div>`;
   }
+
+  // ---- the same diagram for a model you trained: its own tokenizer, its real weights, every calculation ----
+  // The numbers come from one real forward pass (/api/train/trace, run with PyTorch on a training machine and
+  // checked against it), the weights straight from the model's model.pt (/api/train/weights), and the tokenisation
+  // from its bpe.json (/api/train/tokenize). The trace is shared with tab 4's "Every number" view.
+  const NW = 8;                                       // neurons drawn per column; ▲ ▼ page through the rest
+  const fx9 = (x) => fx(x, 9);                        // 9 significant digits give a float32 value back exactly
+  const range = (n) => Array.from({ length: n }, (_, i) => i);
+  const nItems = (op, ks, more) => ks.map((k) => Object.assign({ id: op.id + ":" + k, op, k, name: String(k) }, more ? more(k) : {}));
+  function netStages(tr) {
+    const ops = tr.ops, c = tr.config, d = c.width, H = c.heads, hd = d / H, S = [];
+    const grp = (g) => ops.filter((o) => o.group === g), kind = (g, k) => g.filter((o) => o.how.kind === k);
+    const lin = (g, end) => g.find((o) => o.how.kind === "linear" && o.how.weight.endsWith(end));
+    const emb = grp("Embedding"), E = emb.find((o) => o.how.kind === "lookup" && o.how.weight.startsWith("token")), X = kind(emb, "add")[0];
+    S.push({ key: "emb", label: "Embedding: the token becomes " + d + " numbers",
+      note: "x = E[token] + P[t]: the token's row of the token table plus this position's row of the position table. No multiplying yet: the lines into E[token] are simply the numbers it looks up.",
+      cols: [
+        { cap: "Token", title: "The token going in", kind: "in", items: (t) => [{ id: "t" + t, token: t, name: evToken(t), tid: tr.tokens[t].id }],
+          calc: (it, t) => "Token “" + it.name + "” is number " + it.tid + " in your model's vocabulary (the tokenizer gave it that ID — see the tokenisation above).\n"
+            + "Step 1: look up row " + it.tid + " of token_embedding.weight (" + c.vocabulary + " × " + d + "): those " + d + " learned numbers are E[token], the next column.\n"
+            + "Step 2: it is token " + t + " of the text, so row " + t + " of position_embedding.weight (P[t]) is added to them, number by number." },
+        { cap: "E[token]", title: "E[token]: its row of the token table", kind: "hid", edge: "lookup", items: () => nItems(E, range(d)) },
+        { cap: "x = E + P", title: "x = E[token] + P[t]: what goes into block 1", kind: "hid", edge: "one", items: () => nItems(X, range(d)) }] });
+    for (let b = 1; b <= c.layers; b++) {
+      const g = grp("Block " + b), ln = kind(g, "layernorm"), add = kind(g, "add"), dots = kind(g, "dot"), sms = kind(g, "softmax"), mixes = kind(g, "mix");
+      const qkv = g.filter((o) => o.how.kind === "linear" && o.how.weight.endsWith("in_proj_weight")), AO = lin(g, "out_proj.weight");
+      const F1 = lin(g, "linear1.weight"), GE = kind(g, "gelu")[0], F2 = lin(g, "linear2.weight");
+      const wOf = (op) => (k) => ({ w: op.how.weight, row: op.how.offset + k });
+      S.push({ key: "b" + b + "q", label: "Block " + b + " · queries, keys, values", heads: true,
+        note: "Each q, k and v number is a weighted sum of the " + d + " layer-norm numbers plus a bias: q = Σ hⱼ × Wq[i][j] + bqᵢ. The lines are those weights (Wq, Wk, Wv are rows of in_proj_weight).",
+        cols: [
+          { cap: "Layer norm 1", title: "Layer norm 1 of this token (x scaled to mean 0, spread 1, then × γ + β)", kind: "hid", items: () => nItems(ln[0], range(d)) },
+          { cap: "q, k, v", title: "This head's query, key and value numbers", kind: "hid", edge: "lin",
+            items: (t, h) => [0, 1, 2].flatMap((p) => nItems(qkv[p], range(hd).map((i) => h * hd + i), (k) => Object.assign({ name: "qkv"[p] + (k - h * hd) }, wOf(qkv[p])(k)))) }] });
+      S.push({ key: "b" + b + "a", label: "Block " + b + " · attention", heads: true,
+        note: "This token looks back at every token up to itself. Each line on the left is an attention weight (they add up to 1, from softmax of q·k scores). The head's output is Σ weight × v; then W_O mixes every head's output into " + d + " numbers (only this head's lines are drawn, the sum uses all of them).",
+        cols: [
+          { cap: "Tokens", title: "Every token this one can look at, with its attention weight", kind: "in", pct: true,
+            items: (t, h) => range(tr.tokens.length).map((u) => ({ id: "u" + u, token: u, name: evToken(u), att: u > t ? null : sms[h].values[t][u] })),
+            calc: async (it, t, h) => (await expand(dots[h], t, it.token)) + (it.token > t ? "" : "\n\n" + (await expand(sms[h], t, it.token))) },
+          { cap: "Head out", title: "This head's output: Σ attention weight × v", kind: "hid", edge: "attn", items: (t, h) => nItems(mixes[h], range(hd), (k) => ({ ik: h * hd + k })) },
+          { cap: "Attention out", title: "Attention output: all heads side by side × W_O + b_O", kind: "hid", edge: "lin", items: () => nItems(AO, range(d), wOf(AO)) },
+          { cap: "x + attention", title: "Residual: x + attention output", kind: "hid", edge: "one", items: () => nItems(add[0], range(d)) }] });
+      S.push({ key: "b" + b + "f", label: "Block " + b + " · feed-forward (" + 4 * d + " neurons)",
+        note: "Every hidden neuron: z = Σ hⱼ × W₁[i][j] + b₁ᵢ, then GELU bends it. Then each output number is Σ over all " + 4 * d + " hidden neurons × W₂ + b₂, and is added back onto x.",
+        cols: [
+          { cap: "Layer norm 2", title: "Layer norm 2 of this token", kind: "hid", items: () => nItems(ln[1], range(d)) },
+          { cap: "GELU neurons", title: "Hidden neurons: GELU(h·W₁ + b₁)", kind: "hid", edge: "lin", items: () => nItems(GE, range(4 * d), wOf(F1)),
+            calc: async (it, t) => "1. The weighted sum (row " + it.k + " of " + F1.how.weight + "):\n" + (await expand(F1, t, it.k)) + "\n\n2. Bend it with GELU:\n" + (await expand(GE, t, it.k)) },
+          { cap: "FF out", title: "Feed-forward out: GELU neurons × W₂ + b₂", kind: "hid", edge: "lin", items: () => nItems(F2, range(d), wOf(F2)) },
+          { cap: "x + FF", title: "Residual: x + feed-forward (the block's output)", kind: "hid", edge: "one", items: () => nItems(add[1], range(d)) }] });
+    }
+    const o = grp("Output"), FN = kind(o, "layernorm")[0], LG = kind(o, "linear")[0], PR = kind(o, "softmax")[0], order = {};
+    const ranked = (t) => order[t] || (order[t] = range(PR.values[t].length).sort((a, b) => PR.values[t][b] - PR.values[t][a]));
+    const tokName = (id) => vis(tr.vocab && tr.vocab[id] != null ? tr.vocab[id] : "#" + id);
+    S.push({ key: "out", label: "Output: a score for every token in the vocabulary",
+      note: "Each logit is Σ hⱼ × W[token][j] + b: the final numbers weighed by that token's row of head.weight. Softmax turns the " + n0(c.vocabulary) + " logits into probabilities. Tokens are listed most likely first.",
+      cols: [
+        { cap: "Final norm", title: "Final layer norm", kind: "hid", items: () => nItems(FN, range(d)) },
+        { cap: "Logits", title: "Logits (scores), most likely token first", kind: "out", edge: "lin", items: (t) => nItems(LG, ranked(t), (k) => ({ name: tokName(k), w: LG.how.weight, row: k })) },
+        { cap: "Probability", title: "Probability = softmax(logits)", kind: "out", edge: "one", pct: true, items: (t) => nItems(PR, ranked(t), (k) => ({ name: tokName(k) })) }] });
+    return S;
+  }
+  function netStage() {
+    const s = L.net, tr = EV.trace;
+    if (s.stTrace !== tr) { s.st = tr ? netStages(tr) : []; s.stTrace = tr; }
+    s.stage = Math.max(0, Math.min(s.st.length - 1, s.stage || 0));
+    if (tr) { s.t = s.t == null ? tr.tokens.length - 1 : Math.max(0, Math.min(tr.tokens.length - 1, s.t)); s.head = Math.max(0, Math.min(tr.config.heads - 1, s.head || 0)); }
+    return s.st[s.stage];
+  }
+  function netView(st) {                              // each column's items and the window of them on screen
+    const s = L.net;
+    return st.cols.map((col, ci) => { const all = col.items(s.t, s.head), off = Math.max(0, Math.min(s.win[st.key + ":" + ci] || 0, all.length - NW)); return { all, off, shown: all.slice(off, off + NW) }; });
+  }
+  const netRow = (name, row) => { const m = L.net.rows[name]; return m ? m[row] : undefined; };
+  function netVal(it, t) { return it.token != null ? (it.att !== undefined ? it.att : it.tid) : it.op.values[t][it.k]; }
+  function netEdge(type, l, r, t) {                   // the number on the line from l to r (null: no line)
+    if (type === "one") return (l.ik ?? l.k) === r.k ? 1 : null;
+    if (type === "lookup") return r.op.values[t][r.k];
+    if (type === "attn") return l.att ? l.att : null;
+    if (type === "lin") { const row = netRow(r.w, r.row); return row ? row[l.ik ?? l.k] : undefined; }
+    return null;
+  }
+  function netSVG(st) {
+    const s = L.net, t = s.t, cols = st.cols, views = netView(st), VW = 780, padX = 108, r = 14, gap = 46, top = 66;
+    const maxN = Math.max(...views.map((v) => v.shown.length)), VH = top + maxN * gap + 40;
+    const colX = (c) => padX + c * (VW - 2 * padX) / Math.max(1, cols.length - 1);
+    const rowY = (n, j) => top + (maxN - n) * gap / 2 + j * gap + gap / 2;
+    const sel = s.nsel;
+    let edges = "", nodes = "", caps = "";
+    for (let ci = 1; ci < cols.length; ci++) {
+      const type = cols[ci].edge, L_ = views[ci - 1].shown, R_ = views[ci].shown, lines = [];
+      R_.forEach((rr, j) => L_.forEach((ll, i) => { const w = netEdge(type, ll, rr, t); if (w !== null) lines.push([i, j, w, ll, rr]); }));
+      const mx = Math.max(1e-12, ...lines.map((x) => (x[2] == null ? 0 : Math.abs(x[2]))));
+      lines.forEach(([i, j, w, ll, rr]) => {
+        const hot = sel && ((sel.ci === ci && sel.id === rr.id) || (sel.ci === ci - 1 && sel.id === ll.id)), dim = sel && !hot;
+        const cls = type === "one" ? "one" : w == null ? "" : w >= 0 ? "pos" : "neg";
+        const width = type === "one" ? 1.2 : w == null ? 0.6 : type === "attn" ? 0.6 + 3.4 * w : 0.5 + 2.6 * Math.abs(w) / mx;
+        edges += `<line x1="${(colX(ci - 1) + r).toFixed(1)}" y1="${rowY(L_.length, i).toFixed(1)}" x2="${(colX(ci) - r).toFixed(1)}" y2="${rowY(R_.length, j).toFixed(1)}" class="nn-edge ${cls}" style="stroke-width:${width.toFixed(2)};opacity:${hot ? 0.95 : dim ? 0.08 : w == null ? 0.15 : 0.45}"/>`;
+      });
+    }
+    cols.forEach((col, ci) => {
+      const v = views[ci], cx = colX(ci), last = ci === cols.length - 1;
+      caps += `<text x="${cx}" y="20" class="nn-cap ${col.kind}">${esc(col.cap)}</text>`;
+      if (v.all.length > NW) {
+        caps += `<text x="${cx}" y="36" class="nn-range">${n0(v.off)}–${n0(v.off + v.shown.length - 1)} of ${n0(v.all.length)}</text>`;
+        if (v.off > 0) caps += `<g class="nn-page" data-tr-netpage="${ci},-1" role="button" tabindex="0" aria-label="Show earlier ${esc(col.cap)}"><rect x="${cx - 22}" y="${top - 22}" width="44" height="18" rx="5"/><text x="${cx}" y="${top - 13}">▲</text></g>`;
+        if (v.off + NW < v.all.length) caps += `<g class="nn-page" data-tr-netpage="${ci},1" role="button" tabindex="0" aria-label="Show more ${esc(col.cap)}"><rect x="${cx - 22}" y="${VH - 22}" width="44" height="18" rx="5"/><text x="${cx}" y="${VH - 13}">▼</text></g>`;
+      }
+      v.shown.forEach((it, j) => {
+        const cy = rowY(v.shown.length, j), val = netVal(it, t), on = sel && sel.ci === ci && sel.id === it.id;
+        const shown = it.token != null && it.att === undefined ? "#" + val : val == null ? "masked" : col.pct ? f(val * 100, 3) + "%" : f(val, 3);
+        const named = it.token != null || col.kind === "out", label = named && (ci === 0 || last) ? it.name : "";
+        const inner = it.token != null ? "" : named ? String(it.k) : it.name, short = label.length > 11 ? label.slice(0, 10) + "…" : label;
+        nodes += `<g class="nn-neuron" data-tr-nnet="${ci}|${esc(it.id)}" tabindex="0" role="button" aria-label="${esc(col.cap + " " + it.name + ", value " + shown)}">`
+          + `<title>${esc(col.title + " · " + (named ? "“" + it.name + "”" : "number " + it.name) + " = " + (it.token != null && it.att === undefined ? "token #" + val : val == null ? "masked" : fx9(val)))}</title>`
+          + `<circle cx="${cx}" cy="${cy.toFixed(1)}" r="${r}" class="nn-dot ${col.kind}${on ? " sel" : ""}"/>`
+          + (inner ? `<text x="${cx}" y="${cy.toFixed(1)}" class="nn-idx${inner.length > 3 ? " tiny" : ""}">${esc(inner)}</text>` : "")
+          + `<text x="${cx}" y="${(cy + r + 10).toFixed(1)}" class="nn-val">${esc(shown)}</text>`
+          + (label ? `<text x="${(ci === 0 ? cx - r - 6 : cx + r + 6).toFixed(1)}" y="${cy.toFixed(1)}" class="nn-tok ${ci === 0 ? "l" : "r"}">${esc(short)}</text>` : "")
+          + `</g>`;
+      });
+    });
+    return `<svg viewBox="0 0 ${VW} ${VH}" class="nn-svg nn-real" role="group" aria-label="${esc(st.label)}: click a neuron to see its calculation">${edges}${nodes}${caps}</svg>`;
+  }
+  async function netEnsure() {                         // fetch the weight rows the lines on screen need
+    const s = L.net, tr = EV.trace, st = tr && tr.trained && tr.model === s.src && netStage(); if (!st) return;
+    if (Object.values(s.rows).reduce((a, m) => a + Object.keys(m).length, 0) > 600) s.rows = {};   // keep memory bounded
+    const need = {};
+    netView(st).forEach((v, ci) => { if (st.cols[ci].edge === "lin") v.shown.forEach((it) => { if (!netRow(it.w, it.row)) (need[it.w] = need[it.w] || new Set()).add(it.row); }); });
+    const names = Object.keys(need); if (!names.length) return;
+    try {
+      for (const name of names) {
+        const want = Array.from(need[name]), put = (row, vals) => { (s.rows[name] = s.rows[name] || {})[row] = vals; };
+        if (tr.weights && tr.weights[name]) { want.forEach((row) => put(row, tr.weights[name][row])); continue; }
+        const r = await getJSON("/api/train/weights?model=" + encodeURIComponent(tr.model) + "&name=" + encodeURIComponent(name) + "&rows=" + want.join(","));
+        if (EV.trace !== tr) return;
+        if (!r.ok) { toast(r.error); return; }
+        r.index.forEach((row, i) => put(row, r.rows[i]));
+      }
+    } catch (e) { toast("Couldn't read the weights."); return; }
+    paint();
+  }
+  async function netSelect(spec) {
+    const s = L.net, st = netStage(), [ci, id] = [+spec.split("|")[0], spec.slice(spec.indexOf("|") + 1)];
+    if (s.nsel && s.nsel.ci === ci && s.nsel.id === id) { s.nsel = null; paint(); return; }
+    const col = st.cols[ci], it = col.items(s.t, s.head).find((x) => x.id === id); if (!it) return;
+    s.nsel = { ci, id }; s.ncalc = null; paint();
+    const want = s.nsel;
+    let text;
+    try { text = await (col.calc ? col.calc(it, s.t, s.head) : expand(it.op, s.t, it.k)); } catch (e) { text = "Couldn't work it out: " + e.message; }
+    if (s.nsel === want) { s.ncalc = text; paint(); }
+  }
+  function netDetail(st) {
+    const s = L.net, sel = s.nsel;
+    if (!sel) return html`<div class="nn-detail empty small">Click any neuron to see exactly how its number was made: every input × weight, every sum, written out in + − × ÷, with your model's real weights.</div>`;
+    const col = st.cols[sel.ci], it = col && col.items(s.t, s.head).find((x) => x.id === sel.id);
+    if (!it) return "";
+    const v = netVal(it, s.t), what = it.token != null ? "“" + it.name + "”" : col.cap === "Logits" || col.cap === "Probability" ? "“" + it.name + "” (token #" + it.k + ")" : "number " + it.name;
+    return html`<div class="nn-detail"><h4>${col.title} · ${what}</h4>
+      <p class="small">${it.token != null && it.att === undefined ? html`Token ID <b>#${v}</b>` : v == null ? "Masked: a token can't look at later tokens." : html`Value: <b class="nn-exact">${fx9(v)}</b>`}${it.w ? html` · its weights are row ${n0(it.row)} of <code>${it.w}</code> (${n0(((EV.trace.parameters.find((p) => p.name === it.w) || {}).shape || [0, 0])[1])} numbers), each one in the sum below` : ""}</p>
+      <pre class="tr-pre tr-ev-calc">${s.ncalc == null ? "Working it out…" : s.ncalc}</pre></div>`;
+  }
+  function netTokens(k) {
+    const V = (id) => k.vocab[id] || { text: "#" + id, hex: "" }, inNet = Math.min(k.ids.length, EV.tokens, k.context || Infinity);
+    const chip = (id, hot) => html`<span class="tr-tok${hot ? " hot" : ""}" title="${"token #" + id + " = bytes " + V(id).hex}"><b>${vis(V(id).text)}</b><small>#${id}</small></span>`;
+    const pair = (a, b) => "“" + vis(V(a).text) + "” + “" + vis(V(b).text) + "”";
+    let at = 0;
+    return html`<h3 class="tr-h3">1 · Tokenisation, exactly as ${k.model} does it</h3>
+      <p class="small">Your model's tokenizer (its <code>bpe.json</code>) has ${n0(k.vocabulary)} tokens: the 256 single bytes, then ${n0(k.merges)} merges it learned from your training text, in order. The merge learned first is #0 and becomes token 256; merge #r becomes token 256 + r.</p>
+      <p class="small"><b>A. Cut the text into pieces</b> (a word keeps the space before it; numbers, punctuation and spaces are their own pieces). Merges never cross a piece boundary. Pattern: <code>${k.pattern}</code></p>
+      <div class="tr-toks">${k.pieces.map((p) => html`<span class="tr-tok"><b>${vis(p.text)}</b></span>`)}</div>
+      <p class="small"><b>B. Each piece starts as its UTF-8 bytes</b> (token IDs 0–255). Then, again and again: list every neighbouring pair the tokenizer has a merge for, take the one it learned <b>earliest</b> (lowest merge number), and join it everywhere in the piece. Stop when no pair has a merge.</p>
+      ${k.pieces.map((p, i) => html`<details class="nn-piece" ${i < 4 ? "open" : ""}><summary>Piece ${i + 1} “${vis(p.text)}”: ${p.start.length} byte${p.start.length === 1 ? "" : "s"} → ${p.ids.length} token${p.ids.length === 1 ? "" : "s"} after ${p.steps.length} merge${p.steps.length === 1 ? "" : "s"}</summary>
+        <div class="tr-calc small"><div>bytes: <span class="tr-toks inline">${p.start.map((b) => chip(b))}</span></div>
+        ${p.steps.map((s, j) => html`<hr><div>Merge ${j + 1}: pairs with a merge: ${s.candidates.map(([r, a, b]) => pair(a, b) + " (#" + r + ")").join(", ")}${s.candidate_count > s.candidates.length ? " … and " + (s.candidate_count - s.candidates.length) + " more" : ""}<br>
+          earliest is #${s.rank}: ${pair(s.pair[0], s.pair[1])} → token <b>${s.id}</b> “${vis(V(s.id).text)}”${s.times > 1 ? " (" + s.times + " places)" : ""}<br>
+          now: <span class="tr-toks inline">${s.tokens.map((id) => chip(id))}</span></div>`)}
+        ${p.steps.length ? "" : html`<div class="faint">${p.start.length > 1 ? "No neighbouring pair here has a merge, so the bytes are the tokens." : "A single byte: nothing to merge, so the byte is the token."}</div>`}</div></details>`)}
+      <p class="small"><b>C. The token IDs</b>, in order. The first ${inNet} (the “tokens” setting${k.context ? ", at most the context of " + k.context : ""}) go into the network below.</p>
+      <div class="tr-toks">${k.pieces.map((p) => p.ids.map((id) => chip(id, at++ < inNet)))}</div>`;
+  }
+  function netPicker() {
+    const ms = TR.ov ? TR.ov.models : [], s = L.net;
+    if (TR.ov && s.src && !ms.some((m) => m.name === s.src)) s.src = "";
+    return html`<div class="row wrap nn-pick"><label class="tr-field inline"><span>Network</span><select class="select" data-tr-act="net-src"><option value="">The small demo network (made-up weights)</option>${raw(ms.map((m) => '<option value="' + esc(m.name) + '"' + (s.src === m.name ? " selected" : "") + ">Your model: " + esc(m.name) + " (" + n0(m.parameters) + " weights)</option>").join(""))}</select></label>
+      ${ms.length ? html`<span class="faint small">Pick one of your trained models to see its real tokenizer, weights and calculations.</span>` : html`<span class="faint small">Train a model in <a href="#" data-tr-tab="train">step 3</a> and it appears here, with its real weights.</span>`}</div>`;
+  }
+  function netModelView() {
+    const s = L.net, tr = EV.trace, m = (TR.ov ? TR.ov.models : []).find((x) => x.name === s.src);
+    const ready = tr && tr.trained && tr.model === s.src, st = ready && netStage(), k = s.tok && s.tok.model === s.src ? s.tok : null;
+    return html`${workerNote("Running your model")}
+      <p>This is <b>${s.src}</b>, the model you trained${m ? html`: ${n0(m.vocabulary)} tokens, ${m.layers} block${m.layers === 1 ? "" : "s"} of width ${m.width} with ${m.heads} attention heads, ${n0(m.parameters)} weights${m.trained_steps ? ", trained " + n0(m.trained_steps) + " steps" : ""}` : ""}. Type some text and run it: you'll see how its tokenizer cuts the text up, then every neuron of every layer with its real weights.</p>
+      <div class="row wrap"><input class="input grow" data-tr-act="ex-prompt" value="${TR.exPrompt}" placeholder="Text to run through your model">
+        <label class="tr-field inline"><span>tokens</span><input class="input" type="number" min="1" max="16" value="${EV.tokens}" data-tr-act="ev-tokens" style="width:64px"></label>
+        <button class="btn primary" data-tr-act="net-run" ${s.busy ? "disabled" : ""}>${s.busy ? "Working…" : ready || k ? "Run again" : "Run it"}</button></div>
+      ${k ? netTokens(k) : ""}
+      ${ready ? html`<h3 class="tr-h3">2 · The network, neuron by neuron</h3>
+        <p class="small">One real forward pass of “${tr.tokens.map((x) => x.text).join("")}”, every number kept (PyTorch's own result differs from the hand-written maths by at most ${fx(tr.check_max_difference, 2)}: rounding). Pick the token to follow and the part of the network:</p>
+        <div class="row wrap small nn-bar"><span>Token:</span><span class="tr-toks inline">${tr.tokens.map((x, i) => html`<button class="tr-tok${i === s.t ? " on" : ""}" data-tr-nett="${i}"><b>${vis(x.text)}</b><small>#${x.id}</small></button>`)}</span></div>
+        <div class="row wrap small nn-bar"><button class="btn small" data-tr-act="net-prev" ${s.stage ? "" : "disabled"}>← back</button>
+          <select class="select" data-tr-act="net-stage">${raw(s.st.map((x, i) => '<option value="' + i + '"' + (i === s.stage ? " selected" : "") + ">" + esc(x.label) + "</option>").join(""))}</select>
+          <button class="btn small" data-tr-act="net-next" ${s.stage < s.st.length - 1 ? "" : "disabled"}>forward →</button>
+          ${st.heads ? html`<span class="seg">${range(tr.config.heads).map((h) => html`<button class="${h === s.head ? "on" : ""}" data-tr-nethead="${h}">head ${h + 1}</button>`)}</span>` : ""}</div>
+        <p class="small muted">${st.note}</p>
+        ${raw(netSVG(st))}
+        <p class="faint small tr-netnote">Columns, left to right: ${st.cols.map((c) => c.title).join(" → ")}. Line thickness is the size of the weight; <b class="nn-k pos">blue</b> adds, <b class="nn-k neg">red</b> subtracts${st.cols.some((c) => c.edge === "one") ? "; grey lines just carry a number across" : ""}. ▲ ▼ show the other neurons.</p>
+        ${netDetail(st)}
+        <p class="muted small">The same run, as tables of every number and every weight matrix: <a href="#" data-tr-tab="inside">4 · Inside the model → Every number</a>.</p>`
+      : s.busy ? html`<p class="small"><span class="spin"></span> Running the text through ${s.src}…</p>` : ""}`;
+  }
+  async function netRun() {
+    const s = L.net; if (!s.src || s.busy) return;
+    s.busy = true; TR.exModel = s.src; paint();
+    const tk = post("/api/train/tokenize", { model: s.src, text: TR.exPrompt }), tp = post("/api/train/trace", { model: s.src, prompt: TR.exPrompt, tokens: EV.tokens });
+    const a = await tk; if (a) { s.tok = a.tokenize; paint(); }
+    const r = await tp; s.busy = false;
+    if (r) {
+      Object.assign(EV, { trace: r.trace, op: 0, cell: null, col0: 0, wname: "", wcache: {}, explain: null });
+      Object.assign(s, { t: null, nsel: null, ncalc: null, win: {}, rows: {} });
+      if (!r.trace.trained) toast("That model's files weren't found, so this ran the untrained demo model.");
+      netEnsure();
+    }
+    paint();
+  }
   const AI_LESSONS = [
     { id: "big", title: "The big picture", body: () => html`
       <p>A language model is one function with millions of adjustable numbers (<b>weights</b>). Give it some text and it returns, for every possible next piece of text, a probability. <b>Training</b> nudges the weights so that the piece that really came next gets a higher probability. That's all — everything else is how to do that well.</p>
@@ -347,8 +574,9 @@
     }, draw: () => { const p = []; for (let x = -4; x <= 4; x += 0.1) p.push([x, gelu(x)]); const z = L.neuron.w1 * L.neuron.x1 + L.neuron.w2 * L.neuron.x2 + L.neuron.b;
       chart($('[data-tr-chart="gelu"]'), [{ pts: p, color: cssv("--accent", "#7c8cff") }], { mark: [z, gelu(z)], xlabel: "z → GELU(z)" }); } },
     { id: "network", title: "A whole network", body: () => {
+      if (L.net.src && TR.ov && TR.ov.models.some((m) => m.name === L.net.src)) return html`${netPicker()}${netModelView()}`;
       const fwd = nnForward(L.net.x), out = fwd.acts[fwd.acts.length - 1][0];
-      return html`<p>A neuron on its own isn't much. Stack neurons into <b>layers</b> and connect every neuron to every neuron in the next layer, and you have a network. Numbers flow left to right: the <b class="nn-k in">inputs</b> you feed in, through the <b class="nn-k hid">hidden</b> layers that mix and bend them, to the <b class="nn-k out">output</b>.</p>
+      return html`${netPicker()}<p>A neuron on its own isn't much. Stack neurons into <b>layers</b> and connect every neuron to every neuron in the next layer, and you have a network. Numbers flow left to right: the <b class="nn-k in">inputs</b> you feed in, through the <b class="nn-k hid">hidden</b> layers that mix and bend them, to the <b class="nn-k out">output</b>.</p>
       ${raw(nnSVG(fwd))}
       <p class="faint small tr-netnote">Click any neuron to see the exact calculation its inputs go through. Arrow thickness shows the size of each weight; <b class="nn-k pos">blue</b> arrows add, <b class="nn-k neg">red</b> arrows subtract.</p>
       <div class="tr-two"><div class="nn-inputs"><div class="small" style="margin-bottom:4px"><b>Inputs</b> — feed the network different numbers and watch every value update:</div>
@@ -1086,7 +1314,7 @@ Assistant: game tonight?</pre></div>
 
   // ---------- every number: the whole network, every weight, every calculation in + − × ÷ ----------
   const EV = { trace: null, op: 0, cell: null, col0: 0, busy: false, tokens: 8, wcache: {}, wname: "", wrow: 0, wcol: 0, explain: null };
-  const fx = (x, p = 7) => (x == null ? "−∞" : !isFinite(x) ? String(x) : (+(+x).toPrecision(p)).toString());
+  const fx = (x, p = 9) => (x == null ? "−∞" : !isFinite(x) ? String(x) : (+(+x).toPrecision(p)).toString());
   const PAGE_COLS = 128, PAGE_ROWS = 64;
   function evToken(i) { const t = EV.trace.tokens[i]; return t ? vis(t.text) : "#" + i; }
   async function weightRow(name, row) {
@@ -1156,7 +1384,7 @@ Assistant: game tonight?</pre></div>
     } else if (h.kind === "linear") {
       const x = O(h.x)[r], w = await weightRow(h.weight, h.offset + c), b = vecOf(h.bias);
       L.push("Number " + c + " = Σ input × weight, over the " + x.length + " inputs (row " + (h.offset + c) + " of " + h.weight + "), then + bias:");
-      const s = sumLines(x.map((v, k) => [v, w[k], "input " + k]));
+      const s = sumLines(x.map((v, k) => [v, w[k], "input " + k + " × W[" + (h.offset + c) + "][" + k + "]"]));
       L.push("+ bias " + h.bias + "[" + (h.offset + c) + "] = " + fx(s) + " + " + fx(b[h.offset + c]) + " = " + fx(s + b[h.offset + c]));
     } else if (h.kind === "dot") {
       if (c > r) { L.push("Token " + c + " (“" + evToken(c) + "”) comes after token " + r + " (“" + evToken(r) + "”): the model may not look ahead, so this score is −∞ and its weight becomes e^(−∞) = 0."); }
@@ -1304,12 +1532,16 @@ Assistant: game tonight?</pre></div>
     if (S.view !== "train" || !e.target.closest("#tr-root")) return;
     const ev = e.target.closest("[data-ev-op],[data-ev-w],[data-ev-cell]");
     if (ev) { evClick(ev); return; }
-    const t = e.target.closest("[data-tr-tab],[data-tr-lesson],[data-tr-neuron],[data-tr-act],[data-tr-check],[data-tr-del],[data-tr-delmodel],[data-tr-chatwith],[data-tr-inspect],[data-tr-get],[data-tr-use],[data-tr-qdel],[data-tr-together]");
+    const t = e.target.closest("[data-tr-tab],[data-tr-lesson],[data-tr-neuron],[data-tr-nnet],[data-tr-netpage],[data-tr-nett],[data-tr-nethead],[data-tr-act],[data-tr-check],[data-tr-del],[data-tr-delmodel],[data-tr-chatwith],[data-tr-inspect],[data-tr-get],[data-tr-use],[data-tr-qdel],[data-tr-together]");
     if (!t || t.tagName === "SELECT" || t.tagName === "INPUT" && t.type !== "button") return;
     const d = t.dataset;
     if (d.trTab) { e.preventDefault(); TR.tab = d.trTab; store.set("train.tab", TR.tab); paint(); window.scrollTo(0, 0); return; }
     if (d.trLesson != null) { TR.lesson = +d.trLesson; store.set("train.lesson", TR.lesson); paint(); const el = $("#tr-lesson"); if (el) el.scrollIntoView({ block: "start" }); return; }
     if (d.trNeuron) { const [l, j] = d.trNeuron.split(",").map(Number), s = L.net; s.sel = s.sel && s.sel[0] === l && s.sel[1] === j ? null : [l, j]; paint(); return; }
+    if (d.trNnet) return netSelect(d.trNnet);
+    if (d.trNetpage) { const [ci, dir] = d.trNetpage.split(",").map(Number), st = netStage(), key = st.key + ":" + ci; L.net.win[key] = Math.max(0, (L.net.win[key] || 0) + dir * NW); paint(); netEnsure(); return; }
+    if (d.trNett != null) { L.net.t = +d.trNett; L.net.nsel = null; paint(); netEnsure(); return; }
+    if (d.trNethead != null) { L.net.head = +d.trNethead; L.net.nsel = null; paint(); netEnsure(); return; }
     if (d.trCheck) return checkData(d.trCheck);
     if (d.trTogether) { TR.together = d.trTogether; store.set("train.together", TR.together); paint(); return; }
     if (d.trQdel != null) { qPrompts().splice(+d.trQdel, 1); saveQ(); paint(); return; }
@@ -1374,6 +1606,8 @@ Assistant: game tonight?</pre></div>
     else if (a === "mdice-reset") { Object.assign(L.mdice, { counts: [0, 0, 0], total: 0, last: null }); paint(); }
     else if (a === "inside-every" || a === "inside-summary") { store.set("train.inside", a.slice(7)); paint(); }
     else if (a === "ev-trace") evTrace();
+    else if (a === "net-run") netRun();
+    else if (a === "net-prev" || a === "net-next") { L.net.stage += a === "net-next" ? 1 : -1; L.net.nsel = null; paint(); netEnsure(); }
     else if (a === "ev-left" || a === "ev-right") { EV.col0 = Math.max(0, EV.col0 + (a === "ev-left" ? -PAGE_COLS : PAGE_COLS)); paint(); }
     else if (a === "ev-wup" || a === "ev-wdown") { EV.wrow = Math.max(0, EV.wrow + (a === "ev-wup" ? -PAGE_ROWS : PAGE_ROWS)); loadWeights(); }
     else if (a === "ev-wleft" || a === "ev-wright") { EV.wcol = Math.max(0, EV.wcol + (a === "ev-wleft" ? -PAGE_COLS : PAGE_COLS)); paint(); }
@@ -1394,6 +1628,11 @@ Assistant: game tonight?</pre></div>
     c.busy = false; c.history.push({ role: "assistant", content: r ? (r.reply || "(nothing)") : "(no reply)" }); paint();
     const m = $("#tr-msgs"); if (m) m.scrollTop = m.scrollHeight;
   }
+  document.addEventListener("keydown", (e) => {
+    if (S.view !== "train" || (e.key !== "Enter" && e.key !== " ")) return;
+    const g = e.target.closest && e.target.closest("[data-tr-nnet],[data-tr-neuron],[data-tr-netpage]");
+    if (g) { e.preventDefault(); g.dispatchEvent(new MouseEvent("click", { bubbles: true })); }
+  });
   document.addEventListener("keydown", (e) => { if (S.view === "train" && e.target.id === "tr-ask" && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } });
   document.addEventListener("input", (e) => {
     if (S.view !== "train" || !e.target.closest("#tr-root")) return;
@@ -1438,6 +1677,8 @@ Assistant: game tonight?</pre></div>
     }
     else if (d.trAct === "keep-best") { TR.keepBest = t.checked; paint(); }
     else if (d.trAct === "ex-model") TR.exModel = t.value;
+    else if (d.trAct === "net-src") { const s = L.net; s.src = t.value; store.set("train.netsrc", s.src); s.nsel = null; paint(); if (s.src && !(EV.trace && EV.trace.trained && EV.trace.model === s.src)) netRun(); }
+    else if (d.trAct === "net-stage") { L.net.stage = +t.value; L.net.nsel = null; paint(); netEnsure(); }
     else if (d.trAct === "mp-file") {
       TR.mp.file = t.value; TR.mp.speakers = null; TR.mp.speaker = "";
       if (t.value) { try { const r = await getJSON("/api/train/speakers?name=" + encodeURIComponent(t.value)); if (r.ok) { TR.mp.speakers = r.speakers; TR.mp.speaker = r.speakers.length ? r.speakers[0].name : ""; } else toast(r.error); } catch (_) { toast("Couldn't read it."); } }

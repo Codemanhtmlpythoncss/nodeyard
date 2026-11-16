@@ -9,6 +9,12 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Train AI: see a model you trained, neuron by neuron.** *Learn → A whole network* has a **Network** picker: the small demo network as before, or any model you trained. Pick one, type some text and run it, and the lesson shows:
+  - **Tokenisation, exactly as your model does it**, from its own `bpe.json`: the pieces the text is cut into, each piece's UTF-8 bytes, then every merge in order (the pairs that could merge with their merge numbers, the earliest-learned one, the new token ID and the tokens after it), and the final token IDs. A new endpoint, `POST /api/train/tokenize`, replays the tokenizer step by step in plain Python on the dashboard and gives exactly the IDs the model uses.
+  - **The real network**, drawn like the demo but with your model's weights: the embedding, then for each block the queries, keys and values (per head), attention (each earlier token with its attention weight), the output projection and residual, the GELU feed-forward neurons, and finally the logits and probabilities of the likeliest next tokens. Line thickness is the size of each real weight. Choose the token to follow, the head, and page through every neuron with ▲ ▼.
+  - **The exact calculation behind any neuron**: click it to see every input × weight (named `W[row][column]`) with its running total, plus the bias, the dot products and softmax for attention, and the GELU series, each ending with PyTorch's own value.
+
+  The weights come straight from `model.pt`, fetched a few rows at a time with the new `rows=` option of `/api/train/weights`. Traces now keep 9 significant digits, enough to give back every float32 value exactly.
 - **Train AI teaches the maths first, simply.** *Learn* starts with **Maths you need**, 12 lessons written for a beginner (about age 14):
   - letters as boxes for numbers (plus negatives, decimals and 1e-3);
   - Σ;
