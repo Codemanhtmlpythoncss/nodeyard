@@ -190,6 +190,14 @@ k3s_run_installer() {
         ny_die "The k3s installer failed." "See the output above, then run this command again (it is safe to repeat). 'sudo nodeyard doctor' checks the usual problems."
 }
 
+# k3s_relink_watch -- the timer that brings a node back after its cable was
+# unplugged and plugged in again (relink.sh); undone by 'uninstall k3s'.
+k3s_relink_watch() {
+    ny_systemd_available || return 0
+    relink_watch_write
+    ny_info "Nodes that drop off the network reconnect by themselves (nodeyard relink-watch)."
+}
+
 # k3s_start_service SERVICE -- enable and (re)start a k3s service. If it won't
 # start or stay up, show why in plain English and stop.
 k3s_start_service() {
@@ -491,6 +499,7 @@ k3s_install_server_cmd() {
     k3s_start_service k3s
 
     firewall_open_k3s server
+    k3s_relink_watch
 
     if [[ "$allow" -eq 1 ]]; then
         ny_simulating || sleep 5
@@ -733,6 +742,7 @@ k3s_join() {
     K3S_ROLE="$mode"
     k3s_start_service "$svc"
     firewall_open_k3s "$mode"
+    k3s_relink_watch
     [[ "$NY_DRY_RUN" -eq 1 ]] && return 0
     ny_ok "Joined ${K3S_J_SERVER} as a ${what}."
 }
@@ -1172,8 +1182,8 @@ Usage: nodeyard uninstall k3s [--yes]
 
 Removes k3s from THIS node (all its containers and cluster data on this
 machine) and undoes the system changes nodeyard made for k3s: kernel
-settings, firewall rules, the watchdog and the stored join token. Your
-cluster.conf is kept.
+settings, firewall rules, the watchdog, the relink timer and the stored join
+token. Your cluster.conf is kept.
 HELP
 }
 
@@ -1194,6 +1204,7 @@ k3s_uninstall_cmd() {
         fi
     done
     ny_journal_undo_feature watchdog 1 || true
+    ny_journal_undo_feature relink 1 || true
     ny_journal_undo_feature k3s || ny_warn "Some changes could not be undone automatically (see above)."
     local self
     self="$(ny_self_name)"

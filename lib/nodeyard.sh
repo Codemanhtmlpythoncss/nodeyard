@@ -58,6 +58,8 @@ shopt -s lastpipe
 . "${NY_HOME}/lib/modules/k3s.sh"
 # shellcheck source=modules/cluster.sh
 . "${NY_HOME}/lib/modules/cluster.sh"
+# shellcheck source=modules/relink.sh
+. "${NY_HOME}/lib/modules/relink.sh"
 # shellcheck source=modules/ai.sh
 . "${NY_HOME}/lib/modules/ai.sh"
 # shellcheck source=modules/ai_split.sh

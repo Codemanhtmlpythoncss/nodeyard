@@ -96,6 +96,7 @@ k3s kubectl get node * -o jsonpath=*allocatable.memory*	0	8031888Ki
 k3s kubectl get node *	0	yard   Ready
 k3s kubectl get --raw=/healthz	0	ok
 k3s kubectl get pods -A --no-headers*	0	@pods.txt
+k3s kubectl get nodes -o jsonpath=*backend-data*	0	yard-1|True|2026-10-06T08:00:00Z|192.168.1.10|{"BackendType":"vxlan","VNI":1,"VtepMAC":"5a:1e:7c:30:9b:01"}|192.168.1.10|10.42.0.0/24\nyard-2|True|2026-10-07T08:00:00Z|192.168.1.11|{"BackendType":"vxlan","VNI":1,"VtepMAC":"5a:1e:7c:30:9b:02"}|192.168.1.11|10.42.1.0/24\nyard-3|True|2026-10-08T08:00:00Z|192.168.1.12|{"BackendType":"vxlan","VNI":1,"VtepMAC":"5a:1e:7c:30:9b:03"}|192.168.1.12|10.42.2.0/24\nyard-4|True|2026-10-09T08:00:00Z|192.168.1.13|{"BackendType":"vxlan","VNI":1,"VtepMAC":"5a:1e:7c:30:9b:04"}|192.168.1.13|10.42.3.0/24
 k3s kubectl get nodes -o jsonpath=*DiskPressure*	0	yard-1 False False\nyard-2 False False\nyard-3 False False\nyard-4 False False
 k3s kubectl get nodes -o jsonpath=*InternalIP*	0	yard-1\t192.168.1.10\nyard-2\t192.168.1.11\nyard-3\t192.168.1.12\nyard-4\t192.168.1.13
 k3s kubectl get nodes -l * -o jsonpath=*	0	yard-1\nyard-3

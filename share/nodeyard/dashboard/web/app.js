@@ -1220,8 +1220,8 @@
     const reachText = (name) => { const r = FIX.reach[String(name).toLowerCase()]; return (r === "both" || r === "lan" || r === "tailscale") ? "answers (online)" : r === "partial" ? "up, agent not answering" : r === "unreachable" ? "no answer (offline)" : "not tested"; };
     const nodeRow = (n) => { const st = nodeState(n); return html`<div class="fix-row"><div class="grow"><b>${n.name} — ${st.label}</b>
       <div class="muted small">Reachability: ${reachText(n.name)}.</div>
-      <div class="faint small">${st.unknown ? "The control plane hasn't heard from it. If it answers above, it's a control-plane/network issue, not a dead node — try Restart Kubernetes below. If it's offline for good, remove it." : "The node itself reports NotReady — open it for the exact condition (memory, disk, kubelet)."}</div></div>
-      ${chip(st.label, st.cls)}<button class="btn small danger" data-node-remove="${n.name}">Remove node…</button></div>`; };
+      <div class="faint small">${st.unknown ? "The control plane hasn't heard from it. If its network cable was unplugged and plugged back in, Reconnect brings it back without a reboot. If it's offline for good, remove it." : "The node itself reports NotReady — open it for the exact condition (memory, disk, kubelet), or try Reconnect if it lost its network for a moment."}</div></div>
+      ${chip(st.label, st.cls)}<button class="btn small" data-node-relink="${n.name}" title="Clear this server's old network entries for it and bring it back without rebooting anything">Reconnect</button><button class="btn small danger" data-node-remove="${n.name}">Remove node…</button></div>`; };
     const checkRow = (c) => html`<div class="fix-row"><div class="grow"><b>${isBad(c) ? "✗ " : "⚠ "}${c.title}</b>${c.detail ? html`<div class="muted small">${c.detail}</div>` : ""}
       ${c.fix ? html`<div class="faint small">Fix: ${c.fix}</div>` : html`<div class="faint small">Needs a manual change — no automatic fix.</div>`}</div>
       ${chip(isBad(c) ? "problem" : "warning", isBad(c) ? "bad" : "warn")}
@@ -1232,9 +1232,10 @@
         <span>${fixable.length} auto-fixable</span></div>
       <div class="row wrap" style="gap:8px;margin:10px 0">${fixable.length ? html`<button class="btn primary" data-fix="all">Fix all ${fixable.length} safe problem${fixable.length === 1 ? "" : "s"}</button>` : ""}<button class="btn" data-fix="rerun">Re-check</button></div>
       ${notReady.length ? html`<div class="section-title">Nodes needing attention</div>${notReady.map(nodeRow)}
-        <div class="row wrap" style="gap:8px;margin:8px 2px 2px"><button class="btn small danger" data-fix="restart-k8s">Restart Kubernetes on every node…</button><span class="faint small">The usual fix when a node answers but shows “Status unknown”: restarts k3s + nodeyard services on each reachable node (workers first). Offline nodes are skipped; it confirms first.</span></div>` : ""}
+        <div class="row wrap" style="gap:8px;margin:8px 2px 2px"><button class="btn small primary" data-fix="relink">Reconnect missing nodes</button><span class="faint small">The fix for a node that went missing after its cable was unplugged and plugged back in — no reboot. Clears this server's old network entries for it (including a pinned one), spots two machines using the same address, and restarts k3s here only if the node answers but still doesn't report in.</span></div>
+        <div class="row wrap" style="gap:8px;margin:8px 2px 2px"><button class="btn small danger" data-fix="restart-k8s">Restart Kubernetes on every node…</button><span class="faint small">If Reconnect didn't bring it back: restarts k3s + nodeyard services on each reachable node (workers first). Offline nodes are skipped; it confirms first.</span></div>` : ""}
       ${problems.length ? html`<div class="section-title">Checks</div>${problems.map(checkRow)}` : html`<div class="note good" style="margin-top:10px">The checks found no problems.</div>`}
-      <p class="faint small" style="margin-top:14px"><b>Fix</b> runs nodeyard's own repair for that check, then re-checks to confirm. The bigger actions here (Restart Kubernetes, and removing a node from <b>Devices</b>) confirm before they run.</p>`);
+      <p class="faint small" style="margin-top:14px"><b>Fix</b> runs nodeyard's own repair for that check, then re-checks to confirm. <b>Reconnect</b> runs straight away (it only restarts k3s on this server, and only if a node answers but still doesn't report in). The bigger actions here (Restart Kubernetes, and removing a node from <b>Devices</b>) confirm before they run.</p>`);
   }
   function runPalette(i) { const it = pItems[i]; if (!it) return; closeModals(); it.run(); }
 
@@ -1435,6 +1436,8 @@
     if (t.closest("[data-mobile-fullrefresh]")) { setMobileMenu(false, false); fullRefresh(); return; }
     const rm = t.closest("[data-node-remove]");
     if (rm && !rm.disabled) { removeNode(rm.dataset.nodeRemove); return; }
+    const rl = t.closest("[data-node-relink]");
+    if (rl && !rl.disabled) { startJob("relink", { node: rl.dataset.nodeRelink }, () => openFix()); return; }
     const lg = t.closest("[data-logs]");
     if (lg) { if (lg.dataset.logs === "refresh") loadDiag(); return; }
     const fx = t.closest("[data-fix]");
@@ -1443,7 +1446,8 @@
       if (act === "close") { closeModals(); }
       else if (act === "rerun") { runFixDiagnostics(); }
       else if (act === "one") { startJob("doctor-fix", { only: fx.dataset.id }, () => openFix()); }
-      else if (act === "all") { if (window.confirm("Apply nodeyard's safe fixes for every auto-fixable problem?\n\nEach is a per-machine repair (enable a service, a sysctl, etc.), re-checked afterwards. Disruptive cluster actions are not included.")) startJob("doctor-fix", {}, () => openFix()); }
+      else if (act === "all") { if (window.confirm("Apply nodeyard's safe fixes for every auto-fixable problem?\n\nEach is a per-machine repair (enable a service, a sysctl, etc.), re-checked afterwards. Nodes that dropped off are reconnected, which can restart k3s on this server (containers keep running). Restarting or rebooting every node is not included.")) startJob("doctor-fix", {}, () => openFix()); }
+      else if (act === "relink") { startJob("relink", {}, () => openFix()); }
       else if (act === "restart-k8s") { if (window.confirm("Restart Kubernetes on every node to re-register the ones stuck on “Status unknown”?\n\n• Restarts k3s and the nodeyard services on each reachable node, workers first, then this server.\n• Offline nodes are skipped. Containers keep running; the cluster is briefly unreachable.\n• This is the usual fix when a node answers but the control plane hasn't heard from it.")) startJob("restart-cluster", {}, () => openFix()); }
       return;
     }

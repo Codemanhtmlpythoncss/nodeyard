@@ -97,6 +97,12 @@ It needs `python3` (3.8 or newer; nodeyard offers to install it).
 Settings also has a confirmed **Restart Kubernetes** action. Workers restart one
 at a time before the control node; the dashboard waits for nodes to return.
 
+The **Fix** dialog lists nodes that aren't Ready. For a node that went
+missing after its network cable was unplugged and plugged back in,
+**Reconnect** (or **Reconnect missing nodes**) runs `nodeyard relink` and
+brings it back without a reboot. See "When a node drops off after its cable
+was unplugged" in [k3s.md](k3s.md).
+
 Also: search everything with `Ctrl K` or `/` (names, IP addresses, ports),
 numbers `1`-`9` and `0` switch sections, `r` refreshes, `Space` pauses live
 updates, `t` switches theme, `?` lists the shortcuts. Click any address to

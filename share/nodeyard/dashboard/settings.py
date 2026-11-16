@@ -38,12 +38,16 @@ ENV = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "
 CHAT_DEFAULTS = {"system": "", "temperature": 0.7, "max_tokens": 1024, "compress": "auto", "web": False,
                  "skills_auto": True, "autofix": False, "files": "ask", "context_length": 8192, "context_max": False}
 
-DEMO_DOCTOR = {"ok": True, "issues": 1, "warnings": 2, "fixed": 0, "checks": [
+DEMO_DOCTOR = {"ok": True, "issues": 3, "warnings": 2, "fixed": 0, "checks": [
     {"id": "deps", "category": "nodeyard", "title": "nodeyard's required tools are installed", "status": "ok", "detail": None, "fix": None},
     {"id": "k3s-active", "category": "k3s", "title": "k3s service is running", "status": "ok", "detail": None, "fix": "restart the k3s service"},
     {"id": "time-sync", "category": "host", "title": "clock is synchronised", "status": "warn", "detail": "systemd-timesyncd is not running", "fix": "enable time sync"},
     {"id": "disk-space", "category": "host", "title": "enough free disk space", "status": "warn", "detail": "/ is 91% full on yard-3", "fix": None},
-    {"id": "nodes-ready", "category": "cluster", "title": "every node is Ready", "status": "fail", "detail": "yard-4 is NotReady", "fix": None},
+    {"id": "relink-watch", "category": "network", "title": "dropped nodes reconnect by themselves", "status": "issue",
+     "detail": "a node that loses its cable stays missing until someone reboots or runs 'sudo nodeyard relink'",
+     "fix": "check every 20 s and reconnect a node that dropped off (e.g. after its cable was unplugged)"},
+    {"id": "cluster-nodes", "category": "cluster", "title": "all nodes Ready, none under pressure", "status": "issue", "detail": "not Ready: yard-4",
+     "fix": "reconnect them without a reboot: clear this server's old network entries for them, and restart k3s here if they answer but still don't report in"},
     {"id": "pods", "category": "cluster", "title": "all pods running", "status": "issue",
      "detail": "stuck pods to clear: ai-split/rpc-yard-4-7dd5 (ContainerStatusUnknown)",
      "fix": "force-delete pods stuck Terminating/Unknown (ghosts left on an unreachable node)"},
