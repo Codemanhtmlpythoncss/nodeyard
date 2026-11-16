@@ -1835,11 +1835,18 @@ def _current_run(points):
     return points[i:]
 
 
-def loss_metrics(points, window=50, hour=3600.0):
+def loss_metrics(points, window=50, hour=3600.0, min_span=300.0):
     """Two live readings from the training loss: a smoothed average of the recent steps, and how much the loss
     has fallen over the last hour (extrapolated when less than an hour has run). Returns None values when there
     isn't enough to say. Wall-clock time is taken from each step's own steps/sec (elapsed ≈ step ÷ steps-per-sec),
-    so it needs no timestamps in the log and resets cleanly with each run."""
+    so it needs no timestamps in the log and resets cleanly with each run.
+
+    The per-hour figure is deliberately conservative so it is never wildly off early on. The first seconds of a
+    run are a steep warm-up cliff (loss plunges from ~ln(V) then flattens); measuring the drop from step 1 and
+    multiplying a tiny span up to a whole hour used to report absurd rates (e.g. "−181/h" one minute in). Instead:
+    before a full hour has run we measure only the most recent half of the run — past the cliff — and we quote
+    nothing until that window is at least min_span seconds (so the extrapolation factor is capped at hour/min_span,
+    12× by default); once a real hour of data exists we use the actual last hour and stop extrapolating."""
     run = _current_run(points)
     losses = [p["loss"] for p in run if isinstance(p.get("loss"), (int, float))]
     if not losses:
@@ -1851,16 +1858,19 @@ def loss_metrics(points, window=50, hour=3600.0):
     per_hour = window_seconds = extrapolated = None
     if len(timed) >= 2:
         now_t, now_loss = timed[-1]
-        ref_t, ref_loss = timed[0]
-        for t, loss in timed:                 # the earliest point still within the last hour
-            if t >= now_t - hour:
+        # Reference point for the drop: a real hour ago once we have one, otherwise the start of the most recent
+        # half of the run (which skips the opening warm-up cliff instead of letting it dominate the rate).
+        lo_t = now_t - hour if now_t >= hour else now_t * 0.5
+        ref_t, ref_loss = timed[-1]
+        for t, loss in timed:
+            if t >= lo_t:
                 ref_t, ref_loss = t, loss
                 break
         span = now_t - ref_t
-        if span > 1e-6:
+        if span >= min_span:                  # too little signal yet → leave it blank rather than guess wildly
             window_seconds = span
             drop = ref_loss - now_loss        # positive = the loss went down (improving)
-            extrapolated = span < hour
+            extrapolated = now_t < hour
             per_hour = drop * (hour / span) if extrapolated else drop
     return {"avg_loss": avg, "loss_per_hour": per_hour, "window_seconds": window_seconds, "extrapolated": extrapolated}
 
