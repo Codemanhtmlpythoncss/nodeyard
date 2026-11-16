@@ -141,6 +141,10 @@ def resume_learning_rate(params, validation_loss=None, vocab=None):
     return float("%.2g" % (base * fraction))
 
 
+MAX_WEIGHTS = 300_000_000     # the recommender never sizes a model above this
+AUTO_MAX_HOURS = 24 * 30      # Auto never plans a run longer than this (the same ceiling as the custom time box)
+
+
 def recommend(hw, data_chars=None, hours=1.0, profile=None):
     """Settings for this hardware and this data, each with the formula, the numbers and why.
 
@@ -195,17 +199,26 @@ def recommend(hw, data_chars=None, hours=1.0, profile=None):
                 "explain": "How many different tokens the model knows. Each needs its own row of d numbers in and out of the model (2·V·d weights), so a big vocabulary on little text wastes weights on tokens it rarely sees."})
 
     # Three limits on the model size N; the smallest wins.
-    n_compute = math.sqrt(compute / 120)
+    # Compute: Chinchilla's 20 tokens per weight costs C = 6·N·20N = 120·N². But the trainer reads the text at most
+    # 50 times, so past N = 2.5 × tokens a model sized that way would stop at 50 passes with time left over. There,
+    # spend the whole budget on a bigger model read those 50 times instead: C = 6·N·50·tokens, N = C ÷ (300 × tokens).
+    # So a run limited by compute always uses the time it was given.
+    n_chinchilla = math.sqrt(compute / 120)
+    n_passes = compute / (300 * max(1, tokens))
+    n_compute = max(n_chinchilla, n_passes)
     n_data = tokens * 10
     context0 = 128
     n_memory = budget / 20      # 16 bytes per weight for weights+gradients+AdamW m and v, plus room for activations
     caps = [("compute", n_compute), ("data", n_data), ("memory", n_memory)]
     limit_name, target = min(caps, key=lambda c: c[1])
-    target = max(50_000, min(target, 300_000_000))
-    why.append({"name": "Model size N (weights)", "value": _n(target), "formula": "N = min(√(C ÷ 120), 10 × tokens, memory ÷ 20 bytes)",
-                "numbers": "compute C = %s FLOP/s × %s s = %s → √(C÷120) = %s · data %s × 10 = %s · memory %s ÷ 20 = %s → %s is the limit"
-                           % (_sci(speed), _n(seconds), _sci(compute), _n(n_compute), _n(tokens), _n(n_data), _gb(budget), _n(n_memory), limit_name),
-                "explain": "Compute: the Chinchilla rule says train on about 20 tokens per weight, and training costs 6 FLOPs per weight per token, so C = 6·N·20N = 120·N². Data: with little text a bigger model still does better as long as dropout stops it memorising and you stop when validation stops falling (nanoGPT's Shakespeare model has about 10 weights per character of text), so this allows up to 10 weights per token, and the trainer keeps the checkpoint with the best validation. A smaller cap makes a model too small to learn the text, and the loss goes flat early. Memory: float32 weights, gradients and AdamW's two moments are 16 bytes per weight. %s" % ("Speed here is a guess for this hardware (%s FLOP/s); the real tokens/sec shows once training starts." % _sci(speed))})
+    target = max(50_000, min(target, MAX_WEIGHTS))
+    compute_rule = ("√(C÷120) = %s" % _n(n_chinchilla)) if n_chinchilla >= n_passes else (
+        "√(C÷120) = %s would need more than 50 passes, so C ÷ (300·%s) = %s" % (_n(n_chinchilla), _n(tokens), _n(n_passes)))
+    why.append({"name": "Model size N (weights)", "value": _n(target),
+                "formula": "N = min(compute, 10 × tokens, memory ÷ 20 bytes) — compute = √(C ÷ 120), or C ÷ (300 × tokens) once that would need more than 50 passes",
+                "numbers": "compute C = %s FLOP/s × %s s = %s → %s · data %s × 10 = %s · memory %s ÷ 20 = %s → %s is the limit"
+                           % (_sci(speed), _n(seconds), _sci(compute), compute_rule, _n(tokens), _n(n_data), _gb(budget), _n(n_memory), limit_name),
+                "explain": "Compute: the Chinchilla rule says train on about 20 tokens per weight, and training costs 6 FLOPs per weight per token, so C = 6·N·20N = 120·N². The text is read at most 50 times, so once 20 tokens per weight would need more passes than that, the time goes to a bigger model read 50 times (C = 6·N·50·tokens) rather than stopping early with time unused. Data: with little text a bigger model still does better as long as dropout stops it memorising and you stop when validation stops falling (nanoGPT's Shakespeare model has about 10 weights per character of text), so this allows up to 10 weights per token, and the trainer keeps the checkpoint with the best validation. A smaller cap makes a model too small to learn the text, and the loss goes flat early. Memory: float32 weights, gradients and AdamW's two moments are 16 bytes per weight. %s" % ("Speed here is a guess for this hardware (%s FLOP/s); the real tokens/sec shows once training starts." % _sci(speed))})
 
     context = 64 if target < 300_000 else 256 if target > 5_000_000 and device != "cpu" else context0
     base_context = context
@@ -291,6 +304,7 @@ def recommend(hw, data_chars=None, hours=1.0, profile=None):
                      "batch_size": batch, "grad_accum": accum, "steps": steps, "learning_rate": lr, "warmup": warmup, "weight_decay": 0.1,
                      "eval_every": eval_every, "dropout": dropout, "assistant_only": chat},
         "parameters": params, "tokens": tokens, "seconds": seconds_est, "memory": total_mem, "why": why, "expect": expect,
+        "caps": {"compute": n_compute, "data": n_data, "memory": n_memory},
     }
 
 
@@ -366,6 +380,33 @@ def recommend_resume(hw, saved, data_chars=None, hours=1.0, profile=None):
             "parameters": params, "tokens": tokens, "seconds": seconds_est, "steps": steps,
             "memory": 16 * params + batch * activation_bytes(1, context, width, layers, heads, vocab or 1),
             "why": why, "expect": expectation(params, tokens, chat=bool(profile.get("chat") or hw.get("chat")))}
+
+
+def auto_hours(hw, data_chars=None, profile=None, saved=None):
+    """The training time the "Auto" choice picks: long enough that the model ends up fully trained.
+
+    A new model: the shortest time at which more time stops buying a bigger model — its size is limited by your text
+    or memory instead of by compute — so the run is the biggest model this text supports, read its full ~50 times.
+    Continuing a saved model (its size is fixed): the time for its full ~50 passes over the text.
+    Returns (hours, capped); capped is True when even AUTO_MAX_HOURS leaves it limited by compute.
+    """
+    def enough(h):
+        if saved:
+            return recommend_resume(hw, saved, data_chars, h, profile)["limit"] != "your time"
+        r = recommend(hw, data_chars, h, profile)
+        return r["limit"] != "compute" or r["caps"]["compute"] >= MAX_WEIGHTS
+    lo, hi = 0.05, float(AUTO_MAX_HOURS)
+    if enough(lo):
+        return lo, False
+    if not enough(hi):
+        return hi, True
+    while hi / lo > 1.005:      # bisect on a log scale: the answer can be minutes or weeks
+        mid = math.sqrt(lo * hi)
+        if enough(mid):
+            hi = mid
+        else:
+            lo = mid
+    return hi, False
 
 
 def _hms(seconds):
@@ -710,7 +751,8 @@ class Trainer:
                 chat = chat or c["chat"]
             except TrainError:
                 pass
-        hours = _clamp_float(body.get("hours"), 0.05, 24 * 30, 1.0)
+        auto = body.get("hours") == "auto"
+        hours = 1.0 if auto else _clamp_float(body.get("hours"), 0.05, 24 * 30, 1.0)
         machines = self.machines(both=True)
         if not any(m["usable"] for m in machines):
             why = "; ".join("%s: %s" % (m["name"], m["reason"]) for m in machines if not m["usable"]) or "no machines found"
@@ -724,9 +766,13 @@ class Trainer:
         profile = {"chat": chat, "unique_fraction": 1.0, "example_chars": 0} if chars else None
         plan = self.plan(machines, links=links, model_bytes=0)
         hw = self.plan_hardware(machines, plan)
+        if auto:
+            hours, _ = auto_hours(dict(hw, chat=chat), chars, profile)
         rec = recommend(dict(hw, chat=chat), chars, hours, profile)
         plan = self.plan(machines, links=links, model_bytes=4 * (rec.get("parameters") or 0))
         hw = self.plan_hardware(machines, plan)
+        if auto:
+            hours, _ = auto_hours(dict(hw, chat=chat), chars, profile)
         rec = recommend(dict(hw, chat=chat), chars, hours, profile)
         for m in machines:
             lk = (links or {}).get(m["name"])
@@ -1908,7 +1954,9 @@ def register(ctx, args):
         return handler
 
     def overview(q):
-        hours = _clamp_float((q.get("hours") or ["1"])[0], 0.05, 24 * 30, 1.0)
+        raw_hours = (q.get("hours") or ["1"])[0]
+        auto = raw_hours == "auto"     # "Auto": work out how long it takes to train fully, instead of a fixed time
+        hours = 1.0 if auto else _clamp_float(raw_hours, 0.05, 24 * 30, 1.0)
         chars = None
         names = [n for n in (q.get("data") or [""])[0].split("|") if n]
         chat = False
@@ -1932,14 +1980,27 @@ def register(ctx, args):
         saved = None
         if resume_name:
             saved = next((m for m in t.models() if m["name"] == resume_name), None)
-        plan = t.plan(machines, chosen, links=links)
-        hw = t.plan_hardware(machines, plan)
-        rec = recommend(dict(hw, chat=chat), chars, hours, profile)
-        # Judge latency against the real model size, then settle the plan and hardware once more.
-        plan = t.plan(machines, chosen, links=links, model_bytes=4 * ((saved or rec).get("parameters") or 0))
-        hw = t.plan_hardware(machines, plan)
-        rec = (recommend_resume(dict(hw, chat=chat), saved, chars, hours, profile) if saved
-               else recommend(dict(hw, chat=chat), chars, hours, profile))
+        hw0 = t.plan_hardware(machines, t.plan(machines, chosen, links=links))
+
+        def settle(h):
+            """Size the model on a first plan, judge latency against that size, then plan and size once more — what
+            training will really use. h is a number of hours, or "auto" for the time that trains it fully."""
+            want_auto, capped = h == "auto", False
+            if want_auto:
+                h, _ = auto_hours(dict(hw0, chat=chat), chars, profile, saved)
+            first = recommend(dict(hw0, chat=chat), chars, h, profile)
+            plan = t.plan(machines, chosen, links=links, model_bytes=4 * ((saved or first).get("parameters") or 0))
+            hw = t.plan_hardware(machines, plan)
+            if want_auto:
+                h, capped = auto_hours(dict(hw, chat=chat), chars, profile, saved)
+            rec = (recommend_resume(dict(hw, chat=chat), saved, chars, h, profile) if saved
+                   else recommend(dict(hw, chat=chat), chars, h, profile))
+            return plan, hw, h, capped, rec
+
+        plan, hw, hours, capped, rec = settle("auto" if auto else hours)
+        auto_h, auto_rec = hours, rec
+        if not auto:   # also work out Auto, so a run limited by compute can say how long full training would take
+            _, _, auto_h, capped, auto_rec = settle("auto")
         for m in machines:   # show each machine's latency in the table
             lk = (links or {}).get(m["name"])
             if lk:
@@ -1949,11 +2010,12 @@ def register(ctx, args):
             t.pool.ensure(lead["name"], lead.get("_node"))
         # What would get a bigger model: more time on these machines, or a faster machine (even one that's down).
         times = []
-        for h in (0.25, 1, 3, 8, 24, 72):
+        fixed = [0.25, 1, 3, 8, 24, 72]
+        for h in sorted(fixed + ([hours] if auto and hours not in fixed else [])):
             r = (recommend_resume(dict(hw, chat=chat), saved, chars, h, profile) if saved
                  else recommend(dict(hw, chat=chat), chars, h, profile))
             times.append({"hours": h, "parameters": r["parameters"], "limit": r.get("limit", "continue"),
-                          "seconds": r["seconds"], "steps": r.get("steps")})
+                          "seconds": r["seconds"], "steps": r.get("steps"), "auto": auto and h == hours})
         faster = []
         for m in machines:
             if m["speed"] > 2 * (hw.get("speed") or 1) and m["name"] not in plan["share"]:
@@ -1963,7 +2025,9 @@ def register(ctx, args):
                                "parameters": r["parameters"], "limit": r["limit"], "seconds": r["seconds"]})
         rec["bigger"] = {"times": times, "faster": faster[:3]}
         return {"machines": [t.public(m) for m in machines], "plan": plan, "mode": t.pool.mode, "hardware": hw, "recommend": rec,
-                "datasets": t.datasets(), "catalog": t.fetcher.catalog(), "models": t.models(), "presets": t.presets(), "running": t.running(), "job": t.job, "hours": hours, "data_dir": t.data_dir}
+                "datasets": t.datasets(), "catalog": t.fetcher.catalog(), "models": t.models(), "presets": t.presets(), "running": t.running(), "job": t.job, "hours": hours,
+                "auto": {"on": auto, "hours": auto_h, "capped": capped, "seconds": auto_rec["seconds"], "parameters": auto_rec["parameters"]},
+                "data_dir": t.data_dir}
 
     def warm(body):
         names = body.get("machines") if isinstance(body.get("machines"), list) else []

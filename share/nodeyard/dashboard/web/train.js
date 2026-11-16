@@ -8,7 +8,7 @@
   const { S, V, $, toast, getJSON, postJSON, store } = U;
   const TABS = [["learn", "1 · Learn"], ["data", "2 · Your data"], ["train", "3 · Train"], ["inside", "4 · Inside the model"], ["chat", "5 · Chat"]];
   const TR = {
-    tab: store.get("train.tab", "learn"), lesson: +store.get("train.lesson", 0) || 0, ov: null, hours: +store.get("train.hours", 1) || 1,
+    tab: store.get("train.tab", "learn"), lesson: +store.get("train.lesson", 0) || 0, ov: null, hours: store.get("train.hours", 1) === "auto" ? "auto" : +store.get("train.hours", 1) || 1,
     sel: JSON.parse(store.get("train.sel", "[]") || "[]"), check: null, form: null, model: "", resume: false, keepBest: true, status: null, since: 0,
     lines: [], pollT: 0, ovT: 0, chat: { model: "", history: [], mode: "chat", temperature: 0.7, top_k: 40, top_p: 0.9, busy: false },
     explain: null, exModel: "", exPrompt: "User: Hello, who are you?", exBusy: false, upload: null, ovPollT: 0,
@@ -36,6 +36,10 @@
   const T_ = (A) => A[0].map((_, j) => A.map((r) => r[j]));
   const params = (V, T, d, L) => V * d + T * d + L * (12 * d * d + 13 * d) + 2 * d + d * V + V;
   const actBytes = (B, T, d, L, h, V) => 4 * B * T * (L * (34 * d + 5 * h * T) + 3 * V);
+  // "Auto" trains until the model is fully trained; the server works out how many hours that is (TR.ov.hours).
+  const isAuto = () => TR.hours === "auto";
+  const hoursNum = () => (isAuto() ? (TR.ov && TR.ov.hours) || 1 : +TR.hours);
+  const hrs = (h) => (h < 1 ? Math.round(h * 60) + " min" : +(+h).toPrecision(3) + " h");
   const lrAt = (step, total, peak, warm) => (step <= warm ? peak * step / Math.max(1, warm) : peak * (0.1 + 0.9 * 0.5 * (1 + Math.cos(Math.PI * Math.min(1, (step - warm) / Math.max(1, total - warm))))));
 
   // ---------- drawing ----------
@@ -805,14 +809,15 @@ Assistant: game tonight?</pre></div>
       <section class="card"><h2 class="tr-h">Recommended for ${ov.plan.share.length > 1 ? "these machines" : ov.plan.lead || "this hardware"}</h2>
         <label class="tr-field"><span>How long can it train?</span>
           <div class="row" style="gap:6px;align-items:center">
-            <select class="select" data-tr-act="hours">${raw([[0.25, "15 minutes"], [1, "1 hour"], [3, "3 hours"], [8, "overnight (8 h)"], [24, "a day"], [72, "3 days"]].map(([v, l]) => '<option value="' + v + '"' + (+v === +TR.hours ? " selected" : "") + ">" + l + "</option>").join("") + '<option value="custom"' + ([0.25, 1, 3, 8, 24, 72].indexOf(+TR.hours) < 0 ? " selected" : "") + ">Custom…</option>")}</select>
+            <select class="select" data-tr-act="hours">${raw('<option value="auto"' + (isAuto() ? " selected" : "") + ">Auto — until fully trained</option>" + [[0.25, "15 minutes"], [1, "1 hour"], [3, "3 hours"], [8, "overnight (8 h)"], [24, "a day"], [72, "3 days"]].map(([v, l]) => '<option value="' + v + '"' + (!isAuto() && +v === +TR.hours ? " selected" : "") + ">" + l + "</option>").join("") + '<option value="custom"' + (!isAuto() && [0.25, 1, 3, 8, 24, 72].indexOf(+TR.hours) < 0 ? " selected" : "") + ">Custom…</option>")}</select>
+            ${isAuto() ? html`<span class="small">≈ <b>${dur(r.seconds)}</b> on ${ov.plan.share.length > 1 ? "these machines" : "this machine"}</span>` : html`
             <input class="input" type="number" min="0.05" max="720" step="0.25" data-tr-act="hours-custom" value="${+TR.hours}" style="width:84px" title="exact hours — for precise time optimisation">
-            <span class="faint small">hours exactly</span>
+            <span class="faint small">hours exactly</span>`}
           </div></label>
         <p class="small">${TR.sel.length ? html`For <b>${TR.sel.join(", ")}</b>:` : html`<span class="warn-t">No data chosen yet</span> — <a href="#" data-tr-tab="data">choose it in step 2</a>.`} ${r.resume
           ? html`continuing this <b>${n0(r.parameters)}</b>-weight model for <b>${n0(r.steps)}</b> more steps, about <b>${dur(r.seconds)}</b>${r.measured ? "" : " (speed is a guess until it runs)"}. Limited by <b>${r.limit}</b>.`
           : html`a <b>${n0(r.parameters)}</b>-weight model, about <b>${dur(r.seconds)}</b>, using ~${gb(r.memory)}. Limited by <b>${r.limit}</b>.`}</p>
-        ${!r.resume && r.seconds && +TR.hours && r.seconds < 0.6 * +TR.hours * 3600 ? html`<p class="small tr-timecap">You allowed <b>${dur(+TR.hours * 3600)}</b>, but this model is fully trained in about <b>${dur(r.seconds)}</b> — it's limited by how much text you have, not by the clock. After about 50 passes over your text (<b>${n0(r.settings.steps)}</b> steps) more training only memorises it and scores <i>worse</i>, so the rest of the budget is left unused on purpose. To make a longer run pay off, <a href="#" data-tr-tab="data">add more text</a>.</p>` : ""}
+        ${timeNote(ov, r)}
         ${bigger(r)}
         <div class="tr-why">${r.why.map((w) => html`<details><summary><b>${w.name}</b><span>${w.value}</span></summary><div class="tr-eq small">${w.formula}</div><div class="tr-calc small">${w.numbers}</div><p class="muted small">${w.explain}</p></details>`)}</div>
         <p class="small"><b>Expect:</b> ${r.expect.level}</p>
@@ -855,16 +860,39 @@ Assistant: game tonight?</pre></div>
         <details class="mt"><summary>Training log</summary><pre class="tr-pre tr-log" id="tr-logbox"></pre></details></section>
       ${savedModels()}</div>`;
   }
+  // What the chosen time means: Auto's plan, a run cut short by the clock (offer Auto), or one that finishes early on purpose.
+  function timeNote(ov, r) {
+    const a = ov.auto || {}, H = hoursNum(), where = ov.plan.share.length > 1 ? "these machines" : "this machine";
+    const steps = r.resume ? r.steps : r.settings.steps;
+    if (isAuto()) {
+      if (a.capped) return html`<p class="small tr-timecap warn">Training ${r.resume ? "this model" : "a model"} fully would take more than <b>30 days</b> on ${where}, so Auto plans the longest run allowed (30 days, about <b>${dur(r.seconds)}</b>) and it's still limited by compute. To train fully sooner, add a faster machine (see “How to get a bigger model” below).</p>`;
+      return html`<p class="small tr-timecap">Auto: ${r.resume ? "keeps training this model" : html`trains the biggest model ${r.limit === "memory" ? "that fits in memory" : "your text supports"}`} until it has seen your text about 50 times (<b>${n0(steps)}</b> steps) — about <b>${dur(r.seconds)}</b> on ${where}. That's fully trained: past it, more training only memorises the text and scores worse.</p>`;
+    }
+    if (r.limit === "compute" || r.limit === "your time") {
+      if (!a.seconds || a.seconds < 1.2 * r.seconds) return "";
+      return html`<p class="small tr-timecap warn">Limited by compute: <b>${dur(H * 3600)}</b> isn't long enough to train ${r.resume ? "this model" : "the model your text deserves"} fully. ${a.capped
+        ? html`Even 30 days wouldn't be on ${where}; Auto plans those 30 days${r.resume ? "" : html` (a <b>${n0(a.parameters)}</b>-weight model)`}, or add a faster machine.`
+        : html`Training fully takes about <b>${dur(a.seconds)}</b> on ${where}${r.resume ? "" : html` and gives a <b>${n0(a.parameters)}</b>-weight model`}.`}
+        <button class="btn small" data-tr-act="hours-auto">Use Auto</button></p>`;
+    }
+    if (r.resume || !r.seconds || r.seconds >= 0.6 * H * 3600) return "";
+    return html`<p class="small tr-timecap">You allowed <b>${dur(H * 3600)}</b>, but this model is fully trained in about <b>${dur(r.seconds)}</b> — ${r.limit === "memory"
+      ? "it's the biggest model that fits in memory, and"
+      : "it's limited by how much text you have, not by the clock."} After about 50 passes over your text (<b>${n0(steps)}</b> steps) more training only memorises it and scores <i>worse</i>, so the rest of the budget is left unused on purpose. ${r.limit === "memory"
+      ? "For a bigger model, add a machine with more memory."
+      : html`To make a longer run pay off, <a href="#" data-tr-tab="data">add more text</a>.`}</p>`;
+  }
   function bigger(r) {
     const b = r.bigger; if (!b) return "";
-    const hrs = (h) => (h < 1 ? Math.round(h * 60) + " min" : h + " h");
+    const hl = (t) => (t.auto || (!isAuto() && +t.hours === +TR.hours) ? "hl" : "");
+    const when = (t) => hrs(t.hours) + (t.auto ? " (Auto)" : "");
     if (r.resume) return html`<details class="tr-bigger"><summary class="small"><b>How much time buys how many steps</b> <span class="faint">— the model's size is fixed; only the number of extra steps changes</span></summary>
       <p class="faint small">Continuing can't resize the model, so more time just means more steps on the model you have. Each row is timed for this exact model, so the finish time is the real one.</p>
-      <div class="tr-scroll"><table class="tr-key"><tr><th>Train for</th><th>Extra steps</th><th>Limited by</th></tr>${b.times.map((t) => html`<tr class="${+t.hours === +TR.hours ? "hl" : ""}"><td>${hrs(t.hours)}</td><td>${n0(t.steps)} steps</td><td class="small faint">${t.limit}</td></tr>`)}</table></div></details>`;
+      <div class="tr-scroll"><table class="tr-key"><tr><th>Train for</th><th>Extra steps</th><th>Limited by</th></tr>${b.times.map((t) => html`<tr class="${hl(t)}"><td>${when(t)}</td><td>${n0(t.steps)} steps</td><td class="small faint">${t.limit}</td></tr>`)}</table></div></details>`;
     return html`<details class="tr-bigger" ${r.limit === "compute" ? "open" : ""}><summary class="small"><b>How to get a bigger model</b> ${r.limit === "compute" ? html`<span class="warn-t">— limited by compute: time × speed</span>` : r.limit === "data" ? html`<span class="faint">— limited by your text: add more</span>` : html`<span class="faint">— limited by memory</span>`}</summary>
-      <p class="faint small">A model can only learn as much as the arithmetic it gets: weights ≈ √(speed × time ÷ 120). Past that, a bigger model would stay half-trained and do worse.</p>
-      <div class="tr-scroll"><table class="tr-key"><tr><th>Train for</th><th>Model</th><th>Limited by</th></tr>${b.times.map((t) => html`<tr class="${+t.hours === +TR.hours ? "hl" : ""}"><td>${hrs(t.hours)}</td><td>${n0(t.parameters)} weights</td><td class="small faint">${t.limit}</td></tr>`)}</table></div>
-      ${b.faster.map((m) => html`<div class="tr-adv ${m.usable ? "ok" : "warn"} small"><b>${m.name}</b>${m.gpu ? " (" + m.gpu + ")" : ""} is ~${f(m.speed / (r.speed || 1), 2)}× faster: in ${hrs(TR.hours)} it could train <b>${n0(m.parameters)} weights</b>${m.usable ? " — tick it under “Where it trains”." : html` — but it's ${m.reason}. Get it back online (check its kubelet, cable and power: <code>sudo k3s kubectl describe node ${m.name}</code>) and it's picked automatically.`}</div>`)}</details>`;
+      <p class="faint small">A model can only learn as much as the arithmetic it gets: weights ≈ √(speed × time ÷ 120). Once a model that size would read your text more than 50 times, the extra time goes into a bigger model instead (weights ≈ speed × time ÷ (300 × tokens)), until it reaches 10 weights per token of text — then it's limited by your text and Auto stops there. Past the compute line, a bigger model would stay half-trained and do worse.</p>
+      <div class="tr-scroll"><table class="tr-key"><tr><th>Train for</th><th>Model</th><th>Limited by</th></tr>${b.times.map((t) => html`<tr class="${hl(t)}"><td>${when(t)}</td><td>${n0(t.parameters)} weights</td><td class="small faint">${t.limit}</td></tr>`)}</table></div>
+      ${b.faster.map((m) => html`<div class="tr-adv ${m.usable ? "ok" : "warn"} small"><b>${m.name}</b>${m.gpu ? " (" + m.gpu + ")" : ""} is ~${f(m.speed / (r.speed || 1), 2)}× faster: in ${hrs(hoursNum())} it could train <b>${n0(m.parameters)} weights</b>${m.usable ? " — tick it under “Where it trains”." : html` — but it's ${m.reason}. Get it back online (check its kubelet, cable and power: <code>sudo k3s kubectl describe node ${m.name}</code>) and it's picked automatically.`}</div>`)}</details>`;
   }
   function stopWhen() {
     const q = TR.q, ps = qPrompts();
@@ -1307,6 +1335,7 @@ Assistant: game tonight?</pre></div>
     }
     else if (a === "convert") { const r = await post("/api/train/convert", { name: TR.check.name }); if (r) { toast("Saved " + r.name + " (" + n0(r.records) + " records)"); await loadOverview(); checkData(r.name); } }
     else if (a === "use-rec" || a === "reset-settings") resetSettings();
+    else if (a === "hours-auto") { TR.hours = "auto"; store.set("train.hours", "auto"); TR.form = null; loadOverview(); }
     else if (a === "save-settings") {
       let name = prompt("Save these settings as a preset. Name (an existing name is replaced):", TR.preset || (TR.sel[0] ? TR.sel[0].replace(/\.[a-z]+$/i, "") + " settings" : ""));
       if (!name || !(name = name.trim())) return;
@@ -1391,9 +1420,14 @@ Assistant: game tonight?</pre></div>
     else if (d.trSet === "assistant_only") { TR.form.assistant_only = t.checked; markEdited(); paint(); }
     else if (d.trSet === "device") { TR.form.device = t.value; markEdited(); paint(); }
     else if (d.trAct === "files") { uploadFiles(Array.from(t.files || [])); t.value = ""; }
-    else if (d.trAct === "hours") { if (t.value === "custom") return; TR.hours = +t.value; store.set("train.hours", TR.hours); TR.form = null; loadOverview(); }
+    else if (d.trAct === "hours") {
+      // Custom… from Auto starts the box at Auto's figure; from a fixed time the box already shows it.
+      if (t.value === "custom") { if (!isAuto()) return; TR.hours = Math.max(0.05, Math.round(hoursNum() * 100) / 100); }
+      else TR.hours = t.value === "auto" ? "auto" : +t.value;
+      store.set("train.hours", TR.hours); TR.form = null; loadOverview();
+    }
     else if (d.trAct === "hours-custom") {
-      const h = Math.max(0.05, Math.min(720, +t.value || TR.hours));
+      const h = Math.max(0.05, Math.min(720, +t.value || hoursNum() || 1));
       TR.hours = h; store.set("train.hours", h); TR.form = null; loadOverview();
     }
     else if (d.trAct === "model-pick") {

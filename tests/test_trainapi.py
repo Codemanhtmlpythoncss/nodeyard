@@ -270,6 +270,88 @@ class ResumeEstimateTests(unittest.TestCase):
         self.assertNotIn("resume", r)              # the fresh path is untouched
 
 
+class AutoTimeTests(unittest.TestCase):
+    # The screenshot: an M-series Mac, ~10.5M tokens of chat text (Shakespeare + starter). A 4-day budget used to
+    # give a 51.6M-weight model that stopped after 41.7 h at 50 passes while still saying "limited by compute".
+    HW = {"device": "mps", "cores": 10, "arch": "arm64", "ram_free": 16e9, "gpu": None, "speed": 9.25e11, "chat": True}
+    CHARS = int(10_482_186 * 3.6)
+    PROF = {"chat": True, "unique_fraction": 1.0, "example_chars": 0}
+
+    def test_a_compute_limited_run_uses_its_time(self):
+        r = trainapi.recommend(self.HW, self.CHARS, 96, self.PROF)
+        self.assertEqual(r["limit"], "compute")
+        self.assertGreater(r["seconds"], 0.8 * 96 * 3600)     # was 41.7 h of the 96: limited by compute means the clock
+        self.assertGreater(r["parameters"], 80_000_000)       # the spare time goes into a bigger model instead
+        # Below the 50-pass knee nothing changed: the screenshot's 15 min / 1 h / 8 h sizes are the same as before.
+        self.assertEqual(trainapi.recommend(self.HW, self.CHARS, 1, self.PROF)["parameters"], 4_922_016)
+
+    def test_every_compute_limited_time_is_mostly_used(self):
+        for hw in RecommendTests.HW:
+            for chars in (200_000, 8_000_000, 50_000_000):
+                for hours in (0.25, 1, 8, 72, 300):
+                    r = trainapi.recommend(hw, chars, hours)
+                    if r["limit"] == "compute" and r["settings"]["steps"] < 200_000:
+                        self.assertGreater(r["seconds"], 0.6 * hours * 3600, (hw["device"], chars, hours))
+
+    def test_auto_is_the_shortest_time_that_trains_fully(self):
+        h, capped = trainapi.auto_hours(self.HW, self.CHARS, self.PROF)
+        self.assertFalse(capped)
+        full = trainapi.recommend(self.HW, self.CHARS, h, self.PROF)
+        self.assertNotEqual(full["limit"], "compute")                       # text or memory now decides the size
+        self.assertEqual(trainapi.recommend(self.HW, self.CHARS, 0.95 * h, self.PROF)["limit"], "compute")
+        self.assertGreater(full["seconds"], 0.8 * h * 3600)                 # and the run really takes about that long
+
+    def test_auto_follows_how_much_text_there_is(self):
+        small, _ = trainapi.auto_hours(self.HW, 2_000_000, self.PROF)       # the starter set alone
+        big, _ = trainapi.auto_hours(self.HW, self.CHARS, self.PROF)
+        self.assertLess(small, 1)
+        self.assertGreater(big, 10 * small)
+
+    def test_auto_stops_at_30_days_on_a_slow_machine(self):
+        slow = {"device": "cpu", "cores": 2, "arch": "aarch64", "ram_free": 64e9, "speed": 1e9}
+        h, capped = trainapi.auto_hours(slow, 2_000_000_000)
+        self.assertTrue(capped)
+        self.assertEqual(h, trainapi.AUTO_MAX_HOURS)
+
+    def test_auto_for_a_saved_model_runs_until_time_is_not_the_limit(self):
+        hw = {"device": "cpu", "cores": 8, "arch": "x86_64", "ram_free": 6e9, "speed": 5e10}
+        saved = ResumeEstimateTests.SAVED
+        h, capped = trainapi.auto_hours(hw, 20_000_000, None, saved)
+        self.assertFalse(capped)
+        self.assertNotEqual(trainapi.recommend_resume(hw, saved, 20_000_000, h)["limit"], "your time")
+        self.assertEqual(trainapi.recommend_resume(hw, saved, 20_000_000, 0.95 * h)["limit"], "your time")
+
+    def _overview(self, hours):
+        ctx = SimpleNamespace(get_routes={}, post_routes={}, post_limits={}, store=None)
+        with tempfile.TemporaryDirectory() as d:
+            trainapi.register(ctx, SimpleNamespace(demo=True, state_dir=d))
+            ctx.trainer.pool.ensure = lambda *a, **k: None
+            got = {}
+            ctx.get_routes["/api/train"](SimpleNamespace(_json=lambda obj, code=200: got.update(obj)), {"hours": [hours]})
+        return got
+
+    def test_overview_with_auto_plans_the_auto_time(self):
+        got = self._overview("auto")
+        self.assertTrue(got["auto"]["on"])
+        self.assertEqual(got["hours"], got["auto"]["hours"])
+        self.assertEqual(got["recommend"]["seconds"], got["auto"]["seconds"])
+        rows = [t for t in got["recommend"]["bigger"]["times"] if t["auto"]]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["hours"], got["hours"])
+
+    def test_overview_with_a_fixed_time_still_says_what_auto_would_take(self):
+        got = self._overview("0.25")
+        self.assertFalse(got["auto"]["on"])
+        self.assertEqual(got["hours"], 0.25)
+        self.assertGreater(got["auto"]["hours"], 0)
+        self.assertGreater(got["auto"]["parameters"], 0)
+        self.assertFalse(any(t["auto"] for t in got["recommend"]["bigger"]["times"]))
+        # "Use Auto" must land on the time it promised: the estimate is planned for Auto's model, not this one.
+        on = self._overview("auto")
+        self.assertAlmostEqual(got["auto"]["hours"], on["hours"], places=6)
+        self.assertEqual(got["auto"]["parameters"], on["recommend"]["parameters"])
+
+
 class LossNoiseGovernorTests(unittest.TestCase):
     def test_unsteadiness_runs_from_smooth_to_jagged(self):
         self.assertEqual(lr_governor.loss_unsteadiness([5, 4, 3, 2, 1]), 0.0)   # monotone fall
