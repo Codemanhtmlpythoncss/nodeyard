@@ -515,6 +515,79 @@ def post(t, fn, body):
         return {"error": str(e), "code": e.code}
 
 
+class TokenizeTests(unittest.TestCase):
+    """The "A whole network" lesson on a trained model: its own tokenizer, replayed one merge at a time."""
+    TRAIN_TEXT = ("User: Hello, who are you?\nAssistant: I am a small model trained on this text.\n"
+                  "The dashboard runs nodeyard on every node. Nodes report their status every few seconds.\n"
+                  "aaaa bbbb aaaa 1234 1234 éé café naïve — “quotes” £5\n") * 6
+
+    @classmethod
+    def setUpClass(cls):
+        import bpe_tokenizer
+        cls.B = bpe_tokenizer
+        cls.tok = bpe_tokenizer.BPETokenizer.train(cls.TRAIN_TEXT, 380)
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.t = trainapi.Trainer(self.dir.name)
+        self.mdir = Path(self.t.models_dir) / "tiny"
+        self.mdir.mkdir(parents=True)
+        self.tok.save(self.mdir / "bpe.json")
+        (self.mdir / "model.json").write_text(json.dumps({"context": 24}))
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_replay_gives_exactly_the_tokenizers_ids(self):
+        texts = ["Hello there, the dashboard runs nodeyard!", "aaaaaaaaa", "  two  spaces\n\n\tand tabs",
+                 "café naïve £5 — “quotes” 😀", "1234567890 12 1", "x", "nodes nodes nodes", "Ünïcödé ßtraße"]
+        for text in texts:
+            out = trainapi.bpe_steps(self.tok, text)
+            self.assertEqual(out["ids"], self.tok.encode(text), text)
+            self.assertEqual("".join(p["text"] for p in out["pieces"]), text, text)     # the pieces cover the text
+            self.assertEqual(self.tok.decode(out["ids"]), text, text)
+            for p in out["pieces"]:
+                self.assertEqual(p["start"], list(p["text"].encode("utf-8")))
+                ids = p["start"]
+                for s in p["steps"]:
+                    self.assertEqual(s["id"], 256 + s["rank"])
+                    self.assertEqual(s["candidates"][0][0], s["rank"])                     # the earliest-learned pair wins
+                    self.assertEqual([r for r, _a, _b in s["candidates"]], sorted(r for r, _a, _b in s["candidates"]))
+                    self.assertEqual(tuple(self.tok.merges[s["rank"]]), tuple(s["pair"]))
+                    self.assertEqual(len(ids) - s["times"], len(s["tokens"]))             # each merge joins two into one
+                    ids = s["tokens"]
+                self.assertEqual(ids, p["ids"])
+            for i in out["ids"]:
+                self.assertEqual(bytes.fromhex(out["vocab"][str(i)]["hex"]), self.tok.vocab[i])
+
+    def test_a_repeated_pair_merges_in_every_place_at_once(self):
+        out = trainapi.bpe_steps(self.tok, "aaaa")
+        first = out["pieces"][0]["steps"][0]
+        self.assertEqual(first["pair"], [97, 97])
+        self.assertEqual(first["times"], 2)
+
+    def test_endpoint(self):
+        r = post(self.t, self.t.tokenize, {"model": "tiny", "text": "Hello, who are you?"})["tokenize"]
+        self.assertEqual(r["ids"], self.tok.encode("Hello, who are you?"))
+        self.assertEqual((r["context"], r["model"], r["vocabulary"], r["merges"]), (24, "tiny", self.tok.vocab_size, len(self.tok.merges)))
+        self.assertGreater(len(self.tok.merges), 50)
+        self.assertEqual(r["pattern"], self.B.PRETOKEN_PATTERN.pattern)
+        long = post(self.t, self.t.tokenize, {"model": "tiny", "text": "word " * 200})["tokenize"]
+        self.assertEqual(len(long["text"]), trainapi.TOKENIZE_CHARS)
+        self.assertEqual(post(self.t, self.t.tokenize, {"model": "nope", "text": "hi"})["code"], 404)
+        self.assertIn("error", post(self.t, self.t.tokenize, {"model": "../tiny", "text": "hi"}))
+        self.assertIn("error", post(self.t, self.t.tokenize, {"model": "tiny", "text": ""}))
+        (self.mdir / "bpe.json").write_text("{not json")
+        self.assertEqual(post(self.t, self.t.tokenize, {"model": "tiny", "text": "hi"})["code"], 500)
+
+    def test_a_retrained_tokenizer_is_read_again(self):
+        post(self.t, self.t.tokenize, {"model": "tiny", "text": "hi"})
+        self.B.BPETokenizer([]).save(self.mdir / "bpe.json")         # bytes only: no merges
+        r = post(self.t, self.t.tokenize, {"model": "tiny", "text": "hello"})["tokenize"]
+        self.assertEqual(r["ids"], list(b"hello"))
+        self.assertEqual(r["merges"], 0)
+
+
 class TrainerTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()

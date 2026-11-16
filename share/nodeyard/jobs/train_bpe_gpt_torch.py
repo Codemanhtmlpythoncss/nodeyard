@@ -610,9 +610,9 @@ def _stats(t: torch.Tensor) -> dict:
 
 
 def _g(t) -> list:
-    """A tensor as nested lists, 7 significant digits (float32 holds about 7)."""
+    """A tensor as nested lists, 9 significant digits: enough to give back each float32 value exactly."""
     def one(x):   # masked scores are −∞, which JSON can't hold: null
-        return float("%.7g" % x) if math.isfinite(x) else None
+        return float("%.9g" % x) if math.isfinite(x) else None
     if t.dim() == 0:
         return one(float(t))
     if t.dim() == 1:
