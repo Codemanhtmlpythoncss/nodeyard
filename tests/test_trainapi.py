@@ -317,12 +317,30 @@ class LiveMetricsTests(unittest.TestCase):
         self.assertAlmostEqual(m["avg_loss"], 4.0)
 
     def test_loss_per_hour_is_extrapolated_under_an_hour(self):
-        losses = [4.0 - 0.01 * i for i in range(120)]   # 120 steps at 1 step/sec = 119 s of data
+        losses = [4.0 - 0.0005 * i for i in range(1200)]   # 1200 steps at 1 step/sec = 1199 s (~20 min) of data
         m = trainapi.loss_metrics(self._pts(losses))
         self.assertTrue(m["extrapolated"])
         self.assertLess(m["window_seconds"], 3600)
-        # drop over 119 s is ~1.19; per hour extrapolates to much more, and stays positive (improving)
-        self.assertGreater(m["loss_per_hour"], 1.19)
+        # measured over the recent half (~600 s), then extrapolated to an hour; stays positive (improving)
+        self.assertGreater(m["loss_per_hour"], 0)
+
+    def test_short_steep_start_gives_no_per_hour_estimate(self):
+        # One minute into a run, loss plunges off the warm-up cliff. Extrapolating that to an hour used to
+        # report an absurd rate (e.g. "−181/h"); now it stays blank until there is enough signal.
+        losses = [9.3, 8.4, 7.6, 7.0, 6.7]                 # 5 steps at 1 step/sec ≈ 5 s, a steep drop
+        m = trainapi.loss_metrics(self._pts(losses))
+        self.assertIsNotNone(m["avg_loss"])
+        self.assertIsNone(m["loss_per_hour"])
+        self.assertIsNone(m["extrapolated"])
+
+    def test_steep_opening_cliff_does_not_inflate_the_rate(self):
+        # A steep first minute then a gentle decline over ~20 min. The per-hour rate should reflect the gentle
+        # recent slope (a few tenths/h), not the cliff blown up to an hour (which would be dozens/h).
+        cliff = [9.3 - 0.9 * i for i in range(4)]          # 9.3 → 6.6 over the first 4 s
+        gentle = [6.6 - 0.00005 * i for i in range(1, 1200)]   # then ~0.00005/step for ~20 min
+        m = trainapi.loss_metrics(self._pts(cliff + gentle))
+        self.assertTrue(m["extrapolated"])
+        self.assertLess(abs(m["loss_per_hour"]), 1.0)      # gentle slope, not the ~180/h the cliff would imply
 
     def test_loss_per_hour_uses_a_real_hour_when_there_is_one(self):
         losses = [5.0 - 0.0002 * i for i in range(300)]
