@@ -252,9 +252,38 @@ doctor_check_cluster_nodes() {
         awk '$2 == "True" {print $1 " (disk)"} $3 == "True" {print $1 " (memory)"}' | paste -sd, - || true)"
     if [[ -n "$notready" || -n "$pressured" ]]; then
         DOCTOR_DETAIL="${notready:+not Ready: ${notready}}${notready:+${pressured:+; }}${pressured:+under pressure: ${pressured} - run 'sudo nodeyard doctor --fix' on those nodes}"
+        # A node that's not Ready gets the reconnect fix; pressure alone is a warning.
+        [[ -n "$notready" ]] && return 1
         return 3
     fi
     return 0
+}
+
+# Reconnect nodes that aren't Ready (the "unplugged and plugged back in" case):
+# see relink.sh. Fails when one still isn't Ready, with what to do printed.
+doctor_fix_relink() {
+    doctor_cluster_relevant || return 0
+    # In a subshell, so a node-list failure can't end the doctor run.
+    (NY_JSON=0 NY_YES=1 relink_cmd) || return 1
+    ny_simulating && return 0
+    local left
+    left="$(kctl get nodes --no-headers 2>/dev/null | awk '$2 !~ /^Ready/{print $1}' | paste -sd, - || true)"
+    [[ -z "$left" ]]
+}
+
+# The relink timer: on a server it reconnects dropped nodes, on a worker it
+# re-announces this machine and unsticks k3s-agent after the cable comes back.
+doctor_check_relink_watch() {
+    ny_k3s_installed || return 2
+    [[ "$K3S_ROLE" == server || "$K3S_ROLE" == agent ]] || return 2
+    ny_systemd_available || return 2
+    relink_watch_installed && return 0
+    DOCTOR_DETAIL="a node that loses its cable stays missing until someone reboots or runs 'sudo nodeyard relink'"
+    return 1
+}
+
+doctor_fix_relink_watch() {
+    relink_watch_write
 }
 
 doctor_check_pods() {
@@ -315,7 +344,8 @@ doctor_register nextcloud coexistence "no port 80/443 clash with Nextcloud" doct
 doctor_register server-reachable network "the k3s server is reachable" doctor_check_server_reachable
 doctor_register api-healthz cluster "Kubernetes API responds" doctor_check_api_healthz
 doctor_register node-ready cluster "this node is Ready" doctor_check_node_ready
-doctor_register cluster-nodes cluster "all nodes Ready, none under pressure" doctor_check_cluster_nodes
+doctor_register relink-watch network "dropped nodes reconnect by themselves" doctor_check_relink_watch doctor_fix_relink_watch "check every 20 s and reconnect a node that dropped off (e.g. after its cable was unplugged)" k3s
+doctor_register cluster-nodes cluster "all nodes Ready, none under pressure" doctor_check_cluster_nodes doctor_fix_relink "reconnect them without a reboot: clear this server's old network entries for them, and restart k3s here if they answer but still don't report in" k3s
 doctor_register pods cluster "all pods running" doctor_check_pods doctor_fix_pods "force-delete pods stuck Terminating/Unknown (ghosts left on an unreachable node)" k3s
 
 doctor_cmd_help() {

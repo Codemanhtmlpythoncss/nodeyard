@@ -385,7 +385,7 @@ class HuggingFace:
 # write a separate file. Everything else changes the running model, so only
 # one of those runs at a time.
 # Actions that change system files, so they run outside the dashboard's sandbox.
-OUTSIDE_ACTIONS = {"doctor-fix", "cli", "restart-cluster", "reboot-cluster", "remove-node"}
+OUTSIDE_ACTIONS = {"doctor-fix", "cli", "restart-cluster", "reboot-cluster", "remove-node", "relink"}
 # Commands the Commands page may run: filled from `nodeyard commands --json` (settings.py).
 # Interactive ones need a real terminal (use the Terminal page for those).
 COMMAND_PATHS = None
@@ -672,6 +672,12 @@ def build_command(action, p, nodes, key_path):
         if not node or not NODE_RE.match(node):
             raise AIError("Choose a node to remove.")
         return ("Remove %s from the cluster" % node), ["remove-node", node, "--yes"]
+    if action == "relink":
+        # A node that dropped off (cable out and back in): reconnect it without a reboot.
+        node = str(p.get("node") or "").strip()
+        if node and not NODE_RE.match(node):
+            raise AIError("Bad node name.")
+        return ("Reconnect " + node if node else "Reconnect missing nodes"), ["relink", "--yes"] + ([node] if node else [])
     if action == "doctor-fix":
         only = str(p.get("only") or "").strip()
         if only and not CHECK_RE.match(only):
@@ -1489,7 +1495,7 @@ def register(ctx, args):
 
     def run(h, body):
         action = str(body.get("action", ""))
-        if action in ("cli", "restart-cluster", "reboot-cluster", "remove-node") and h._forwarded() is not None:
+        if action in ("cli", "restart-cluster", "reboot-cluster", "remove-node", "relink") and h._forwarded() is not None:
             return h._json({"ok": False, "error": "This only works over Tailscale or your own network, not through public access."}, 403)
         try:
             h._json({"ok": True, "job": backend.run(action, body)})

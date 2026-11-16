@@ -9,6 +9,12 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Nodes come back after their cable is unplugged and plugged in, without a reboot.** `nodeyard relink` clears the server's old network state for a node that isn't Ready, then restarts k3s on the server only if the node answers but still doesn't report in. The old state it clears:
+  - its neighbour (ARP) entry, including one pinned by hand;
+  - connection tracking;
+  - flannel's forwarding entry, neighbour and route.
+
+  It also warns when two machines answer for the node's address. On a worker it re-announces the machine and unsticks `k3s-agent`. `relink-watch` runs it every 20 s on servers and workers; k3s installs set it up, and on existing machines `doctor --fix` installs it. In the dashboard, Fix → **Reconnect** (one node) and **Reconnect missing nodes** run it, and the not-Ready-nodes check now has this as its fix.
 - **Train AI teaches the maths first, simply.** *Learn* starts with **Maths you need**, 12 lessons written for a beginner (about age 14):
   - letters as boxes for numbers (plus negatives, decimals and 1e-3);
   - Σ;

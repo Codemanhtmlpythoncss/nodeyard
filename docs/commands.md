@@ -70,6 +70,8 @@ done, 10 needs confirmation (re-run with `--yes`), 130 cancelled.
 | `logs [--follow] [--lines N]` | k3s service log |
 | `firewall status\|open\|disable` | The host firewall |
 | `watchdog-install --master A`, `watchdog-uninstall`, `promote` | Control-plane watchdog |
+| `relink [NODE...] [--no-restart] [--no-link-reset]` | Bring back nodes that dropped off (e.g. cable unplugged and plugged in) without a reboot |
+| `relink-watch install\|uninstall` | Do that by itself every 20 s (installed with k3s) |
 
 ## Backups and updates
 
