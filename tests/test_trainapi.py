@@ -806,6 +806,62 @@ class TrainerTests(unittest.TestCase):
         self.assertEqual(gpu_pod["spec"]["containers"][0]["resources"]["limits"]["memory"], half)
 
 
+class AutosetupResumeTests(unittest.TestCase):
+    """"Auto-setup to continue": the one-click setup, but for continuing a saved model instead of sizing a new one."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        t = self.t = trainapi.Trainer(self.dir.name)
+        box = {"name": "box", "speed": 5e11, "usable": True, "reason": "", "device": "cpu", "ram_free": 8e9,
+               "gpu": None, "cores": 8, "arch": "x86_64"}
+        t.machines = lambda both=False: [dict(box)]   # no cluster here: one ready machine
+        t.pool.ensure = lambda *a, **k: None
+        t.measure_links = lambda machines: None
+        self.saved = {"parameters": 135776, "vocabulary": 800, "context": 32, "width": 48, "layers": 2, "heads": 4,
+                      "validation_loss": 5.6, "trained_steps": 400, "data_files": ["gone.txt", "old.txt"]}
+        mdir = os.path.join(t.models_dir, "m1")
+        os.makedirs(mdir)
+        with open(os.path.join(mdir, "model.json"), "w", encoding="utf-8") as f:
+            json.dump(self.saved, f)
+        for name in ("old.txt", "new.txt"):
+            post(t, t.paste, {"name": name, "text": "User: hi\nAssistant: hello there\n" * 300})
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_it_keeps_the_saved_shape_and_continues_at_the_resume_rate(self):
+        r = self.t.autosetup({"resume": "m1", "hours": 1})
+        self.assertEqual(r["resume"], "m1")
+        s = r["recommend"]["settings"]
+        self.assertEqual((s["vocab_size"], s["context"], s["dim"], s["layers"], s["heads"]), (800, 32, 48, 2, 4))
+        (m,) = [x for x in self.t.models() if x["name"] == "m1"]
+        self.assertEqual(s["learning_rate"], m["resume_lr"])
+        self.assertEqual(r["machines"], ["box"])
+
+    def test_with_nothing_ticked_it_uses_the_files_the_model_was_trained_on(self):
+        r = self.t.autosetup({"resume": "m1", "hours": "auto"})
+        self.assertEqual(r["data"], ["old.txt"])         # gone.txt was deleted since, so it's skipped
+        self.assertGreater(r["hours"], 0)                # "Auto" became a real time
+
+    def test_ticked_data_wins(self):
+        self.assertEqual(self.t.autosetup({"resume": "m1", "data": ["new.txt"], "hours": 1})["data"], ["new.txt"])
+
+    def test_it_says_so_when_the_original_files_are_gone(self):
+        os.remove(os.path.join(self.t.data_dir, "old.txt"))
+        err = post(self.t, self.t.autosetup, {"resume": "m1", "hours": 1})
+        self.assertIn("aren't in your data any more", err["error"])
+        self.assertIn("gone.txt, old.txt", err["error"])
+
+    def test_unknown_or_bad_model_names(self):
+        self.assertEqual(post(self.t, self.t.autosetup, {"resume": "nope", "hours": 1})["code"], 404)
+        self.assertIn("error", post(self.t, self.t.autosetup, {"resume": "../m1", "hours": 1}))
+
+    def test_without_resume_it_still_sets_up_a_new_model(self):
+        r = self.t.autosetup({"data": ["new.txt"], "hours": 1})
+        self.assertIsNone(r["resume"])
+        self.assertEqual(r["data"], ["new.txt"])
+
+
 class WorkerTests(unittest.TestCase):
     """The training worker's file and job API, without PyTorch."""
 

@@ -747,8 +747,24 @@ class Trainer:
     def autosetup(self, body):
         """One button: choose the best machines (each one's GPU and CPU together), warm their workers up, measure the
         links between them, and hand back a ready-to-run configuration — which machines, sharing on, and the settings
-        recommended for this data. It does not start training; the page fills itself in and the user presses Start."""
+        recommended for this data. It does not start training; the page fills itself in and the user presses Start.
+
+        With "resume": a saved model's name, it sets up *continuing* that model instead: its shape and tokenizer are
+        fixed, so the plan is sized for its real weights, "Auto" time is what it needs to read the text fully, and the
+        settings come from recommend_resume (more steps and a learning rate from how trained it already is). With no
+        data ticked it continues on the files the model was trained on."""
+        saved = None
+        if body.get("resume"):
+            self._model_dir(body.get("resume"))   # a valid name, or TrainError
+            saved = next((m for m in self.models() if m["name"] == body.get("resume")), None)
+            if not saved:
+                raise TrainError("There's no saved model called %s." % body.get("resume"), 404)
         names = [n for n in (body.get("data") or []) if isinstance(n, str)]
+        if saved and not names:
+            names = [n for n in (saved.get("data_files") or []) if isinstance(n, str) and self._data_exists(n)]
+            if not names:
+                raise TrainError("Choose some data in step 2: the files %s was trained on (%s) aren't in your data any more."
+                                 % (saved["name"], ", ".join(saved.get("data_files") or []) or "not recorded"))
         chars, chat = None, False
         for n in names:
             try:
@@ -770,22 +786,36 @@ class Trainer:
         machines = self.machines(both=True)   # re-read: worker states, speeds and links may have moved
         links = self.pool.links or None
         profile = {"chat": chat, "unique_fraction": 1.0, "example_chars": 0} if chars else None
-        plan = self.plan(machines, links=links, model_bytes=0)
-        hw = self.plan_hardware(machines, plan)
-        if auto:
-            hours, _ = auto_hours(dict(hw, chat=chat), chars, profile)
-        rec = recommend(dict(hw, chat=chat), chars, hours, profile)
-        plan = self.plan(machines, links=links, model_bytes=4 * (rec.get("parameters") or 0))
-        hw = self.plan_hardware(machines, plan)
-        if auto:
-            hours, _ = auto_hours(dict(hw, chat=chat), chars, profile)
-        rec = recommend(dict(hw, chat=chat), chars, hours, profile)
+        if saved:   # the size is known: plan once for the model as it is
+            plan = self.plan(machines, links=links, model_bytes=4 * int(saved.get("parameters") or 0))
+            hw = self.plan_hardware(machines, plan)
+            if auto:
+                hours, _ = auto_hours(dict(hw, chat=chat), chars, profile, saved)
+            rec = recommend_resume(dict(hw, chat=chat), saved, chars, hours, profile)
+        else:
+            plan = self.plan(machines, links=links, model_bytes=0)
+            hw = self.plan_hardware(machines, plan)
+            if auto:
+                hours, _ = auto_hours(dict(hw, chat=chat), chars, profile)
+            rec = recommend(dict(hw, chat=chat), chars, hours, profile)
+            plan = self.plan(machines, links=links, model_bytes=4 * (rec.get("parameters") or 0))
+            hw = self.plan_hardware(machines, plan)
+            if auto:
+                hours, _ = auto_hours(dict(hw, chat=chat), chars, profile)
+            rec = recommend(dict(hw, chat=chat), chars, hours, profile)
         for m in machines:
             lk = (links or {}).get(m["name"])
             if lk:
                 m["link"] = {"rtt_ms": lk.get("rtt_ms"), "mbit": lk.get("mbit")}
         return {"both": True, "share": True, "together": "share", "machines": plan["share"], "plan": plan,
-                "hardware": hw, "recommend": rec, "machine_list": [self.public(m) for m in machines], "mode": self.pool.mode}
+                "hardware": hw, "recommend": rec, "machine_list": [self.public(m) for m in machines], "mode": self.pool.mode,
+                "resume": saved["name"] if saved else None, "data": names, "hours": hours}
+
+    def _data_exists(self, name):
+        try:
+            return os.path.isfile(self._data_path(name))
+        except TrainError:
+            return False
 
     def plan_hardware(self, machines, plan):
         """What the recommender sizes the model for: the lead's hardware, the plan's combined speed, the smallest memory."""
