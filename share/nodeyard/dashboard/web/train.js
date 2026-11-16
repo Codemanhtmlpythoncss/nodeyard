@@ -842,6 +842,22 @@ Assistant: game tonight?</pre></div>
         <td class="row"><button class="btn small" data-tr-chatwith="${m.name}">Chat</button><button class="btn small" data-tr-inspect="${m.name}">Inspect</button><button class="btn small danger" data-tr-delmodel="${m.name}">Delete</button></td></tr>`)}</table></div>`}</section>`;
   }
 
+  // The failed run's output shows the Kubernetes control plane (API server on :6443) was
+  // unreachable — the usual "restart the cluster" case, not a training/data problem.
+  function controlPlaneDown() {
+    const t = (TR.lines || []).join("\n");
+    return /\b6443\b/.test(t) && /refus|unexpected eof|i\/o timeout|no route to host|could not reach|none of the machines could start/i.test(t);
+  }
+  // Shown under a failed run only when the control plane was down: a one-click restart that
+  // reuses the header Fix modal's proven "restart-cluster" recovery (runs here on the server,
+  // so it works even while the API server is unreachable).
+  function fixPanel(st) {
+    if (!st || st.running || !st.job || !st.job.code) return "";   // only a real failure (non-zero exit)
+    if (!controlPlaneDown()) return "";
+    return html`<div class="tr-fix"><p><b>The cluster's control plane was down</b>, so none of the machines could start — the Kubernetes API server (<code>127.0.0.1:6443</code>) refused the connection. This is usually <b>debian-1</b> (it runs the control plane and the split model) dropping out after it's been under load.</p>
+      <p class="small">The fix restarts k3s and the nodeyard services on every reachable node — workers first, then this server — to re-register the cluster. It runs here on the server, so it works even while the API server is unreachable. Containers keep running; the cluster is briefly offline, then you can press <b>Start</b> again.</p>
+      <div class="row"><button class="btn primary" data-tr-act="fix-cluster">Restart the cluster &amp; fix this</button></div></div>`;
+  }
   function paintLive() {
     if (TR.tab !== "train") return;
     const st = TR.status, live = $("#tr-live"); if (!live) return;
@@ -856,7 +872,7 @@ Assistant: game tonight?</pre></div>
     setHTML(live, html`<div class="tr-progress big"><i style="width:${(frac * 100).toFixed(1)}%"></i></div>
       <div class="tr-stats">${[["Step", last.local ? (total ? n0(Math.round(frac * total)) + " / " + n0(total) : n0(last.local) + " / " + n0(last.of)) : j.phase || "starting…"], ["Time left", st.running && eta != null ? dur(eta) : "–"], ["Training loss", f(last.loss, 4)], ["Avg loss (recent)", mt.avg_loss != null ? f(mt.avg_loss, 4) : "–"], ["Validation loss", f(val, 4)],
         ["Perplexity e^ℒ", val != null ? f(Math.exp(val), 4) : "–"], ["Loss ↓ in last hour", lph == null ? "–" : (lph >= 0 ? "−" : "+") + f(Math.abs(lph), 3) + (mt.extrapolated ? " (est)" : "")], ["Learning rate", f(last.lr, 3)], ["Speed", last.tps ? n0(last.tps) + " tokens/s" : "–"], ["Total steps", n0(last.step)]].map(([a, b]) => html`<div><span>${a}</span><b>${b}</b></div>`)}</div>
-      ${val != null ? html`<p class="small">Right now the model is about as unsure as picking among <b>${f(Math.exp(val), 3)}</b> equally likely tokens for each next token (a random guess would be ${n0(V0)}: ln ${n0(V0)} = ${f(Math.log(V0), 4)}). ${st.val.length > 2 && st.val[st.val.length - 1].loss > Math.min(...st.val.map((v) => v.loss)) * 1.02 ? "Validation is rising above its best: the model is starting to memorise; more steps won't help much." : ""}</p>` : ""}`);
+      ${val != null ? html`<p class="small">Right now the model is about as unsure as picking among <b>${f(Math.exp(val), 3)}</b> equally likely tokens for each next token (a random guess would be ${n0(V0)}: ln ${n0(V0)} = ${f(Math.log(V0), 4)}). ${st.val.length > 2 && st.val[st.val.length - 1].loss > Math.min(...st.val.map((v) => v.loss)) * 1.02 ? "Validation is rising above its best: the model is starting to memorise; more steps won't help much." : ""}</p>` : ""}${fixPanel(st)}`);
     const qbox = $("#tr-qlive"); if (qbox) setHTML(qbox, html`${raceLive(st)}${qualityLive(st)}`);
     const box = $("#tr-logbox"); if (box) { const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 8; box.textContent = TR.lines.slice(-400).join("\n"); if (atEnd) box.scrollTop = box.scrollHeight; }
     drawLive();
@@ -1228,6 +1244,10 @@ Assistant: game tonight?</pre></div>
       if (r) { toast("Training " + r.model); TR.lines = []; TR.since = 0; TR.status = null; TR.model = TR.resume ? TR.model : ""; await loadOverview(); poll(); }
     }
     else if (a === "stop") { if (await post("/api/train/stop", {})) toast("Stopping: it saves after the current step."); }
+    else if (a === "fix-cluster") {
+      if (!confirm("Restart Kubernetes on every node to bring the control plane back?\n\n• Restarts k3s and the nodeyard services on each reachable node — workers first, then this server.\n• It runs here on the server, so it works even while the API server is unreachable.\n• Offline nodes are skipped. Containers keep running; the cluster is briefly offline.\n\nAfter it finishes, press Start to train again.")) return;
+      U.startJob("restart-cluster", {}, () => { toast("Cluster restarted — press Start to train again."); loadOverview(); });
+    }
     else if (a === "mdice-roll") { const d = L.mdice; for (let n = 0; n < 10; n++) { const r = Math.random(), pick = r < 0.6 ? 0 : r < 0.9 ? 1 : 2; d.counts[pick]++; d.total++; d.last = r; d.lastPick = pick; } paint(); }
     else if (a === "mdice-reset") { Object.assign(L.mdice, { counts: [0, 0, 0], total: 0, last: null }); paint(); }
     else if (a === "inside-every" || a === "inside-summary") { store.set("train.inside", a.slice(7)); paint(); }
