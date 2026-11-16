@@ -17,7 +17,8 @@
     q: Object.assign({ on: false, preset: "starter", prompts: [], pass: 1, target_loss: "", give_up: 10, count: 20, held_out: false, match: "exact" },
       (() => { try { return JSON.parse(store.get("train.quality", "") || "null"); } catch (_) { return null; } })() || {}),
     machines: JSON.parse(store.get("train.machines", "[]") || "[]"), share: store.get("train.share", "1") !== "0", together: store.get("train.together", "share") || "share",
-    both: store.get("train.both", "0") === "1", autosetupBusy: false,
+    both: store.get("train.both", "0") === "1", autosetupBusy: false,   // "new" | "resume" while Auto-setup runs
+    autoResume: store.get("train.autoresume", "") || "",                 // the model "Auto-setup to continue" continues
   };
 
   // ---------- small maths helpers (the same formulas as the trainer) ----------
@@ -491,7 +492,7 @@
     const chip = (id, hot) => html`<span class="tr-tok${hot ? " hot" : ""}" title="${"token #" + id + " = bytes " + V(id).hex}"><b>${vis(V(id).text)}</b><small>#${id}</small></span>`;
     const pair = (a, b) => "“" + vis(V(a).text) + "” + “" + vis(V(b).text) + "”";
     let at = 0;
-    return html`<h3 class="tr-h3">1 · Tokenisation, exactly as ${k.model} does it</h3>
+    return html`<h3 class="tr-h3 nn-h">1 · Tokenisation, exactly as ${k.model} does it</h3>
       <p class="small">Your model's tokenizer (its <code>bpe.json</code>) has ${n0(k.vocabulary)} tokens: the 256 single bytes, then ${n0(k.merges)} merges it learned from your training text, in order. The merge learned first is #0 and becomes token 256; merge #r becomes token 256 + r.</p>
       <p class="small"><b>A. Cut the text into pieces</b> (a word keeps the space before it; numbers, punctuation and spaces are their own pieces). Merges never cross a piece boundary. Pattern: <code>${k.pattern}</code></p>
       <div class="tr-toks">${k.pieces.map((p) => html`<span class="tr-tok"><b>${vis(p.text)}</b></span>`)}</div>
@@ -509,18 +510,18 @@
     const ms = TR.ov ? TR.ov.models : [], s = L.net;
     if (TR.ov && s.src && !ms.some((m) => m.name === s.src)) s.src = "";
     return html`<div class="row wrap nn-pick"><label class="tr-field inline"><span>Network</span><select class="select" data-tr-act="net-src"><option value="">The small demo network (made-up weights)</option>${raw(ms.map((m) => '<option value="' + esc(m.name) + '"' + (s.src === m.name ? " selected" : "") + ">Your model: " + esc(m.name) + " (" + n0(m.parameters) + " weights)</option>").join(""))}</select></label>
-      ${ms.length ? html`<span class="faint small">Pick one of your trained models to see its real tokenizer, weights and calculations.</span>` : html`<span class="faint small">Train a model in <a href="#" data-tr-tab="train">step 3</a> and it appears here, with its real weights.</span>`}</div>`;
+      ${ms.length ? html`<span class="faint small">Pick one of your trained models to see its real tokenizer, weights and calculations (also in <a href="#" data-tr-tab="inside" data-tr-inside="network">4 · Inside the model</a>).</span>` : html`<span class="faint small">Train a model in <a href="#" data-tr-tab="train">step 3</a> and it appears here, with its real weights.</span>`}</div>`;
   }
-  function netModelView() {
+  function netModelView(inside) {
     const s = L.net, tr = EV.trace, m = (TR.ov ? TR.ov.models : []).find((x) => x.name === s.src);
     const ready = tr && tr.trained && tr.model === s.src, st = ready && netStage(), k = s.tok && s.tok.model === s.src ? s.tok : null;
-    return html`${workerNote("Running your model")}
+    return html`${inside ? "" : workerNote("Running your model")}
       <p>This is <b>${s.src}</b>, the model you trained${m ? html`: ${n0(m.vocabulary)} tokens, ${m.layers} block${m.layers === 1 ? "" : "s"} of width ${m.width} with ${m.heads} attention heads, ${n0(m.parameters)} weights${m.trained_steps ? ", trained " + n0(m.trained_steps) + " steps" : ""}` : ""}. Type some text and run it: you'll see how its tokenizer cuts the text up, then every neuron of every layer with its real weights.</p>
       <div class="row wrap"><input class="input grow" data-tr-act="ex-prompt" value="${TR.exPrompt}" placeholder="Text to run through your model">
         <label class="tr-field inline"><span>tokens</span><input class="input" type="number" min="1" max="16" value="${EV.tokens}" data-tr-act="ev-tokens" style="width:64px"></label>
         <button class="btn primary" data-tr-act="net-run" ${s.busy ? "disabled" : ""}>${s.busy ? "Working…" : ready || k ? "Run again" : "Run it"}</button></div>
       ${k ? netTokens(k) : ""}
-      ${ready ? html`<h3 class="tr-h3">2 · The network, neuron by neuron</h3>
+      ${ready ? html`<h3 class="tr-h3 nn-h">2 · The network, neuron by neuron</h3>
         <p class="small">One real forward pass of “${tr.tokens.map((x) => x.text).join("")}”, every number kept (PyTorch's own result differs from the hand-written maths by at most ${fx(tr.check_max_difference, 2)}: rounding). Pick the token to follow and the part of the network:</p>
         <div class="row wrap small nn-bar"><span>Token:</span><span class="tr-toks inline">${tr.tokens.map((x, i) => html`<button class="tr-tok${i === s.t ? " on" : ""}" data-tr-nett="${i}"><b>${vis(x.text)}</b><small>#${x.id}</small></button>`)}</span></div>
         <div class="row wrap small nn-bar"><button class="btn small" data-tr-act="net-prev" ${s.stage ? "" : "disabled"}>← back</button>
@@ -531,7 +532,7 @@
         ${raw(netSVG(st))}
         <p class="faint small tr-netnote">Columns, left to right: ${st.cols.map((c) => c.title).join(" → ")}. Line thickness is the size of the weight; <b class="nn-k pos">blue</b> adds, <b class="nn-k neg">red</b> subtracts${st.cols.some((c) => c.edge === "one") ? "; grey lines just carry a number across" : ""}. ▲ ▼ show the other neurons.</p>
         ${netDetail(st)}
-        <p class="muted small">The same run, as tables of every number and every weight matrix: <a href="#" data-tr-tab="inside">4 · Inside the model → Every number</a>.</p>`
+        <p class="muted small">The same run, as tables of every number and every weight matrix: <a href="#" data-tr-tab="inside" data-tr-inside="every">4 · Inside the model → Every number</a>.</p>`
       : s.busy ? html`<p class="small"><span class="spin"></span> Running the text through ${s.src}…</p>` : ""}`;
   }
   async function netRun() {
@@ -547,6 +548,16 @@
       netEnsure();
     }
     paint();
+  }
+  function netAuto() {                             // opening "Your model's network": pick a model and run it, once
+    const s = L.net, ms = TR.ov ? TR.ov.models : [];
+    if (!ms.length || s.busy) return;
+    if (!s.src || !ms.some((m) => m.name === s.src)) {
+      s.src = (ms.find((m) => m.name === TR.exModel) || ms[ms.length - 1]).name;
+      store.set("train.netsrc", s.src); paint();
+    }
+    if (s.autoRan === s.src || (EV.trace && EV.trace.trained && EV.trace.model === s.src)) return;
+    s.autoRan = s.src; netRun();
   }
   const AI_LESSONS = [
     { id: "big", title: "The big picture", body: () => html`
@@ -839,6 +850,7 @@
       if ((fetching || r.machines.some((m) => /starting|installing|checking/.test(m.worker.state))) && S.view === "train") TR.ovPollT = setTimeout(loadOverview, fetching ? 1500 : 3000);
     } catch (e) { /* signed out */ }
     paint();
+    if (TR.tab === "inside" && store.get("train.inside", "network") === "network") netAuto();
   }
   async function poll() {
     clearTimeout(TR.pollT);
@@ -1021,6 +1033,26 @@ Assistant: game tonight?</pre></div>
     }
     return raw(out);
   }
+  // "Auto-setup to continue": the saved model it would continue, and the data it would train on.
+  function autoPick(ov) {
+    const ms = ov.models || [], newest = ms.slice().sort((a, b) => (b.saved_at || 0) - (a.saved_at || 0))[0];
+    const m = ms.find((x) => x.name === TR.autoResume) || (TR.resume && ms.find((x) => x.name === TR.model)) || newest;
+    if (!m) return null;
+    const have = new Set((ov.datasets || []).map((d) => d.name)), own = (m.data_files || []).filter((n) => have.has(n));
+    return { m, own, files: TR.sel.length ? TR.sel : own };
+  }
+  function autoContinue(ov) {
+    const p = autoPick(ov); if (!p) return "";
+    const { m, own, files } = p, gone = (m.data_files || []).filter((n) => !own.includes(n));
+    const opt = (x) => '<option value="' + esc(x.name) + '"' + (x.name === m.name ? " selected" : "") + ">" + esc(x.name) + " · " + n0(x.parameters) + " weights, " + n0(x.trained_steps || 0) + " steps"
+      + (x.validation_loss != null ? ", loss " + f(x.validation_loss, 3) : "") + "</option>";
+    return html`<div class="row wrap tr-autoresume"><label class="tr-field inline"><span>Continue</span><select class="select" data-tr-act="autoresume-pick">${raw((ov.models || []).map(opt).join(""))}</select></label>
+        <span class="spacer"></span>
+        <button class="btn primary" data-tr-act="autosetup-resume" ${TR.autosetupBusy || !files.length ? "disabled" : ""}>${TR.autosetupBusy === "resume" ? "Setting up…" : "Auto-setup to continue"}</button></div>
+      <p class="faint small" style="margin:.4em 0 0">Keeps <b>${m.name}</b>'s shape and tokenizer, then picks the machines, how many more steps fit the time (<i>Auto</i>: until it has read the text fully) and a learning rate from how trained it already is. Keep the best stays on, so it only replaces the saved model if it gets better.
+        ${files.length ? html`It trains on ${TR.sel.length ? "the data ticked in step 2" : "the data it was trained on"}: <b>${files.join(", ")}</b>.`
+          : html`<span class="warn-t">The files it was trained on${gone.length ? " (" + gone.join(", ") + ")" : ""} aren't in your data any more:</span> <a href="#" data-tr-tab="data">choose some in step 2</a>.`}</p>`;
+  }
   function trainTab() {
     const ov = TR.ov; if (!ov) return html`<div class="empty"><div class="spin"></div>Reading this machine's hardware…</div>`;
     const hw = ov.hardware, r = ov.recommend, s = TR.form, run = TR.status ? TR.status.running : ov.running;
@@ -1031,8 +1063,9 @@ Assistant: game tonight?</pre></div>
         <div><h2 class="tr-h" style="margin:0">Auto-setup</h2>
           <p class="faint small" style="margin:.2em 0 0">One click: pick the best machines (each one's GPU and CPU together), get them ready, measure the links between them, and fill in the recommended settings. Then just press Start.</p></div>
         <span class="spacer"></span>
-        <button class="btn primary" data-tr-act="autosetup" ${TR.autosetupBusy || !TR.sel.length ? "disabled" : ""}>${TR.autosetupBusy ? "Setting up…" : "Auto-setup"}</button></div>
-        ${!TR.sel.length ? html`<p class="faint small" style="margin:.5em 0 0">Choose some data in <a href="#" data-tr-tab="data">step 2</a> first.</p>` : ""}</section>
+        <button class="btn primary" data-tr-act="autosetup" ${TR.autosetupBusy || !TR.sel.length ? "disabled" : ""}>${TR.autosetupBusy === "new" ? "Setting up…" : "Auto-setup a new model"}</button></div>
+        ${!TR.sel.length ? html`<p class="faint small" style="margin:.5em 0 0">Choose some data in <a href="#" data-tr-tab="data">step 2</a> to set up a new model.</p>` : ""}
+        ${autoContinue(ov)}</section>
       ${machinesCard()}
       <section class="card"><h2 class="tr-h">Recommended for ${ov.plan.share.length > 1 ? "these machines" : ov.plan.lead || "this hardware"}</h2>
         <label class="tr-field"><span>How long can it train?</span>
@@ -1247,9 +1280,21 @@ Assistant: game tonight?</pre></div>
     return html`<div class="tr-adv ok">${what} runs on <b>${lead.name}</b>, which is ${lead.worker.state === "failed" ? "unable to: " + lead.worker.detail : "getting ready (PyTorch installs itself the first time; " + (lead.worker.detail || "starting") + ")"}.</div>`;
   }
   function insideTab() {
-    const mode = store.get("train.inside", "every");
-    return html`${workerNote("This")}<div class="seg tr-inside-mode"><button class="${mode === "every" ? "on" : ""}" data-tr-act="inside-every">Every number</button><button class="${mode === "summary" ? "on" : ""}" data-tr-act="inside-summary">Summary + one training step</button></div>
-      ${mode === "every" ? everyNumber() : insideSummary()}`;
+    const mode = store.get("train.inside", "network");
+    const seg = [["network", "Your model's network"], ["every", "Every number"], ["summary", "Summary + one training step"]];
+    return html`${workerNote("This")}<div class="seg tr-inside-mode">${seg.map(([id, label]) => html`<button class="${mode === id ? "on" : ""}" data-tr-act="inside-${id}">${label}</button>`)}</div>
+      ${mode === "network" ? insideNetwork() : mode === "every" ? everyNumber() : insideSummary()}`;
+  }
+  function insideNetwork() {                       // the neuron-by-neuron view of one of your trained models
+    const ov = TR.ov, ms = ov ? ov.models : [], s = L.net;
+    if (!ov) return html`<section class="card"><p class="small"><span class="spin"></span> Loading your models…</p></section>`;
+    if (!ms.length) return html`<section class="card"><div class="empty"><b>No trained model yet</b>Train one in step 3 and its network appears here: its real tokenizer, every neuron and every weight.<div class="mt"><button class="btn primary" data-tr-tab="train">Go to training</button></div></div></section>`;
+    if (s.src && !ms.some((m) => m.name === s.src)) s.src = "";
+    const opt = (m) => '<option value="' + esc(m.name) + '"' + (s.src === m.name ? " selected" : "") + ">" + esc(m.name) + " · " + n0(m.parameters) + " weights" + (m.trained_steps ? ", " + n0(m.trained_steps) + " steps" : "") + "</option>";
+    return html`<section class="card"><h2 class="tr-h">Your model's network, neuron by neuron</h2>
+      <div class="row wrap nn-pick"><label class="tr-field inline"><span>Model</span><select class="select" data-tr-act="net-src"><option value="">Choose one of your models…</option>${raw(ms.map(opt).join(""))}</select></label>
+        <span class="faint small">Its real tokenizer, every neuron of every layer, its exact weights and the exact calculation each neuron does.</span></div>
+      ${s.src ? netModelView(true) : html`<p class="small">Choose a model above. It runs your text through it, then shows how the text was cut into tokens and every neuron along the way.</p>`}</section>`;
   }
   function insideSummary() {
     const ov = TR.ov, ms = ov ? ov.models : [], x = TR.explain;
@@ -1535,7 +1580,7 @@ Assistant: game tonight?</pre></div>
     const t = e.target.closest("[data-tr-tab],[data-tr-lesson],[data-tr-neuron],[data-tr-nnet],[data-tr-netpage],[data-tr-nett],[data-tr-nethead],[data-tr-act],[data-tr-check],[data-tr-del],[data-tr-delmodel],[data-tr-chatwith],[data-tr-inspect],[data-tr-get],[data-tr-use],[data-tr-qdel],[data-tr-together]");
     if (!t || t.tagName === "SELECT" || t.tagName === "INPUT" && t.type !== "button") return;
     const d = t.dataset;
-    if (d.trTab) { e.preventDefault(); TR.tab = d.trTab; store.set("train.tab", TR.tab); paint(); window.scrollTo(0, 0); return; }
+    if (d.trTab) { e.preventDefault(); TR.tab = d.trTab; store.set("train.tab", TR.tab); if (d.trInside) store.set("train.inside", d.trInside); paint(); window.scrollTo(0, 0); if (TR.tab === "inside" && store.get("train.inside", "network") === "network") netAuto(); return; }
     if (d.trLesson != null) { TR.lesson = +d.trLesson; store.set("train.lesson", TR.lesson); paint(); const el = $("#tr-lesson"); if (el) el.scrollIntoView({ block: "start" }); return; }
     if (d.trNeuron) { const [l, j] = d.trNeuron.split(",").map(Number), s = L.net; s.sel = s.sel && s.sel[0] === l && s.sel[1] === j ? null : [l, j]; paint(); return; }
     if (d.trNnet) return netSelect(d.trNnet);
@@ -1577,19 +1622,25 @@ Assistant: game tonight?</pre></div>
     else if (a === "delete-preset") {
       if (confirm("Delete the saved settings “" + TR.preset + "”?")) { const r = await post("/api/train/presets/delete", { name: TR.preset }); if (r) { TR.ov.presets = r.presets; resetSettings(); } }
     }
-    else if (a === "autosetup") {
-      if (!TR.sel.length) { toast("Choose some data in step 2 first."); return; }
-      TR.autosetupBusy = true; paint();
-      const r = await post("/api/train/autosetup", { data: TR.sel, hours: TR.hours });
+    else if (a === "autosetup" || a === "autosetup-resume") {
+      const cont = a === "autosetup-resume", pick = cont && TR.ov && autoPick(TR.ov);
+      if (cont && !pick) return;
+      if (!cont && !TR.sel.length) { toast("Choose some data in step 2 first."); return; }
+      TR.autosetupBusy = cont ? "resume" : "new"; paint();
+      const r = await post("/api/train/autosetup", { data: TR.sel, hours: TR.hours, resume: cont ? pick.m.name : undefined });
       TR.autosetupBusy = false;
       if (!r) { paint(); return; }
+      if (cont) {   // continue that model: "Continue X" in the Model box, Keep the best on, and its data ticked if none was
+        TR.resume = true; TR.model = r.resume; TR.keepBest = true;
+        if (!TR.sel.length && (r.data || []).length) { TR.sel = r.data.slice(); saveSel(); }
+      } else if (TR.resume) { TR.resume = false; TR.model = ""; }
       TR.both = !!r.both; store.set("train.both", TR.both ? "1" : "0");
       TR.together = r.together || "share"; store.set("train.together", TR.together);
       TR.machines = (r.machines || []).filter((n) => !n.endsWith(" · CPU"));   // tick the real machines; each one's CPU half rides along
       store.set("train.machines", JSON.stringify(TR.machines));
       TR.edited = null; TR.preset = ""; store.set("train.preset", ""); TR.form = null;   // take the recommended settings
       await loadOverview();
-      toast("Set up on " + (TR.machines.length || 1) + " machine" + (TR.machines.length === 1 ? "" : "s") + (TR.both ? " (GPU + CPU)" : "") + ". Review and press Start.");
+      toast((cont ? "Set up to continue " + r.resume + " on " : "Set up on ") + (TR.machines.length || 1) + " machine" + (TR.machines.length === 1 ? "" : "s") + (TR.both ? " (GPU + CPU)" : "") + ". Review and press " + (cont ? "Continue training." : "Start."));
     }
     else if (a === "start") {
       const body = { data: TR.sel, settings: TR.form, resume: TR.resume, keep_best: TR.resume ? TR.keepBest : undefined, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.together !== "fastest", together: TR.together, both: TR.both,
@@ -1604,7 +1655,7 @@ Assistant: game tonight?</pre></div>
     }
     else if (a === "mdice-roll") { const d = L.mdice; for (let n = 0; n < 10; n++) { const r = Math.random(), pick = r < 0.6 ? 0 : r < 0.9 ? 1 : 2; d.counts[pick]++; d.total++; d.last = r; d.lastPick = pick; } paint(); }
     else if (a === "mdice-reset") { Object.assign(L.mdice, { counts: [0, 0, 0], total: 0, last: null }); paint(); }
-    else if (a === "inside-every" || a === "inside-summary") { store.set("train.inside", a.slice(7)); paint(); }
+    else if (a === "inside-every" || a === "inside-summary" || a === "inside-network") { store.set("train.inside", a.slice(7)); paint(); if (a === "inside-network") netAuto(); }
     else if (a === "ev-trace") evTrace();
     else if (a === "net-run") netRun();
     else if (a === "net-prev" || a === "net-next") { L.net.stage += a === "net-next" ? 1 : -1; L.net.nsel = null; paint(); netEnsure(); }
@@ -1676,6 +1727,7 @@ Assistant: game tonight?</pre></div>
       loadOverview();   // re-estimate time for the model being continued (its real size), not a fresh one
     }
     else if (d.trAct === "keep-best") { TR.keepBest = t.checked; paint(); }
+    else if (d.trAct === "autoresume-pick") { TR.autoResume = t.value; store.set("train.autoresume", t.value); paint(); }
     else if (d.trAct === "ex-model") TR.exModel = t.value;
     else if (d.trAct === "net-src") { const s = L.net; s.src = t.value; store.set("train.netsrc", s.src); s.nsel = null; paint(); if (s.src && !(EV.trace && EV.trace.trained && EV.trace.model === s.src)) netRun(); }
     else if (d.trAct === "net-stage") { L.net.stage = +t.value; L.net.nsel = null; paint(); netEnsure(); }

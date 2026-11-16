@@ -1300,6 +1300,9 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 /* "A whole network" on a model you trained: its real tokenizer, weights and calculations */
 .nn-pick { margin: 0 0 12px; padding-bottom: 10px; border-bottom: 1px solid var(--line); gap: 10px; }
 .nn-pick .select { max-width: 100%; }
+.nn-pick > .tr-field.inline { min-width: 0; max-width: 100%; }
+.nn-pick .tr-field.inline .select { min-width: 0; flex: 1 1 auto; text-overflow: ellipsis; }
+.card .tr-h3.nn-h { margin: 18px 0 8px; }
 .nn-svg.nn-real { max-width: 780px; }
 .nn-idx { fill: var(--bg); font: 600 9px ui-monospace, Menlo, monospace; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
 .nn-idx.tiny { font-size: 7.5px; letter-spacing: -.03em; }
