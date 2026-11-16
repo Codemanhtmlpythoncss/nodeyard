@@ -101,11 +101,12 @@ def estimate_speed(device, cores=0, arch="", gpu=None):
 
 
 def shape_for(target, vocab, context):
-    """The widest/deepest shape whose parameter count fits the target. Head size 32 (64 from width 512), depth ≈ width/48."""
+    """The widest/deepest shape whose parameter count fits the target. Head size 32 (64 from width 512), depth ≈ width/48.
+    Widths go up in steps of the head size (32, then 64), so the heads always divide the width exactly."""
     best = None
-    for width in range(32, 2049, 32):
+    for width in list(range(32, 512, 32)) + list(range(512, 2049, 64)):
         layers = max(1, min(24, round(width / 48)))
-        heads = max(1, width // (64 if width >= 512 else 32))
+        heads = width // (64 if width >= 512 else 32)
         n = count_parameters(vocab, context, width, layers)
         if best is not None and n > target:
             break

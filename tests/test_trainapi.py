@@ -30,6 +30,15 @@ class ParameterCountTests(unittest.TestCase):
         for args, expected in [((300, 32, 32, 2), 45_996), ((2048, 128, 192, 4), 2_592_896), ((5000, 256, 512, 10), 36_780_936)]:
             self.assertEqual(trainapi.count_parameters(*args), expected, args)
 
+    def test_every_shape_has_heads_that_divide_the_width(self):
+        # The screenshot: an Auto run on ~10.5M tokens sized d=672 with h=10, which the trainer refuses to start.
+        for target in range(50_000, 300_000_001, 250_000):
+            for vocab in (512, 2048, 16384):
+                for context in (64, 256, 512):
+                    s = trainapi.shape_for(target, vocab, context)
+                    self.assertEqual(s["width"] % s["heads"], 0, (target, vocab, context, s))
+                    self.assertEqual(s["width"] // s["heads"], 64 if s["width"] >= 512 else 32)
+
 
 class RecommendTests(unittest.TestCase):
     HW = [
