@@ -1333,13 +1333,18 @@
   }
   // Merge the ticked files into one shuffled .jsonl; a trigger makes a file's style come out only when asked for.
   function mergeFiles() { const ov = TR.ov; return ov ? TR.sel.filter((n) => ov.datasets.some((d) => d.name === n)) : []; }
-  function mergeTrigger(n) { const v = TR.merge.triggers[n]; return v != null ? v : /shakespeare/i.test(n) ? "Speak like Shakespeare." : ""; }
+  function mergeTrigger(n) {
+    const v = TR.merge.triggers[n];
+    return v != null ? v : /shakespeare/i.test(n) ? "Speak like Shakespeare." : /stor(y|ies)/i.test(n) ? "Tell me a story."
+      : /gutenberg|novel|classic/i.test(n) ? "Write like a classic novel." : "";
+  }
   function mergePanel() {
     const files = mergeFiles();
     if (files.length < 2) return "";
     return html`<details class="mt"><summary>Merge the ${files.length} ticked files into one</summary>
       <p class="faint small">One <code>.jsonl</code> with every record of those files in a random order, so the 5% held back for validation has some of each. Speaker names come off scripts and plain text is cut at paragraph breaks, exactly as training reads them. Your files aren't changed.</p>
       <p class="faint small"><b>Only in a style when asked:</b> give a file a trigger and every conversation from it starts with those words. The model learns that style only for messages that start with them: type them at the start of your chat message (e.g. “Speak like Shakespeare. How are you?”). Leave it empty for files it should always learn from.</p>
+      <p class="faint small">Plain text with a trigger becomes conversations too: a play (like the Complete Works of Shakespeare) becomes each speech answering the one before it, with the names and stage directions taken off, and each sonnet answers “Write me a sonnet.”; anything else, like stories or a novel, becomes one reply per blank-line block (one story, or a paragraph or two) to the trigger itself.</p>
       <div class="tr-scroll"><table class="tr-key"><tr><th>File</th><th>Only in this file's style when a message starts with</th></tr>
         ${files.map((n) => html`<tr><td>${n}</td><td><input class="input" data-tr-merge="${n}" value="${mergeTrigger(n)}" placeholder="(always, no trigger)"></td></tr>`)}</table></div>
       <div class="row wrap mt" style="gap:8px;align-items:center"><label class="tr-field inline"><span>New file</span><input class="input" data-tr-act="merge-name" value="${TR.merge.name}" style="width:180px"></label><span class="faint small">.jsonl</span>

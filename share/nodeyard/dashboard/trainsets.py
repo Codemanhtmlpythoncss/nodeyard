@@ -55,7 +55,8 @@ BY_ID = {c["id"]: c for c in CATALOG}
 def strip_gutenberg(text):
     """Keep only the book: drop Project Gutenberg's header and footer (the lines around *** START/END OF … ***)."""
     text = text.replace("\r\n", "\n").lstrip("﻿")
-    start = re.search(r"^\*\*\* ?START OF.*$", text, re.M)
+    # The marker can wrap onto a second line ("*** START OF … SHERLOCK\nHOLMES ***").
+    start = re.search(r"^\*\*\* ?START OF[^*\n]*(?:\n[^*\n]*)?\*\*\*.*$|^\*\*\* ?START OF.*$", text, re.M)
     end = re.search(r"^\*\*\* ?END OF.*$", text, re.M)
     body = text[start.end() if start else 0: end.start() if end else len(text)]
     return re.sub(r"\n{3,}", "\n\n", body).strip() + "\n"
@@ -266,41 +267,198 @@ def convert_file(src, dst):
             "names": info.get("names", [])}
 
 
+# -- plays and poems in plain text ------------------------------------------------------------------------------
+# A printed play, e.g. Project Gutenberg's Complete Works of Shakespeare: a speech starts with the speaker's name
+# and a full stop, either on the same line ("  Ham. Who's there?", "COUNTESS. In delivering my son from me") with
+# the rest of the speech indented under it, or alone on its line ("HAMLET.") with the speech on the lines below,
+# up to a blank line. Stage directions ("Enter \u2026", "Exit", "[Aside]") sit between and beside the speeches, and
+# ACT/SCENE headings start a new scene. Sonnets are numbered poems of about 14 lines under a centred number.
+_NAME_ANY = r"(?:[A-Z][A-Za-z'\u2019\-]{0,2}\. |[A-Z][A-Za-z'\u2019\-]* ){0,3}[A-Z][A-Za-z'\u2019\-]*"   # Ham, Lady M, K. Hen, MRS. PAGE
+_NAME_CAPS = r"(?:[A-Z][A-Z'\u2019\-]+ ){0,3}[A-Z][A-Z'\u2019\-]+"             # COUNTESS, ANTIPHOLUS OF SYRACUSE
+SPEECH_LINE = re.compile(r"^(?: {1,3}(%s)|(%s))\. +(\S.*)$" % (_NAME_ANY, _NAME_CAPS))
+SPEECH_CAPS = re.compile(r"^ {0,4}(%s)\. +(\S.*)$" % _NAME_CAPS)       # NAME in capitals: a new speech even inside one
+SPEECH_NAME = re.compile(r"^ {0,3}(%s)\.$" % _NAME_CAPS)
+PLAY_HEADING = re.compile(r"^\s*(?:ACT|Act|SCENE|Scene)(?![a-z])")
+PLAY_END = re.compile(r"^\s*(?:THE END|Dramatis Person|DRAMATIS PERSON|PERSONS REPRESENTED|\d{4}\s*$)")
+STAGE_WORDS = re.compile(r"\b(?:Enter|Re-enter|Reenter|Exit|Exeunt|Manet|Manent|Flourish|Sennet|Alarums?|Trumpets|Hautboys)\b")
+SIDE_NOTE = re.compile(r"(?<=\S) {4,}\S.*$|(?<=[.!?,;:\-]) +(?:Exit|Exeunt)\b.*$")   # a stage direction beside a line
+STAGE_LINE = re.compile(r"^(?:Exit|Exeunt|Re-enter|Reenter|Manet|Manent)\b")
+SONNET_NUMBER = re.compile(r"^ {8,}(?:\d{1,3}|[IVXLC]+)\.?\s*$")
+SONNET_ASKS = ["Write me a sonnet.", "Write a sonnet.", "Write me a poem.", "Give me a sonnet."]
+PLAY_SHARE = 0.1                                       # speeches must be this share of the lines for a file to be a play
+PLAY_MAX = 50 * 1024 * 1024                  # bigger plain text is never read whole to look for a play
+
+
+def _speech_text(lines):
+    """A speech's lines -> its words: stage directions beside or inside it taken off, verse lines kept."""
+    text = re.sub(r" *\[[^\]]{0,300}\] *", " ", "\n".join(lines))
+    text = re.sub(r"\[.*|^[^\[\n]*\]\.?", "", text, flags=re.M)     # what's left of a [note] that ran on past the speech
+    text = "\n".join(SIDE_NOTE.sub("", line).strip() for line in text.split("\n"))
+    lines = (re.sub(r"[ \t]{2,}", " ", line).strip() for line in text.split("\n"))
+    return "\n".join(line for line in lines if line)
+
+
+def play_scenes(text):
+    """[[(speaker, speech), \u2026] for each scene] of a play in plain text, or of all the plays in a complete works."""
+    text = re.sub(r"<<[^>]*>>", "\n", text.replace("\r\n", "\n").expandtabs())   # World Library's notices between the plays
+    scenes, scene = [], []
+    cur = None                                         # [speaker, lines, indent of its first line, name on its own line]
+    in_play = False                                    # off in front matter and cast lists, on from the first ACT or SCENE
+    in_note = False                                    # inside a [stage direction] that runs over several lines
+
+    def end_speech():
+        nonlocal cur
+        if cur:
+            words = _speech_text(cur[1])
+            if words:
+                scene.append((cur[0].upper(), words))
+        cur = None
+
+    def end_scene():
+        end_speech()
+        if scene:
+            scenes.append(scene[:])
+            scene.clear()
+
+    for raw in text.split("\n"):
+        line = raw.rstrip()
+        words = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if in_note:
+            in_note = "]" not in words
+        elif not words:
+            if cur and cur[3] and cur[1]:
+                end_speech()
+        elif PLAY_HEADING.match(line):
+            end_scene()
+            in_play = True
+        elif PLAY_END.match(line):
+            end_scene()
+            in_play = False
+        elif not in_play:
+            continue
+        elif words.startswith("["):
+            in_note = "]" not in words                 # a stage direction between speeches or lines
+        elif STAGE_LINE.match(words) or (indent >= 5 and STAGE_WORDS.search(words)):
+            continue
+        elif SPEECH_CAPS.match(line):
+            m = SPEECH_CAPS.match(line)
+            end_speech()
+            cur = [m.group(1), [m.group(2)], indent, False]
+        elif cur and not cur[3] and cur[2] == 0 and indent > 0:
+            cur[1].append(line)                        # a speech that starts at the margin goes on indented
+        elif SPEECH_LINE.match(line):
+            m = SPEECH_LINE.match(line)
+            end_speech()
+            cur = [m.group(1) or m.group(2), [m.group(3)], indent, False]
+        elif SPEECH_NAME.match(line):
+            end_speech()
+            cur = [SPEECH_NAME.match(line).group(1), [], indent, True]
+        elif cur and (cur[3] or indent > cur[2]):
+            cur[1].append(line)
+        else:
+            end_speech()                               # a place, a stage direction at the margin, a title
+    end_scene()
+    return scenes
+
+
+def sonnets(text):
+    """Every poem of 12 to 16 lines under a centred number (1, 2 \u2026 or I, II \u2026), as its lines."""
+    found, cur = [], None
+    for line in text.replace("\r\n", "\n").split("\n"):
+        if SONNET_NUMBER.match(line):
+            cur = []
+            found.append(cur)
+        elif cur is not None:
+            if line.strip():
+                cur.append(line.strip())
+            elif cur:
+                cur = None
+    return ["\n".join(s) for s in found if 12 <= len(s) <= 16]
+
+
+def play_conversations(text):
+    """A play (or complete works) -> conversations with no names: every speech answers the one before it in the
+    same scene, and every sonnet answers "Write me a sonnet." [] if the text isn't a play."""
+    scenes = play_scenes(text)
+    lines = sum(1 for line in text.split("\n") if line.strip())
+    if sum(len(s) for s in scenes) < max(20, PLAY_SHARE * lines):
+        return []
+    out = ["User: %s\nAssistant: %s" % (SONNET_ASKS[i % len(SONNET_ASKS)], poem) for i, poem in enumerate(sonnets(text))]
+    for scene in scenes:
+        out.extend("User: %s\nAssistant: %s" % (a, b) for (who_a, a), (who_b, b) in zip(scene, scene[1:]) if who_a != who_b)
+    return out
+
+
 MERGE_MAX = 1024 ** 3        # the shuffle keeps an index of every record in the dashboard's memory
 MERGE_CHUNK = 2000           # plain text is cut at paragraph breaks into pieces of about this many characters
+REPLY_MIN = 200              # with a trigger, each block of plain text is one reply, joined to the next if shorter than this
 
 
-def _file_pieces(src, training_data, info, chunk=MERGE_CHUNK):
-    """Every piece of one file as the trainer reads it (speaker names already off), streaming where it can."""
+def _text_blocks(src):
+    """The blank-line-separated blocks of a plain text file, streamed."""
+    para = []
+    with open(src, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.replace("\r\n", "\n").lstrip("\ufeff").rstrip("\n")
+            if line.strip():
+                para.append(line)
+            elif para:
+                yield "\n".join(para)
+                para = []
+    if para:
+        yield "\n".join(para)
+
+
+def _file_pieces(src, training_data, info, chunk=MERGE_CHUNK, trigger=""):
+    """Every piece of one file as the trainer reads it (speaker names already off), streaming where it can. With a
+    trigger, every conversation starts with it, and plain text becomes conversations too: a play becomes its
+    speeches answering each other (names off), anything else one reply per blank-line block (a story, a
+    paragraph or two) to the trigger itself."""
     kind = info["format"] = _kind(src, training_data)
     if kind == "jsonl":
-        yield from _jsonl_pieces(src, training_data, info)
+        pieces = _jsonl_pieces(src, training_data, info)
     elif kind in ("json", "chat"):
         if os.path.getsize(src) > 200 * 1024 * 1024:
             raise ValueError("%s: JSON lists and chat text over 200 MB can't be merged here: save it as JSONL instead." % os.path.basename(src))
         with open(src, "r", encoding="utf-8", errors="replace") as f:
             pieces, rep = training_data.normalize_pieces(f.read())
         info.update(skipped=rep["skipped"], names_removed=rep["names_removed"], names=rep["names"])
-        yield from pieces
+    elif trigger:
+        plays = []
+        if os.path.getsize(src) <= PLAY_MAX:
+            with open(src, "r", encoding="utf-8", errors="replace") as f:
+                plays = play_conversations(f.read().lstrip("\ufeff"))
+        if plays:
+            info["format"] = "play"
+            pieces = plays
+        else:
+            yield from _wrap_blocks(_text_blocks(src), trigger)
+            return
     else:
-        para, buf, size = [], [], 0
-        with open(src, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.replace("\r\n", "\n").lstrip("\ufeff").rstrip("\n")
-                if line.strip():
-                    para.append(line)
-                    continue
-                if para:
-                    buf.append("\n".join(para))
-                    size += len(buf[-1])
-                    para = []
-                if size >= chunk:
-                    yield "\n\n".join(buf)
-                    buf, size = [], 0
-        if para:
-            buf.append("\n".join(para))
+        buf, size = [], 0
+        for block in _text_blocks(src):
+            buf.append(block)
+            size += len(block)
+            if size >= chunk:
+                yield "\n\n".join(buf)
+                buf, size = [], 0
         if buf:
             yield "\n\n".join(buf)
+        return
+    for piece in pieces:
+        yield training_data.add_trigger(piece, trigger) if trigger else piece
+
+
+def _wrap_blocks(blocks, trigger):
+    buf = []
+    for block in blocks:
+        buf.append(block)
+        if sum(map(len, buf)) >= REPLY_MIN:
+            yield "User: %s\nAssistant: %s" % (trigger, "\n\n".join(buf))
+            buf = []
+    if buf:
+        yield "User: %s\nAssistant: %s" % (trigger, "\n\n".join(buf))
 
 
 def merge_files(srcs, dst, triggers=None, seed=0):
@@ -308,7 +466,8 @@ def merge_files(srcs, dst, triggers=None, seed=0):
     back for validation (the end of the file) has some of every file. Each record reads back exactly as the trainer
     read it from its own file: speaker names taken off a script, plain text cut at paragraph breaks into pieces of
     about MERGE_CHUNK characters. triggers: {file name: words}; each conversation from that file starts its first
-    message with those words, so the model learns that file's style only for messages that start with them."""
+    message with those words, so the model learns that file's style only for messages that start with them. Plain
+    text with a trigger becomes conversations (see _file_pieces), so its style also comes out only when asked."""
     training_data = _training_data()
     triggers = triggers or {}
     parts = dst + ".parts"
@@ -320,8 +479,8 @@ def merge_files(srcs, dst, triggers=None, seed=0):
             trigger = str(triggers.get(name) or "").strip()
             info = {"file": name, "records": 0, "conversations": 0, "triggered": 0, "skipped": 0, "names_removed": 0, "names": []}
             with open(os.path.join(parts, "%d.jsonl" % n), "wb") as out:
-                for piece in _file_pieces(src, training_data, info):
-                    rec = training_data.piece_to_record(training_data.add_trigger(piece, trigger) if trigger else piece)
+                for piece in _file_pieces(src, training_data, info, trigger=trigger):
+                    rec = training_data.piece_to_record(piece)
                     if "messages" in rec:
                         info["conversations"] += 1
                         info["triggered"] += bool(trigger and any(t["role"] == "user" for t in rec["messages"]))

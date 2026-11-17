@@ -15,6 +15,13 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
   - speaker names are taken off on the way (see Fixed), and the new file is then the only one ticked;
   - a file name that's already used, fewer than 2 files, more than 1 GB in all or too little room on the dashboard are refused.
 
+- **Train AI: plays, stories and novels only when asked for.** Merging plain text with a trigger now makes conversations from it too, so its style comes out only for messages that start with the trigger:
+  - a play (the Complete Works of Shakespeare, or any play with "NAME. text" or a name on its own line) becomes each speech answering the one before it in the same scene. Speaker names, stage directions ("Enter …", "Exit", "[Aside]"), ACT/SCENE headings, cast lists and World Library's notices are taken off;
+  - each sonnet becomes the answer to "Write me a sonnet." (or a few other ways of asking);
+  - any other plain text becomes one reply per blank-line block (one TinyStories story, a paragraph or two of a novel) to the trigger itself; blocks under 200 characters join the next one;
+  - new default triggers: *Tell me a story.* for a file with "story" or "stories" in its name, and *Write like a classic novel.* for the Gutenberg novels;
+  - plain text without a trigger is cut into pieces as before.
+
 - **Train AI: download and upload settings as a JSON file, with a specification an AI can follow.** A **Settings file (JSON)** card near the top of the Train tab (the Settings card's **JSON file ↑** jumps to it):
   - the file holds the Settings card, what to train and where (data files, the model to continue, keep the best, machines, share / parallel / fastest) and the Stop when card;
   - every key is optional: one a file leaves out keeps the page's value, and a file of just the settings works too;
@@ -91,6 +98,8 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 - **Train AI saved settings, and settings that follow the dataset.** Settings start as the recommendation for your hardware *and* your data. The model is sized for the text that isn't repeated: the check now reports how much is repeated, and a pairs file where every line appears twice counts once. The context fits a typical example. *Learn only the replies* switches on for conversations. Every choice shows its numbers. *Config for hardware and training dataset* fills in the recommended settings; *Save settings preset* keeps named presets on the dashboard; the *Saved presets* menu brings one back from any browser. New *Dropout* setting.
 
 ### Fixed
+
+- **Train AI: a Gutenberg book could keep part of Project Gutenberg's header.** A `*** START OF … ***` marker that wraps onto a second line (as in some copies of *The Adventures of Sherlock Holmes*) is now removed whole.
 
 - **Train AI: speaker names in chat JSONL taught the model to start replies with a name.** A ChatML or messages file made from a play (*Jul: O, my lord…*, *Nurse: …*) kept its names, so every reply began with one. If at least 10% of a file's replies start with a capitalised name and it has two or more different names (a Shakespeare pairs file has names on only some plays), the trainer now takes the name off the start of every line, in training, the data check, the test prompts and Convert. The check says which names it found. Tokenised data made before this is built again once.
 - **Train AI: the file ticks didn't follow a change made for you.** After a merge or a settings file changed which files are ticked, a box you had clicked before could still show its old tick. The ticks now always show what will be trained on.
