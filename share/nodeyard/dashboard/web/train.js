@@ -13,7 +13,7 @@
     lines: [], pollT: 0, ovT: 0, chat: { model: "", history: [], mode: "chat", temperature: 0.7, top_k: 40, top_p: 0.9, busy: false },
     explain: null, exModel: "", exPrompt: "User: Hello, who are you?", exBusy: false, upload: null, ovPollT: 0,
     mp: { file: "", speakers: null, speaker: "", context: 3, names: false },
-    edited: null, preset: store.get("train.preset", "") || "",
+    edited: null, formFrom: "", preset: store.get("train.preset", "") || "",   // formFrom: the settings file the form came from
     q: Object.assign({ on: false, preset: "starter", prompts: [], pass: 1, target_loss: "", give_up: 10, count: 20, held_out: false, match: "exact" },
       (() => { try { return JSON.parse(store.get("train.quality", "") || "null"); } catch (_) { return null; } })() || {}),
     machines: JSON.parse(store.get("train.machines", "[]") || "[]"), share: store.get("train.share", "1") !== "0", together: store.get("train.together", "share") || "share",
@@ -22,6 +22,14 @@
     merge: { name: "everything", triggers: {} },                        // Merge the ticked files: the new file's name, a trigger per file
     spec: null, fileCheck: null, pasteText: "",                          // the settings-file specification; the last upload's check; the paste box
   };
+  // Settings you typed or loaded from a file survive a reload: the dashboard reloads itself after every update, which
+  // used to put the form back to the recommendation without a word, so a pasted file looked like it never applied.
+  (() => {
+    try {
+      const s = JSON.parse(store.get("train.form", "") || "null");
+      if (s && (s.edited || s.model)) { TR.edited = s.edited || null; TR.formFrom = s.from || ""; TR.model = s.model || ""; TR.resume = !!s.resume; }
+    } catch (_) { /* start from the recommendation */ }
+  })();
 
   // ---------- small maths helpers (the same formulas as the trainer) ----------
   const f = (x, p = 4) => (x == null || !isFinite(x) ? "–" : Math.abs(x) >= 1e5 || (Math.abs(x) < 1e-3 && x !== 0) ? (+x).toExponential(2) : (+(+x).toPrecision(p)).toString());
@@ -1027,13 +1035,28 @@
   }
   function saveQ() { store.set("train.quality", JSON.stringify(TR.q)); }
   function recSettings(ov) { return Object.assign({ save_every: 500, device: "auto", assistant_only: false, dropout: 0 }, (ov || TR.ov).recommend.settings); }
-  function markEdited() { TR.edited = Object.assign({}, TR.form); }
+  // from: the settings file the values came from; a later hand edit keeps the file's name but says it changed.
+  function markEdited(from) {
+    TR.edited = Object.assign({}, TR.form);
+    TR.formFrom = from != null ? from : TR.formFrom ? TR.formFrom.replace(/, changed since$/, "") + ", changed since" : "";
+    saveForm();
+  }
+  function saveForm() { store.set("train.form", TR.edited || TR.model ? JSON.stringify({ edited: TR.edited, from: TR.formFrom, model: TR.model, resume: TR.resume }) : ""); }
+  // What the form is now set to, in words, so "Applied" can be checked against the page at a glance.
+  function formSummary() {
+    const s = TR.form || {}, N = params(+s.vocab_size, +s.context, +s.dim, +s.layers), r = TR.ov && TR.ov.recommend;
+    const plan = TR.ov && TR.ov.plan, where = TR.machines.length ? TR.machines.join(", ") : (plan && plan.lead) || "the fastest machine";
+    const time = !TR.resume && r && r.speed ? ", about " + dur(6 * N * s.batch_size * s.context * (+s.grad_accum || 1) * s.steps / r.speed) : "";
+    return (TR.resume ? "continue " + TR.model + " for " : "a new model" + (TR.model ? " called " + TR.model : "") + " with " + n0(N) + " weights (V " + n0(s.vocab_size)
+      + ", T " + s.context + ", d " + s.dim + ", L " + s.layers + ", h " + s.heads + "), ") + n0(s.steps) + " steps" + time + ", batch " + s.batch_size + " × " + (+s.grad_accum || 1)
+      + ", learning rate " + s.learning_rate + "; data: " + (TR.sel.length ? TR.sel.join(", ") : "none ticked") + "; on " + where;
+  }
   // A box you typed in keeps its text through repaints; when whole settings are loaded, the boxes show the new values.
   function freshForm() { document.querySelectorAll("#tr-root [data-tr-set]").forEach((el) => { delete el.dataset.touched; }); }
-  function resetSettings() { TR.edited = null; TR.preset = ""; store.set("train.preset", ""); TR.form = recSettings(); freshForm(); paint(); toast("Settings configured for this hardware and the training data you ticked."); }
+  function resetSettings() { TR.edited = null; saveForm(); TR.preset = ""; store.set("train.preset", ""); TR.form = recSettings(); freshForm(); paint(); toast("Settings configured for this hardware and the training data you ticked."); }
   function loadPreset(name) {
     const p = (TR.ov.presets || []).find((x) => x.name === name); if (!p) return resetSettings();
-    TR.preset = name; store.set("train.preset", name); TR.edited = Object.assign({}, p.settings); TR.form = Object.assign(recSettings(), p.settings); freshForm(); paint(); toast("Loaded “" + name + "”.");
+    TR.preset = name; store.set("train.preset", name); TR.edited = Object.assign({}, p.settings); TR.formFrom = ""; saveForm(); TR.form = Object.assign(recSettings(), p.settings); freshForm(); paint(); toast("Loaded “" + name + "”.");
   }
 
   // ---------- settings as a JSON file: download, upload, and the specification (trainsettings.py) ----------
@@ -1116,10 +1139,10 @@
       saveQ();
       if (!sw.prompts && TR.q.preset === "data" && TR.q.preset !== prev) sampleFromData();
     }
-    TR.form = Object.assign({}, TR.form, r.settings); markEdited(); TR.preset = ""; store.set("train.preset", "");
-    freshForm(); await loadOverview();
-    const n = Object.keys(r.settings).length + Object.keys(run).length + Object.keys(sw).length;
-    toast("Applied " + n + " value" + (n === 1 ? "" : "s") + " from " + name + (r.warnings.length ? " (with notes under Settings file)" : "") + ". Review, then press " + (TR.resume ? "Continue training." : "Start."));
+    TR.form = Object.assign({}, TR.form, r.settings); TR.preset = ""; store.set("train.preset", "");
+    markEdited(name); freshForm(); await loadOverview();
+    TR.fileCheck.summary = formSummary(); paint();
+    toast("Applied " + name + (r.warnings.length ? " (with notes under Settings file)" : "") + ": they're in the Settings card now. Review, then press " + (TR.resume ? "Continue training." : "Start."));
     return true;
   }
   // The specification plus what's on this cluster, for pasting into an AI chat with what you want it to do.
@@ -1153,7 +1176,7 @@
         <li>With <code>run.continue</code> true the saved model's shape and tokenizer are kept: <code>vocab_size</code>, <code>context</code>, <code>dim</code>, <code>layers</code> and <code>heads</code> are ignored. <code>steps</code> are extra steps on top of the ones it has.</li>
         <li><code>run.data</code> and <code>run.machines</code> use the exact names on this page; ones that aren't here are left out with a note.</li>
         <li>A file of just the settings (<code>{"learning_rate": 0.0003}</code>) works too.</li></ul>
-      <h4>Example</h4><pre class="tr-pre">${JSON.stringify(sp.example, null, 2)}</pre>`;
+      <h4>Example <span class="faint small">a sample file to copy from, not your settings</span></h4><pre class="tr-pre">${JSON.stringify(sp.example, null, 2)}</pre>`;
   }
   function settingsFileCard() {
     const c = TR.fileCheck;
@@ -1167,7 +1190,8 @@
       <textarea class="input mt" id="tr-paste-settings" rows="4" spellcheck="false" style="width:100%;font-family:ui-monospace,Menlo,monospace;font-size:12px" placeholder='Paste settings JSON here, e.g. {"run": {"model": "best-yet", "continue": true}, "settings": {"learning_rate": 0.0003}} or a whole reply from an AI'>${TR.pasteText}</textarea>
       <div class="row wrap" style="gap:8px;align-items:center"><button class="btn small primary" data-tr-act="settings-paste">Apply pasted settings</button><span class="faint small">or ⌘/Ctrl + Enter in the box</span></div>
       ${c ? html`<div class="tr-adv ${c.errors.length ? "bad" : c.warnings.length ? "warn" : "good"}"><button class="btn small" style="float:right;margin:-2px -4px 0 8px" data-tr-act="filecheck-close" aria-label="dismiss">×</button>
-        <b>${c.errors.length ? "Nothing applied from " + c.name + ": fix these and try again" : "Applied " + c.name + " — review the settings below"}</b>
+        <b>${c.errors.length ? "Nothing applied from " + c.name + ": fix these and try again" : "Applied " + c.name}</b>
+        ${!c.errors.length && c.summary ? html`<p class="small" style="margin:.3em 0">Now set to ${c.summary}. <button class="btn small" data-tr-act="goto-settings">Show the Settings card ↓</button></p>` : ""}
         ${c.errors.length || c.warnings.length ? html`<ul class="small">${c.errors.map((x) => html`<li class="bad-t">${x}</li>`)}${c.warnings.map((x) => html`<li>${x}</li>`)}</ul>` : ""}</div>` : ""}
       <details class="mt tr-spec"><summary data-tr-act="spec">Settings JSON specification — every key, what it does, what's allowed</summary>${specPanel()}</details></section>`;
   }
@@ -1185,6 +1209,7 @@
       const r = await getJSON("/api/train" + q);
       if (!r.ok) { toast(r.error || "Couldn't read the trainer."); return; }
       TR.ov = r;
+      if (TR.resume && !r.models.some((m) => m.name === TR.model)) { TR.resume = false; TR.model = ""; saveForm(); }   // a restored model was deleted since
       const names = new Set(r.datasets.map((d) => d.name)); TR.sel = TR.sel.filter((n) => names.has(n));
       // Settings follow the recommendation for this hardware and data until you edit one or load saved settings.
       const saved = TR.preset && (r.presets || []).find((p) => p.name === TR.preset);
@@ -1451,6 +1476,7 @@ Assistant: game tonight?</pre></div>
       ${settingsFileCard()}
       ${machinesCard()}
       <section class="card"><h2 class="tr-h">Recommended for ${ov.plan.share.length > 1 ? "these machines" : ov.plan.lead || "this hardware"}</h2>
+        ${TR.edited ? html`<p class="tr-adv small" style="margin-top:0">Start uses <b>your settings</b> in the Settings card${TR.resume ? "" : html`: a <b>${n0(N)}</b>-weight model`}, about <b>${dur(fl * s.steps / r.speed)}</b>. This card is only a suggestion; <i>Use these settings</i> at its foot switches to it.</p>` : ""}
         <label class="tr-field"><span>How long can it train?</span>
           <div class="row" style="gap:6px;align-items:center">
             <select class="select" data-tr-act="hours">${raw('<option value="auto"' + (isAuto() ? " selected" : "") + ">Auto — until fully trained</option>" + [[0.25, "15 minutes"], [1, "1 hour"], [3, "3 hours"], [8, "overnight (8 h)"], [24, "a day"], [72, "3 days"]].map(([v, l]) => '<option value="' + v + '"' + (!isAuto() && +v === +TR.hours ? " selected" : "") + ">" + l + "</option>").join("") + '<option value="custom"' + (!isAuto() && [0.25, 1, 3, 8, 24, 72].indexOf(+TR.hours) < 0 ? " selected" : "") + ">Custom…</option>")}</select>
@@ -1466,7 +1492,7 @@ Assistant: game tonight?</pre></div>
         <div class="tr-why">${r.why.map((w) => html`<details><summary><b>${w.name}</b><span>${w.value}</span></summary><div class="tr-eq small">${w.formula}</div><div class="tr-calc small">${w.numbers}</div><p class="muted small">${w.explain}</p></details>`)}</div>
         <p class="small"><b>Expect:</b> ${r.expect.level}</p>
         ${TR.edited ? html`<button class="btn" data-tr-act="use-rec">Use these settings</button>` : html`<p class="faint small">These are in the settings below.</p>`}</section>
-      <section class="card tr-span2"><h2 class="tr-h">Settings</h2>
+      <section class="card tr-span2" id="tr-settings"><h2 class="tr-h">Settings</h2>
         <div class="row wrap tr-presets">
           <button class="btn small primary" data-tr-act="reset-settings">Config for hardware and training dataset</button>
           <button class="btn small" data-tr-act="save-settings">Save settings preset</button>
@@ -1475,7 +1501,7 @@ Assistant: game tonight?</pre></div>
             <option value="">${(ov.presets || []).length ? "— choose a preset —" : "none saved yet"}</option>${raw((ov.presets || []).map((p) => '<option value="' + esc(p.name) + '"' + (TR.preset === p.name ? " selected" : "") + ">" + esc(p.name) + "</option>").join(""))}</select></label>
           ${TR.preset ? html`<button class="btn small danger" data-tr-act="delete-preset">Delete preset</button>` : ""}
           <span class="spacer"></span>
-          <span class="small ${TR.edited && (!TR.preset || presetChanged()) ? "warn-t" : "faint"}">${TR.preset ? (presetChanged() ? "“" + TR.preset + "”, changed since saved" : "using “" + TR.preset + "”") : TR.edited ? "edited, not saved" : "configured for this hardware and data"}</span></div>
+          <span class="small ${!TR.preset && TR.edited && TR.formFrom && !TR.formFrom.endsWith("changed since") ? "good-t" : TR.edited && (!TR.preset || presetChanged()) ? "warn-t" : "faint"}">${TR.preset ? (presetChanged() ? "“" + TR.preset + "”, changed since saved" : "using “" + TR.preset + "”") : TR.edited && TR.formFrom ? "set from " + TR.formFrom : TR.edited ? "your own settings (not saved as a preset)" : "configured for this hardware and data"}</span></div>
         <p class="faint small">${TR.edited ? "Recommended would be: " + n0(params(r.settings.vocab_size, r.settings.context, r.settings.dim, r.settings.layers)) + " weights (V " + n0(r.settings.vocab_size) + ", T " + r.settings.context + ", d " + r.settings.dim + ", L " + r.settings.layers + "), " + n0(r.settings.steps) + " steps." : "Worked out from this machine's hardware and the data you ticked (see “Recommended” above for every reason). Change anything; Save keeps it for next time."}</p>
         <div class="tr-form">
           ${field("vocab_size", "Vocabulary V", "tokens the BPE tokenizer learns (≥ 256)")}${field("context", "Context T", "tokens it sees at once")}${field("dim", "Width d", "numbers per token; must divide by heads")}
@@ -2015,12 +2041,13 @@ Assistant: game tonight?</pre></div>
       let name = prompt("Save these settings as a preset. Name (an existing name is replaced):", TR.preset || (TR.sel[0] ? TR.sel[0].replace(/\.[a-z]+$/i, "") + " settings" : ""));
       if (!name || !(name = name.trim())) return;
       const r = await post("/api/train/presets/save", { name, settings: TR.form, note: TR.sel.join(", ") });
-      if (r) { TR.ov.presets = r.presets; TR.preset = name; store.set("train.preset", name); TR.edited = Object.assign({}, TR.form); paint(); toast("Saved “" + name + "”."); }
+      if (r) { TR.ov.presets = r.presets; TR.preset = name; store.set("train.preset", name); TR.edited = Object.assign({}, TR.form); TR.formFrom = ""; saveForm(); paint(); toast("Saved “" + name + "”."); }
     }
     else if (a === "settings-download") downloadSettings();
     else if (a === "settings-paste") pasteSettings();
     else if (a === "settings-copy") { const sp = await loadSpec(); if (sp) U.copyText(JSON.stringify(settingsDoc(sp), null, 2)); }
     else if (a === "goto-json") { const el = $("#tr-json"); if (el) el.scrollIntoView({ block: "start", behavior: "smooth" }); }
+    else if (a === "goto-settings") { const el = $("#tr-settings"); if (el) el.scrollIntoView({ block: "start", behavior: "smooth" }); }
     else if (a === "spec") loadSpec();
     else if (a === "spec-copy") { const sp = await loadSpec(); if (sp) U.copyText(aiText(sp)); }
     else if (a === "spec-save") { const sp = await loadSpec(); if (sp) saveFile("nodeyard-train-settings-spec.md", aiText(sp), "text/markdown"); }
@@ -2045,7 +2072,7 @@ Assistant: game tonight?</pre></div>
       TR.together = r.together || "share"; store.set("train.together", TR.together);
       TR.machines = (r.machines || []).filter((n) => !n.endsWith(" · CPU"));   // tick the real machines; each one's CPU half rides along
       store.set("train.machines", JSON.stringify(TR.machines));
-      TR.edited = null; TR.preset = ""; store.set("train.preset", ""); TR.form = null;   // take the recommended settings
+      TR.edited = null; saveForm(); TR.preset = ""; store.set("train.preset", ""); TR.form = null;   // take the recommended settings
       await loadOverview();
       toast((cont ? "Set up to continue " + r.resume + " on " : "Set up on ") + (TR.machines.length || 1) + " machine" + (TR.machines.length === 1 ? "" : "s") + (TR.both ? " (GPU + CPU)" : "") + ". Review and press " + (cont ? "Continue training." : "Start."));
     }
@@ -2053,7 +2080,7 @@ Assistant: game tonight?</pre></div>
       const body = { data: TR.sel, settings: TR.form, resume: TR.resume, keep_best: TR.resume ? TR.keepBest : undefined, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.together !== "fastest", together: TR.together, both: TR.both,
         quality: TR.q.on ? { on: true, prompts: qPrompts().filter((p) => p.prompt.trim()).map((p) => ({ prompt: p.prompt, answer: p.answer || "", expect: String(p.expect || "").split(",").map((x) => x.trim()).filter(Boolean) })), pass: TR.q.pass, target_loss: TR.q.target_loss, give_up: TR.q.give_up || 10, match: TR.q.match } : undefined };
       const r = await post("/api/train/start", body);
-      if (r) { toast("Training " + r.model); TR.lines = []; TR.since = 0; TR.status = null; TR.model = TR.resume ? TR.model : ""; await loadOverview(); poll(); }
+      if (r) { toast("Training " + r.model); TR.lines = []; TR.since = 0; TR.status = null; TR.model = TR.resume ? TR.model : ""; saveForm(); await loadOverview(); poll(); }
     }
     else if (a === "stop") { if (await post("/api/train/stop", {})) toast("Stopping: it saves after the current step."); }
     else if (a === "fix-cluster") {
@@ -2106,7 +2133,7 @@ Assistant: game tonight?</pre></div>
     else if (d.trAct === "q-giveup") { TR.q.give_up = Math.max(3, Math.min(100, +t.value || 10)); saveQ(); }
     else if (d.trAct === "ex-prompt") TR.exPrompt = t.value;
     else if (d.trAct === "ev-tokens") EV.tokens = Math.max(1, Math.min(16, +t.value || 8));
-    else if (d.trAct === "model-name") TR.model = t.value;
+    else if (d.trAct === "model-name") { TR.model = t.value; saveForm(); }
     else if (t.id === "tr-paste-settings") TR.pasteText = t.value;
     else if (d.trMerge != null) TR.merge.triggers[d.trMerge] = t.value;
     else if (d.trAct === "merge-name") TR.merge.name = t.value;
@@ -2140,7 +2167,7 @@ Assistant: game tonight?</pre></div>
       TR.hours = h; store.set("train.hours", h); TR.form = null; loadOverview();
     }
     else if (d.trAct === "model-pick") {
-      TR.resume = !!t.value; TR.model = t.value;
+      TR.resume = !!t.value; TR.model = t.value; saveForm();
       const m = TR.ov.models.find((x) => x.name === t.value);
       if (m) { TR.form.learning_rate = m.resume_lr || +((m.learning_rate || 1e-3) * 0.3).toPrecision(2); markEdited(); toast("Learning rate set to " + TR.form.learning_rate + " for continuing, from this model's size and how trained it is (see the note below Start)."); }
       loadOverview();   // re-estimate time for the model being continued (its real size), not a fresh one

@@ -109,7 +109,7 @@
       '<button id="ny-repeat" title="Loop: Off (click to change)" aria-label="Loop: Off (click to change)" aria-pressed="false">🔁</button><span id="ny-repeat-state" class="loop-state">Off</span>' +
       '<button id="ny-copy" title="Copy SoundCloud link" aria-label="Copy SoundCloud link">⧉</button>' +
       '<label class="faint small" title="Playback speed">Speed <select id="ny-rate" aria-label="Playback speed"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="1.75">1.75×</option><option value="2">2×</option></select></label>' +
-      '<label class="faint small" title="Equalizer">EQ <select id="ny-eq" aria-label="Equalizer mode">' + EQ_OPTIONS + '</select></label>' +
+      '<label class="faint small" title="Equalizer. Flat plays the music directly; a preset routes it through filters until the page reloads.">EQ <select id="ny-eq" aria-label="Equalizer mode">' + EQ_OPTIONS + '</select></label>' +
       '<button id="ny-sleep" title="Sleep timer: off" aria-label="Sleep timer: off">⏾</button><span id="ny-sleep-state" class="loop-state"></span>' +
       '<button id="ny-vol-i" title="Mute" aria-label="Mute">🔊</button><input type="range" id="ny-vol" min="0" max="1" value="1" step="0.05" style="width:70px" aria-label="Volume">' +
       '<button id="ny-close" title="Close player">✕</button>';
@@ -160,7 +160,7 @@
   }
 
   // ---- volume, mute and the sleep timer ------------------------------------
-  // Once startViz routes the element through the Web Audio graph, the element's own .volume no
+  // Once an EQ preset routes the element through the Web Audio graph, the element's own .volume no
   // longer changes what you hear — the graph does. Mirror volume+mute onto the graph's gain node
   // so the slider, mute button and DJ ducking keep working during playback. Before the graph
   // exists (nothing has played yet) this is a no-op and native audio.volume applies as usual.
@@ -239,44 +239,94 @@
     } catch (e) { /* metadata is a nicety */ }
   }
 
-  // ---- CAVA-style visualizer ----------------------------------------------
+  // ---- CAVA-style visualizer and the equalizer ---------------------------------
+  // Music plays straight from the <audio> element unless an EQ preset is on. Routing the element through Web Audio
+  // (createMediaElementSource) puts a second clock between the decoder and the speakers, and in Firefox/Zen and in
+  // Safari/the Nodeyard app every stall or clock drift was smoothed over by resampling: an audible glitch, then the
+  // pitch sliding up and back down. So on Flat the browser plays the music itself, and the visualizer listens to a
+  // copy of the sound where the browser can make one without touching playback (Chrome, Edge and Brave's
+  // captureStream). An EQ preset has to shape the sound, so it routes the element through the filters; an element
+  // can't be un-routed, so that lasts until the page reloads.
+  let routed = false, tapSource = null, tapStream = null;
+  function audioCtx() {
+    if (actx) return actx;
+    // "playback" asks for bigger buffers: fewer underruns, and latency doesn't matter for music
+    try { actx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "playback" }); }
+    catch (e) { actx = new (window.AudioContext || window.webkitAudioContext)(); }
+    // A routed element goes silent if the context suspends (tab switch, heavy WebGL like the 3D galaxy, browser
+    // throttling), which stopped the music when moving around the dashboard. Resume whenever that happens.
+    const keep = () => { if (actx.state === "suspended" && audio && !audio.paused) actx.resume().catch(() => {}); };
+    actx.addEventListener("statechange", keep);
+    document.addEventListener("visibilitychange", keep);
+    window.addEventListener("focus", keep);
+    setInterval(keep, 4000);
+    return actx;
+  }
+  function vizAnalyser() {
+    if (analyser) return analyser;
+    analyser = audioCtx().createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.8;
+    vizData = new Uint8Array(analyser.frequencyBinCount);
+    return analyser;
+  }
+  function dropTap() {
+    if (tapSource) { try { tapSource.disconnect(); } catch (e) { /* already gone */ } tapSource = null; }
+  }
+  function routeThroughEq() {
+    if (routed) return;
+    const ctx = audioCtx(), an = vizAnalyser(), gains = EQ_PRESETS[M.eq] || EQ_PRESETS.flat;
+    dropTap();
+    vizSource = ctx.createMediaElementSource(audio);
+    routed = true;
+    eqNodes = [60, 250, 1000, 4000, 10000].map((frequency, i) => {
+      const filter = ctx.createBiquadFilter();
+      filter.type = i === 0 ? "lowshelf" : i === 4 ? "highshelf" : "peaking";
+      filter.frequency.value = frequency;
+      if (filter.type === "peaking") filter.Q.value = 0.9;
+      filter.gain.value = gains[i];
+      return filter;
+    });
+    let previous = vizSource;
+    eqNodes.forEach((filter) => { previous.connect(filter); previous = filter; });
+    previous.connect(an);
+    // Routing the element through this graph bypasses its native .volume, so the output level
+    // is this gain node, not audio.volume. Keep it in step with the element (see applyGain).
+    gainNode = ctx.createGain();
+    an.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    applyGain();
+  }
+  // Listen to a copy of what's playing, for the bars only: the analyser is never connected to the speakers, so the
+  // music itself never goes through Web Audio. Firefox's (moz)captureStream takes the sound away from the element, and
+  // Safari has none, so those browsers only get bars with an EQ preset on.
+  function canTap() { return !!audio && typeof audio.captureStream === "function" && !("mozCaptureStream" in audio); }
+  function tapForViz() {
+    if (routed || !canTap()) return;
+    if (!tapStream) {
+      tapStream = audio.captureStream();
+      tapStream.addEventListener("addtrack", () => { try { dropTap(); tapForViz(); } catch (e) { /* no bars, the music is unaffected */ } });   // every new track brings a new stream track
+    }
+    if (tapSource) return;
+    const tracks = tapStream.getAudioTracks().filter((t) => t.readyState === "live");
+    if (!tracks.length) return;   // nothing decoded yet; "addtrack" calls back
+    const ctx = audioCtx();
+    dropTap();
+    tapSource = ctx.createMediaStreamSource(new MediaStream([tracks[tracks.length - 1]]));
+    tapSource.connect(vizAnalyser());
+    vizReady();   // the track usually arrives after "play", so start the bars from here too
+  }
+  function vizReady() {
+    if (analyser && !vizRAF && audio && !audio.paused) drawViz();
+    const small = document.getElementById("ny-viz");
+    if (small) small.title = analyser ? "" : "The bars move while an EQ preset is on (on Flat this browser plays the music directly, so it can't be listened to)";
+  }
   function startViz() {
     try {
-      if (!actx) {
-        actx = new (window.AudioContext || window.webkitAudioContext)();
-        vizSource = actx.createMediaElementSource(audio);
-        analyser = actx.createAnalyser();
-        analyser.fftSize = 256;
-        analyser.smoothingTimeConstant = 0.8;
-        eqNodes = [60, 250, 1000, 4000, 10000].map((frequency, i) => {
-          const filter = actx.createBiquadFilter();
-          filter.type = i === 0 ? "lowshelf" : i === 4 ? "highshelf" : "peaking";
-          filter.frequency.value = frequency;
-          if (filter.type === "peaking") filter.Q.value = 0.9;
-          return filter;
-        });
-        let previous = vizSource;
-        eqNodes.forEach((filter) => { previous.connect(filter); previous = filter; });
-        previous.connect(analyser);
-        // Routing the element through this graph bypasses its native .volume, so the output level
-        // is this gain node, not audio.volume. Keep it in step with the element (see applyGain).
-        gainNode = actx.createGain();
-        analyser.connect(gainNode);
-        gainNode.connect(actx.destination);
-        applyGain();
-        setEqualizer(M.eq, false);
-        vizData = new Uint8Array(analyser.frequencyBinCount);
-        // A routed element goes silent if the context suspends (tab switch, heavy WebGL like the 3D galaxy, browser
-        // throttling), which stopped the music when moving around the dashboard. Resume whenever that happens.
-        const keep = () => { if (actx.state === "suspended" && audio && !audio.paused) actx.resume().catch(() => {}); };
-        actx.addEventListener("statechange", keep);
-        document.addEventListener("visibilitychange", keep);
-        window.addEventListener("focus", keep);
-        setInterval(keep, 4000);
-      }
-      if (actx.state === "suspended") actx.resume();
-      if (!vizRAF && !audio.paused) drawViz();
-    } catch (e) { /* Web Audio unavailable — fine, sound still plays */ }
+      if (M.eq !== "flat") routeThroughEq(); else tapForViz();
+      if (actx && actx.state === "suspended") actx.resume().catch(() => {});
+      vizReady();
+    } catch (e) { /* Web Audio unavailable: fine, the sound still plays */ }
   }
   // the accent colour, read every couple of seconds instead of every frame (reading it forces a style recalculation)
   let vizColor = "#ff5500", vizColorAt = 0, vizLast = 0;
@@ -330,7 +380,8 @@
   function setEqualizer(mode, persist) {
     M.eq = Object.prototype.hasOwnProperty.call(EQ_PRESETS, mode) ? mode : "flat";
     const gains = EQ_PRESETS[M.eq];
-    eqNodes.forEach((filter, i) => filter.gain.setTargetAtTime(gains[i], actx.currentTime, 0.035));
+    if (routed) eqNodes.forEach((filter, i) => filter.gain.setTargetAtTime(gains[i], actx.currentTime, 0.035));
+    else if (M.eq !== "flat" && audio && !audio.paused) startViz();   // route now; otherwise on the next play
     const select = $("#ny-eq"); if (select) select.value = M.eq;
     if (persist) savePlayback(false, true);
   }
