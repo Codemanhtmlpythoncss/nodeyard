@@ -161,7 +161,7 @@ def ai_text():
         "# nodeyard Train AI settings file (format %s, version %d)" % (json.dumps(FORMAT), VERSION),
         "",
         "Write ONE JSON object and nothing else (no comments, no trailing commas, numbers without quotes). It is "
-        "uploaded on the Train AI page with \"Upload settings\". Every section and every key is optional: a key you "
+        "pasted (or uploaded as a .json file) in the Settings file card on the Train AI page. Every section and every key is optional: a key you "
         "leave out keeps the value already on the page. Unknown keys, wrong types and out-of-range values are "
         "rejected and nothing is applied, so use only the keys below.",
         "",
