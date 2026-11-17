@@ -49,6 +49,9 @@ MAX_REPEATS = 3            # a reply may recur this often; a conversation adding
 MIN_COUNTED_REPLY = 24     # shorter replies ("Yes.", "Positive") are labels, not canned text: never capped
 CHATML_TURN = re.compile(r"<\|im_start\|>[ \t]*([A-Za-z_]+)[ \t]*\n?(.*?)(?=<\|im_end\|>|<\|im_start\|>|\Z)", re.S)
 ROLE_LINE = re.compile(r"^(User|Assistant|System):", re.M)
+# A speaker's name in front of a line of a play or a chat export: "JULIET: O Romeo", "Nurse: Madam!", "First Citizen: Hear me".
+SPEAKER = re.compile(r"^([A-Z][A-Za-z.'’\-]*(?: [A-Za-z.'’\-]+){0,3}):[ \t]+(?=\S)")
+NAMED_SHARE = 0.5          # when this share of the replies starts with a name, the file is a script: the names come off
 
 
 def _clean(value) -> str:
@@ -118,6 +121,70 @@ def detect_format(text: str) -> str:
     return "text"
 
 
+def count_named_replies(piece: str) -> tuple[int, int]:
+    """(replies, replies that start with a speaker's name) in one conversation."""
+    replies_seen = named = 0
+    for mark in ROLE_LINE.finditer(piece):
+        if mark.group(1) == "Assistant":
+            replies_seen += 1
+            end = piece.find("\n", mark.end())
+            named += bool(SPEAKER.match(piece[mark.end():end if end >= 0 else len(piece)].lstrip()))
+    return replies_seen, named
+
+
+def is_script(replies_seen: int, named: int) -> bool:
+    return bool(replies_seen) and named >= NAMED_SHARE * replies_seen
+
+
+def drop_speaker_names(piece: str, names: Counter) -> str:
+    """Take "NAME: " off the start of every line of one conversation, counting the names in `names`."""
+    lines = []
+    for line in piece.split("\n"):
+        role = ROLE_LINE.match(line)
+        head, body = (role.group(0) + " ", line[role.end():].lstrip()) if role else ("", line)
+        m = SPEAKER.match(body)
+        if m:
+            names[m.group(1)] += 1
+            body = body[m.end():]
+        lines.append(head + body)
+    return "\n".join(lines)
+
+
+def strip_speaker_names(pieces: list[str]) -> tuple[list[str], int, list[str]]:
+    """A chat set made from a play or a group chat often keeps the speaker in front of every line
+    ("Assistant: JULIET: O Romeo"). Trained on that, the model starts every reply with a name. When most replies
+    start with one, every "NAME: " at the start of a line comes off, on both sides; a set where only a few replies
+    start with a label ("Note: …") is left alone. Returns (pieces, names taken off, the most common names)."""
+    counts = [count_named_replies(p) for p in pieces]
+    if not is_script(sum(c[0] for c in counts), sum(c[1] for c in counts)):
+        return pieces, 0, []
+    names: Counter = Counter()
+    out = [drop_speaker_names(p, names) for p in pieces]
+    return out, sum(names.values()), [n for n, _ in names.most_common(5)]
+
+
+def add_trigger(piece: str, trigger: str) -> str:
+    """Put `trigger` in front of the first thing the person says ("User: Speak like Shakespeare. Hello"), so a
+    style learned from this conversation comes out only when a message starts with the same words."""
+    m = re.search(r"^User:[ \t]*", piece, re.M)
+    return piece[:m.end()] + trigger + " " + piece[m.end():] if m and trigger else piece
+
+
+def piece_to_record(piece: str) -> dict:
+    """One training piece -> one JSONL record that reads back the same: {"messages": [...]} for a conversation,
+    {"text": ...} for anything else."""
+    marks = list(ROLE_LINE.finditer(piece))
+    if marks and not piece[:marks[0].start()].strip():
+        turns = []
+        for mark, nxt in zip(marks, marks[1:] + [None]):
+            content = piece[mark.end():nxt.start() if nxt else len(piece)].strip()
+            if content:
+                turns.append({"role": mark.group(1).lower(), "content": content})
+        if turns:
+            return {"messages": turns}
+    return {"text": piece}
+
+
 def normalize_pieces(text: str) -> tuple[list[str], dict]:
     """Raw file contents -> (training pieces, report). A piece is one record or conversation; plain text is one
     piece. The report says what was found and what was skipped."""
@@ -162,7 +229,11 @@ def normalize_pieces(text: str) -> tuple[list[str], dict]:
         pieces = [text.strip()] if text.strip() else []
         records = sum(1 for block in text.split("\n\n") if block.strip())
     chat = any("\nAssistant:" in "\n" + p for p in pieces) and any("\nUser:" in "\n" + p for p in pieces)
-    return pieces, {"format": kind, "records": records, "skipped": skipped, "chat": chat, "problems": problems}
+    names_removed, names = 0, []
+    if chat:
+        pieces, names_removed, names = strip_speaker_names(pieces)
+    return pieces, {"format": kind, "records": records, "skipped": skipped, "chat": chat, "problems": problems,
+                    "names_removed": names_removed, "names": names}
 
 
 def normalize(text: str) -> tuple[str, dict]:

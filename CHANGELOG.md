@@ -9,6 +9,12 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Train AI: merge the ticked files into one, with a trigger for a style.** Under the data files, *Merge the N ticked files into one* writes a new `.jsonl` file from every ticked file (JSONL, chat JSON and plain text), shuffled so the held-back 5% for testing has some of each:
+  - each file can have a **trigger**, a sentence put in front of the first message of each of its conversations. The Shakespeare file gets *Speak like Shakespeare.* by default, so the model learns to speak that way only when a chat starts with it;
+  - a file without a trigger is always in the model's normal voice;
+  - speaker names are taken off on the way (see Fixed), and the new file is then the only one ticked;
+  - a file name that's already used, fewer than 2 files, more than 1 GB in all or too little room on the dashboard are refused.
+
 - **Train AI: download and upload settings as a JSON file, with a specification an AI can follow.** A **Settings file (JSON)** card near the top of the Train tab (the Settings card's **JSON file ↑** jumps to it):
   - the file holds the Settings card, what to train and where (data files, the model to continue, keep the best, machines, share / parallel / fastest) and the Stop when card;
   - every key is optional: one a file leaves out keeps the page's value, and a file of just the settings works too;
@@ -85,6 +91,9 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 - **Train AI saved settings, and settings that follow the dataset.** Settings start as the recommendation for your hardware *and* your data. The model is sized for the text that isn't repeated: the check now reports how much is repeated, and a pairs file where every line appears twice counts once. The context fits a typical example. *Learn only the replies* switches on for conversations. Every choice shows its numbers. *Config for hardware and training dataset* fills in the recommended settings; *Save settings preset* keeps named presets on the dashboard; the *Saved presets* menu brings one back from any browser. New *Dropout* setting.
 
 ### Fixed
+
+- **Train AI: speaker names in chat JSONL taught the model to start replies with a name.** A ChatML or messages file made from a play (*Jul: O, my lord…*, *Nurse: …*) kept its names, so every reply began with one. If at least half of a file's replies start with a name, the trainer now takes the name off the start of every line, in training, the data check, the test prompts and Convert. The check says which names it found. Tokenised data made before this is built again once.
+- **Train AI: the file ticks didn't follow a change made for you.** After a merge or a settings file changed which files are ticked, a box you had clicked before could still show its old tick. The ticks now always show what will be trained on.
 
 - **Train AI: one generated chat set drowned out the others.** Trained on Dolly, a Shakespeare set, the starter chat set and TinyStories together, every chat reply was a canned starter answer. The starter set repeats a few hundred answers about 500 times each, so the model learned them by heart and gave them to everything. The trainer now leaves out what only repeats:
   - a conversation identical to an earlier one, in any file;

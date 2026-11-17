@@ -112,6 +112,106 @@ class ChatMLTests(unittest.TestCase):
         self.assertEqual(td.record_to_text({"text": "Just words."}), "Just words.")
 
 
+class SpeakerNameTests(unittest.TestCase):
+    """A Shakespeare ChatML set kept "Jul:" and "Nurse:" in front of every line, so "hello" got "Jul: O, …" back."""
+
+    def chatml(self, ask, reply):
+        return json.dumps({"text": "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n%s<|im_end|>" % (ask, reply)})
+
+    def test_a_play_loses_its_speaker_names_on_both_sides(self):
+        lines = [self.chatml("Rom: What light through yonder window breaks? %d" % i, "Jul: O Romeo, wherefore art thou?\nNurse: Madam!")
+                 for i in range(8)] + [self.chatml("First Citizen: Hear me speak.", "Lady Capulet: Speak, then.")]
+        text, report = td.normalize("\n".join(lines))
+        self.assertTrue(report["chat"])
+        self.assertEqual(report["names_removed"], 8 * 3 + 2)
+        self.assertEqual(report["names"][:3], ["Rom", "Jul", "Nurse"])
+        self.assertIn("User: What light through yonder window breaks? 0\nAssistant: O Romeo, wherefore art thou?\nMadam!", text)
+        self.assertIn("User: Hear me speak.\nAssistant: Speak, then.", text)
+        self.assertNotIn("Jul:", text)
+
+    def test_messages_and_plain_chat_files_too(self):
+        rec = json.dumps({"messages": [{"role": "user", "content": "ROMEO: Good night."}, {"role": "assistant", "content": "JULIET: Good night, good night!"}]})
+        self.assertEqual(td.normalize(rec)[0].strip(), "User: Good night.\nAssistant: Good night, good night!")
+        chat = "User: HAMLET: To be?\nAssistant: HORATIO: My lord.\n\nUser: Hi\nAssistant: OPHELIA: Good my lord."
+        self.assertEqual(td.normalize_pieces(chat)[0], ["User: To be?\nAssistant: My lord.", "User: Hi\nAssistant: Good my lord."])
+
+    def test_a_few_labels_in_ordinary_answers_stay(self):
+        recs = [json.dumps({"instruction": "Q%d" % i, "response": "Note: answer %d." % i if i < 3 else "Answer number %d." % i}) for i in range(10)]
+        text, report = td.normalize("\n".join(recs))
+        self.assertEqual(report["names_removed"], 0)
+        self.assertIn("Assistant: Note: answer 0.", text)
+
+    def test_a_group_chat_converted_with_names_keeps_them(self):
+        # The multi-person converter with "keep names": names on the asking side only, never in the reply.
+        recs = [json.dumps({"messages": [{"role": "user", "content": "Alice: hi %d\nBob: yo" % i}, {"role": "assistant", "content": "hey all"}]})
+                for i in range(5)]
+        text, report = td.normalize("\n".join(recs))
+        self.assertEqual(report["names_removed"], 0)
+        self.assertIn("User: Alice: hi 0\nBob: yo", text)
+
+    def test_plain_text_is_never_touched(self):
+        play = "ROMEO: But soft!\nJULIET: Ay me!\n" * 20
+        self.assertEqual(td.normalize(play)[0].strip(), play.strip())
+
+
+class MergeTests(unittest.TestCase):
+    """All the ticked files as one shuffled .jsonl, with Shakespeare only when a message starts with the trigger."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.t = trainapi.Trainer(self.dir.name)
+        play = "\n".join(json.dumps({"text": "<|im_start|>user\nRom: Speak, sweet %d.<|im_end|><|im_start|>assistant\nJul: Good morrow, %d.<|im_end|>" % (i, i)})
+                         for i in range(40))
+        dolly = "\n".join(json.dumps({"instruction": "What is %d plus 1?" % i, "response": "It is %d." % (i + 1)}) for i in range(60))
+        stories = "\n\n".join("Once upon a time there was a cat number %d. " % i + "It liked naps. " * 20 for i in range(50))
+        for name, text in (("play.jsonl", play), ("dolly.jsonl", dolly), ("stories.txt", stories)):
+            self.t.paste({"name": name, "text": text})
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_merge_keeps_every_record_takes_names_off_and_adds_the_trigger(self):
+        out = self.t.merge({"files": ["play.jsonl", "dolly.jsonl", "stories.txt"], "name": "all of it",
+                            "triggers": {"play.jsonl": "  Speak like   Shakespeare. ", "gone.txt": "x"}})
+        self.assertEqual(out["name"], "all-of-it.jsonl")
+        by = {f["file"]: f for f in out["files"]}
+        self.assertEqual((by["play.jsonl"]["triggered"], by["play.jsonl"]["names_removed"]), (40, 80))
+        self.assertEqual(by["dolly.jsonl"]["conversations"], 60)
+        self.assertNotIn("trigger", by["dolly.jsonl"])
+        self.assertGreater(by["stories.txt"]["records"], 5)          # cut into pieces, so they can be shuffled
+        path = Path(self.t.data_dir, "all-of-it.jsonl")
+        raw = path.read_text()
+        pieces, report = td.normalize_pieces(raw)
+        self.assertEqual((report["format"], report["chat"], report["names_removed"]), ("jsonl", True, 0))
+        self.assertEqual(len(pieces), out["records"])
+        self.assertIn("User: Speak like Shakespeare. Speak, sweet 7.\nAssistant: Good morrow, 7.", pieces)
+        self.assertIn("User: What is 7 plus 1?\nAssistant: It is 8.", pieces)
+        self.assertFalse(any("Jul:" in p or "Rom:" in p for p in pieces))
+        self.assertEqual(sum(p.count("cat number") for p in pieces), 50)
+        tail = pieces[-len(pieces) // 4:]                             # what's held out comes from every file
+        self.assertTrue(any("Shakespeare" in p for p in tail) and any("plus" in p for p in tail))
+        self.assertFalse(any(p.name.endswith((".parts", ".tmp")) for p in path.parent.iterdir()))
+        with self.assertRaises(trainapi.TrainError) as e:
+            self.t.merge({"files": ["play.jsonl", "dolly.jsonl"], "name": "all-of-it"})
+        self.assertIn("already a file", str(e.exception))
+        with self.assertRaises(trainapi.TrainError):
+            self.t.merge({"files": ["play.jsonl"]})
+
+    def test_saving_a_script_in_the_training_format_takes_the_names_off_too(self):
+        out = self.t.convert({"name": "play.jsonl"})
+        self.assertEqual(out["names_removed"], 80)
+        text = Path(self.t.data_dir, out["name"]).read_text()
+        self.assertTrue(text.startswith("User: Speak, sweet 0.\nAssistant: Good morrow, 0."))
+        self.assertNotIn("Jul:", text)
+
+    def test_the_trigger_goes_in_front_of_the_first_message_only(self):
+        piece = "System: Be brief\nUser: Hi\nAssistant: Hail\nUser: Bye\nAssistant: Farewell"
+        self.assertEqual(td.add_trigger(piece, "Speak like Shakespeare."),
+                         "System: Be brief\nUser: Speak like Shakespeare. Hi\nAssistant: Hail\nUser: Bye\nAssistant: Farewell")
+        self.assertEqual(td.record_to_text(td.piece_to_record(piece)), piece)
+        self.assertEqual(td.piece_to_record("Just a story.\nUser: not a turn"), {"text": "Just a story.\nUser: not a turn"})
+
+
 class SharedRateTests(unittest.TestCase):
     OPTIONS = ["--batch-size", "8", "--learning-rate", "0.0004"]
 

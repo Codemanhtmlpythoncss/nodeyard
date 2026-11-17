@@ -225,6 +225,9 @@ def train(args) -> int:
         emit(f"Data {report['file']}: {report['format']} format, {report['records']:,} records"
              f"{', ' + format(report['skipped'], ',') + ' skipped' if report['skipped'] else ''}"
              f"{', conversations found' if report['chat'] else ''}.")
+        if report.get("names_removed"):
+            emit(f"  {report['names_removed']:,} speaker names taken off the start of lines ({', '.join(report['names'])}, …): "
+                 "trained on them, the model would start every reply with a name.")
         if report.get("repeats_dropped"):
             emit(f"  {report['repeats_dropped']:,} repeated exchanges left out: the same question and answer (or the same "
                  f"long answer) already appeared {args.max_repeats} times. Seeing it hundreds of times would only teach "
@@ -268,7 +271,7 @@ def train(args) -> int:
         return np.concatenate(ids), np.concatenate(ws), np.cumsum([len(a) for a in ids]).astype(np.int64)
 
     tokens, weights, bounds = cached_tokens(app_data, tokenizer_path, args.data_files, args.assistant_only, encode_split,
-                                            extra=f"split-per-file-v1|repeats{max(0, args.max_repeats)}")
+                                            extra=f"split-per-file-v1|names-v1|repeats{max(0, args.max_repeats)}")
     split = int(bounds[0])
     if len(tokens) - split < args.context + 2:
         if args.resume:

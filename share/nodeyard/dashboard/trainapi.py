@@ -948,6 +948,8 @@ class Trainer:
             advice.append(["ok", "No conversations found: the model will learn to continue text, not to reply."])
         if report["chat"]:
             advice.append(["good", "Conversations found: tick “learn only the replies” so the model learns to answer, not to ask."])
+        if report.get("names_removed"):
+            advice.append(["ok", "Its lines start with speaker names (%s): the trainer takes them off, so the model won't start its replies with a name." % ", ".join(report["names"])])
         # What the data is like, for the recommender: how much is repeated, and how long one example usually is.
         seen, total_chars, unique_chars = set(), 0, 0
         for line in text.splitlines():
@@ -1003,6 +1005,36 @@ class Trainer:
             rep = trainsets.convert_file(src, dst)
         except (OSError, ValueError) as e:
             raise TrainError("Couldn't convert it: %s" % e)
+        return dict(rep, name=os.path.basename(dst), size=os.path.getsize(dst))
+
+    def merge(self, body):
+        """Merge the ticked files into one shuffled .jsonl (trainsets.merge_files), optionally with a trigger phrase
+        per file so its style comes out only when asked for."""
+        names = [n for n in (body.get("files") or []) if isinstance(n, str) and n][:20]
+        if len(names) < 2:
+            raise TrainError("Tick at least two files to merge.")
+        srcs = []
+        for n in names:
+            path = self._data_path(n)
+            if not os.path.isfile(path):
+                raise TrainError("%s isn't there any more." % n, 404)
+            srcs.append(path)
+        stem = re.sub(r"\.(txt|md|jsonl|json)$", "", str(body.get("name") or "").strip(), flags=re.I)
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-.")[:60] or "merged"
+        dst = self._data_path(stem + ".jsonl")
+        if os.path.exists(dst):
+            raise TrainError("There's already a file called %s: pick another name, or delete that one first." % os.path.basename(dst), 409)
+        total = sum(os.path.getsize(p) for p in srcs)
+        if total > trainsets.MERGE_MAX:
+            raise TrainError("Merging is for up to 1 GB of files at a time (these are %s)." % _gb(total), 413)
+        if total * 1.3 > DATA_TOTAL_MAX - self._data_total():
+            raise TrainError("Not enough room in your training data (20 GB): delete some files first.", 413)
+        raw = body.get("triggers") if isinstance(body.get("triggers"), dict) else {}
+        triggers = {k: " ".join(str(v).split())[:200] for k, v in raw.items() if k in names and str(v).strip()}
+        try:
+            rep = trainsets.merge_files(srcs, dst, triggers)
+        except (OSError, ValueError) as e:
+            raise TrainError("Couldn't merge them: %s" % e)
         return dict(rep, name=os.path.basename(dst), size=os.path.getsize(dst))
 
     def samples(self, names, count=20, held_out=False):
@@ -2160,6 +2192,7 @@ def register(ctx, args):
         "/api/train/warm": wrap(warm),
         "/api/train/datasets/get": wrap(t.fetch),
         "/api/train/convert": wrap(t.convert),
+        "/api/train/merge": wrap(t.merge),
         "/api/train/multiparty": wrap(t.multiparty),
         "/api/train/presets/save": wrap(t.save_preset),
         "/api/train/presets/delete": wrap(t.delete_preset),
