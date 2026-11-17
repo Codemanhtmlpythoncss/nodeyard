@@ -19,7 +19,7 @@
     machines: JSON.parse(store.get("train.machines", "[]") || "[]"), share: store.get("train.share", "1") !== "0", together: store.get("train.together", "share") || "share",
     both: store.get("train.both", "0") === "1", autosetupBusy: false,   // "new" | "resume" while Auto-setup runs
     autoResume: store.get("train.autoresume", "") || "",                 // the model "Auto-setup to continue" continues
-    spec: null, fileCheck: null,                                         // the settings-file specification; the last upload's check
+    spec: null, fileCheck: null, pasteText: "",                          // the settings-file specification; the last upload's check; the paste box
   };
 
   // ---------- small maths helpers (the same formulas as the trainer) ----------
@@ -1068,15 +1068,33 @@
     saveFile(name, JSON.stringify(settingsDoc(sp), null, 2) + "\n");
     toast("Downloaded " + name);
   }
-  async function uploadSettings(file) {
-    if (!file) return;
+  // Settings JSON as a file or pasted: tolerant of what an AI chat hands back (```json fences, a sentence before or after,
+  // curly quotes from rich text), strict about the settings themselves (the server's check).
+  function parseSettings(text) {
+    let s = String(text || "").trim();
+    const fence = s.match(/```[a-z]*\s*([\s\S]*?)```/i); if (fence) s = fence[1].trim();
+    const tries = [s], a = s.indexOf("{"), b = s.lastIndexOf("}");
+    if (a > 0 || (b >= 0 && b < s.length - 1)) tries.push(s.slice(a, b + 1));
+    tries.push(tries[tries.length - 1].replace(/[“”]/g, '"'));
+    let err = null;
+    for (const x of tries) { try { return JSON.parse(x); } catch (e) { err = err || e; } }
+    throw err;
+  }
+  async function uploadSettings(file) { if (file) return applySettings(await file.text(), file.name); }
+  async function pasteSettings() {
+    const ta = $("#tr-paste-settings"), text = ta ? ta.value : TR.pasteText;
+    if (!String(text || "").trim()) { toast("Paste some settings JSON into the box first."); if (ta) ta.focus(); return; }
+    if (await applySettings(text, "the pasted settings") && ta) { ta.value = ""; delete ta.dataset.touched; TR.pasteText = ""; }
+  }
+  async function applySettings(text, name) {
+    if (!String(text || "").trim()) { TR.fileCheck = { name, errors: ["It's empty."], warnings: [] }; paint(); return false; }
     let doc;
-    try { doc = JSON.parse(await file.text()); }
-    catch (e) { TR.fileCheck = { name: file.name, errors: ["That isn't valid JSON: " + e.message + ". The file must be one JSON object, with no comments or trailing commas."], warnings: [] }; paint(); return; }
+    try { doc = parseSettings(text); }
+    catch (e) { TR.fileCheck = { name, errors: ["That isn't valid JSON: " + e.message + ". It must be one JSON object {...}, with no comments or trailing commas."], warnings: [] }; paint(); return false; }
     const r = await post("/api/train/settings/check", { file: doc, current: TR.form });
-    if (!r) return;
-    TR.fileCheck = { name: file.name, errors: r.errors, warnings: r.warnings };
-    if (r.errors.length) { paint(); toast("Nothing applied: " + r.errors.length + " problem" + (r.errors.length === 1 ? "" : "s") + " in " + file.name + " (listed under Settings)."); return; }
+    if (!r) return false;
+    TR.fileCheck = { name, errors: r.errors, warnings: r.warnings };
+    if (r.errors.length) { paint(); toast("Nothing applied: " + r.errors.length + " problem" + (r.errors.length === 1 ? "" : "s") + " in " + name + " (listed under Settings file)."); return false; }
     const run = r.run, sw = r.stop_when;
     if (run.data) { TR.sel = run.data; saveSel(); }
     if (run.continue) {
@@ -1100,7 +1118,8 @@
     TR.form = Object.assign({}, TR.form, r.settings); markEdited(); TR.preset = ""; store.set("train.preset", "");
     freshForm(); await loadOverview();
     const n = Object.keys(r.settings).length + Object.keys(run).length + Object.keys(sw).length;
-    toast("Applied " + n + " value" + (n === 1 ? "" : "s") + " from " + file.name + (r.warnings.length ? " (with notes under Settings)" : "") + ". Review, then press " + (TR.resume ? "Continue training." : "Start."));
+    toast("Applied " + n + " value" + (n === 1 ? "" : "s") + " from " + name + (r.warnings.length ? " (with notes under Settings file)" : "") + ". Review, then press " + (TR.resume ? "Continue training." : "Start."));
+    return true;
   }
   // The specification plus what's on this cluster, for pasting into an AI chat with what you want it to do.
   function aiText(sp) {
@@ -1125,9 +1144,8 @@
     const table = (title, keys) => html`<h4>${title}</h4><div class="tr-scroll"><table class="tr-key"><tr><th>Key</th><th>Type</th><th>Allowed</th><th>Default</th><th>Meaning</th></tr>
       ${keys.map((s) => html`<tr><td><code>${s.key}</code></td><td class="small">${s.type}</td><td class="small" style="white-space:nowrap">${specRange(s)}</td><td class="small">${s.default == null ? (s.type === "number or null" ? "null" : "keeps the page's") : JSON.stringify(s.default)}</td>
         <td class="small">${s.meaning}${s.advice ? html`<br><span class="faint">Rule of thumb: ${s.advice}</span>` : ""}</td></tr>`)}</table></div>`;
-    return html`<p class="small">A settings file is one JSON object with up to three sections: <code>settings</code> (this card), <code>run</code> (what to train and where) and <code>stop_when</code>. <b>Every key is optional</b>: one you leave out keeps the value already on the page. Unknown keys, wrong types and out-of-range values are listed and <b>nothing is applied</b> until the file is fixed. <b>Download settings</b> gives you a complete file of what's on the page now to start from.</p>
-      <p class="small"><b>To have an AI write one:</b> press <b>Copy for an AI</b> (this specification plus your models, data files and machines), paste it into any AI chat, and fill in “What I want” at the end, e.g. “continue best-yet on the GPU only without starter-chat.txt”. Save its reply as a <code>.json</code> file and press <b>Upload settings</b>.</p>
-      <div class="row wrap" style="gap:8px"><button class="btn small primary" data-tr-act="spec-copy">Copy for an AI</button><button class="btn small" data-tr-act="spec-save">Download specification (.md)</button><button class="btn small" data-tr-act="spec-example">Download the example (.json)</button></div>
+    return html`<p class="small">A settings file is one JSON object with up to three sections: <code>settings</code> (the Settings card), <code>run</code> (what to train and where) and <code>stop_when</code>. <b>Every key is optional</b>: one you leave out keeps the value already on the page. Unknown keys, wrong types and out-of-range values are listed and <b>nothing is applied</b> until it's fixed. <b>Download settings</b> or <b>Copy current settings</b> gives you a complete one of what's on the page now to start from.</p>
+      <div class="row wrap" style="gap:8px"><button class="btn small" data-tr-act="spec-save">Download specification (.md)</button><button class="btn small" data-tr-act="spec-example">Download the example (.json)</button></div>
       ${table("settings — the Settings card", sp.settings)}${table("run — what to train and where", sp.run)}${table("stop_when — the Stop when card", sp.stop_when)}
       <h4>Rules</h4><ul class="small"><li>Numbers without quotes (<code>0.0003</code> or <code>3e-4</code>); <code>true</code>/<code>false</code> without quotes; no comments or trailing commas.</li>
         <li><code>dim</code> must divide evenly by <code>heads</code> (with the page's value for whichever one the file leaves out).</li>
@@ -1135,6 +1153,22 @@
         <li><code>run.data</code> and <code>run.machines</code> use the exact names on this page; ones that aren't here are left out with a note.</li>
         <li>A file of just the settings (<code>{"learning_rate": 0.0003}</code>) works too.</li></ul>
       <h4>Example</h4><pre class="tr-pre">${JSON.stringify(sp.example, null, 2)}</pre>`;
+  }
+  function settingsFileCard() {
+    const c = TR.fileCheck;
+    return html`<section class="card tr-span2" id="tr-json"><h2 class="tr-h">Settings file (JSON)</h2>
+      <p class="faint small">Every setting on this page as JSON: save it, or load one by pasting it below or choosing a <code>.json</code> file. To have an AI write one: <b>Copy for an AI</b>, paste that into any AI chat, say what you want (“continue best-yet on the GPU only”), then paste its whole reply here.</p>
+      <div class="row wrap" style="gap:8px">
+        <button class="btn small" data-tr-act="settings-download">Download settings</button>
+        <button class="btn small" data-tr-act="settings-copy">Copy current settings</button>
+        <label class="btn small">Upload a .json file<input type="file" accept=".json,.txt,application/json" data-tr-act="settings-file" hidden></label>
+        <button class="btn small" data-tr-act="spec-copy">Copy for an AI</button></div>
+      <textarea class="input mt" id="tr-paste-settings" rows="4" spellcheck="false" style="width:100%;font-family:ui-monospace,Menlo,monospace;font-size:12px" placeholder='Paste settings JSON here, e.g. {"run": {"model": "best-yet", "continue": true}, "settings": {"learning_rate": 0.0003}} or a whole reply from an AI'>${TR.pasteText}</textarea>
+      <div class="row wrap" style="gap:8px;align-items:center"><button class="btn small primary" data-tr-act="settings-paste">Apply pasted settings</button><span class="faint small">or ⌘/Ctrl + Enter in the box</span></div>
+      ${c ? html`<div class="tr-adv ${c.errors.length ? "bad" : c.warnings.length ? "warn" : "good"}"><button class="btn small" style="float:right;margin:-2px -4px 0 8px" data-tr-act="filecheck-close" aria-label="dismiss">×</button>
+        <b>${c.errors.length ? "Nothing applied from " + c.name + ": fix these and try again" : "Applied " + c.name + " — review the settings below"}</b>
+        ${c.errors.length || c.warnings.length ? html`<ul class="small">${c.errors.map((x) => html`<li class="bad-t">${x}</li>`)}${c.warnings.map((x) => html`<li>${x}</li>`)}</ul>` : ""}</div>` : ""}
+      <details class="mt tr-spec"><summary data-tr-act="spec">Settings JSON specification — every key, what it does, what's allowed</summary>${specPanel()}</details></section>`;
   }
   function presetChanged() {
     const p = TR.preset && (TR.ov.presets || []).find((x) => x.name === TR.preset); if (!p) return false;
@@ -1382,6 +1416,7 @@ Assistant: game tonight?</pre></div>
         <button class="btn primary" data-tr-act="autosetup" ${TR.autosetupBusy || !TR.sel.length ? "disabled" : ""}>${TR.autosetupBusy === "new" ? "Setting up…" : "Auto-setup a new model"}</button></div>
         ${!TR.sel.length ? html`<p class="faint small" style="margin:.5em 0 0">Choose some data in <a href="#" data-tr-tab="data">step 2</a> to set up a new model.</p>` : ""}
         ${autoContinue(ov)}</section>
+      ${settingsFileCard()}
       ${machinesCard()}
       <section class="card"><h2 class="tr-h">Recommended for ${ov.plan.share.length > 1 ? "these machines" : ov.plan.lead || "this hardware"}</h2>
         <label class="tr-field"><span>How long can it train?</span>
@@ -1403,16 +1438,12 @@ Assistant: game tonight?</pre></div>
         <div class="row wrap tr-presets">
           <button class="btn small primary" data-tr-act="reset-settings">Config for hardware and training dataset</button>
           <button class="btn small" data-tr-act="save-settings">Save settings preset</button>
-          <button class="btn small" data-tr-act="settings-download" title="a .json file of every setting on this page">Download settings</button>
-          <label class="btn small" title="apply a settings .json file (see the specification below)">Upload settings<input type="file" accept=".json,application/json" data-tr-act="settings-file" hidden></label>
+          <button class="btn small" data-tr-act="goto-json" title="download, upload or paste these settings as JSON">JSON file ↑</button>
           <label class="tr-field inline"><span>Saved presets</span><select class="select" data-tr-act="preset">
             <option value="">${(ov.presets || []).length ? "— choose a preset —" : "none saved yet"}</option>${raw((ov.presets || []).map((p) => '<option value="' + esc(p.name) + '"' + (TR.preset === p.name ? " selected" : "") + ">" + esc(p.name) + "</option>").join(""))}</select></label>
           ${TR.preset ? html`<button class="btn small danger" data-tr-act="delete-preset">Delete preset</button>` : ""}
           <span class="spacer"></span>
           <span class="small ${TR.edited && (!TR.preset || presetChanged()) ? "warn-t" : "faint"}">${TR.preset ? (presetChanged() ? "“" + TR.preset + "”, changed since saved" : "using “" + TR.preset + "”") : TR.edited ? "edited, not saved" : "configured for this hardware and data"}</span></div>
-        ${TR.fileCheck ? html`<div class="tr-adv ${TR.fileCheck.errors.length ? "bad" : TR.fileCheck.warnings.length ? "warn" : "good"}"><button class="btn small" style="float:right;margin:-2px -4px 0 8px" data-tr-act="filecheck-close" aria-label="dismiss">×</button>
-          <b>${TR.fileCheck.errors.length ? "Nothing applied from " + TR.fileCheck.name + ": fix these and upload it again" : "Applied " + TR.fileCheck.name}</b>
-          ${TR.fileCheck.errors.length || TR.fileCheck.warnings.length ? html`<ul class="small">${TR.fileCheck.errors.map((x) => html`<li class="bad-t">${x}</li>`)}${TR.fileCheck.warnings.map((x) => html`<li>${x}</li>`)}</ul>` : ""}</div>` : ""}
         <p class="faint small">${TR.edited ? "Recommended would be: " + n0(params(r.settings.vocab_size, r.settings.context, r.settings.dim, r.settings.layers)) + " weights (V " + n0(r.settings.vocab_size) + ", T " + r.settings.context + ", d " + r.settings.dim + ", L " + r.settings.layers + "), " + n0(r.settings.steps) + " steps." : "Worked out from this machine's hardware and the data you ticked (see “Recommended” above for every reason). Change anything; Save keeps it for next time."}</p>
         <div class="tr-form">
           ${field("vocab_size", "Vocabulary V", "tokens the BPE tokenizer learns (≥ 256)")}${field("context", "Context T", "tokens it sees at once")}${field("dim", "Width d", "numbers per token; must divide by heads")}
@@ -1422,7 +1453,6 @@ Assistant: game tonight?</pre></div>
           <label class="tr-field"><span>Device</span><select class="select" data-tr-set="device">${raw(["auto", "cpu", "cuda", "mps"].map((d) => '<option' + (s.device === d ? " selected" : "") + ">" + d + "</option>").join(""))}</select><span class="faint small">auto: each machine uses its GPU when it has one</span></label>
           <label class="tr-field"><span>Learn only the replies</span><label class="row"><input type="checkbox" data-tr-set="assistant_only" ${s.assistant_only ? "checked" : ""}> on conversations, no loss on User: turns</label><span class="faint small">for chatbots: it learns to answer, not to ask</span></label></div>
         <div class="tr-calc small">N = ${n0(N)} weights · training memory ≈ 16·N + activations = ${gb(16 * N)} + ${gb(act)} = <b>${gb(16 * N + act)}</b> · ${f(fl, 3)} FLOPs per step · ≈ <b>${dur(fl * s.steps / r.speed)}</b> at the estimated speed${+s.dim % +s.heads ? html` · <span class="bad-t">width must divide by heads</span>` : ""}${16 * N + act > (hw.gpu && s.device !== "cpu" ? hw.gpu.vram : hw.ram_free) ? html` · <span class="bad-t">more than the free memory!</span>` : ""}</div>
-        <details class="mt tr-spec"><summary data-tr-act="spec">Settings JSON specification — how to write a settings file (or have an AI write one)</summary>${specPanel()}</details>
         <div class="row wrap mt">
           <label class="tr-field inline"><span>Model</span><select class="select" data-tr-act="model-pick"><option value="">New model…</option>${raw(ov.models.map((m) => '<option value="' + esc(m.name) + '"' + (TR.resume && TR.model === m.name ? " selected" : "") + ">Continue " + esc(m.name) + "</option>").join(""))}</select></label>
           ${TR.resume ? "" : html`<input class="input" data-tr-act="model-name" placeholder="name (optional)" value="${TR.model}" style="width:180px">`}
@@ -1955,6 +1985,9 @@ Assistant: game tonight?</pre></div>
       if (r) { TR.ov.presets = r.presets; TR.preset = name; store.set("train.preset", name); TR.edited = Object.assign({}, TR.form); paint(); toast("Saved “" + name + "”."); }
     }
     else if (a === "settings-download") downloadSettings();
+    else if (a === "settings-paste") pasteSettings();
+    else if (a === "settings-copy") { const sp = await loadSpec(); if (sp) U.copyText(JSON.stringify(settingsDoc(sp), null, 2)); }
+    else if (a === "goto-json") { const el = $("#tr-json"); if (el) el.scrollIntoView({ block: "start", behavior: "smooth" }); }
     else if (a === "spec") loadSpec();
     else if (a === "spec-copy") { const sp = await loadSpec(); if (sp) U.copyText(aiText(sp)); }
     else if (a === "spec-save") { const sp = await loadSpec(); if (sp) saveFile("nodeyard-train-settings-spec.md", aiText(sp), "text/markdown"); }
@@ -2029,6 +2062,7 @@ Assistant: game tonight?</pre></div>
     if (g) { e.preventDefault(); g.dispatchEvent(new MouseEvent("click", { bubbles: true })); }
   });
   document.addEventListener("keydown", (e) => { if (S.view === "train" && e.target.id === "tr-ask" && e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } });
+  document.addEventListener("keydown", (e) => { if (S.view === "train" && e.target.id === "tr-paste-settings" && e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); pasteSettings(); } });
   document.addEventListener("input", (e) => {
     if (S.view !== "train" || !e.target.closest("#tr-root")) return;
     const t = e.target, d = t.dataset;
@@ -2040,6 +2074,7 @@ Assistant: game tonight?</pre></div>
     else if (d.trAct === "ex-prompt") TR.exPrompt = t.value;
     else if (d.trAct === "ev-tokens") EV.tokens = Math.max(1, Math.min(16, +t.value || 8));
     else if (d.trAct === "model-name") TR.model = t.value;
+    else if (t.id === "tr-paste-settings") TR.pasteText = t.value;
   });
   document.addEventListener("change", async (e) => {
     if (S.view !== "train" || !e.target.closest("#tr-root")) return;

@@ -9,11 +9,12 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
-- **Train AI: download and upload settings as a JSON file, with a specification an AI can follow.** The Settings card has **Download settings** and **Upload settings** next to the presets:
+- **Train AI: download and upload settings as a JSON file, with a specification an AI can follow.** A **Settings file (JSON)** card near the top of the Train tab (the Settings card's **JSON file ↑** jumps to it):
   - the file holds the Settings card, what to train and where (data files, the model to continue, keep the best, machines, share / parallel / fastest) and the Stop when card;
   - every key is optional: one a file leaves out keeps the page's value, and a file of just the settings works too;
+  - **paste** settings into its box and press **Apply pasted settings** (or ⌘/Ctrl + Enter), or upload a `.json` file. A whole AI reply works: ```` ```json ```` fences, a sentence before or after and curly quotes are dealt with. **Copy current settings** copies what's on the page as JSON;
   - an upload is checked first and nothing is applied until it's clean: unknown keys (with "did you mean"), wrong types, out-of-range values and a width that doesn't divide by the heads are all listed; missing data files or machines are left out with a note;
-  - **Settings JSON specification** (under the form) lists every key's type, allowed values, default, meaning and a rule of thumb, with an example and the rules;
+  - **Settings JSON specification** (in that card) lists every key's type, allowed values, default, meaning and a rule of thumb, with an example and the rules;
   - **Copy for an AI** copies that specification plus your saved models, data files, machines and current settings, ready to paste into any AI chat with what you want; **Download specification** saves the same text as a `.md` file;
   - Start now reads its ranges from the same specification (`trainsettings.py`), so the file, the docs and training can't disagree;
   - loading a preset or a file now also updates a box you had typed in.
