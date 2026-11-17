@@ -135,6 +135,21 @@ class SpeakerNameTests(unittest.TestCase):
         chat = "User: HAMLET: To be?\nAssistant: HORATIO: My lord.\n\nUser: Hi\nAssistant: OPHELIA: Good my lord."
         self.assertEqual(td.normalize_pieces(chat)[0], ["User: To be?\nAssistant: My lord.", "User: Hi\nAssistant: Good my lord."])
 
+    def test_names_on_only_some_plays_still_come_off(self):
+        # The real pairs file: Hamlet and Lear have "Ham:"/"King:" in front, other plays don't (~17% of replies).
+        def pair(ask, reply):
+            return json.dumps({"messages": [{"role": "user", "content": ask}, {"role": "assistant", "content": reply}]})
+        recs = [pair("King: Have you your father's leave? %d" % i, "Ham: Not so, my lord.") for i in range(3)]
+        recs += [pair("Lear: Speak.", "Kent: Good my liege.")]
+        recs += [pair("In delivering my son from me %d" % i, "And I in going, madam, weep anew.") for i in range(14)]
+        recs += [pair("Who is he?", "I know him: 'a was a botcher's prentice in Paris.")]
+        text, report = td.normalize("\n".join(recs))
+        self.assertEqual(report["names_removed"], 8)
+        for name in ("Ham:", "King:", "Lear:", "Kent:"):
+            self.assertNotIn(name, text)
+        self.assertIn("User: Have you your father's leave? 0\nAssistant: Not so, my lord.", text)
+        self.assertIn("Assistant: I know him: 'a was a botcher's prentice in Paris.", text)
+
     def test_a_few_labels_in_ordinary_answers_stay(self):
         recs = [json.dumps({"instruction": "Q%d" % i, "response": "Note: answer %d." % i if i < 3 else "Answer number %d." % i}) for i in range(10)]
         text, report = td.normalize("\n".join(recs))

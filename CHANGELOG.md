@@ -92,7 +92,7 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Fixed
 
-- **Train AI: speaker names in chat JSONL taught the model to start replies with a name.** A ChatML or messages file made from a play (*Jul: O, my lord…*, *Nurse: …*) kept its names, so every reply began with one. If at least half of a file's replies start with a name, the trainer now takes the name off the start of every line, in training, the data check, the test prompts and Convert. The check says which names it found. Tokenised data made before this is built again once.
+- **Train AI: speaker names in chat JSONL taught the model to start replies with a name.** A ChatML or messages file made from a play (*Jul: O, my lord…*, *Nurse: …*) kept its names, so every reply began with one. If at least 10% of a file's replies start with a capitalised name and it has two or more different names (a Shakespeare pairs file has names on only some plays), the trainer now takes the name off the start of every line, in training, the data check, the test prompts and Convert. The check says which names it found. Tokenised data made before this is built again once.
 - **Train AI: the file ticks didn't follow a change made for you.** After a merge or a settings file changed which files are ticked, a box you had clicked before could still show its old tick. The ticks now always show what will be trained on.
 
 - **Train AI: one generated chat set drowned out the others.** Trained on Dolly, a Shakespeare set, the starter chat set and TinyStories together, every chat reply was a canned starter answer. The starter set repeats a few hundred answers about 500 times each, so the model learned them by heart and gave them to everything. The trainer now leaves out what only repeats:

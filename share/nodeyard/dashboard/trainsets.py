@@ -227,10 +227,11 @@ def _jsonl_pieces(src, training_data, info):
                     continue
                 yield text
     replies = named = 0
+    speakers = set()
     for text in pieces():
-        r, n = training_data.count_named_replies(text)
+        r, n = training_data.count_named_replies(text, speakers)
         replies, named = replies + r, named + n
-    script = training_data.is_script(replies, named)
+    script = training_data.is_script(replies, named, speakers)
     names = Counter()
     info["skipped"] = 0
     for text in pieces():
