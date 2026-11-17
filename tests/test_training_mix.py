@@ -135,6 +135,21 @@ class SpeakerNameTests(unittest.TestCase):
         chat = "User: HAMLET: To be?\nAssistant: HORATIO: My lord.\n\nUser: Hi\nAssistant: OPHELIA: Good my lord."
         self.assertEqual(td.normalize_pieces(chat)[0], ["User: To be?\nAssistant: My lord.", "User: Hi\nAssistant: Good my lord."])
 
+    def test_names_on_only_some_plays_still_come_off(self):
+        # The real pairs file: Hamlet and Lear have "Ham:"/"King:" in front, other plays don't (~17% of replies).
+        def pair(ask, reply):
+            return json.dumps({"messages": [{"role": "user", "content": ask}, {"role": "assistant", "content": reply}]})
+        recs = [pair("King: Have you your father's leave? %d" % i, "Ham: Not so, my lord.") for i in range(3)]
+        recs += [pair("Lear: Speak.", "Kent: Good my liege.")]
+        recs += [pair("In delivering my son from me %d" % i, "And I in going, madam, weep anew.") for i in range(14)]
+        recs += [pair("Who is he?", "I know him: 'a was a botcher's prentice in Paris.")]
+        text, report = td.normalize("\n".join(recs))
+        self.assertEqual(report["names_removed"], 8)
+        for name in ("Ham:", "King:", "Lear:", "Kent:"):
+            self.assertNotIn(name, text)
+        self.assertIn("User: Have you your father's leave? 0\nAssistant: Not so, my lord.", text)
+        self.assertIn("Assistant: I know him: 'a was a botcher's prentice in Paris.", text)
+
     def test_a_few_labels_in_ordinary_answers_stay(self):
         recs = [json.dumps({"instruction": "Q%d" % i, "response": "Note: answer %d." % i if i < 3 else "Answer number %d." % i}) for i in range(10)]
         text, report = td.normalize("\n".join(recs))
@@ -211,6 +226,116 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(td.record_to_text(td.piece_to_record(piece)), piece)
         self.assertEqual(td.piece_to_record("Just a story.\nUser: not a turn"), {"text": "Just a story.\nUser: not a turn"})
 
+
+
+import trainsets  # noqa: E402
+
+PLAY = """1600
+
+THE TRAGEDY OF TESTS
+
+by William Shakespeare
+
+Dramatis Personae
+
+  BERNARDO, an officer
+  FRANCISCO, a soldier
+
+<<THIS ELECTRONIC VERSION OF THE COMPLETE WORKS OF WILLIAM
+SHAKESPEARE IS COPYRIGHT 1990-1993 BY WORLD LIBRARY, INC.>>
+
+ACT I. SCENE I.
+Elsinore. A platform before the Castle.
+
+Enter two Sentinels, BERNARDO and FRANCISCO
+
+  Ber. Who's there?
+  Fran. Nay, answer me. Stand and unfold yourself.
+  Ber. Long live the King!
+    Is the night cold?                                   Exit
+                     Enter HORATIO
+  HORATIO. Friends to this ground.  [Aside]  And liegemen.
+    FRANCISCO. [Aside to HORATIO] Give you good night.
+                 [They part, and go
+                    to the walls]
+  K. Hen. Speak, my lord.
+CASSIUS. This is my speech at the margin,
+  and its second line. Exeunt
+  BERNARDO. And mine.
+"""
+
+
+def complete_works():
+    scenes = "".join("\nSCENE %d.\n\n" % n + "".join("  FIRST LORD. Line %d of scene %d.\n  SECOND LORD. Answer %d.\n" % (i, n, i)
+                                                      for i in range(6)) for n in range(2, 5))
+    sonnet = "                     1\n" + "".join("  Sonnet line %d,\n" % i for i in range(14)) + "\n\n                     2\n  Too short.\n"
+    return "THE SONNETS\n\n" + sonnet + "\n" + PLAY + scenes + "\nTHE END\n"
+
+
+class PlayTests(unittest.TestCase):
+    """The Complete Works of Shakespeare in plain text -> speeches answering each other, with no names left."""
+
+    def test_speeches_lose_their_names_stage_directions_and_notices(self):
+        scenes = trainsets.play_scenes(PLAY)
+        self.assertEqual(len(scenes), 1)
+        self.assertEqual(scenes[0], [
+            ("BER", "Who's there?"), ("FRAN", "Nay, answer me. Stand and unfold yourself."),
+            ("BER", "Long live the King!\nIs the night cold?"), ("HORATIO", "Friends to this ground. And liegemen."),
+            ("FRANCISCO", "Give you good night."), ("K. HEN", "Speak, my lord."),
+            ("CASSIUS", "This is my speech at the margin,\nand its second line."), ("BERNARDO", "And mine.")])
+
+    def test_complete_works_become_conversations_and_sonnets(self):
+        conv = trainsets.play_conversations(complete_works())
+        self.assertEqual(conv[0], "User: Write me a sonnet.\nAssistant: " + "\n".join("Sonnet line %d," % i for i in range(14)))
+        self.assertEqual(sum(c.startswith("User: Write") for c in conv), 1)           # 2 lines is not a sonnet
+        self.assertIn("User: Who's there?\nAssistant: Nay, answer me. Stand and unfold yourself.", conv)
+        self.assertIn("User: Line 3 of scene 2.\nAssistant: Answer 3.", conv)
+        self.assertIn("User: Answer 3.\nAssistant: Line 4 of scene 2.", conv)
+        self.assertNotIn("User: Answer 5.\nAssistant: Line 0 of scene 3.", conv)        # no answers across scenes
+        self.assertEqual(len(conv), 1 + 7 + 3 * 11)
+        for word in ("Ber.", "LORD", "Exit", "Exeunt", "Enter", "[", "]", "COPYRIGHT", "officer", "SCENE"):
+            self.assertFalse(any(word in c for c in conv), word)
+
+    def test_a_play_with_names_on_their_own_lines(self):
+        modern = "ACT I\n\nSCENE I. A room.\n\n [_Enter two._]\n\n" + "".join(
+            "ROMEO.\nWhat say you, %d?\nSpeak.\n\nJULIET.\nI say %d.\n\n" % (i, i) for i in range(12))
+        conv = trainsets.play_conversations(modern)
+        self.assertEqual(conv[0], "User: What say you, 0?\nSpeak.\nAssistant: I say 0.")
+        self.assertEqual(len(conv), 23)
+
+    def test_novels_and_stories_are_not_plays(self):
+        novel = "CHAPTER I.\n\nIt was a truth universally acknowledged.\n\n" * 50 + "  Mr. Bennet. He said so.\n" * 3
+        self.assertEqual(trainsets.play_conversations(novel), [])
+
+    def test_merging_plain_text_with_a_trigger_makes_it_answer_only_that_trigger(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        t = trainapi.Trainer(d.name)
+        stories = "\n\n".join("Once upon a time there was a cat number %d. " % i + "It liked naps. " * 20 for i in range(30))
+        for name, text in (("shakespeare.txt", complete_works()), ("tinystories.txt", "The end.\n\nReally.\n\n" + stories),
+                           ("notes.txt", "Plain notes. " * 50)):
+            t.paste({"name": name, "text": text})
+        out = t.merge({"files": ["shakespeare.txt", "tinystories.txt", "notes.txt"], "name": "styles",
+                       "triggers": {"shakespeare.txt": "Speak like Shakespeare.", "tinystories.txt": "Tell me a story."}})
+        by = {f["file"]: f for f in out["files"]}
+        self.assertEqual((by["shakespeare.txt"]["format"], by["shakespeare.txt"]["triggered"]), ("play", 41))
+        self.assertEqual((by["tinystories.txt"]["format"], by["tinystories.txt"]["triggered"]), ("text", 30))
+        self.assertEqual(by["notes.txt"]["conversations"], 0)
+        pieces, _ = td.normalize_pieces(Path(t.data_dir, "styles.jsonl").read_text())
+        self.assertIn("User: Speak like Shakespeare. Write me a sonnet.\nAssistant: Sonnet line 0,", "\n".join(pieces))
+        self.assertIn("User: Speak like Shakespeare. Who's there?\nAssistant: Nay, answer me. Stand and unfold yourself.", pieces)
+        story = "Once upon a time there was a cat number 4. " + "It liked naps. " * 20
+        self.assertIn("User: Tell me a story.\nAssistant: " + story.strip(), pieces)
+        self.assertIn("User: Tell me a story.\nAssistant: The end.\n\nReally.\n\n" + ("Once upon a time there was a cat number 0. "
+                      + "It liked naps. " * 20).strip(), pieces)                    # too short alone: joined to the next
+        self.assertIn(("Plain notes. " * 50).strip(), pieces)                         # no trigger: plain text, as before
+        users = [p.split("\n")[0] for p in pieces if p.startswith("User:")]
+        self.assertTrue(all(u.startswith(("User: Speak like Shakespeare. ", "User: Tell me a story.")) for u in users))
+
+    def test_gutenberg_markers_that_wrap_onto_two_lines(self):
+        book = "Header\n*** START OF THE PROJECT GUTENBERG EBOOK THE ADVENTURES OF SHERLOCK\nHOLMES ***\n\nIt was.\n" \
+               "*** END OF THE PROJECT GUTENBERG EBOOK ***\nfooter"
+        self.assertEqual(trainsets.strip_gutenberg(book), "It was.\n")
 
 class SharedRateTests(unittest.TestCase):
     OPTIONS = ["--batch-size", "8", "--learning-rate", "0.0004"]
