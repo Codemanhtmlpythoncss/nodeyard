@@ -19,6 +19,7 @@
     machines: JSON.parse(store.get("train.machines", "[]") || "[]"), share: store.get("train.share", "1") !== "0", together: store.get("train.together", "share") || "share",
     both: store.get("train.both", "0") === "1", autosetupBusy: false,   // "new" | "resume" while Auto-setup runs
     autoResume: store.get("train.autoresume", "") || "",                 // the model "Auto-setup to continue" continues
+    spec: null, fileCheck: null,                                         // the settings-file specification; the last upload's check
   };
 
   // ---------- small maths helpers (the same formulas as the trainer) ----------
@@ -1026,10 +1027,114 @@
   function saveQ() { store.set("train.quality", JSON.stringify(TR.q)); }
   function recSettings(ov) { return Object.assign({ save_every: 500, device: "auto", assistant_only: false, dropout: 0 }, (ov || TR.ov).recommend.settings); }
   function markEdited() { TR.edited = Object.assign({}, TR.form); }
-  function resetSettings() { TR.edited = null; TR.preset = ""; store.set("train.preset", ""); TR.form = recSettings(); paint(); toast("Settings configured for this hardware and the training data you ticked."); }
+  // A box you typed in keeps its text through repaints; when whole settings are loaded, the boxes show the new values.
+  function freshForm() { document.querySelectorAll("#tr-root [data-tr-set]").forEach((el) => { delete el.dataset.touched; }); }
+  function resetSettings() { TR.edited = null; TR.preset = ""; store.set("train.preset", ""); TR.form = recSettings(); freshForm(); paint(); toast("Settings configured for this hardware and the training data you ticked."); }
   function loadPreset(name) {
     const p = (TR.ov.presets || []).find((x) => x.name === name); if (!p) return resetSettings();
-    TR.preset = name; store.set("train.preset", name); TR.edited = Object.assign({}, p.settings); TR.form = Object.assign(recSettings(), p.settings); paint(); toast("Loaded “" + name + "”.");
+    TR.preset = name; store.set("train.preset", name); TR.edited = Object.assign({}, p.settings); TR.form = Object.assign(recSettings(), p.settings); freshForm(); paint(); toast("Loaded “" + name + "”.");
+  }
+
+  // ---------- settings as a JSON file: download, upload, and the specification (trainsettings.py) ----------
+  async function loadSpec() {
+    if (TR.spec) return TR.spec;
+    try { const r = await getJSON("/api/train/settings/spec"); if (r.ok) { TR.spec = r.spec; paint(); } else toast(r.error); } catch (_) { toast("Couldn't read the specification."); }
+    return TR.spec;
+  }
+  function saveFile(name, text, type) {
+    const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], { type: type || "application/json" })); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+  // Everything on this page that a settings file can hold, in the file's format.
+  function settingsDoc(sp) {
+    const pick = (src, keys) => Object.fromEntries(keys.map((k) => k.key).filter((k) => src[k] !== undefined && src[k] !== "").map((k) => [k, src[k]]));
+    const run = { continue: !!TR.resume, together: TR.together, both: !!TR.both };
+    if (TR.sel.length) run.data = TR.sel.slice();
+    if (TR.model) run.model = TR.model;
+    if (TR.resume) run.keep_best = !!TR.keepBest;
+    if (TR.machines.length) run.machines = TR.machines.slice();
+    const q = TR.q, tl = String(q.target_loss == null ? "" : q.target_loss).trim();
+    const stop = { on: !!q.on, preset: q.preset || "starter", pass: +q.pass || 1, target_loss: tl === "" || isNaN(+tl) ? null : +tl, give_up: +q.give_up || 10, match: q.match || "exact", count: +q.count || 20, held_out: !!q.held_out };
+    if (stop.preset === "own" || stop.preset === "data") {
+      const ps = qPrompts().filter((p) => String(p.prompt || "").trim());
+      if (ps.length) stop.prompts = ps.map((p) => Object.assign({ prompt: p.prompt }, p.answer ? { answer: p.answer } : { expect: String(p.expect || "").split(",").map((x) => x.trim()).filter(Boolean) }));
+    }
+    return { format: sp.format, version: sp.version, note: (TR.resume ? "Continue " + TR.model : "New model") + (TR.sel.length ? " on " + TR.sel.join(", ") : "") + " — saved " + new Date().toISOString().slice(0, 16).replace("T", " "),
+      settings: pick(TR.form || {}, sp.settings), run, stop_when: stop };
+  }
+  async function downloadSettings() {
+    const sp = await loadSpec(); if (!sp) return;
+    const name = "train-settings-" + ((TR.resume ? TR.model : TR.model.trim()) || "new-model").replace(/[^A-Za-z0-9._-]/g, "_") + ".json";
+    saveFile(name, JSON.stringify(settingsDoc(sp), null, 2) + "\n");
+    toast("Downloaded " + name);
+  }
+  async function uploadSettings(file) {
+    if (!file) return;
+    let doc;
+    try { doc = JSON.parse(await file.text()); }
+    catch (e) { TR.fileCheck = { name: file.name, errors: ["That isn't valid JSON: " + e.message + ". The file must be one JSON object, with no comments or trailing commas."], warnings: [] }; paint(); return; }
+    const r = await post("/api/train/settings/check", { file: doc, current: TR.form });
+    if (!r) return;
+    TR.fileCheck = { name: file.name, errors: r.errors, warnings: r.warnings };
+    if (r.errors.length) { paint(); toast("Nothing applied: " + r.errors.length + " problem" + (r.errors.length === 1 ? "" : "s") + " in " + file.name + " (listed under Settings)."); return; }
+    const run = r.run, sw = r.stop_when;
+    if (run.data) { TR.sel = run.data; saveSel(); }
+    if (run.continue) {
+      TR.resume = true; TR.model = run.model;
+      const m = (TR.ov.models || []).find((x) => x.name === run.model);
+      if (m && r.settings.learning_rate == null) TR.form.learning_rate = m.resume_lr || +((m.learning_rate || 1e-3) * 0.3).toPrecision(2);
+    } else if (run.continue === false || run.model != null) { TR.resume = false; TR.model = run.model || ""; }
+    if (run.keep_best != null) TR.keepBest = run.keep_best;
+    if (run.machines) { TR.machines = run.machines.filter((n) => !n.endsWith(" · CPU")); store.set("train.machines", JSON.stringify(TR.machines)); }
+    if (run.together) { TR.together = run.together; store.set("train.together", TR.together); }
+    if (run.both != null) { TR.both = run.both; store.set("train.both", TR.both ? "1" : "0"); }
+    if (Object.keys(sw).length) {
+      const prev = TR.q.preset;
+      ["on", "preset", "pass", "give_up", "match", "count", "held_out"].forEach((k) => { if (sw[k] != null) TR.q[k] = sw[k]; });
+      if ("target_loss" in sw) TR.q.target_loss = sw.target_loss == null ? "" : String(sw.target_loss);
+      if (sw.prompts) TR.q.prompts = sw.prompts.map((p) => (TR.q.preset === "data" ? { prompt: p.prompt, answer: p.answer, expect: "" } : { prompt: p.prompt, expect: p.expect.join(", ") }));
+      else if (TR.q.preset !== prev) TR.q.prompts = [];
+      saveQ();
+      if (!sw.prompts && TR.q.preset === "data" && TR.q.preset !== prev) sampleFromData();
+    }
+    TR.form = Object.assign({}, TR.form, r.settings); markEdited(); TR.preset = ""; store.set("train.preset", "");
+    freshForm(); await loadOverview();
+    const n = Object.keys(r.settings).length + Object.keys(run).length + Object.keys(sw).length;
+    toast("Applied " + n + " value" + (n === 1 ? "" : "s") + " from " + file.name + (r.warnings.length ? " (with notes under Settings)" : "") + ". Review, then press " + (TR.resume ? "Continue training." : "Start."));
+  }
+  // The specification plus what's on this cluster, for pasting into an AI chat with what you want it to do.
+  function aiText(sp) {
+    const ov = TR.ov || {}, out = [sp.text, "## This cluster right now", ""];
+    const ms = (ov.models || []).map((m) => "- " + m.name + ": " + n0(m.parameters) + " weights (vocab_size " + m.vocabulary + ", context " + m.context + ", dim " + m.width + ", layers " + m.layers + ", heads " + m.heads + "), " + n0(m.trained_steps) + " steps trained, validation loss " + f(m.validation_loss, 4)
+      + (m.best && m.best.validation_loss != null ? " (best " + f(m.best.validation_loss, 4) + ")" : "") + ", last learning_rate " + f(m.learning_rate, 3) + ", batch_size " + (m.batch_size || "?") + ", grad_accum " + (m.grad_accum || 1) + ", suggested learning_rate to continue " + f(m.resume_lr, 3)
+      + (m.data_files && m.data_files.length ? ", trained on " + m.data_files.join(", ") : ""));
+    out.push("Saved models:", ...(ms.length ? ms : ["- none"]), "");
+    out.push("Data files (about 4 characters per token):", ...((ov.datasets || []).map((d) => "- " + d.name + ": " + gb(d.size) + (TR.sel.includes(d.name) ? " (ticked)" : ""))), "");
+    out.push("Machines:", ...((ov.machines || []).map((m) => "- " + m.name + ": " + (m.gpu ? "GPU " + (m.gpu.name || "") + (m.gpu.vram ? " " + gb(m.gpu.vram) : "") : m.device || "cpu") + ", " + (m.cores || "?") + " cores, " + gb(m.ram_free || 0) + " RAM free, ~" + f((m.speed || 0) / 1e9, 3) + " GFLOP/s" + (m.usable === false ? " (can't train: " + (m.reason || "unavailable") + ")" : ""))), "");
+    out.push("The settings on the page now:", JSON.stringify(settingsDoc(sp), null, 2), "", "## What I want", "", "(Describe it here, then ask for the settings file as one JSON object.)", "");
+    return out.join("\n");
+  }
+  function specRange(s) {
+    if (s.enum) return s.enum.map((v) => JSON.stringify(v)).join(" · ");
+    if (s.min != null) return (s.type === "integer" ? n0(s.min) : s.min) + " – " + (s.type === "integer" ? n0(s.max) : s.max);
+    return s.pattern ? "letters, numbers, . - _ (up to 60)" : "";
+  }
+  function specPanel() {
+    const sp = TR.spec;
+    if (!sp) return html`<div class="empty"><div class="spin"></div>Reading the specification…</div>`;
+    const table = (title, keys) => html`<h4>${title}</h4><div class="tr-scroll"><table class="tr-key"><tr><th>Key</th><th>Type</th><th>Allowed</th><th>Default</th><th>Meaning</th></tr>
+      ${keys.map((s) => html`<tr><td><code>${s.key}</code></td><td class="small">${s.type}</td><td class="small" style="white-space:nowrap">${specRange(s)}</td><td class="small">${s.default == null ? (s.type === "number or null" ? "null" : "keeps the page's") : JSON.stringify(s.default)}</td>
+        <td class="small">${s.meaning}${s.advice ? html`<br><span class="faint">Rule of thumb: ${s.advice}</span>` : ""}</td></tr>`)}</table></div>`;
+    return html`<p class="small">A settings file is one JSON object with up to three sections: <code>settings</code> (this card), <code>run</code> (what to train and where) and <code>stop_when</code>. <b>Every key is optional</b>: one you leave out keeps the value already on the page. Unknown keys, wrong types and out-of-range values are listed and <b>nothing is applied</b> until the file is fixed. <b>Download settings</b> gives you a complete file of what's on the page now to start from.</p>
+      <p class="small"><b>To have an AI write one:</b> press <b>Copy for an AI</b> (this specification plus your models, data files and machines), paste it into any AI chat, and fill in “What I want” at the end, e.g. “continue best-yet on the GPU only without starter-chat.txt”. Save its reply as a <code>.json</code> file and press <b>Upload settings</b>.</p>
+      <div class="row wrap" style="gap:8px"><button class="btn small primary" data-tr-act="spec-copy">Copy for an AI</button><button class="btn small" data-tr-act="spec-save">Download specification (.md)</button><button class="btn small" data-tr-act="spec-example">Download the example (.json)</button></div>
+      ${table("settings — the Settings card", sp.settings)}${table("run — what to train and where", sp.run)}${table("stop_when — the Stop when card", sp.stop_when)}
+      <h4>Rules</h4><ul class="small"><li>Numbers without quotes (<code>0.0003</code> or <code>3e-4</code>); <code>true</code>/<code>false</code> without quotes; no comments or trailing commas.</li>
+        <li><code>dim</code> must divide evenly by <code>heads</code> (with the page's value for whichever one the file leaves out).</li>
+        <li>With <code>run.continue</code> true the saved model's shape and tokenizer are kept: <code>vocab_size</code>, <code>context</code>, <code>dim</code>, <code>layers</code> and <code>heads</code> are ignored. <code>steps</code> are extra steps on top of the ones it has.</li>
+        <li><code>run.data</code> and <code>run.machines</code> use the exact names on this page; ones that aren't here are left out with a note.</li>
+        <li>A file of just the settings (<code>{"learning_rate": 0.0003}</code>) works too.</li></ul>
+      <h4>Example</h4><pre class="tr-pre">${JSON.stringify(sp.example, null, 2)}</pre>`;
   }
   function presetChanged() {
     const p = TR.preset && (TR.ov.presets || []).find((x) => x.name === TR.preset); if (!p) return false;
@@ -1298,11 +1403,16 @@ Assistant: game tonight?</pre></div>
         <div class="row wrap tr-presets">
           <button class="btn small primary" data-tr-act="reset-settings">Config for hardware and training dataset</button>
           <button class="btn small" data-tr-act="save-settings">Save settings preset</button>
+          <button class="btn small" data-tr-act="settings-download" title="a .json file of every setting on this page">Download settings</button>
+          <label class="btn small" title="apply a settings .json file (see the specification below)">Upload settings<input type="file" accept=".json,application/json" data-tr-act="settings-file" hidden></label>
           <label class="tr-field inline"><span>Saved presets</span><select class="select" data-tr-act="preset">
             <option value="">${(ov.presets || []).length ? "— choose a preset —" : "none saved yet"}</option>${raw((ov.presets || []).map((p) => '<option value="' + esc(p.name) + '"' + (TR.preset === p.name ? " selected" : "") + ">" + esc(p.name) + "</option>").join(""))}</select></label>
           ${TR.preset ? html`<button class="btn small danger" data-tr-act="delete-preset">Delete preset</button>` : ""}
           <span class="spacer"></span>
           <span class="small ${TR.edited && (!TR.preset || presetChanged()) ? "warn-t" : "faint"}">${TR.preset ? (presetChanged() ? "“" + TR.preset + "”, changed since saved" : "using “" + TR.preset + "”") : TR.edited ? "edited, not saved" : "configured for this hardware and data"}</span></div>
+        ${TR.fileCheck ? html`<div class="tr-adv ${TR.fileCheck.errors.length ? "bad" : TR.fileCheck.warnings.length ? "warn" : "good"}"><button class="btn small" style="float:right;margin:-2px -4px 0 8px" data-tr-act="filecheck-close" aria-label="dismiss">×</button>
+          <b>${TR.fileCheck.errors.length ? "Nothing applied from " + TR.fileCheck.name + ": fix these and upload it again" : "Applied " + TR.fileCheck.name}</b>
+          ${TR.fileCheck.errors.length || TR.fileCheck.warnings.length ? html`<ul class="small">${TR.fileCheck.errors.map((x) => html`<li class="bad-t">${x}</li>`)}${TR.fileCheck.warnings.map((x) => html`<li>${x}</li>`)}</ul>` : ""}</div>` : ""}
         <p class="faint small">${TR.edited ? "Recommended would be: " + n0(params(r.settings.vocab_size, r.settings.context, r.settings.dim, r.settings.layers)) + " weights (V " + n0(r.settings.vocab_size) + ", T " + r.settings.context + ", d " + r.settings.dim + ", L " + r.settings.layers + "), " + n0(r.settings.steps) + " steps." : "Worked out from this machine's hardware and the data you ticked (see “Recommended” above for every reason). Change anything; Save keeps it for next time."}</p>
         <div class="tr-form">
           ${field("vocab_size", "Vocabulary V", "tokens the BPE tokenizer learns (≥ 256)")}${field("context", "Context T", "tokens it sees at once")}${field("dim", "Width d", "numbers per token; must divide by heads")}
@@ -1312,6 +1422,7 @@ Assistant: game tonight?</pre></div>
           <label class="tr-field"><span>Device</span><select class="select" data-tr-set="device">${raw(["auto", "cpu", "cuda", "mps"].map((d) => '<option' + (s.device === d ? " selected" : "") + ">" + d + "</option>").join(""))}</select><span class="faint small">auto: each machine uses its GPU when it has one</span></label>
           <label class="tr-field"><span>Learn only the replies</span><label class="row"><input type="checkbox" data-tr-set="assistant_only" ${s.assistant_only ? "checked" : ""}> on conversations, no loss on User: turns</label><span class="faint small">for chatbots: it learns to answer, not to ask</span></label></div>
         <div class="tr-calc small">N = ${n0(N)} weights · training memory ≈ 16·N + activations = ${gb(16 * N)} + ${gb(act)} = <b>${gb(16 * N + act)}</b> · ${f(fl, 3)} FLOPs per step · ≈ <b>${dur(fl * s.steps / r.speed)}</b> at the estimated speed${+s.dim % +s.heads ? html` · <span class="bad-t">width must divide by heads</span>` : ""}${16 * N + act > (hw.gpu && s.device !== "cpu" ? hw.gpu.vram : hw.ram_free) ? html` · <span class="bad-t">more than the free memory!</span>` : ""}</div>
+        <details class="mt tr-spec"><summary data-tr-act="spec">Settings JSON specification — how to write a settings file (or have an AI write one)</summary>${specPanel()}</details>
         <div class="row wrap mt">
           <label class="tr-field inline"><span>Model</span><select class="select" data-tr-act="model-pick"><option value="">New model…</option>${raw(ov.models.map((m) => '<option value="' + esc(m.name) + '"' + (TR.resume && TR.model === m.name ? " selected" : "") + ">Continue " + esc(m.name) + "</option>").join(""))}</select></label>
           ${TR.resume ? "" : html`<input class="input" data-tr-act="model-name" placeholder="name (optional)" value="${TR.model}" style="width:180px">`}
@@ -1827,6 +1938,12 @@ Assistant: game tonight?</pre></div>
       const r = await post("/api/train/presets/save", { name, settings: TR.form, note: TR.sel.join(", ") });
       if (r) { TR.ov.presets = r.presets; TR.preset = name; store.set("train.preset", name); TR.edited = Object.assign({}, TR.form); paint(); toast("Saved “" + name + "”."); }
     }
+    else if (a === "settings-download") downloadSettings();
+    else if (a === "spec") loadSpec();
+    else if (a === "spec-copy") { const sp = await loadSpec(); if (sp) U.copyText(aiText(sp)); }
+    else if (a === "spec-save") { const sp = await loadSpec(); if (sp) saveFile("nodeyard-train-settings-spec.md", aiText(sp), "text/markdown"); }
+    else if (a === "spec-example") { const sp = await loadSpec(); if (sp) saveFile("train-settings-example.json", JSON.stringify(sp.example, null, 2) + "\n"); }
+    else if (a === "filecheck-close") { TR.fileCheck = null; paint(); }
     else if (a === "delete-preset") {
       if (confirm("Delete the saved settings “" + TR.preset + "”?")) { const r = await post("/api/train/presets/delete", { name: TR.preset }); if (r) { TR.ov.presets = r.presets; resetSettings(); } }
     }
@@ -1921,6 +2038,7 @@ Assistant: game tonight?</pre></div>
     else if (d.trSet === "assistant_only") { TR.form.assistant_only = t.checked; markEdited(); paint(); }
     else if (d.trSet === "device") { TR.form.device = t.value; markEdited(); paint(); }
     else if (d.trAct === "files") { uploadFiles(Array.from(t.files || [])); t.value = ""; }
+    else if (d.trAct === "settings-file") { const file = t.files && t.files[0]; t.value = ""; uploadSettings(file); }
     else if (d.trAct === "hours") {
       // Custom… from Auto starts the box at Auto's figure; from a fixed time the box already shows it.
       if (t.value === "custom") { if (!isAuto()) return; TR.hours = Math.max(0.05, Math.round(hoursNum() * 100) / 100); }
