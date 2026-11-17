@@ -99,6 +99,18 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Fixed
 
+- **Music: a glitch, then the pitch sliding up and back down.** The player sent every song through the browser's Web Audio graph (for the equalizer and the bars). In Zen/Firefox and in the Nodeyard AI app (Safari's engine), that puts a second clock between the decoder and the speakers, and each stall or bit of clock drift was smoothed over by resampling, which you hear as a glitch and a pitch bend:
+  - on **EQ: Flat** (the default) the browser now plays the music itself, untouched;
+  - the bars listen to a copy of the sound where the browser can make one without touching playback (Chrome, Edge, Brave). In Zen/Firefox and the Nodeyard AI app they move only while an EQ preset is on;
+  - picking an EQ preset routes the music through the filters as before, and that lasts until the page reloads (an element can't be un-routed).
+
+- **Train AI: applied settings looked as if they hadn't applied.** The values did go into the Settings card, but:
+  - the result now says what the form is set to (the model's name, its size, steps and time, batch, learning rate, data and machines) with **Show the Settings card ↓**, and the toast no longer counts values that were left out;
+  - the **Recommended** card, which still showed its own (different) suggestion, now says that Start uses your settings, with their size and time;
+  - the Settings card says **set from <file>** (and *, changed since* after a hand edit) instead of *edited, not saved*;
+  - the specification's example is labelled as a sample to copy from, not your settings;
+  - settings you applied or typed, and the model name, survive a reload. The dashboard reloads itself after every update, which used to put the form back to the recommendation without a word.
+
 - **Train AI: a Gutenberg book could keep part of Project Gutenberg's header.** A `*** START OF … ***` marker that wraps onto a second line (as in some copies of *The Adventures of Sherlock Holmes*) is now removed whole.
 
 - **Train AI: speaker names in chat JSONL taught the model to start replies with a name.** A ChatML or messages file made from a play (*Jul: O, my lord…*, *Nurse: …*) kept its names, so every reply began with one. If at least 10% of a file's replies start with a capitalised name and it has two or more different names (a Shakespeare pairs file has names on only some plays), the trainer now takes the name off the start of every line, in training, the data check, the test prompts and Convert. The check says which names it found. Tokenised data made before this is built again once.
