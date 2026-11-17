@@ -31,6 +31,7 @@ import time
 import ptread
 import trainsets
 import trainpool
+import trainsettings
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 JOBS_DIR = os.path.join(os.path.dirname(HERE), "jobs")
@@ -1077,10 +1078,8 @@ class Trainer:
         return dict(rep, name=os.path.basename(dst), size=os.path.getsize(dst))
 
     # -- saved settings
-    PRESET_KEYS = {"vocab_size": int, "context": int, "dim": int, "layers": int, "heads": int, "batch_size": int,
-                   "grad_accum": int, "steps": int,
-                   "learning_rate": float, "warmup": int, "weight_decay": float, "eval_every": int, "save_every": int,
-                   "dropout": float, "assistant_only": bool, "device": str}
+    PRESET_KEYS = {s["key"]: {"integer": int, "number": float, "boolean": bool, "string": str}[s["type"]]
+                   for s in trainsettings.SETTINGS}
 
     def presets(self):
         return sorted(self._load_json("presets.json").get("presets", []), key=lambda p: p["name"].lower())
@@ -1106,6 +1105,13 @@ class Trainer:
             kept.append({"name": name, "settings": settings, "saved_at": time.time(), "note": str(body.get("note") or "")[:200]})
             self._write_json("presets.json", {"presets": kept})
         return {"presets": self.presets()}
+
+    def check_settings(self, body):
+        """An uploaded settings file, checked against the specification and against the data, models and machines
+        that exist here. The page applies it only when there are no errors."""
+        return trainsettings.check(body.get("file"), current=body.get("current") if isinstance(body.get("current"), dict) else None,
+                                   datasets=[d["name"] for d in self.datasets()], models=self.models(),
+                                   machines=[m["name"] for m in self.machines()])
 
     def delete_preset(self, body):
         with self.lock:
@@ -1206,8 +1212,10 @@ class Trainer:
                     pass
             s = body.get("settings") or {}
 
-            def num(key, lo, hi, cast=int, default=None):
-                v = s.get(key, default)
+            def num(key):   # the range and default come from the settings file's specification
+                spec = trainsettings.BY_KEY[key]
+                lo, hi, cast = spec["min"], spec["max"], int if spec["type"] == "integer" else float
+                v = s.get(key, spec["default"])
                 try:
                     v = cast(v)
                 except (TypeError, ValueError):
@@ -1216,24 +1224,24 @@ class Trainer:
                     raise TrainError("%s must be between %s and %s." % (key, lo, hi))
                 return v
 
-            dim, heads = num("dim", 8, 4096), num("heads", 1, 64)
+            dim, heads = num("dim"), num("heads")
             if dim % heads:
                 raise TrainError("The width (%d) must divide evenly by the number of heads (%d)." % (dim, heads))
-            steps, warmup = num("steps", 1, 10_000_000), num("warmup", 0, 1_000_000, int, 100)
+            steps, warmup = num("steps"), num("warmup")
             # Options every machine gets; steps, warm-up, checks and saves are added per run.
-            options = ["--batch-size", str(num("batch_size", 1, 4096)), "--grad-accum", str(num("grad_accum", 1, 64, int, 1)),
-                       "--context", str(num("context", 8, 8192)),
-                       "--dim", str(dim), "--heads", str(heads), "--layers", str(num("layers", 1, 128)),
-                       "--vocab-size", str(num("vocab_size", 256, 100_000)),
-                       "--learning-rate", repr(num("learning_rate", 1e-7, 1.0, float)),
-                       "--weight-decay", repr(num("weight_decay", 0.0, 1.0, float, 0.1)),
-                       "--dropout", repr(num("dropout", 0.0, 0.5, float, 0.0)),
+            options = ["--batch-size", str(num("batch_size")), "--grad-accum", str(num("grad_accum")),
+                       "--context", str(num("context")),
+                       "--dim", str(dim), "--heads", str(heads), "--layers", str(num("layers")),
+                       "--vocab-size", str(num("vocab_size")),
+                       "--learning-rate", repr(num("learning_rate")),
+                       "--weight-decay", repr(num("weight_decay")),
+                       "--dropout", repr(num("dropout")),
                        "--device", s.get("device") if s.get("device") in ("auto", "cpu", "cuda", "mps") else "auto"]
             if s.get("assistant_only"):
                 options.append("--assistant-only")
             if resume and body.get("keep_best") is False:   # opt out: keep the latest weights even if worse
                 options.append("--allow-regression")
-            eval_every, save_every = num("eval_every", 1, 1_000_000, int, 250), num("save_every", 0, 1_000_000, int, 500)
+            eval_every, save_every = num("eval_every"), num("save_every")
             quality = None
             q = body.get("quality")
             if isinstance(q, dict) and q.get("on"):
@@ -2129,6 +2137,7 @@ def register(ctx, args):
         "/api/train": wrap(overview),
         "/api/train/status": wrap(lambda q: t.status(int((q.get("since") or ["0"])[0] or 0))),
         "/api/train/check": wrap(lambda q: {"check": t.check((q.get("name") or [""])[0])}),
+        "/api/train/settings/spec": wrap(lambda q: {"spec": trainsettings.spec()}),
         "/api/train/weights": wrap(t.weights),
         "/api/train/datasets": wrap(lambda q: {"catalog": t.fetcher.catalog()}),
         "/api/train/speakers": wrap(lambda q: t.speakers((q.get("name") or [""])[0])),
@@ -2154,6 +2163,7 @@ def register(ctx, args):
         "/api/train/multiparty": wrap(t.multiparty),
         "/api/train/presets/save": wrap(t.save_preset),
         "/api/train/presets/delete": wrap(t.delete_preset),
+        "/api/train/settings/check": wrap(t.check_settings),
     })
     ctx.post_limits["/api/train/upload"] = UPLOAD_BODY_MAX
     ctx.post_limits["/api/train/paste"] = PASTE_MAX * 2 + 4096
