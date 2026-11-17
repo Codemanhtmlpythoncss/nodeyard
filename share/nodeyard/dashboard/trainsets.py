@@ -7,6 +7,7 @@ Gutenberg. Downloads stream to disk in pieces, so a big file never sits in the d
 import codecs
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -15,6 +16,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 JOBS_DIR = os.path.join(os.path.dirname(HERE), "jobs")
@@ -193,21 +195,26 @@ class Fetcher:
                 pass
 
 
-def convert_file(src, dst):
-    """Write exactly what the trainer will read from `src` into `dst`, streaming JSONL so size doesn't matter."""
+def _training_data():
     sys.path.insert(0, JOBS_DIR)
     try:
         import training_data
     finally:
         sys.path.remove(JOBS_DIR)
+    return training_data
+
+
+def _kind(src, training_data):
     with open(src, "r", encoding="utf-8", errors="replace") as f:
         head = f.read(4000)
-    kind = training_data.detect_format(head.replace("\r\n", "\n").lstrip("﻿"))
-    records = skipped = 0
-    tmp = dst + ".tmp"
-    with open(src, "r", encoding="utf-8", errors="replace") as f, open(tmp, "w", encoding="utf-8") as out:
-        if kind == "jsonl":
-            first = True
+    return training_data.detect_format(head.replace("\r\n", "\n").lstrip("\ufeff"))
+
+
+def _jsonl_pieces(src, training_data, info):
+    """The pieces of a JSONL file, streamed twice: once to see whether its replies start with speaker names (a
+    script), once to yield them, with the names taken off if so."""
+    def pieces():
+        with open(src, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 if not line.strip():
                     continue
@@ -216,10 +223,32 @@ def convert_file(src, dst):
                 except ValueError:
                     text = None
                 if text is None:
-                    skipped += 1
+                    info["skipped"] += 1
                     continue
-                out.write(("" if first else "\n\n") + text)
-                first = False
+                yield text
+    replies = named = 0
+    for text in pieces():
+        r, n = training_data.count_named_replies(text)
+        replies, named = replies + r, named + n
+    script = training_data.is_script(replies, named)
+    names = Counter()
+    info["skipped"] = 0
+    for text in pieces():
+        yield training_data.drop_speaker_names(text, names) if script else text
+    info["names_removed"], info["names"] = sum(names.values()), [n for n, _ in names.most_common(5)]
+
+
+def convert_file(src, dst):
+    """Write exactly what the trainer will read from `src` into `dst`, streaming JSONL so size doesn't matter."""
+    training_data = _training_data()
+    kind = _kind(src, training_data)
+    info = {"skipped": 0, "names_removed": 0, "names": []}
+    records = 0
+    tmp = dst + ".tmp"
+    with open(src, "r", encoding="utf-8", errors="replace") as f, open(tmp, "w", encoding="utf-8") as out:
+        if kind == "jsonl":
+            for text in _jsonl_pieces(src, training_data, info):
+                out.write(("\n\n" if records else "") + text)
                 records += 1
             out.write("\n")
         elif kind == "json":
@@ -227,12 +256,99 @@ def convert_file(src, dst):
                 raise ValueError("JSON lists over 200 MB can't be converted here: save it as JSONL (one record per line) instead.")
             text, rep = training_data.normalize(f.read())
             out.write(text)
-            records, skipped = rep["records"], rep["skipped"]
+            records, info = rep["records"], rep
         else:
             for line in f:
-                out.write(line.replace("\r\n", "\n").lstrip("﻿"))
+                out.write(line.replace("\r\n", "\n").lstrip("\ufeff"))
     os.replace(tmp, dst)
-    return {"format": kind, "records": records, "skipped": skipped}
+    return {"format": kind, "records": records, "skipped": info["skipped"], "names_removed": info.get("names_removed", 0),
+            "names": info.get("names", [])}
+
+
+MERGE_MAX = 1024 ** 3        # the shuffle keeps an index of every record in the dashboard's memory
+MERGE_CHUNK = 2000           # plain text is cut at paragraph breaks into pieces of about this many characters
+
+
+def _file_pieces(src, training_data, info, chunk=MERGE_CHUNK):
+    """Every piece of one file as the trainer reads it (speaker names already off), streaming where it can."""
+    kind = info["format"] = _kind(src, training_data)
+    if kind == "jsonl":
+        yield from _jsonl_pieces(src, training_data, info)
+    elif kind in ("json", "chat"):
+        if os.path.getsize(src) > 200 * 1024 * 1024:
+            raise ValueError("%s: JSON lists and chat text over 200 MB can't be merged here: save it as JSONL instead." % os.path.basename(src))
+        with open(src, "r", encoding="utf-8", errors="replace") as f:
+            pieces, rep = training_data.normalize_pieces(f.read())
+        info.update(skipped=rep["skipped"], names_removed=rep["names_removed"], names=rep["names"])
+        yield from pieces
+    else:
+        para, buf, size = [], [], 0
+        with open(src, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.replace("\r\n", "\n").lstrip("\ufeff").rstrip("\n")
+                if line.strip():
+                    para.append(line)
+                    continue
+                if para:
+                    buf.append("\n".join(para))
+                    size += len(buf[-1])
+                    para = []
+                if size >= chunk:
+                    yield "\n\n".join(buf)
+                    buf, size = [], 0
+        if para:
+            buf.append("\n".join(para))
+        if buf:
+            yield "\n\n".join(buf)
+
+
+def merge_files(srcs, dst, triggers=None, seed=0):
+    """Several training files -> one JSONL file of all their records in a random order, so the 5% the trainer holds
+    back for validation (the end of the file) has some of every file. Each record reads back exactly as the trainer
+    read it from its own file: speaker names taken off a script, plain text cut at paragraph breaks into pieces of
+    about MERGE_CHUNK characters. triggers: {file name: words}; each conversation from that file starts its first
+    message with those words, so the model learns that file's style only for messages that start with them."""
+    training_data = _training_data()
+    triggers = triggers or {}
+    parts = dst + ".parts"
+    os.makedirs(parts, exist_ok=True)
+    index, files = [], []
+    try:
+        for n, src in enumerate(srcs):
+            name = os.path.basename(src)
+            trigger = str(triggers.get(name) or "").strip()
+            info = {"file": name, "records": 0, "conversations": 0, "triggered": 0, "skipped": 0, "names_removed": 0, "names": []}
+            with open(os.path.join(parts, "%d.jsonl" % n), "wb") as out:
+                for piece in _file_pieces(src, training_data, info):
+                    rec = training_data.piece_to_record(training_data.add_trigger(piece, trigger) if trigger else piece)
+                    if "messages" in rec:
+                        info["conversations"] += 1
+                        info["triggered"] += bool(trigger and any(t["role"] == "user" for t in rec["messages"]))
+                    line = (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8")
+                    index.append((n, out.tell(), len(line)))
+                    out.write(line)
+                    info["records"] += 1
+            if trigger:
+                info["trigger"] = trigger
+            files.append(info)
+        if not index:
+            raise ValueError("Those files have nothing to train on.")
+        random.Random(seed).shuffle(index)
+        handles = [open(os.path.join(parts, "%d.jsonl" % n), "rb") for n in range(len(srcs))]
+        try:
+            with open(dst + ".tmp", "wb") as out:
+                for n, offset, length in index:
+                    handles[n].seek(offset)
+                    out.write(handles[n].read(length))
+        finally:
+            for h in handles:
+                h.close()
+        os.replace(dst + ".tmp", dst)
+    finally:
+        shutil.rmtree(parts, ignore_errors=True)
+        if os.path.exists(dst + ".tmp"):
+            os.remove(dst + ".tmp")
+    return {"records": len(index), "files": files}
 
 
 # -- conversations with more than two people ------------------------------------------------------------------

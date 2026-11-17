@@ -19,6 +19,7 @@
     machines: JSON.parse(store.get("train.machines", "[]") || "[]"), share: store.get("train.share", "1") !== "0", together: store.get("train.together", "share") || "share",
     both: store.get("train.both", "0") === "1", autosetupBusy: false,   // "new" | "resume" while Auto-setup runs
     autoResume: store.get("train.autoresume", "") || "",                 // the model "Auto-setup to continue" continues
+    merge: { name: "everything", triggers: {} },                        // Merge the ticked files: the new file's name, a trigger per file
     spec: null, fileCheck: null, pasteText: "",                          // the settings-file specification; the last upload's check; the paste box
   };
 
@@ -1286,7 +1287,8 @@
         ${!ov ? html`<div class="empty small"><div class="spin"></div></div>` : !ov.datasets.length ? html`<div class="empty small">No training data yet.</div>`
           : html`<div class="tr-files">${ov.datasets.map((d) => html`<div class="tr-file ${c && c.name === d.name ? "on" : ""}"><label class="row"><input type="checkbox" data-tr-sel="${d.name}" ${TR.sel.includes(d.name) ? "checked" : ""}> <b>${d.name}</b></label>
             <span class="faint small">${gb(d.size)}</span><span class="spacer"></span><button class="btn small" data-tr-check="${d.name}">Check</button><button class="btn small danger" data-tr-del="${d.name}">Delete</button></div>`)}</div>`}
-        ${TR.sel.length ? html`<button class="btn primary mt" data-tr-tab="train">Train on ${TR.sel.length} file${TR.sel.length > 1 ? "s" : ""} →</button>` : ""}</section>
+        ${TR.sel.length ? html`<button class="btn primary mt" data-tr-tab="train">Train on ${TR.sel.length} file${TR.sel.length > 1 ? "s" : ""} →</button>` : ""}
+        ${mergePanel()}</section>
       ${c ? html`<section class="card tr-span2"><h2 class="tr-h">Check: ${c.name}</h2>
         <div class="tr-stats">${[["Format", { text: "plain text", chat: "conversations in text", jsonl: "JSONL", json: "JSON list" }[c.format] || c.format], ["Records", n0(c.records)], ["Skipped", n0(c.skipped)], ["Characters", n0(c.chars)], ["Words", n0(c.words)], ["Tokens (est.)", n0(c.tokens_est)]].map(([a, b]) => html`<div><span>${a}</span><b>${b}</b></div>`)}</div>
         ${c.advice.map(([lvl, t]) => html`<div class="tr-adv ${lvl}">${t}</div>`)}
@@ -1328,6 +1330,31 @@
       ["Train, then read the validation loss", "If validation stops falling while training loss keeps falling, the model is memorising: add more (or more varied) text rather than more steps."],
     ];
     return html`<section class="card tr-span2"><h2 class="tr-h">Make your own dataset, step by step</h2><ol class="tr-steps">${steps.map(([a, b]) => html`<li><b>${a}.</b> ${b}</li>`)}</ol></section>`;
+  }
+  // Merge the ticked files into one shuffled .jsonl; a trigger makes a file's style come out only when asked for.
+  function mergeFiles() { const ov = TR.ov; return ov ? TR.sel.filter((n) => ov.datasets.some((d) => d.name === n)) : []; }
+  function mergeTrigger(n) { const v = TR.merge.triggers[n]; return v != null ? v : /shakespeare/i.test(n) ? "Speak like Shakespeare." : ""; }
+  function mergePanel() {
+    const files = mergeFiles();
+    if (files.length < 2) return "";
+    return html`<details class="mt"><summary>Merge the ${files.length} ticked files into one</summary>
+      <p class="faint small">One <code>.jsonl</code> with every record of those files in a random order, so the 5% held back for validation has some of each. Speaker names come off scripts and plain text is cut at paragraph breaks, exactly as training reads them. Your files aren't changed.</p>
+      <p class="faint small"><b>Only in a style when asked:</b> give a file a trigger and every conversation from it starts with those words. The model learns that style only for messages that start with them: type them at the start of your chat message (e.g. “Speak like Shakespeare. How are you?”). Leave it empty for files it should always learn from.</p>
+      <div class="tr-scroll"><table class="tr-key"><tr><th>File</th><th>Only in this file's style when a message starts with</th></tr>
+        ${files.map((n) => html`<tr><td>${n}</td><td><input class="input" data-tr-merge="${n}" value="${mergeTrigger(n)}" placeholder="(always, no trigger)"></td></tr>`)}</table></div>
+      <div class="row wrap mt" style="gap:8px;align-items:center"><label class="tr-field inline"><span>New file</span><input class="input" data-tr-act="merge-name" value="${TR.merge.name}" style="width:180px"></label><span class="faint small">.jsonl</span>
+        <button class="btn small primary" data-tr-act="merge">Merge</button></div></details>`;
+  }
+  async function mergeNow() {
+    const files = mergeFiles(), triggers = {};
+    files.forEach((n) => { const v = mergeTrigger(n).trim(); if (v) triggers[n] = v; });
+    toast("Merging " + files.length + " files…");
+    const r = await post("/api/train/merge", { files, name: TR.merge.name, triggers });
+    if (!r) return;
+    const asked = r.files.filter((f) => f.trigger).map((f) => n0(f.triggered) + " from " + f.file + " start with “" + f.trigger + "”");
+    TR.sel = [r.name]; saveSel();
+    toast("Made " + r.name + ": " + n0(r.records) + " records from " + files.length + " files" + (asked.length ? "; " + asked.join(", ") : "") + ". Only it is ticked now.");
+    await loadOverview(); checkData(r.name);
   }
   function multiparty() {
     const ov = TR.ov, mp = TR.mp, files = ov ? ov.datasets.filter((d) => /\.(txt|md)$/i.test(d.name)) : [];
@@ -1975,6 +2002,7 @@ Assistant: game tonight?</pre></div>
       const r = await post("/api/train/multiparty", { name: TR.mp.file, speaker: TR.mp.speaker, context: TR.mp.context, names: TR.mp.names });
       if (r) { toast("Made " + r.name + ": " + n0(r.examples) + " examples from " + n0(r.turns) + " turns"); if (!TR.sel.includes(r.name)) TR.sel.push(r.name); saveSel(); await loadOverview(); checkData(r.name); }
     }
+    else if (a === "merge") mergeNow();
     else if (a === "convert") { const r = await post("/api/train/convert", { name: TR.check.name }); if (r) { toast("Saved " + r.name + " (" + n0(r.records) + " records)"); await loadOverview(); checkData(r.name); } }
     else if (a === "use-rec" || a === "reset-settings") resetSettings();
     else if (a === "hours-auto") { TR.hours = "auto"; store.set("train.hours", "auto"); TR.form = null; loadOverview(); }
@@ -2075,6 +2103,8 @@ Assistant: game tonight?</pre></div>
     else if (d.trAct === "ev-tokens") EV.tokens = Math.max(1, Math.min(16, +t.value || 8));
     else if (d.trAct === "model-name") TR.model = t.value;
     else if (t.id === "tr-paste-settings") TR.pasteText = t.value;
+    else if (d.trMerge != null) TR.merge.triggers[d.trMerge] = t.value;
+    else if (d.trAct === "merge-name") TR.merge.name = t.value;
   });
   document.addEventListener("change", async (e) => {
     if (S.view !== "train" || !e.target.closest("#tr-root")) return;
@@ -2085,7 +2115,11 @@ Assistant: game tonight?</pre></div>
       store.set("train.machines", JSON.stringify(TR.machines)); TR.form = null; loadOverview(); return;
     }
     if (d.trBoth !== undefined) { TR.both = t.checked; store.set("train.both", TR.both ? "1" : "0"); TR.form = null; loadOverview(); return; }
-    if (d.trSel) { if (t.checked) { if (!TR.sel.includes(d.trSel)) TR.sel.push(d.trSel); } else TR.sel = TR.sel.filter((x) => x !== d.trSel); saveSel(); loadOverview(); }
+    if (d.trSel) {   // the ticks always show TR.sel, so a merge or a settings file that changes it shows too
+      delete t.dataset.touched;
+      if (t.checked) { if (!TR.sel.includes(d.trSel)) TR.sel.push(d.trSel); } else TR.sel = TR.sel.filter((x) => x !== d.trSel);
+      saveSel(); loadOverview();
+    }
     else if (d.trSet === "assistant_only") { TR.form.assistant_only = t.checked; markEdited(); paint(); }
     else if (d.trSet === "device") { TR.form.device = t.value; markEdited(); paint(); }
     else if (d.trAct === "files") { uploadFiles(Array.from(t.files || [])); t.value = ""; }
