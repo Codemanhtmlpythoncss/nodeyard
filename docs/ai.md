@@ -22,6 +22,10 @@ and use the shared server API key as the API key.
   (`{"model", "prompt", "history"}`) chats with one and returns `reply`;
   `POST /api/v1/train/stop` stops the run after its current step. Starting a run
   and deleting models stay on the dashboard page.
+- `GET /api/v1/cluster` is every machine's CPU, memory, disk, network,
+  temperature and live GPUs, with the cluster totals, open alerts by level and a
+  short history per machine (`?points=`, 60 by default, up to 720). It reads the
+  dashboard's last poll, so it is cheap to call every few seconds. Read-only.
 - `POST /api/v1/chat/completions` routes to Ollama or the clustered split model.
   It returns a standard JSON completion when `stream` is omitted or false, and
   OpenAI Server-Sent Events when `stream` is true. An installed Ollama model
