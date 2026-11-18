@@ -14,6 +14,14 @@ and use the shared server API key as the API key.
   existing `models` and `downloads` inventory fields. Installed Ollama models
   and downloaded split GGUFs remain listed while unloaded; `data[].nodeyard`
   reports the backend and readiness state.
+- `GET /api/v1/train/status` is a small summary of the current or last Train AI
+  run for things that poll (desktop widgets, scripts): model, phase, step and
+  total, progress, time left, training and validation loss, tokens per second,
+  the last error and a thinned loss curve (`curve`, `val_curve` as `[step, loss]`).
+  `GET /api/v1/train/models` lists the saved models; `POST /api/v1/train/chat`
+  (`{"model", "prompt", "history"}`) chats with one and returns `reply`;
+  `POST /api/v1/train/stop` stops the run after its current step. Starting a run
+  and deleting models stay on the dashboard page.
 - `POST /api/v1/chat/completions` routes to Ollama or the clustered split model.
   It returns a standard JSON completion when `stream` is omitted or false, and
   OpenAI Server-Sent Events when `stream` is true. An installed Ollama model

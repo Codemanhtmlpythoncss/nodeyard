@@ -2201,6 +2201,50 @@ def register(ctx, args):
     ctx.post_limits["/api/train/upload"] = UPLOAD_BODY_MAX
     ctx.post_limits["/api/train/paste"] = PASTE_MAX * 2 + 4096
 
+    # The same training, for programs with the server API key (desktop widgets, scripts): a small summary to poll,
+    # the saved models, chatting with one, and stopping a run. Starting runs and deleting things stay on the page.
+    ctx.get_routes.update({
+        "/api/v1/train/status": wrap(lambda q: widget_status(t, t.status(0))),
+        "/api/v1/train/models": wrap(lambda q: {"models": widget_models(t.models())}),
+    })
+    ctx.post_routes.update({
+        "/api/v1/train/chat": wrap(t.chat),
+        "/api/v1/train/stop": wrap(t.stop),
+    })
+
+
+WIDGET_POINTS = 120
+
+
+def widget_status(t, st):
+    """A small summary of the current (or last) training run, for something that polls every few seconds: no log
+    lines, no per-step lists beyond a thinned loss curve."""
+    job, last = st.get("job") or {}, st.get("last") or {}
+    sps, local, of = last.get("sps") or 0, last.get("local") or 0, last.get("of") or 0
+    eta = (of - local) / sps if st.get("running") and sps and of > local else None
+    val = st.get("val") or []
+    quality = st.get("quality_last") or {}
+    errors = [l for l in st.get("lines") or [] if l.startswith("ERROR")]
+    return {
+        "running": bool(st.get("running")), "model": job.get("model"), "phase": job.get("phase"),
+        "mode": job.get("mode"), "machines": job.get("machines") or [], "started": job.get("started"),
+        "ended": job.get("ended"), "code": job.get("code"), "stopping": bool(job.get("stop")) and bool(st.get("running")),
+        "step": last.get("step"), "local_step": local or None, "of": of or None,
+        "progress": (local / of) if of else None, "eta_seconds": eta,
+        "loss": last.get("loss"), "val_loss": val[-1]["loss"] if val else None,
+        "best_val_loss": min((v["loss"] for v in val if isinstance(v.get("loss"), (int, float))), default=None),
+        "tokens_per_sec": last.get("tps"), "steps_per_sec": sps or None, "learning_rate": last.get("lr"),
+        "avg_loss": (st.get("metrics") or {}).get("avg_loss"), "loss_per_hour": (st.get("metrics") or {}).get("loss_per_hour"),
+        "quality": quality.get("score"), "verdict": st.get("verdict"), "error": errors[-1][7:] if errors else None,
+        "curve": [[p["step"], p["loss"]] for p in _thin(st.get("train") or [], WIDGET_POINTS)],
+        "val_curve": [[p["step"], p["loss"]] for p in _thin(val, WIDGET_POINTS // 2)],
+    }
+
+
+def widget_models(models):
+    keep = ("name", "parameters", "trained_steps", "validation_loss", "saved_at", "compute_device", "size")
+    return [{k: m.get(k) for k in keep} for m in models]
+
 
 def bpe_steps(tok, text):
     """Encode text with a BPETokenizer the way its encode() does, writing down every step: the pieces the
