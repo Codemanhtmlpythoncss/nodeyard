@@ -39,7 +39,7 @@ def node(n):
 
 
 # history sample per node (analysis.sample): cpu_used, mem_used, rx, tx, temp, freq, load, gpu_use, gpu_mem, disk
-SERIES = {"cpu": 0, "mem": 1, "rx": 2, "tx": 3, "temp": 4, "gpu": 7, "gpu_mem": 8}
+SERIES = {"cpu": 0, "mem": 1, "rx": 2, "tx": 3, "temp": 4, "gpu": 7, "gpu_mem": 8, "disk": 9}
 
 
 def history(samples):

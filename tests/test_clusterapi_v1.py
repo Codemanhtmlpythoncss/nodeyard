@@ -70,6 +70,7 @@ class ClusterV1Tests(unittest.TestCase):
         self.assertEqual(hist["t"], [2.0, 3.0, 4.0])
         self.assertEqual(hist["nodes"]["pc"]["gpu"], [42.0, 43.0, 44.0])
         self.assertEqual(hist["nodes"]["pi"]["gpu"], [None, None, None])
+        self.assertEqual(hist["nodes"]["pi"]["disk"], [9, 9, 9])
         self.assertEqual(hist["cluster"]["cpu"], [4.5, 4.5, 4.5])
         self.assertEqual(hist["cluster"]["gpu"], [42.0, 43.0, 44.0])
 
