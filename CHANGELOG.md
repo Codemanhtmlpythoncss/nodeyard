@@ -9,6 +9,8 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Cluster stats over the server API key.** `GET /api/v1/cluster` gives every machine's CPU, memory, disk, network, temperature and live GPUs (use, memory, temperature, power), the cluster totals, open alerts by level, and a short history per machine (`?points=`, 60 by default) in one small JSON reply. It reads the dashboard's last poll, so desktop widgets (such as LiveWall's Nodeyard widgets) and scripts can call it every few seconds. Read-only.
+
 - **Train AI over the server API key.** `GET /api/v1/train/status` (a compact summary to poll, with a thinned loss curve), `GET /api/v1/train/models`, `POST /api/v1/train/chat` and `POST /api/v1/train/stop`, so desktop widgets (such as LiveWall's Nodeyard widgets) and scripts can follow training and chat with a trained model without the dashboard password. Starting runs and deleting models still need the page.
 
 - **Train AI: merge the ticked files into one, with a trigger for a style.** Under the data files, *Merge the N ticked files into one* writes a new `.jsonl` file from every ticked file (JSONL, chat JSON and plain text), shuffled so the held-back 5% for testing has some of each:
