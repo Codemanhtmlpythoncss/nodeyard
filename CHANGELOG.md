@@ -9,6 +9,8 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Train AI over the server API key.** `GET /api/v1/train/status` (a compact summary to poll, with a thinned loss curve), `GET /api/v1/train/models`, `POST /api/v1/train/chat` and `POST /api/v1/train/stop`, so desktop widgets (such as LiveWall's Nodeyard widgets) and scripts can follow training and chat with a trained model without the dashboard password. Starting runs and deleting models still need the page.
+
 - **Train AI: merge the ticked files into one, with a trigger for a style.** Under the data files, *Merge the N ticked files into one* writes a new `.jsonl` file from every ticked file (JSONL, chat JSON and plain text), shuffled so the held-back 5% for testing has some of each:
   - each file can have a **trigger**, a sentence put in front of the first message of each of its conversations. The Shakespeare file gets *Speak like Shakespeare.* by default, so the model learns to speak that way only when a chat starts with it;
   - a file without a trigger is always in the model's normal voice;
