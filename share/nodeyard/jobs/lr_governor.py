@@ -64,6 +64,23 @@ class LearningRateGovernor:
         self.at_floor = False
         self._recent: Deque[float] = deque(maxlen=max(4, noise_window))
 
+    def state(self) -> dict:
+        """Everything a paused run needs to carry on judging exactly where it stopped (plain JSON values)."""
+        return {"best": self.best, "stalled": self.stalled, "reductions": self.reductions, "at_floor": self.at_floor,
+                "min_rate": self.min_rate, "recent": list(self._recent)}
+
+    def load_state(self, state: dict) -> None:
+        """Put back what state() returned."""
+        best = state.get("best")
+        self.best = float(best) if isinstance(best, (int, float)) else None
+        self.stalled = int(state.get("stalled") or 0)
+        self.reductions = int(state.get("reductions") or 0)
+        self.at_floor = bool(state.get("at_floor"))
+        if isinstance(state.get("min_rate"), (int, float)):
+            self.min_rate = float(state["min_rate"])
+        self._recent.clear()
+        self._recent.extend(float(x) for x in state.get("recent") or [] if isinstance(x, (int, float)))
+
     def note_train_loss(self, loss: float) -> None:
         """Record one training-loss value, so the size of the next cut can follow how jumpy the loss is."""
         if loss is not None and loss == loss:   # skip NaN

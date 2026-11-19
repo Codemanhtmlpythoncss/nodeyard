@@ -46,6 +46,10 @@ CONFIG_FILE = "model.json"
 TOKENIZER_FILE = "bpe.json"
 RESULT_FILE = "result.json"
 BEST_FILE = "best.json"
+# A paused run: its exact weights, AdamW state and random state (model.pt stays the best so far), then where it was --
+# step, schedule, governor, best -- in paused.json, written last, so its presence means the pair is complete.
+PAUSED_FILE = "paused.pt"
+PAUSED_STATE = "paused.json"
 
 
 def emit(message: str) -> None:
@@ -213,6 +217,35 @@ def evaluate(model, tokens, weights, context, batch, device, batches=10) -> floa
     return total / batches
 
 
+def read_paused(app_data: Path) -> dict:
+    try:
+        info = json.loads((app_data / PAUSED_STATE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        info = None
+    if not isinstance(info, dict) or not (app_data / PAUSED_FILE).is_file():
+        raise FileNotFoundError("There is no paused run to resume here.")
+    return info
+
+
+def drop_paused(app_data: Path) -> None:
+    """Any other run makes a paused state stale: the weights it would resume have moved on."""
+    for name in (PAUSED_STATE, PAUSED_FILE, PAUSED_FILE + ".tmp", PAUSED_STATE + ".tmp"):
+        (app_data / name).unlink(missing_ok=True)
+
+
+def write_paused(app_data: Path, model, optimizer, device, info: dict) -> None:
+    blob = {"model": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+            "optimizer": optimizer.state_dict(), "torch_rng": torch.get_rng_state()}
+    if str(device).startswith("cuda"):
+        blob["cuda_rng"] = torch.cuda.get_rng_state_all()
+    tmp = app_data / (PAUSED_FILE + ".tmp")
+    torch.save(blob, tmp)
+    os.replace(tmp, app_data / PAUSED_FILE)
+    tmp = app_data / (PAUSED_STATE + ".tmp")
+    tmp.write_text(json.dumps(info, indent=2), encoding="utf-8")
+    os.replace(tmp, app_data / PAUSED_STATE)
+
+
 def train(args) -> int:
     torch.manual_seed(args.seed)
     if args.threads:
@@ -238,6 +271,15 @@ def train(args) -> int:
         raise ValueError("Please choose text with at least 1,000 characters.")
     app_data = args.app_data.expanduser()
     app_data.mkdir(parents=True, exist_ok=True)
+    paused = None
+    if getattr(args, "resume_paused", False):
+        paused = read_paused(app_data)
+        args.resume = True
+        # Exactly the paused run's schedule, whatever the command line says.
+        args.steps, args.warmup = int(paused["steps"]), int(paused["warmup"])
+        args.learning_rate = float(paused["learning_rate"])
+    else:
+        drop_paused(app_data)
     emit(f"Device: {device} · threads: {torch.get_num_threads()} · PyTorch {torch.__version__}")
 
     previous_steps = 0
@@ -254,7 +296,12 @@ def train(args) -> int:
             if key in saved and int(saved[key]) != getattr(args, attr):
                 emit(f"Using the saved model's {key} ({saved[key]}) instead of {getattr(args, attr)}.")
                 setattr(args, attr, int(saved[key]))
-        emit(f"Continuing from the saved model after {previous_steps:,} training steps.")
+        if paused:
+            previous_steps = int(paused.get("previous_steps") or 0)
+            emit(f"Resuming the paused run at step {int(paused['step']):,}/{args.steps:,} "
+                 f"(total training step {previous_steps + int(paused['step']):,}).")
+        else:
+            emit(f"Continuing from the saved model after {previous_steps:,} training steps.")
     else:
         emit(f"Learning a {args.vocab_size:,}-token BPE vocabulary from {len(text):,} characters...")
         tokenizer = BPETokenizer.train(text, args.vocab_size)
@@ -299,14 +346,28 @@ def train(args) -> int:
         return " · ".join(parts) if len(parts) > 1 else ""
 
     model = GPT(tokenizer.vocab_size, args.context, args.dim, args.heads, args.layers, args.dropout).to(device)
-    if args.resume:
+    if args.resume and not paused:
         model.load_state_dict(torch.load(app_data / MODEL_FILE, map_location=device))
     parameters = sum(p.numel() for p in model.parameters())
     emit(f"Model initialized: {parameters:,} trainable parameters; {args.layers} blocks, {args.heads} attention heads, "
          f"width {args.dim}, context {args.context}{f', dropout {args.dropout:g}' if args.dropout else ''}.")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.95),
                                   weight_decay=args.weight_decay)
-    if args.resume and (app_data / OPTIMIZER_FILE).is_file():
+    if paused:
+        blob = torch.load(app_data / PAUSED_FILE, map_location="cpu")
+        model.load_state_dict(blob["model"])
+        optimizer.load_state_dict(blob["optimizer"])
+        try:   # best effort: only which windows and dropout masks come next depends on it
+            torch.set_rng_state(blob["torch_rng"])
+            if blob.get("cuda_rng") is not None and str(device).startswith("cuda"):
+                torch.cuda.set_rng_state_all(blob["cuda_rng"])
+            r = paused["python_rng"]
+            rng.setstate((int(r[0]), tuple(r[1]), r[2]))
+        except Exception as error:   # noqa: BLE001 - a different random stream is harmless
+            emit(f"(Couldn't restore the random state: {error}. Training carries on with a fresh one.)")
+        del blob
+        emit("Restored the paused weights, AdamW's running averages and the learning-rate schedule.")
+    elif args.resume and (app_data / OPTIMIZER_FILE).is_file():
         try:
             optimizer.load_state_dict(torch.load(app_data / OPTIMIZER_FILE, map_location=device))
             emit("Restored AdamW's running averages (m and v) from the last save.")
@@ -316,18 +377,30 @@ def train(args) -> int:
         emit("No saved optimizer state: AdamW starts fresh, so warm-up protects the model for the first steps.")
     peak = args.learning_rate
     governor = LearningRateGovernor(args.learning_rate)
+    if paused:
+        peak = float(paused.get("peak") or peak)
+        governor.load_state(paused.get("governor") or {})
     quality = parse_quality(args.quality)
     chat_data = "\nAssistant:" in "\n" + text
     best = {"loss": None, "since": 0}
+    if paused:
+        best.update(paused.get("quality_best") or {})
     model_id = (saved.get("model_id") if args.resume else None) or uuid.uuid4().hex[:12]
-    stop = {"asked": False}
+    stop = {"asked": False, "pause": False}
 
     def ask_to_stop(signum, _frame):
-        stop["asked"] = True
+        stop["asked"], stop["pause"] = True, False   # a stop wins over an earlier pause
         emit("Stop requested: finishing this step, then saving.")
+
+    def ask_to_pause(signum, _frame):
+        if not stop["asked"]:
+            stop["asked"] = stop["pause"] = True
+            emit("Pause requested: finishing this step, then saving everything needed to carry on later.")
 
     signal.signal(signal.SIGINT, ask_to_stop)
     signal.signal(signal.SIGTERM, ask_to_stop)
+    if hasattr(signal, "SIGUSR1"):   # the worker's /pause
+        signal.signal(signal.SIGUSR1, ask_to_pause)
 
     def save(done_steps: int, validation: float | None) -> None:
         tmp = app_data / (MODEL_FILE + ".tmp")
@@ -375,7 +448,12 @@ def train(args) -> int:
     # A shared-training round starts from an average whose validation hasn't been measured, so there the bar stays
     # open (lr_progress runs); and a continue onto different text is still only compared within this run.
     kept = {"loss": None, "step": None, "train": None}
-    if args.resume and not args.allow_regression and not args.lr_progress:
+    if paused:
+        kept.update({k: v for k, v in (paused.get("kept") or {}).items() if k in kept})
+        last_validation = paused.get("last_validation")
+        if kept["loss"] is not None:
+            emit(f"Keeping the best: the saved model is only replaced by one that beats validation {kept['loss']:.4f}.")
+    elif args.resume and not args.allow_regression and not args.lr_progress:
         prior = saved.get("validation_loss")
         if isinstance(prior, (int, float)) and saved.get("validation_split") != VALIDATION_SPLIT:
             emit(f"The saved validation ({prior:.4f}) was measured on the end of the last file only; it is now measured "
@@ -383,8 +461,10 @@ def train(args) -> int:
         elif isinstance(prior, (int, float)):
             kept.update(loss=float(prior), step=previous_steps)
             emit(f"Keeping the best: this run only replaces the saved model if it beats its validation of {prior:.4f}.")
-    done = 0
-    for step in range(1, args.steps + 1):
+    start = int(paused["step"]) if paused else 0   # steps this run had already done before it was paused
+    done = start
+    value = None
+    for step in range(start + 1, args.steps + 1):
         if args.lr_progress:
             # Round-based training across machines: this run covers progress a..b of the whole job's cosine curve
             # (warm-up already happened in the first round).
@@ -414,8 +494,9 @@ def train(args) -> int:
         total_step = previous_steps + step
         # Every step, so the page's charts move with each update (the gradient norm is before clipping).
         elapsed = max(1e-9, time.perf_counter() - started)
-        emit(f"Step {step}/{args.steps} | train loss {value:.4f} | {step / elapsed:.2f} steps/sec | "
-             f"{step * accum * args.batch_size * args.context / elapsed:,.0f} tokens/sec | "
+        ran = step - start
+        emit(f"Step {step}/{args.steps} | train loss {value:.4f} | {ran / elapsed:.2f} steps/sec | "
+             f"{ran * accum * args.batch_size * args.context / elapsed:,.0f} tokens/sec | "
              f"total training step {total_step:,} | learning rate {rate:.8g} | gradient norm {grad_norm:.4f}")
         if step % args.eval_every == 0 or step == args.steps:
             validation = evaluate(model, valid_tokens, valid_weights, args.context, args.batch_size, device)
@@ -444,6 +525,20 @@ def train(args) -> int:
     if done == 0:
         emit("Stopped before the first step finished; nothing was changed.")
         return 0
+    if stop["pause"] and done < args.steps:
+        if not (app_data / CONFIG_FILE).is_file():   # a new model paused before its first check: give it a model to resume
+            save(done, last_validation)
+        state = rng.getstate()
+        write_paused(app_data, model, optimizer, device, {
+            "format": "nodeyard-paused", "version": 1, "step": done, "steps": args.steps, "warmup": args.warmup,
+            "learning_rate": args.learning_rate, "peak": peak, "governor": governor.state(), "kept": kept,
+            "quality_best": best, "last_validation": last_validation, "train_loss": value,
+            "previous_steps": previous_steps, "total_step": previous_steps + done,
+            "python_rng": [state[0], list(state[1]), state[2]], "model_id": model_id,
+            "data_files": [Path(p).name for p in args.data_files], "saved_at": time.time()})
+        emit(f"Paused at step {done:,}/{args.steps:,} (total training step {previous_steps + done:,}). "
+             "Resume carries on from exactly here with the same settings; the saved model is still the best so far.")
+        return 0
     final_validation = evaluate(model, valid_tokens, valid_weights, args.context, args.batch_size, device)
     # Per file, at the end of a run (in a long shared job, about every 5% of it, so the rounds stay quick).
     lp = args.lr_progress
@@ -466,6 +561,7 @@ def train(args) -> int:
     if args.result_file:
         Path(args.result_file).write_text(json.dumps({"validation_loss": final_validation,
                                                       "total_steps": previous_steps + done}), encoding="utf-8")
+    drop_paused(app_data)
     emit(f"Saved checkpoint after {previous_steps + done:,} total training steps to {app_data / MODEL_FILE}")
     if stop["asked"]:
         emit(f"Training stopped early and saved. Final validation loss {final_validation:.4f}.")
@@ -960,6 +1056,8 @@ def main() -> int:
     train_parser.add_argument("--threads", type=int, default=int(os.environ.get("NODEYARD_THREADS", "0")))
     train_parser.add_argument("--assistant-only", action="store_true")
     train_parser.add_argument("--resume", action="store_true")
+    train_parser.add_argument("--resume-paused", dest="resume_paused", action="store_true",
+                              help="carry on a paused run exactly where it stopped (its steps, schedule and state)")
     train_parser.add_argument("--allow-regression", dest="allow_regression", action="store_true",
                               help="when continuing, keep the latest weights even if they are worse than the "
                                    "model you started from (default: keep the best, so a continue can't make it worse)")
