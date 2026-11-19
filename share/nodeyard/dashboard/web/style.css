@@ -1205,6 +1205,7 @@ body.desk-mode:has(#ny-player.on) .desk-page { padding-bottom: 84px; }
 .tr-timecap .btn { margin-left: .4em; }
 .tr-fix { margin: 12px 0 2px; padding: .7em .85em; border-left: 3px solid var(--bad); background: var(--panel2); border-radius: 0 6px 6px 0; line-height: 1.5; }
 .tr-fix p { margin: 0 0 .5em; } .tr-fix p:last-of-type { margin-bottom: .7em; }
+.tr-paused { margin: .6em 0 0; padding: .55em .8em; border-left: 3px solid var(--accent, var(--good)); background: var(--panel2); border-radius: 0 6px 6px 0; line-height: 1.5; }
 .tr-fix b { color: var(--text); } .tr-fix code { font-size: .92em; padding: 0 .3em; border-radius: 4px; background: var(--panel); }
 .tr-machines tr.off td { opacity: .6; } .tr-machines td:first-child { width: 22px; }
 .tr-two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; align-items: start; }

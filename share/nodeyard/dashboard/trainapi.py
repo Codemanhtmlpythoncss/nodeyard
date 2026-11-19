@@ -50,6 +50,12 @@ VAL_RE = re.compile(r"^Validation at step (\d+): loss ([-\d.eE+naif]+) \| total 
 STEP_GRAD_RE = re.compile(r"\| gradient norm ([\d.eE+-]+)\s*$")
 GRAD_RE = re.compile(r"^Gradient norm at step (\d+): ([\d.eE+-]+)")
 MODEL_FILES = ("model.pt", "optimizer.pt", "bpe.json", "model.json")
+# A paused run: the trainer leaves paused.pt (weights + AdamW, often GBs) and paused.json on the machine that trained;
+# only paused.json comes back here, with pause-job.json: the job to start again there to resume it.
+PAUSED_STATE = "paused.json"
+PAUSED_FILE = "paused.pt"
+PAUSE_JOB = "pause-job.json"
+PAUSE_JOB_KEYS = ("data", "settings", "options", "steps", "warmup", "eval_every", "save_every", "quality", "lead", "base_steps")
 CHARS_PER_TOKEN = 3.6        # typical for a learned BPE vocabulary on English; the trainer prints the real figure
 TOKENIZE_CHARS = 300         # the most text the tokenisation walk-through (and the trace) takes
 TOKENIZE_CANDIDATES = 8      # pairs listed per merge step (the count says how many there were)
@@ -1189,12 +1195,54 @@ class Trainer:
                     best = json.load(f)
             except (OSError, ValueError):
                 pass
-            out.append({"name": name, "size": size, "best": best,
+            out.append({"name": name, "size": size, "best": best, "paused": self._paused_info(name),
                         "resume_lr": resume_learning_rate(info.get("parameters"), info.get("validation_loss"), info.get("vocabulary")),
                         **{k: info.get(k) for k in (
                             "parameters", "vocabulary", "layers", "width", "heads", "context", "trained_steps", "validation_loss",
                             "assistant_only", "data_files", "saved_at", "compute_device", "learning_rate", "batch_size", "grad_accum")}})
         return out
+
+    def _paused(self, name):
+        """(the job it was paused from, the trainer's paused.json) for a paused model, else None."""
+        mdir = self._model_dir(name)
+        try:
+            with open(os.path.join(mdir, PAUSE_JOB), "r", encoding="utf-8") as f:
+                job = json.load(f)
+            with open(os.path.join(mdir, PAUSED_STATE), "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if not (isinstance(job, dict) and isinstance(state, dict) and all(k in job for k in PAUSE_JOB_KEYS)):
+            return None
+        return job, state
+
+    def _paused_info(self, name):
+        p = self._paused(name)
+        if not p:
+            return None
+        job, state = p
+        return {"step": state.get("step"), "steps": state.get("steps"), "total_step": state.get("total_step"),
+                "machine": job.get("lead"), "at": state.get("saved_at"), "train_loss": state.get("train_loss"),
+                "validation_loss": state.get("last_validation"), "best": (state.get("kept") or {}).get("loss")}
+
+    def _forget_paused(self, name):
+        """Drop this dashboard's note of a pause; returns the machine that held it (or None)."""
+        p = self._paused(name)
+        for f in (PAUSE_JOB, PAUSED_STATE):
+            self._discard(os.path.join(self._model_dir(name), f))
+        return p[0].get("lead") if p else None
+
+    def _drop_remote_pause(self, model, name):
+        """A new run makes an old pause stale: free its copy on the machine that held it (best effort, in the background)."""
+        try:
+            r = self.pool.ready(name, self._machine_node(name), wait=600)
+            for f in (PAUSED_STATE, PAUSED_FILE):
+                try:
+                    r.call("POST", "/delete", {"path": "models/%s/%s" % (model, f)})
+                except trainpool.PoolError:
+                    pass
+        except trainpool.PoolError:
+            pass
 
     def delete_model(self, body):
         path = self._model_dir(body.get("name"))
@@ -1222,6 +1270,8 @@ class Trainer:
         with self.lock:
             if self.running():
                 raise TrainError("A model is already training. Stop it first.", 409)
+            if body.get("resume_paused"):
+                return self._start_paused(body.get("model"))
             files = body.get("data") or []
             if not isinstance(files, list) or not files:
                 raise TrainError("Choose at least one training file.")
@@ -1299,6 +1349,7 @@ class Trainer:
             if not plan["lead"]:
                 raise TrainError(plan["notes"][0], 409)
             share = plan["share"] if body.get("share", True) else plan["share"][:1]
+            held = self._forget_paused(name) if resume else None   # this run replaces the pause
             log_path = os.path.join(self.logs_dir, "%s-%d.log" % (name, int(time.time())))
             open(log_path, "a").close()
             self.job = {"model": name, "log": log_path, "started": time.time(), "resume": resume, "data": files, "settings": s,
@@ -1310,7 +1361,33 @@ class Trainer:
             self.thread = threading.Thread(target=self._orchestrate, daemon=True)
             self.thread.start()
             self._prune_logs()
+            if held and held != share[0]:   # the trainer on the lead drops its own stale pause
+                threading.Thread(target=self._drop_remote_pause, args=(name, held), daemon=True).start()
             return {"model": name, "machines": share}
+
+    def _start_paused(self, name):
+        """Resume a paused run: the same job on the same machine, carrying on from the step it paused at."""
+        p = self._paused(name)
+        if not p:
+            raise TrainError("%s has no paused run to resume." % name, 404)
+        saved, state = p
+        for f in saved["data"]:
+            if not os.path.isfile(self._data_path(f)):
+                raise TrainError("%s isn't there any more, so the paused run can't resume. Continue it with other text instead." % f, 404)
+        lead = saved["lead"]
+        log_path = os.path.join(self.logs_dir, "%s-%d.log" % (name, int(time.time())))
+        open(log_path, "a").close()
+        self.job = {"model": name, "log": log_path, "started": time.time(), "resume": True, "resume_paused": True,
+                    "data": saved["data"], "settings": saved["settings"], "ended": None, "code": None,
+                    "machines": [lead], "lead": lead, "mode": "single", "options": saved["options"], "steps": saved["steps"],
+                    "base_steps": saved["base_steps"], "quality": saved["quality"], "warmup": saved["warmup"],
+                    "eval_every": saved["eval_every"], "save_every": saved["save_every"], "speeds": {},
+                    "round": 0, "rounds": 0, "phase": "starting", "stop": False, "wjob": None}
+        self._save_job()
+        self.thread = threading.Thread(target=self._orchestrate, daemon=True)
+        self.thread.start()
+        self._prune_logs()
+        return {"model": name, "machines": [lead], "step": state.get("step")}
 
     def _prune_logs(self):
         logs = sorted((os.path.join(self.logs_dir, x) for x in os.listdir(self.logs_dir)), key=os.path.getmtime)
@@ -1323,6 +1400,22 @@ class Trainer:
         self.job["stop"] = True   # the job's loop asks each machine to finish its step and save
         self._save_job()
         return {"stopping": True}
+
+    def pause(self, body=None):
+        """Ask a one-machine run to save its exact state and stop; Resume carries on from there with the same settings."""
+        with self.lock:
+            if not self.running():
+                raise TrainError("Nothing is training.", 409)
+            job = self.job
+            if job.get("mode") != "single":
+                raise TrainError("Pause works when one machine trains. Use Stop and save for a run across machines.", 409)
+            if job.get("stop"):
+                raise TrainError("It is already stopping.", 409)
+            if not job.get("wjob"):
+                raise TrainError("Wait until it has started training, then pause.", 409)
+            job["pause"] = True
+            self._save_job()
+        return {"pausing": True}
 
     def status(self, since=0):
         """The job, its new log lines since line `since`, and every loss point (parsed from the log file)."""
@@ -1472,6 +1565,12 @@ class Trainer:
                     wj["stopped"] = True
                 except trainpool.PoolError:
                     pass
+            elif self.job.get("pause") and not wj.get("paused"):
+                try:
+                    r.call("POST", "/pause", {})
+                    wj["paused"] = True
+                except trainpool.PoolError:
+                    pass
             try:
                 out = r.call("GET", "/log?id=%s&offset=%d" % (wj["id"], wj["offset"]), timeout=30)
                 misses = 0
@@ -1536,7 +1635,9 @@ class Trainer:
                 return 0
             opts = job["options"] + ["--steps", str(job["steps"]), "--warmup", str(job["warmup"]),
                                      "--eval-every", str(job["eval_every"]), "--save-every", str(job["save_every"])]
-            if job["resume"]:
+            if job.get("resume_paused"):
+                opts.append("--resume-paused")
+            elif job["resume"]:
                 opts.append("--resume")
             if job.get("quality"):
                 opts += ["--quality", job["quality"]]
@@ -1560,8 +1661,33 @@ class Trainer:
         job["phase"] = "saving"
         if self._pull_model(r, model):
             say("Model copied back to the dashboard.")
+        self._note_paused(r, job, say)
         self._remember_speed(name, seen)
         return code
+
+    def _note_paused(self, r, job, say):
+        """After a one-machine run: if the trainer paused, keep what Resume needs (its state stays on that machine)."""
+        model = job["model"]
+        try:
+            have = r.ls("models/" + model)
+        except trainpool.PoolError:
+            return
+        if PAUSED_STATE not in have or PAUSED_FILE not in have:
+            self._forget_paused(model)
+            return
+        mdir = self._model_dir(model)
+        os.makedirs(mdir, exist_ok=True)
+        try:
+            r.get_file("models/%s/%s" % (model, PAUSED_STATE), os.path.join(mdir, PAUSED_STATE), have[PAUSED_STATE]["version"])
+        except trainpool.PoolError as e:
+            say("(Paused, but couldn't copy its note here: %s)" % e)
+            return
+        tmp = os.path.join(mdir, PAUSE_JOB + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({k: job.get(k) for k in PAUSE_JOB_KEYS}, f)
+        os.replace(tmp, os.path.join(mdir, PAUSE_JOB))
+        job["paused"] = True
+        say("Paused on %s. Resume carries on from there with the same settings (the paused state stays on that machine)." % job["lead"])
 
     def _delete_remote(self, r, model):
         try:
@@ -2185,6 +2311,7 @@ def register(ctx, args):
         "/api/train/start": wrap(t.start),
         "/api/train/autosetup": wrap(t.autosetup),
         "/api/train/stop": wrap(t.stop),
+        "/api/train/pause": wrap(t.pause),
         "/api/train/chat": wrap(t.chat),
         "/api/train/explain": wrap(t.explain),
         "/api/train/trace": wrap(t.trace),
@@ -2229,6 +2356,7 @@ def widget_status(t, st):
         "running": bool(st.get("running")), "model": job.get("model"), "phase": job.get("phase"),
         "mode": job.get("mode"), "machines": job.get("machines") or [], "started": job.get("started"),
         "ended": job.get("ended"), "code": job.get("code"), "stopping": bool(job.get("stop")) and bool(st.get("running")),
+        "pausing": bool(job.get("pause")) and not job.get("stop") and bool(st.get("running")), "paused": bool(job.get("paused")),
         "step": last.get("step"), "local_step": local or None, "of": of or None,
         "progress": (local / of) if of else None, "eta_seconds": eta,
         "loss": last.get("loss"), "val_loss": val[-1]["loss"] if val else None,

@@ -15,6 +15,7 @@ The dashboard talks to it over HTTP with a shared token (Authorization: Bearer <
   POST /delete {path}
   POST /train {model, data, options}   start training (one job at a time); GET /log?id=&offset= reads its output
   POST /stop                           ask the trainer to finish its step, save and exit
+  POST /pause                          ask the trainer to finish its step, save its exact state (paused.pt/json) and exit
   POST /run {cmd, model, options|parts}   generate, explain or average, and wait for the output
 
 Run as a pod on a cluster node (the dashboard creates it) or as a local process when there is no cluster.
@@ -323,6 +324,13 @@ class Worker:
             return {"stopping": True}
         return {"stopping": False}
 
+    def pause(self):
+        """SIGUSR1 to the trainer alone (it is the session leader; its children, if any, don't pause)."""
+        if self.running() and hasattr(signal, "SIGUSR1"):
+            self.proc.send_signal(signal.SIGUSR1)
+            return {"pausing": True}
+        return {"pausing": False}
+
     def run(self, body):
         if self.deps.get("state") != "ready":
             raise RuntimeError("PyTorch isn't ready on this machine yet")
@@ -513,6 +521,8 @@ def make_handler(w, token):
                     self.send(200, w.train(b))
                 elif path == "/stop":
                     self.send(200, w.stop())
+                elif path == "/pause":
+                    self.send(200, w.pause())
                 elif path == "/run":
                     self.send(200, w.run(b))
                 elif path == "/pull":

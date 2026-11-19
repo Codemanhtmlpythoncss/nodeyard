@@ -1515,11 +1515,12 @@ Assistant: game tonight?</pre></div>
           <label class="tr-field inline"><span>Model</span><select class="select" data-tr-act="model-pick"><option value="">New model…</option>${raw(ov.models.map((m) => '<option value="' + esc(m.name) + '"' + (TR.resume && TR.model === m.name ? " selected" : "") + ">Continue " + esc(m.name) + "</option>").join(""))}</select></label>
           ${TR.resume ? "" : html`<input class="input" data-tr-act="model-name" placeholder="name (optional)" value="${TR.model}" style="width:180px">`}
           <span class="spacer"></span>
-          ${run ? html`<button class="btn danger" data-tr-act="stop" ${TR.status && TR.status.job && TR.status.job.stop ? "disabled" : ""}>${TR.status && TR.status.job && TR.status.job.stop ? "Stopping…" : "Stop and save"}</button>` : html`<button class="btn primary" data-tr-act="start" ${ov.plan.lead && TR.sel.length ? "" : "disabled"}>${TR.resume ? "Continue training" : "Start training"}${ov.plan.lead ? " on " + (TR.together !== "fastest" && ov.plan.share.length > 1 ? ov.plan.share.length + " machines" + (TR.together === "race" ? " (parallel)" : "") : ov.plan.lead) : ""}</button>`}</div>
+          ${run ? html`${pauseBtn()}<button class="btn danger" data-tr-act="stop" ${TR.status && TR.status.job && TR.status.job.stop ? "disabled" : ""}>${TR.status && TR.status.job && TR.status.job.stop ? "Stopping…" : "Stop and save"}</button>` : html`${pausedOf(TR.resume && TR.model) ? html`<button class="btn primary" data-tr-resume="${TR.model}">Resume from step ${n0(pausedOf(TR.model).step)}</button>` : ""}<button class="btn${pausedOf(TR.resume && TR.model) ? "" : " primary"}" data-tr-act="start" ${ov.plan.lead && TR.sel.length ? "" : "disabled"}>${TR.resume ? "Continue training" : "Start training"}${ov.plan.lead ? " on " + (TR.together !== "fastest" && ov.plan.share.length > 1 ? ov.plan.share.length + " machines" + (TR.together === "race" ? " (parallel)" : "") : ov.plan.lead) : ""}</button>`}</div>
         ${TR.resume ? (() => {
           const cm = (ov.models || []).find((x) => x.name === TR.model) || {}, b = cm.best;
           return html`
           <label class="row small" style="margin:.5em 0 0;gap:.4em;align-items:flex-start"><input type="checkbox" data-tr-act="keep-best" ${TR.keepBest ? "checked" : ""}> <span><b>Keep the best</b> — only replace the saved model if this run beats its validation loss${b && b.validation_loss != null ? " of " + f(b.validation_loss, 4) : cm.validation_loss != null ? " of " + f(cm.validation_loss, 4) : ""}. If continuing doesn't help, the earlier (better) model is kept. Untick to keep the latest weights even if they're worse.</span></label>
+          ${cm.paused ? pausedNote(cm.paused) : ""}
           ${b ? html`<p class="faint small">Best parameters saved so far: validation <b>${f(b.validation_loss, 4)}</b>${b.perplexity != null ? " (perplexity " + f(b.perplexity, 3) + ")" : ""}${b.train_loss != null ? " · train " + f(b.train_loss, 4) : ""}${b.total_steps != null ? " · at " + n0(b.total_steps) + " total steps" : ""}.</p>` : ""}
           <p class="faint small">Continuing keeps the saved model's shape and tokenizer (V, T, d, L, h) and AdamW's running averages; the other settings apply. The learning rate is set from this model's own stats — its size and how far it's already trained (near the full peak when it's barely trained, down to about 30% once it's well-trained) — not from the last run's rate, so continuing many times keeps it learning instead of creeping toward zero. You can still edit it.</p>`;
         })() : ""}</section>
@@ -1624,13 +1625,30 @@ Assistant: game tonight?</pre></div>
       ${p.notes.filter((n) => p.lead).map((n) => html`<p class="faint small">${n}</p>`)}
       <p class="faint small">Training runs on ${ov.mode === "cluster" ? "the chosen nodes, each in a pod (namespace nodeyard-train)" : "this machine, in a separate worker process"}; models are copied back here. The lesson “Training on several machines” explains how sharing works.</p></section>`;
   }
+  // Pause: a one-machine run saves its exact state (weights, AdamW, step, learning-rate schedule) on that machine and
+  // stops; Resume starts the same job there and carries on from that step. Runs across machines can only Stop and save.
+  function pausedOf(name) {
+    const m = name && TR.ov ? (TR.ov.models || []).find((x) => x.name === name) : null;
+    return m && m.paused ? m.paused : null;
+  }
+  function pauseBtn() {
+    const j = (TR.status && TR.status.job) || {};
+    if (j.mode && j.mode !== "single")
+      return html`<span class="faint small">Pause needs a one-machine run</span><button class="btn" disabled title="Pause works when one machine trains. This run uses ${(j.machines || []).length} machines: use Stop and save.">Pause</button>`;
+    const pausing = j.pause && !j.stop;
+    return html`<button class="btn" data-tr-act="pause" title="Save the exact state on ${j.lead || "the machine"} and stop. Resume carries on from this step with the same settings." ${pausing || j.stop || !j.wjob ? "disabled" : ""}>${pausing ? "Pausing…" : "Pause"}</button>`;
+  }
+  function pausedNote(p) {
+    return html`<p class="small tr-paused"><b>Paused</b> at step ${n0(p.step)} of ${n0(p.steps)} (total training step ${n0(p.total_step)}) on <b>${p.machine}</b>${p.at ? ", " + new Date(p.at * 1000).toLocaleString() : ""}.
+      <b>Resume</b> carries on from exactly there with the same settings (the saved state stays on ${p.machine}). <b>Continue training</b> uses the settings above instead and drops the paused run.</p>`;
+  }
   function savedModels() {
     const ms = TR.ov ? TR.ov.models : [];
     return html`<section class="card tr-span2"><h2 class="tr-h">Saved models</h2>${!ms.length ? html`<div class="empty small">None yet: train one above.</div>` :
       html`<div class="tr-scroll"><table class="tr-key"><tr><th>Name</th><th>Weights</th><th>Shape</th><th>Steps</th><th>Validation loss</th><th>Trained on</th><th></th></tr>
-      ${ms.map((m) => html`<tr><td><b>${m.name}</b></td><td>${n0(m.parameters)}</td><td>V ${n0(m.vocabulary)} · T ${m.context} · d ${m.width} · L ${m.layers} · h ${m.heads}</td><td>${n0(m.trained_steps)}</td>
+      ${ms.map((m) => html`<tr><td><b>${m.name}</b></td><td>${n0(m.parameters)}</td><td>V ${n0(m.vocabulary)} · T ${m.context} · d ${m.width} · L ${m.layers} · h ${m.heads}</td><td>${n0(m.trained_steps)}${m.paused ? html` <span class="chip small" title="paused on ${m.paused.machine}">paused at ${n0(m.paused.step)}/${n0(m.paused.steps)}</span>` : ""}</td>
         <td>${f(m.validation_loss, 4)}${m.validation_loss ? html` <span class="faint">(perplexity ${f(Math.exp(m.validation_loss), 3)})</span>` : ""}</td><td class="small">${(m.data_files || []).join(", ")}</td>
-        <td class="row"><button class="btn small" data-tr-chatwith="${m.name}">Chat</button><button class="btn small" data-tr-inspect="${m.name}">Inspect</button><button class="btn small danger" data-tr-delmodel="${m.name}">Delete</button></td></tr>`)}</table></div>`}</section>`;
+        <td class="row">${m.paused ? html`<button class="btn small primary" data-tr-resume="${m.name}" ${(TR.status ? TR.status.running : TR.ov.running) ? "disabled" : ""}>Resume</button>` : ""}<button class="btn small" data-tr-chatwith="${m.name}">Chat</button><button class="btn small" data-tr-inspect="${m.name}">Inspect</button><button class="btn small danger" data-tr-delmodel="${m.name}">Delete</button></td></tr>`)}</table></div>`}</section>`;
   }
 
   // The failed run's output shows the Kubernetes control plane (API server on :6443) was
@@ -1658,7 +1676,7 @@ Assistant: game tonight?</pre></div>
     const total = +j.steps || 0, frac = total && last.step ? Math.min(1, (last.step - (+(j.base_steps || 0))) / total) : last.of ? last.local / last.of : 0;
     const eta = last.sps && total ? Math.max(0, total * (1 - frac)) / last.sps : last.sps ? (last.of - last.local) / last.sps : null;
     const where = (j.machines || []).join(" + "), rounds = j.mode === "shared" && j.rounds ? " · round " + j.round + " of " + j.rounds : j.mode === "race" ? " · parallel" : "";
-    if (chip) setHTML(chip, st.running ? html`<span class="chip good"><i class="dot good"></i>${j.phase && j.phase !== "training" ? j.phase : "training"} ${j.model}${where ? " on " + where : ""}${rounds}</span>` : html`<span class="chip">${j.code === 0 ? "finished" : j.code == null ? "stopped" : "failed (exit " + j.code + ")"} · ${j.model}</span>`);
+    if (chip) setHTML(chip, st.running ? html`<span class="chip good"><i class="dot good"></i>${j.phase && j.phase !== "training" ? j.phase : "training"} ${j.model}${where ? " on " + where : ""}${rounds}</span>` : html`<span class="chip">${j.paused && j.code === 0 ? "paused" : j.code === 0 ? "finished" : j.code == null ? "stopped" : "failed (exit " + j.code + ")"} · ${j.model}</span>`);
     const mt = st.metrics || {}, lph = mt.loss_per_hour;
     setHTML(live, html`<div class="tr-progress big"><i style="width:${(frac * 100).toFixed(1)}%"></i></div>
       <div class="tr-stats">${[["Step", last.local ? (total ? n0(Math.round(frac * total)) + " / " + n0(total) : n0(last.local) + " / " + n0(last.of)) : j.phase || "starting…"], ["Time left", st.running && eta != null ? dur(eta) : "–"], ["Training loss", f(last.loss, 4)], ["Avg loss (recent)", mt.avg_loss != null ? f(mt.avg_loss, 4) : "–"], ["Validation loss", f(val, 4)],
@@ -2003,7 +2021,7 @@ Assistant: game tonight?</pre></div>
     if (S.view !== "train" || !e.target.closest("#tr-root")) return;
     const ev = e.target.closest("[data-ev-op],[data-ev-w],[data-ev-cell]");
     if (ev) { evClick(ev); return; }
-    const t = e.target.closest("[data-tr-tab],[data-tr-lesson],[data-tr-neuron],[data-tr-nett],[data-tr-act],[data-tr-check],[data-tr-del],[data-tr-delmodel],[data-tr-chatwith],[data-tr-inspect],[data-tr-get],[data-tr-use],[data-tr-qdel],[data-tr-together]");
+    const t = e.target.closest("[data-tr-tab],[data-tr-lesson],[data-tr-neuron],[data-tr-nett],[data-tr-act],[data-tr-check],[data-tr-del],[data-tr-delmodel],[data-tr-chatwith],[data-tr-resume],[data-tr-inspect],[data-tr-get],[data-tr-use],[data-tr-qdel],[data-tr-together]");
     if (!t || t.tagName === "SELECT" || t.tagName === "INPUT" && t.type !== "button") return;
     const d = t.dataset;
     if (d.trTab) { e.preventDefault(); TR.tab = d.trTab; store.set("train.tab", TR.tab); if (d.trInside) store.set("train.inside", d.trInside); paint(); window.scrollTo(0, 0); if (TR.tab === "inside" && store.get("train.inside", "network") === "network") netAuto(); return; }
@@ -2018,6 +2036,11 @@ Assistant: game tonight?</pre></div>
     if (d.trDel) { if (confirm("Delete " + d.trDel + "?")) { if (await post("/api/train/data/delete", { name: d.trDel })) { if (TR.check && TR.check.name === d.trDel) TR.check = null; TR.sel = TR.sel.filter((x) => x !== d.trDel); saveSel(); loadOverview(); } } return; }
     if (d.trDelmodel) { if (confirm("Delete the model " + d.trDelmodel + "? This can't be undone.")) { if (await post("/api/train/model/delete", { name: d.trDelmodel })) loadOverview(); } return; }
     if (d.trChatwith) { TR.chat.model = d.trChatwith; TR.chat.history = []; TR.tab = "chat"; store.set("train.tab", "chat"); paint(); return; }
+    if (d.trResume) {
+      const r = await post("/api/train/start", { model: d.trResume, resume_paused: true });
+      if (r) { toast("Resuming " + r.model + " at step " + n0(r.step) + " on " + r.machines[0]); TR.lines = []; TR.since = 0; TR.status = null; await loadOverview(); poll(); }
+      return;
+    }
     if (d.trInspect) { TR.exModel = d.trInspect; TR.tab = "inside"; store.set("train.tab", "inside"); paint(); return; }
     const a = d.trAct;
     if (a === "glossary") { const el = $("#tr-glossary"); if (el) el.scrollIntoView({ block: "start", behavior: "smooth" }); }
@@ -2077,12 +2100,14 @@ Assistant: game tonight?</pre></div>
       toast((cont ? "Set up to continue " + r.resume + " on " : "Set up on ") + (TR.machines.length || 1) + " machine" + (TR.machines.length === 1 ? "" : "s") + (TR.both ? " (GPU + CPU)" : "") + ". Review and press " + (cont ? "Continue training." : "Start."));
     }
     else if (a === "start") {
+      if (pausedOf(TR.resume && TR.model) && !confirm("Continue " + TR.model + " with the settings above?\n\nThis drops its paused run. To carry on the paused run as it was, press Resume instead.")) return;
       const body = { data: TR.sel, settings: TR.form, resume: TR.resume, keep_best: TR.resume ? TR.keepBest : undefined, model: TR.resume ? TR.model : (TR.model || "").trim() || undefined, machines: TR.machines.length ? TR.machines : undefined, share: TR.together !== "fastest", together: TR.together, both: TR.both,
         quality: TR.q.on ? { on: true, prompts: qPrompts().filter((p) => p.prompt.trim()).map((p) => ({ prompt: p.prompt, answer: p.answer || "", expect: String(p.expect || "").split(",").map((x) => x.trim()).filter(Boolean) })), pass: TR.q.pass, target_loss: TR.q.target_loss, give_up: TR.q.give_up || 10, match: TR.q.match } : undefined };
       const r = await post("/api/train/start", body);
       if (r) { toast("Training " + r.model); TR.lines = []; TR.since = 0; TR.status = null; TR.model = TR.resume ? TR.model : ""; saveForm(); await loadOverview(); poll(); }
     }
     else if (a === "stop") { if (await post("/api/train/stop", {})) toast("Stopping: it saves after the current step."); }
+    else if (a === "pause") { if (await post("/api/train/pause", {})) { toast("Pausing: it saves the exact state after the current step."); poll(); } }
     else if (a === "fix-cluster") {
       if (!confirm("Restart Kubernetes on every node to bring the control plane back?\n\n• Restarts k3s and the nodeyard services on each reachable node — workers first, then this server.\n• It runs here on the server, so it works even while the API server is unreachable.\n• Offline nodes are skipped. Containers keep running; the cluster is briefly offline.\n\nAfter it finishes, press Start to train again.")) return;
       U.startJob("restart-cluster", {}, () => { toast("Cluster restarted — press Start to train again."); loadOverview(); });
