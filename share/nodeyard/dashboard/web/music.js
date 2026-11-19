@@ -413,6 +413,11 @@
     rep.title = "Loop: " + repeatLabel + " (click to change)";
     rep.setAttribute("aria-label", rep.title);
     rep.setAttribute("aria-pressed", M.repeat === "off" ? "false" : "true");
+    // (the mode on the button itself, for now-playing readers outside the page such as LiveWall: "m-one"/"m-all" is
+    // the class SoundCloud's own loop button uses)
+    rep.dataset.repeat = M.repeat;
+    rep.classList.toggle("m-one", M.repeat === "one");
+    rep.classList.toggle("m-all", M.repeat === "all");
     const repeatState = $("#ny-repeat-state"); if (repeatState) repeatState.textContent = repeatLabel;
     if (repeatState) repeatState.classList.toggle("on", M.repeat !== "off");
     const current = M.queue[M.idx];
