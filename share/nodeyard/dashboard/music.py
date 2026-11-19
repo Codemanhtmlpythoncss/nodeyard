@@ -258,7 +258,7 @@ class Music:
                               "title": str(track.get("title") or "Untitled")[:300],
                               "artist": str(track.get("artist") or "SoundCloud")[:200],
                               "duration_ms": duration,
-                              "artwork_url": track.get("artwork_url") if self._soundcloud_art_url(track.get("artwork_url")) else ""})
+                              "artwork_url": self._sc_cover(track.get("artwork_url"))})
             elif track.get("path") and self.resolve(str(track.get("path"))):
                 queue.append({"kind": "local", "path": str(track["path"])[:1000],
                               "name": str(track.get("name") or track["path"])[:300],
@@ -752,15 +752,91 @@ class Music:
             if len(url) > 2000:
                 return False
             parsed = urllib.parse.urlparse(url)
-            return (parsed.scheme == "https" and parsed.hostname == "i1.sndcdn.com" and not parsed.username and
+            return (parsed.scheme == "https" and parsed.hostname in ("i1.sndcdn.com", "a1.sndcdn.com") and not parsed.username and
                     not parsed.password and parsed.port in (None, 443) and len(parsed.path) < 1000)
         except ValueError:
             return False
 
-    def artwork(self, path="", image_url=""):
-        """Return an approved SoundCloud cover or a cover embedded in a confined local track."""
+    # SoundCloud's cover sizes ("artworks-…-large.jpg"); every one has a 500 px JPEG beside it
+    _SC_ART_SIZE = re.compile(r"^(/(?:artworks|avatars)-[^/]*?)-(?:original|mini|tiny|small|badge|t67x67|large|t300x300|crop|t500x500)\.(?:jpg|png)$")
+
+    @classmethod
+    def _sc_cover(cls, url):
+        """An approved SoundCloud cover, at 500 px: "original" can be a many-MB PNG (past the 2 MB the cover proxy takes)
+        and "large", SoundCloud's own pick, is 100 px. Empty when the link isn't an approved cover."""
+        url = str(url or "")
+        if not cls._soundcloud_art_url(url):
+            return ""
+        parsed = urllib.parse.urlparse(url)
+        sized = cls._SC_ART_SIZE.match(parsed.path)
+        if sized:
+            url = parsed._replace(path=sized.group(1) + "-t500x500.jpg").geturl()
+        return url
+
+    @classmethod
+    def _sc_entry_cover(cls, e):
+        """The cover in a yt-dlp entry. A flat list (search, playlist, related) only fills "thumbnails", never "thumbnail"."""
+        urls = [e.get("thumbnail")] + [t.get("url") for t in reversed(e.get("thumbnails") or []) if isinstance(t, dict)]
+        return next((c for c in map(cls._sc_cover, urls) if c), "")
+
+    _OEMBED_SLOTS = threading.BoundedSemaphore(4)
+
+    def _sc_track_cover(self, track_url):
+        """The cover of a SoundCloud track saved without one (search results kept none before), from SoundCloud's oEmbed.
+        The answer, cover or none, is kept a week; a network fault isn't kept."""
+        track_url = str(track_url or "").strip()
+        if self.demo or len(track_url) > 1000 or not self._valid_sc_url(track_url):
+            return ""
         folder = os.path.join(self.cache_dir(), "covers")
-        if image_url:
+        ref = os.path.join(folder, hashlib.sha256(("track:" + track_url).encode("utf-8")).hexdigest() + ".src")
+        try:
+            if time.time() - os.path.getmtime(ref) < 7 * 86400:
+                with open(ref, "r", encoding="ascii") as f:
+                    return self._sc_cover(f.read(2100))
+        except (OSError, ValueError):
+            pass
+
+        class SameSite(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, request, fp, code, message, headers, new_url):
+                p = urllib.parse.urlparse(new_url)
+                if p.scheme != "https" or p.hostname != "soundcloud.com" or p.username or p.password or p.port not in (None, 443):
+                    return None
+                return super().redirect_request(request, fp, code, message, headers, new_url)
+
+        if not self._OEMBED_SLOTS.acquire(timeout=15):
+            return ""
+        try:
+            request = urllib.request.Request("https://soundcloud.com/oembed?" + urllib.parse.urlencode({"format": "json", "url": track_url}),
+                                             headers={"User-Agent": "Nodeyard Music/1.0", "Accept": "application/json"})
+            with urllib.request.build_opener(SameSite).open(request, timeout=8) as response:
+                data = json.loads(response.read(65536) or b"{}")
+            cover = self._sc_cover(data.get("thumbnail_url")) if isinstance(data, dict) else ""
+        except urllib.error.HTTPError as e:
+            e.close()
+            if e.code not in (403, 404):      # (gone or private: there is no cover to find, so that is kept)
+                return ""
+            cover = ""
+        except (OSError, ValueError, urllib.error.URLError):
+            return ""
+        finally:
+            self._OEMBED_SLOTS.release()
+        try:
+            os.makedirs(folder, mode=0o700, exist_ok=True)
+            with open(ref, "w", encoding="ascii") as f:
+                os.chmod(ref, 0o600)
+                f.write(cover)
+        except (OSError, UnicodeEncodeError):
+            pass
+        return cover
+
+    def artwork(self, path="", image_url="", track_url=""):
+        """Return an approved SoundCloud cover (by its link, or looked up for a SoundCloud track) or a cover embedded in a
+        confined local track."""
+        folder = os.path.join(self.cache_dir(), "covers")
+        if image_url or (track_url and not path):
+            image_url = self._sc_cover(image_url) if image_url else self._sc_track_cover(track_url)
+            if not image_url:
+                return None, ""
             if not self._soundcloud_art_url(image_url):
                 return None, ""
             key = hashlib.sha256(image_url.encode("utf-8")).hexdigest()
@@ -908,7 +984,7 @@ class Music:
             rows.append({"title": str(e.get("title") or "Untitled")[:300],
                          "artist": str(e.get("uploader") or e.get("channel") or e.get("uploader_id") or "Unknown artist")[:200],
                          "duration_ms": max(0, duration_ms), "url": url[:1000],
-                         "artwork_url": e.get("thumbnail") if self._soundcloud_art_url(e.get("thumbnail")) else ""})
+                         "artwork_url": self._sc_entry_cover(e)})
         if nodrm and rows:
             # (one batched look-up instead of a yt-dlp per result: eight at once ran the dashboard out of memory)
             playable = self._sc_details([t["url"] for t in rows], slot="user")
@@ -1069,16 +1145,10 @@ class Music:
             dur = int(float(e.get("duration") or 0) * 1000)
         except (TypeError, ValueError):
             dur = 0
-        thumb = e.get("thumbnail") or ""
-        if not thumb:
-            for t in reversed(e.get("thumbnails") or []):
-                if isinstance(t, dict) and self._soundcloud_art_url(t.get("url")):
-                    thumb = t["url"]
-                    break
         # (a related list only gives title and link: the artist is in the link until the details arrive)
         slug = urllib.parse.urlparse(url).path.strip("/").split("/")[0]
         return {"url": url, "title": str(e.get("title") or "")[:300], "artist": str(e.get("uploader") or "")[:200] or slug.replace("-", " "),
-                "duration_ms": max(0, dur), "artwork_url": thumb if self._soundcloud_art_url(thumb) else "",
+                "duration_ms": max(0, dur), "artwork_url": self._sc_entry_cover(e),
                 "genres": [str(g)[:40] for g in (e.get("genres") or [])][:5], "tags": [str(t)[:40] for t in (e.get("tags") or [])][:12],
                 "likes": int(e.get("like_count") or 0)}
 
@@ -1271,7 +1341,7 @@ class Music:
                "artist": str(track.get("artist") or "Unknown artist")[:200],
                "duration_ms": max(0, min(86_400_000, duration_ms)),
                "url": str(track["url"])[:1000],
-               "artwork_url": track.get("artwork_url") if self._soundcloud_art_url(track.get("artwork_url")) else "",
+               "artwork_url": self._sc_cover(track.get("artwork_url")),
                "added": int(time.time())}
         with self.lock:
             cfg = self.cfg()
@@ -1493,7 +1563,7 @@ class Music:
             rows.append({"title": str(e.get("title") or "Untitled")[:300],
                          "artist": str(e.get("uploader") or e.get("channel") or e.get("uploader_id") or "")[:200],
                          "duration_ms": max(0, duration_ms), "url": u[:1000],
-                         "artwork_url": e.get("thumbnail") if self._soundcloud_art_url(e.get("thumbnail")) else ""})
+                         "artwork_url": self._sc_entry_cover(e)})
         title = str((data.get("title") if isinstance(data, dict) else "") or "Playlist")[:200]
         if not rows:
             return False, "No playable tracks found at that URL.", []
@@ -1523,7 +1593,7 @@ class Music:
                 dur = 0
             return {"kind": "sc", "url": str(t["url"])[:1000], "title": str(t.get("title") or "Untitled")[:300],
                     "artist": str(t.get("artist") or "")[:200], "duration_ms": dur,
-                    "artwork_url": t.get("artwork_url") if self._soundcloud_art_url(t.get("artwork_url")) else ""}
+                    "artwork_url": self._sc_cover(t.get("artwork_url"))}
         if t.get("path") and self.resolve(t.get("path")):
             return {"kind": "local", "path": str(t["path"])[:1000], "name": str(t.get("name") or t["path"])[:300],
                     "folder": str(t.get("folder") or "")[:300]}
@@ -1704,7 +1774,7 @@ def register(ctx, args):
         return h._json({"ok": ok, "title": msg if ok else "", "error": "" if ok else msg, "tracks": tracks}, 200 if ok else 400)
 
     def _art(h, q):
-        data, ctype = music.artwork(q.get("path", [""])[0], q.get("url", [""])[0])
+        data, ctype = music.artwork(q.get("path", [""])[0], q.get("url", [""])[0], q.get("track", [""])[0])
         # a song's cover doesn't change: the browser keeps it (and keeps "there is none" for an hour) instead of asking
         # again every time a list is drawn
         if not data:

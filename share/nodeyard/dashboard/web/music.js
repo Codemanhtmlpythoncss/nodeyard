@@ -91,7 +91,12 @@
       ".ny-viz-top{display:block;width:100%;height:56px;margin:2px 0 14px;border-radius:12px;background:linear-gradient(180deg,rgba(255,85,0,.05),rgba(125,160,200,.06))}" +
       "@media (max-width:760px){#ny-player{bottom:56px;gap:3px;padding-left:10px;padding-right:10px}body.desk-mode #ny-player{bottom:0}#ny-player .np{max-width:88px}#ny-player canvas,#ny-player label,#ny-player #ny-copy,#ny-player #ny-repeat-state,#ny-player #ny-sleep-state,#ny-player #ny-sleep,#ny-player #ny-vol,#ny-player #ny-vol-i,#ny-player .t{display:none}#ny-player .seek{min-width:40px;overflow:hidden}#ny-player .seek input{min-width:0;width:100%}.sc-discover-card{height:min(70dvh,720px);min-height:400px}.sc-discover-cover{top:10%;width:min(68%,300px)}.sc-discover-meta{left:18px;bottom:62px}.sc-discover-actions{right:12px;bottom:118px}}";
     document.head.appendChild(style);
-    document.addEventListener("error", (e) => { if (e.target && e.target.matches && e.target.matches(".sc-cover img")) e.target.remove(); }, true);
+    document.addEventListener("error", (e) => {
+      const img = e.target;
+      if (!img || !img.matches) return;
+      if (img.matches(".sc-cover img")) img.remove();
+      else if (img.matches(".sc-discover-cover img")) img.replaceWith(Object.assign(document.createElement("span"), { textContent: "♫", ariaHidden: "true" }));
+    }, true);
     // SoundCloud-ish accent available as --sc (falls back to orange).
     document.documentElement.style.setProperty("--sc", getComputedStyle(document.documentElement).getPropertyValue("--sc") || "#ff5500");
     bar = document.createElement("div");
@@ -1292,6 +1297,8 @@
   function artworkSource(t) {
     if (t && t.artwork_url) return "/api/music/art?url=" + encodeURIComponent(t.artwork_url);
     if (t && t.path) return "/api/music/art?path=" + encodeURIComponent(t.path);
+    // (a SoundCloud song saved without a cover: the server looks it up once and remembers it)
+    if (t && t.url && /^https?:\/\/([a-z]+\.)?soundcloud\.com\//i.test(t.url)) return "/api/music/art?track=" + encodeURIComponent(t.url);
     return "";
   }
 
