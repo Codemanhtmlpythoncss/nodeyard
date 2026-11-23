@@ -52,6 +52,16 @@ ASSET_REF = re.compile(r'(\b(?:src|href)=")([A-Za-z0-9_.-]+\.(?:js|css|webmanife
 IMMUTABLE = "private, max-age=31536000, immutable"
 # Needed to show the sign-in page; everything else waits for a session.
 PUBLIC_FILES = ("/login", "/login.html", "/login.js", "/style.css", "/theme.js", "/manifest.webmanifest", "/icon-180.png", "/icon-512.png")
+
+# The public control API (`nodeyard public on --api`): Tailscale Funnel hands
+# https://NAME.ts.net:10000/api/v1/... to /public-api/v1/... here. Only listing,
+# loading and chatting with models answer there, and still only with the server
+# API key; the rest of the dashboard and its API stay off the internet.
+PUBLIC_API_PREFIX = "/public-api/v1"
+PUBLIC_API = {
+    "GET": ("/api/v1/status", "/api/v1/targets", "/api/v1/models", "/api/v1/jobs"),
+    "POST": ("/api/v1/chat/completions", "/api/v1/models/load", "/api/v1/models/unload"),
+}
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; "
        "connect-src 'self'; frame-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 # Voice chat needs the microphone; nothing here needs the rest.
@@ -348,6 +358,28 @@ class Handler(BaseHTTPRequestHandler):
             return rem.recognised(self._cookie(authmod.REMEMBER_COOKIE), ip, rem.mac_for(ip))
         return False
 
+    def _public_api(self, method):
+        """Turn a public control-API request into its /api/v1/ path. False when refused (answer sent)."""
+        u = urllib.parse.urlsplit(self.path)
+        if u.path != PUBLIC_API_PREFIX and not u.path.startswith(PUBLIC_API_PREFIX + "/"):
+            return True
+        rest = u.path[len(PUBLIC_API_PREFIX):]
+        if rest.startswith("/api/v1/"):   # a proxy that kept its mount point on the path
+            rest = rest[len("/api/v1"):]
+        path = "/api/v1" + rest
+        refuse = None
+        if self.ctx.auth is None:   # no password = no keys checked: never let the internet in
+            refuse = ("Set a dashboard password before using the public API.", 403)
+        elif path not in PUBLIC_API.get(method, ()):
+            refuse = ("Not available from the public API.", 404)
+        if refuse:
+            if method == "POST":
+                self._drain_body()   # keep a keep-alive connection usable
+            self._json({"ok": False, "error": refuse[0]}, refuse[1])
+            return False
+        self.path = path + ("?" + u.query if u.query else "")
+        return True
+
     def _gate(self, public=False):
         """True if the request may go on; otherwise the answer has been sent."""
         v1 = getattr(self.ctx, "v1_gate", None)
@@ -405,6 +437,8 @@ class Handler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self):
+        if not self._public_api("GET"):
+            return
         u = urllib.parse.urlparse(self.path)
         path, q = u.path, urllib.parse.parse_qs(u.query)
         if not self._gate(public=path in PUBLIC_FILES or path in ("/api/health", "/api/auth")):
@@ -556,6 +590,8 @@ class Handler(BaseHTTPRequestHandler):
     # -- POST ----------------------------------------------------------------
 
     def do_POST(self):
+        if not self._public_api("POST"):
+            return
         path = urllib.parse.urlparse(self.path).path
         srv = self.ctx
         if path == "/api/login":
