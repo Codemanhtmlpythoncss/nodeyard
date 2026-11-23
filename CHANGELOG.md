@@ -9,6 +9,12 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Public control API: list, load and chat with models from the internet, dashboard stays private.** `nodeyard public on --api` now also publishes a short list of `/api/v1` calls at `https://NAME.ts.net:10000/api/v1` (next to the model API at `/v1`):
+  - `GET status`, `targets`, `models`, `jobs`, and `POST models/load`, `models/unload`, `chat/completions`;
+  - the server API key is always needed, and wrong keys are rate-limited as before;
+  - every other path answers 404, so chats, settings, downloads and the dashboard page are not reachable;
+  - it's refused (403) when the dashboard has no password, and is skipped when the dashboard doesn't run on this machine or listens only on the LAN.
+
 - **Cluster stats over the server API key.** `GET /api/v1/cluster` gives every machine's CPU, memory, disk, network, temperature and live GPUs (use, memory, temperature, power), the cluster totals, open alerts by level, and a short history per machine (`?points=`, 60 by default) in one small JSON reply. It reads the dashboard's last poll, so desktop widgets (such as LiveWall's Nodeyard widgets) and scripts can call it every few seconds. Read-only.
 
 - **Train AI over the server API key.** `GET /api/v1/train/status` (a compact summary to poll, with a thinned loss curve), `GET /api/v1/train/models`, `POST /api/v1/train/chat` and `POST /api/v1/train/stop`, so desktop widgets (such as LiveWall's Nodeyard widgets) and scripts can follow training and chat with a trained model without the dashboard password. Starting runs and deleting models still need the page.
