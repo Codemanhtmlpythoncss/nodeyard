@@ -275,16 +275,17 @@
     return html`<p class="muted small" style="margin-top:0">Reach these from anywhere on the internet (a phone on mobile data, a work laptop), with no Tailscale needed there. Through Tailscale Funnel, with a real HTTPS certificate.</p>
       ${row("Dashboard", p.dashboard, "dashboard", "Asks for the dashboard password. Wrong passwords from the internet can't lock you out at home.")}
       ${row("Model API", p.api, "api", "Every request from the internet needs the server API key, even if your own network doesn't.")}
-      ${portRow(p.ports || {})}
+      ${portRow(p.ports || {}, !!p.dashboard)}
       <p class="faint small">Anyone can find a public address, so use a strong dashboard password (Sign-in → Make a random one). Turning the dashboard on needs one.</p>`;
   }
-  function portRow(ports) {
+  function portRow(ports, dashPublic) {
     const pick = (id, cur) => html`<select id="${id}">${[443, 8443, 10000].map((n) => html`<option value="${n}" ${String(n) === String(cur) ? raw("selected") : ""}>${n}</option>`)}</select>`;
+    // the dashboard's own public port only matters while the dashboard is public
     return html`<div class="row wrap" style="gap:8px;margin:12px 0 4px;align-items:center"><b style="min-width:92px">Ports</b>
         <label class="small">Model API ${pick("st-port-api", ports.api || 10000)}</label>
-        <label class="small">Dashboard ${pick("st-port-dash", ports.dashboard || 8443)}</label>
-        <span class="grow"></span><button class="btn small" data-st="public-port">Save ports</button></div>
-      <div class="faint small" style="margin:0 0 8px 100px">Funnel allows 443, 8443 and 10000. School and work Wi-Fi often only lets 443 out. Whatever is public moves at once; with 443 in use, the tailnet-only https:// address moves to port 9443.</div>`;
+        ${dashPublic ? html`<label class="small">Dashboard ${pick("st-port-dash", ports.dashboard || 8443)}</label>` : ""}
+        <span class="grow"></span><button class="btn small" data-st="public-port" data-dash="${ports.dashboard || 8443}">Save ports</button></div>
+      <div class="faint small" style="margin:0 0 8px 100px">Funnel allows 443, 8443 and 10000. School and work Wi-Fi often only lets 443 out. The model API on 443 shares it with this dashboard's tailnet address, which stays at https://${location.hostname}/.</div>`;
   }
   V.settings = {
     build() { NY.freshHTML($("#view"), html`<div id="set-body"></div>`); renderSettings(); loadSettings().then(renderSettings); },
@@ -390,17 +391,20 @@
         if (a === "https-on" && u) toast("The secure address is ready: " + u);
       });
     } else if (a === "public-port") {
-      const api = $("#st-port-api").value, dashboard = $("#st-port-dash").value;
-      if (api === dashboard) { toast("The model API and the dashboard need different ports."); return; }
-      // This page is the tailnet-only https:// address on 443: a public port of 443 takes that port, so it moves to 9443.
-      const moving = location.protocol === "https:" && !location.port && (api === "443" || dashboard === "443");
-      if (moving && !window.confirm("Port 443 will be public, so this tailnet address moves to port 9443:\n\n" + location.hostname + ":9443\n\nThe page goes there when it's done.")) return;
+      const api = $("#st-port-api").value, pickDash = $("#st-port-dash");
+      let dashboard = pickDash ? pickDash.value : String(el.dataset.dash || 8443);
+      if (api === dashboard) {
+        if (pickDash) { toast("The model API and the dashboard need different ports."); return; }
+        dashboard = ["8443", "10000", "443"].find((n) => n !== api);   // not public: just keep it out of the way
+      }
+      // Only a public dashboard on 443 takes this page's tailnet https:// port (it moves to 9443).
+      const moving = !!pickDash && location.protocol === "https:" && !location.port && dashboard === "443";
+      if (moving && !window.confirm("The public dashboard takes port 443, so this tailnet address moves to port 9443:\n\n" + location.hostname + ":9443\n\nThe page goes there when it's done.")) return;
       const go = () => { location.href = "https://" + location.hostname + ":9443" + location.pathname + location.hash; };
       const started = await startJob("public-port", { api, dashboard }, async (job) => {
         if (moving && job && job.status === "ok") return go();
         await post("/api/settings/public-refresh"); loadSettings().then(renderSettings);
       });
-      // this page loses port 443 part way through, so its job window may never hear "done"
       if (started && moving) setTimeout(go, 25000);
     } else if (a === "public-off") startJob("public-off", { what: el.dataset.what }, async () => { await post("/api/settings/public-refresh"); loadSettings().then(renderSettings); });
     else if (a === "name-set") startJob("cluster-name", { name: $("#st-name").value.trim() });

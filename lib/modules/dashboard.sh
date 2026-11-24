@@ -981,9 +981,10 @@ dashboard_status_cmd() {
 DASH_HTTPS_PORT=443        # (public access, Tailscale Funnel, uses 8443 and 10000 by default)
 DASH_HTTPS_ALT_PORT=9443   # used instead while a public port (public.*-port) is 443
 
-# dashboard_https_port -> the tailnet-only https:// port: 443, or 9443 when public access is set to use 443
+# dashboard_https_port -> the tailnet-only https:// port: 443, or 9443 when the public dashboard is set to 443
+# (the public model API shares 443 with it instead)
 dashboard_https_port() {
-    if [[ "$(ny_cfg_get public "" api-port)" == 443 || "$(ny_cfg_get public "" dashboard-port)" == 443 ]]; then
+    if [[ "$(ny_cfg_get public "" dashboard-port)" == 443 ]]; then
         echo "$DASH_HTTPS_ALT_PORT"
     else
         echo "$DASH_HTTPS_PORT"
@@ -991,25 +992,29 @@ dashboard_https_port() {
     return 0
 }
 
-# dashboard_https_move NAME -- a tailnet-only Serve on 443 (not Funnel) moves to the other port, so 443 can go public
+# dashboard_https_move NAME -- the tailnet-only Serve (not Funnel) goes to dashboard_https_port: off 443 so a
+# public dashboard can have it, or back to 443 from 9443
 dashboard_https_move() {
-    local name="$1" serve target alt
-    alt="$(dashboard_https_port)"
-    [[ "$alt" != "$DASH_HTTPS_PORT" ]] || return 0
+    local name="$1" serve target want from
+    want="$(dashboard_https_port)"
+    from="$DASH_HTTPS_ALT_PORT"
+    [[ "$want" == "$DASH_HTTPS_PORT" ]] || from="$DASH_HTTPS_PORT"
     serve="$(tailscale serve status --json 2>/dev/null || true)"
-    jq -e --arg k "${name}:${DASH_HTTPS_PORT}" '(.AllowFunnel // {})[$k] | not' >/dev/null 2>&1 <<<"$serve" || return 0
-    target="$(jq -r --arg k "${name}:${DASH_HTTPS_PORT}" '.Web[$k].Handlers["/"].Proxy // empty' <<<"$serve" 2>/dev/null)"
-    [[ -n "$target" ]] || return 0
+    jq -e --arg k "${name}:${from}" '(.AllowFunnel // {})[$k] | not' >/dev/null 2>&1 <<<"$serve" || return 0
+    target="$(jq -r --arg k "${name}:${from}" '.Web[$k].Handlers["/"].Proxy // empty' <<<"$serve" 2>/dev/null)"
+    [[ -n "$target" && "$target" != http://127.0.0.1:* ]] || return 0
     if [[ "$NY_DRY_RUN" -eq 1 ]]; then
-        ny_plan_add run "tailscale serve --https=${DASH_HTTPS_PORT} off"
-        ny_plan_add run "tailscale serve --bg --https=${alt} ${target}"
+        ny_plan_add run "tailscale serve --https=${from} off"
+        ny_plan_add run "tailscale serve --bg --https=${want} ${target}"
         return 0
     fi
-    ny_run tailscale serve --https="$DASH_HTTPS_PORT" off >/dev/null 2>&1 || true
-    if timeout 60 tailscale serve --bg --https="$alt" "$target" >/dev/null 2>&1; then
-        ny_info "The dashboard's tailnet-only https:// address moved to https://${name}:${alt}/ (443 is public now)."
+    ny_run tailscale serve --https="$from" off >/dev/null 2>&1 || true
+    local url="https://${name}/"
+    [[ "$want" == 443 ]] || url="https://${name}:${want}/"
+    if timeout 60 tailscale serve --bg --https="$want" "$target" >/dev/null 2>&1; then
+        ny_info "The dashboard's tailnet-only https:// address is now ${url}"
     else
-        ny_warn "Couldn't move the dashboard's tailnet https:// address to port ${alt}. Turn it on again: sudo nodeyard dashboard https on"
+        ny_warn "Couldn't move the dashboard's tailnet https:// address to port ${want}. Turn it on again: sudo nodeyard dashboard https on"
     fi
     return 0
 }
@@ -1064,9 +1069,16 @@ dashboard_https_cmd() {
         return 0
     fi
     # (an older tailscale waits for you to allow Serve in the admin console: don't hang here)
+    # the public model API may share this port: serving "/" turns its Funnel off, so turn that back on after
+    local shared
+    shared="$(jq -r --arg k "${name}:${hport}" 'if (.AllowFunnel // {})[$k] then (.Web[$k].Handlers["/v1"].Proxy // empty) else empty end' <<<"$serve" 2>/dev/null || true)"
     if ! timeout 60 tailscale serve --bg --https="$hport" "$target" >/dev/null 2>&1; then
         ny_die "Tailscale didn't set up the https:// address." \
             "Turn on MagicDNS and HTTPS Certificates for your tailnet (https://login.tailscale.com/admin/dns), then run this again. Details: tailscale serve --https=${hport} ${target}" "$NY_E_PRECONDITION"
+    fi
+    if [[ -n "$shared" ]]; then
+        ny_run tailscale funnel --bg --https="$hport" --set-path=/v1 "$shared" >/dev/null 2>&1 ||
+            ny_warn "The public model API on port ${hport} needs turning on again: sudo nodeyard public on --api"
     fi
     ny_ok "The dashboard is at ${url} (your tailnet only)."
     ny_hint "The first visit can take a few seconds while Tailscale gets the certificate. Voice chat works there."

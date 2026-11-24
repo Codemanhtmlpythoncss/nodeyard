@@ -46,11 +46,13 @@ public_funnel_handlers() {
     return 0
 }
 
-# public_kind MOUNT PROXY -> dashboard | api | control | other: which of ours a Funnel handler is
+# public_kind MOUNT PROXY -> dashboard | api | control | other: which of ours a Funnel handler is.
+# The tailnet-only dashboard (dashboard https on) goes to the Tailscale address, not 127.0.0.1, so it is
+# "other" even on a port the public API shares with it.
 public_kind() {
     local proxy="${2%/}"
     if [[ "$proxy" == */public-api/v1 ]]; then echo control
-    elif [[ "$proxy" == *":${SPLIT_GATE_PUBLIC_PORT}" ]]; then echo api
+    elif [[ "$proxy" == *":${SPLIT_GATE_PUBLIC_PORT}" || "$proxy" == *":${SPLIT_GATE_PUBLIC_PORT}/v1" ]]; then echo api
     elif [[ "$1" == "/" && "$proxy" == http://127.0.0.1:* ]]; then echo dashboard
     else echo other
     fi
@@ -76,11 +78,38 @@ public_drop() {
             ny_run tailscale funnel --https="$port" --set-path="$mount" off >/dev/null 2>&1 || true
         fi
     done < <(public_funnel_handlers "$name")
+    public_unfunnel_rest "$name"
     for port in ${roots[@]+"${roots[@]}"}; do
         if [[ "$NY_DRY_RUN" -eq 1 ]]; then
             ny_plan_add run "tailscale funnel --https=${port} off"
         else
             ny_run tailscale funnel --https="$port" off >/dev/null 2>&1 || true
+        fi
+    done
+    return 0
+}
+
+# public_unfunnel_rest NAME -- a public port left with none of ours (only the tailnet dashboard's "/")
+# goes back to tailnet-only: serving its "/" again turns Funnel off for that port.
+public_unfunnel_rest() {
+    local name="$1" port mount proxy p ours
+    local -a ports=()
+    while IFS='|' read -r port mount proxy; do
+        [[ -n "$port" && " ${ports[*]-} " != *" ${port} "* ]] && ports+=("$port")
+    done < <(public_funnel_handlers "$name")
+    for p in ${ports[@]+"${ports[@]}"}; do
+        ours=0
+        proxy=""
+        while IFS='|' read -r port mount target; do
+            [[ "$port" == "$p" ]] || continue
+            [[ "$(public_kind "$mount" "$target")" == other ]] || ours=1
+            [[ "$mount" == "/" ]] && proxy="$target"
+        done < <(public_funnel_handlers "$name")
+        [[ $ours -eq 0 && -n "$proxy" ]] || continue
+        if [[ "$NY_DRY_RUN" -eq 1 ]]; then
+            ny_plan_add run "tailscale serve --bg --https=${p} ${proxy}"
+        else
+            ny_run tailscale serve --bg --https="$p" "$proxy" >/dev/null 2>&1 || true
         fi
     done
     return 0
@@ -108,8 +137,10 @@ port at once and the old one is turned off. The same keys, set by hand:
   sudo nodeyard config set public.api-port 443        (model + control API)
   sudo nodeyard config set public.dashboard-port 10000
 then run "nodeyard public on" again. 443 gets
-through most school and work firewalls. While a public port is 443, the
-dashboard's tailnet-only https:// address moves to port 9443.
+through most school and work firewalls. The model API on 443 shares the port
+with the dashboard's tailnet-only https://<name>/ (that stays tailnet-only:
+internet visitors get only /v1 and /api/v1). Only a public dashboard on 443
+moves the tailnet address to port 9443.
 
 --api turns on the model API and, when the dashboard runs here, the control API
 beside it: list models, load or unload one, and chat with any of them, without
@@ -231,7 +262,7 @@ public_on_cmd() {
             ny_die "The model gate is from an older nodeyard without a public port." "Update it: sudo nodeyard ai gate install --yes" "$NY_E_PRECONDITION"
         kctl -n "$SPLIT_NS" get secret llama-api-key >/dev/null 2>&1 ||
             ny_die "The model has no API key, so it can't be put on the internet safely." "Deploy it with a key (the dashboard does this), or: sudo nodeyard ai split key --rotate" "$NY_E_PRECONDITION"
-        todo+=("model API|${PUBLIC_API_PORT}|/|/v1|http://127.0.0.1:${SPLIT_GATE_PUBLIC_PORT}")
+        todo+=("model API|${PUBLIC_API_PORT}|/v1|/v1|http://127.0.0.1:${SPLIT_GATE_PUBLIC_PORT}/v1")
         # list / load / chat with models through the dashboard, and nothing else of it
         rc=0
         dport="$(public_dash_port)" || rc=$?
@@ -257,13 +288,11 @@ public_on_cmd() {
         echo "Cancelled."
         return 0
     }
-    # moved ports: take ours off the old ones first
+    # take ours off first (moved ports, older layouts), then put them back where they go now
     [[ $PUB_DASH -eq 1 ]] && public_drop "$name" "dashboard" "$PUBLIC_DASH_PORT"
-    [[ $PUB_API -eq 1 ]] && public_drop "$name" "api control" "$PUBLIC_API_PORT"
-    # public on 443: the dashboard's tailnet-only https:// (Serve, also 443) moves to 9443
-    if [[ "$PUBLIC_DASH_PORT" == 443 || "$PUBLIC_API_PORT" == 443 ]]; then
-        dashboard_https_move "$name"
-    fi
+    [[ $PUB_API -eq 1 ]] && public_drop "$name" "api control"
+    # the tailnet-only https:// (Serve, 443) moves to 9443 only for a public dashboard on 443, else back to 443
+    dashboard_https_move "$name"
     for t in "${todo[@]}"; do
         IFS='|' read -r what port mount shown target <<<"$t"
         setpath=()

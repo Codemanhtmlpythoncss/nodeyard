@@ -436,8 +436,26 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.do_GET()
 
+    def _funnel_leak(self):
+        """True (answer sent) for an internet visitor reaching the tailnet-only address: the public model API can
+        share its port (443) and Funnel then covers the whole port. Tailscale Serve names the tailnet person on
+        every request it forwards (Tailscale-User-Login) and never on Funnel ones."""
+        if getattr(self.ctx, "port", None):
+            tsserve.https_url(self.ctx.port)   # learns where Serve connects from (cached)
+        via = tsserve.proxy_source()
+        peer = self.client_address[0]
+        funnel = self.headers.get("Tailscale-Funnel-Request") is not None
+        if not funnel and not (via and peer == via and not self.headers.get("Tailscale-User-Login")):
+            return False
+        if peer in ("127.0.0.1", "::1"):
+            return False   # the public dashboard / control API: their own checks apply
+        if self.command == "POST":
+            self._drain_body()
+        self._json({"ok": False, "error": "Not found."}, 404)
+        return True
+
     def do_GET(self):
-        if not self._public_api("GET"):
+        if self._funnel_leak() or not self._public_api("GET"):
             return
         u = urllib.parse.urlparse(self.path)
         path, q = u.path, urllib.parse.parse_qs(u.query)
@@ -590,7 +608,7 @@ class Handler(BaseHTTPRequestHandler):
     # -- POST ----------------------------------------------------------------
 
     def do_POST(self):
-        if not self._public_api("POST"):
+        if self._funnel_leak() or not self._public_api("POST"):
             return
         path = urllib.parse.urlparse(self.path).path
         srv = self.ctx

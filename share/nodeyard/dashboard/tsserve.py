@@ -19,13 +19,12 @@ def _lookup(port):
             out = subprocess.run([ts, "serve", "status", "--json"], capture_output=True, text=True, timeout=4, check=False)
             status = json.loads(out.stdout or "{}") or {}
             web = status.get("Web") or {}
-            public = status.get("AllowFunnel") or {}
             for hostport, conf in web.items():
-                if public.get(hostport):
-                    continue   # Funnel (public access), not the tailnet-only address
                 for handler in ((conf or {}).get("Handlers") or {}).values():
                     proxy = str((handler or {}).get("Proxy") or "")
-                    if proxy.rstrip("/").endswith(":%d" % port):
+                    # the tailnet-only address goes to the Tailscale IP; public access (Funnel) to 127.0.0.1. The
+                    # public model API may share the tailnet one's port, so Funnel being on there doesn't count.
+                    if proxy.rstrip("/").endswith(":%d" % port) and "://127.0.0.1:" not in proxy and "://localhost:" not in proxy:
                         host, _, p = hostport.rpartition(":")
                         url = "https://%s/" % (host if p == "443" else hostport)
                         via = proxy.split("://", 1)[-1].rsplit(":", 1)[0].strip("[]")   # Serve's own requests come from here
