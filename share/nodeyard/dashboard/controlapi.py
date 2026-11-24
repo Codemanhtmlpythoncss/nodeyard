@@ -603,6 +603,10 @@ def register(ctx, args):
             state = "unloaded" if not sp.get("loaded") else ("serving" if sp.get("ready") else ("downloading" if sp.get("download") == "running" else "loading"))
             model = {"state": state, "alias": sp.get("alias", ""), "file": sp.get("model", ""), "ctx": int(sp.get("ctx") or 0), "ready": bool(sp.get("ready")),
                      "machines": [s.get("node") for s in sp.get("shares", [])]}
+            load = sp.get("load") or {}
+            pct = load.get("pct")
+            if state == "loading" and isinstance(pct, (int, float)) and not isinstance(pct, bool):
+                model["load"] = {"phase": load.get("phase") or "loading", "pct": round(float(pct), 1)}   # small clients show a bar
         st = backend.store.snapshot()["state"] or {}
         h._json({"ok": True, "model": model, "nodes": len(st.get("nodes", [])), "version": getattr(args, "nodeyard_version", "")})
 
