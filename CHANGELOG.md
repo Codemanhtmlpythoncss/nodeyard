@@ -7,6 +7,10 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ## [Unreleased]
 
+### Changed
+
+- **The public model API on 443 shares the port with the tailnet dashboard.** The dashboard's tailnet-only address stays plain `https://NAME.ts.net/`; the model API is mounted at `/v1` and the control API at `/api/v1` beside it. Internet (Funnel) visitors get only those two: the dashboard answers 404 to any request through the tailnet address that Tailscale didn't sign with a tailnet person (`Tailscale-User-Login`), so tagged devices use the http:// address there. Only a public dashboard on 443 still moves the tailnet address to 9443, and an earlier move to 9443 goes back on the next `public on` / Save ports. Settings shows the Dashboard port picker only while the dashboard is public.
+
 ### Added
 
 - **Public ports in Settings.** Dashboard > Settings > Public access has Model API and Dashboard port pickers (443, 8443, 10000), and `sudo nodeyard public port --api 443 --dashboard 8443` does the same from the shell. Whatever is public moves to the new port at once. Saving 443 from the tailnet https:// page warns first and then opens the page at its new :9443 address.
