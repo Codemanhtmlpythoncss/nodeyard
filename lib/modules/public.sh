@@ -8,6 +8,7 @@
 #   model API   https://NAME.ts.net:10000/v1   -> the gate's public port,
 #               127.0.0.1:31436, where the API key is ALWAYS needed
 #   control API https://NAME.ts.net:10000/api/v1 -> 127.0.0.1:<dashboard port>/public-api/v1:
+#   (ports: public.dashboard-port / public.api-port, any of Funnel's 443, 8443, 10000)
 #               only list, load and chat with models (server API key needed);
 #               the rest of the dashboard stays private
 #
@@ -18,8 +19,71 @@ ny_cmd "public on" public_on_cmd "Network" "Reach the dashboard and model API fr
 ny_cmd "public off" public_off_cmd "Network" "Stop public access (Tailscale Funnel)" public
 ny_cmd "public status" public_status_cmd "Network" "Show what is reachable from the internet, and its addresses" public json
 
+ny_cfg_schema_add public.api-port enum:443,8443,10000 "" "Public port of the model API and control API (Tailscale Funnel; default 10000). 443 gets through most school and work firewalls"
+ny_cfg_schema_add public.dashboard-port enum:443,8443,10000 "" "Public port of the dashboard (Tailscale Funnel; default 8443)"
+
 PUBLIC_DASH_PORT=8443
 PUBLIC_API_PORT=10000
+PUBLIC_FUNNEL_PORTS=(443 8443 10000)
+
+# public_ports -- PUBLIC_DASH_PORT / PUBLIC_API_PORT from the config (or the defaults)
+public_ports() {
+    PUBLIC_DASH_PORT="$(ny_cfg_get public "" dashboard-port 8443)"
+    PUBLIC_API_PORT="$(ny_cfg_get public "" api-port 10000)"
+    [[ "$PUBLIC_DASH_PORT" =~ ^(443|8443|10000)$ ]] || PUBLIC_DASH_PORT=8443
+    [[ "$PUBLIC_API_PORT" =~ ^(443|8443|10000)$ ]] || PUBLIC_API_PORT=10000
+    return 0
+}
+
+# public_funnel_handlers NAME -> "port|mount|proxy" for every handler on a public (Funnel) port
+public_funnel_handlers() {
+    local cfg
+    cfg="$(tailscale funnel status --json 2>/dev/null || true)"
+    jq -r --arg n "$1" '. as $c | ($c.AllowFunnel // {}) | to_entries[] | select(.value) | .key as $k
+        | select($k | startswith($n + ":")) | ($k | ltrimstr($n + ":")) as $p
+        | (($c.Web // {})[$k].Handlers // {}) | to_entries[] | "\($p)|\(.key)|\(.value.Proxy // "")"' <<<"$cfg" 2>/dev/null || true
+    return 0
+}
+
+# public_kind MOUNT PROXY -> dashboard | api | control | other: which of ours a Funnel handler is
+public_kind() {
+    local proxy="${2%/}"
+    if [[ "$proxy" == */public-api/v1 ]]; then echo control
+    elif [[ "$proxy" == *":${SPLIT_GATE_PUBLIC_PORT}" ]]; then echo api
+    elif [[ "$1" == "/" && "$proxy" == http://127.0.0.1:* ]]; then echo dashboard
+    else echo other
+    fi
+    return 0
+}
+
+# public_drop NAME KINDS [KEEP_PORT] -- turn off our Funnel handlers of these kinds ("dashboard api control"),
+# except on KEEP_PORT. Sub-paths first, so the port's "/" goes last.
+public_drop() {
+    local name="$1" kinds=" $2 " keep="${3:-}" line port mount proxy kind
+    local -a roots=()
+    while IFS='|' read -r port mount proxy; do
+        [[ -n "$port" && "$port" != "$keep" ]] || continue
+        kind="$(public_kind "$mount" "$proxy")"
+        [[ "$kinds" == *" ${kind} "* ]] || continue
+        if [[ "$mount" == "/" ]]; then
+            roots+=("$port")
+            continue
+        fi
+        if [[ "$NY_DRY_RUN" -eq 1 ]]; then
+            ny_plan_add run "tailscale funnel --https=${port} --set-path=${mount} off"
+        else
+            ny_run tailscale funnel --https="$port" --set-path="$mount" off >/dev/null 2>&1 || true
+        fi
+    done < <(public_funnel_handlers "$name")
+    for port in ${roots[@]+"${roots[@]}"}; do
+        if [[ "$NY_DRY_RUN" -eq 1 ]]; then
+            ny_plan_add run "tailscale funnel --https=${port} off"
+        else
+            ny_run tailscale funnel --https="$port" off >/dev/null 2>&1 || true
+        fi
+    done
+    return 0
+}
 
 public_on_cmd_help() {
     cat <<'HELP'
@@ -35,6 +99,13 @@ addresses with a real certificate:
   dashboard   https://<this machine>.<your tailnet>.ts.net:8443/
   model API   https://<this machine>.<your tailnet>.ts.net:10000/v1
   control API https://<this machine>.<your tailnet>.ts.net:10000/api/v1
+
+Ports: Funnel allows 443, 8443 and 10000. Pick others with
+  sudo nodeyard config set public.api-port 443        (model + control API)
+  sudo nodeyard config set public.dashboard-port 10000
+then run "nodeyard public on" again; the old port is turned off. 443 gets
+through most school and work firewalls. While a public port is 443, the
+dashboard's tailnet-only https:// address moves to port 9443.
 
 --api turns on the model API and, when the dashboard runs here, the control API
 beside it: list models, load or unload one, and chat with any of them, without
@@ -119,6 +190,10 @@ public_dash_port() {
 public_on_cmd() {
     ny_need_root
     public_parse "$@"
+    public_ports
+    [[ "$PUBLIC_DASH_PORT" != "$PUBLIC_API_PORT" ]] ||
+        ny_die "The dashboard and the API can't share public port ${PUBLIC_API_PORT}." \
+            "Give them different ones: sudo nodeyard config set public.dashboard-port 8443   (443, 8443 or 10000)" "$NY_E_USAGE"
     local st name dport rc
     st="$(public_ts_json)"
     name="$(public_name "$st")"
@@ -177,6 +252,13 @@ public_on_cmd() {
         echo "Cancelled."
         return 0
     }
+    # moved ports: take ours off the old ones first
+    [[ $PUB_DASH -eq 1 ]] && public_drop "$name" "dashboard" "$PUBLIC_DASH_PORT"
+    [[ $PUB_API -eq 1 ]] && public_drop "$name" "api control" "$PUBLIC_API_PORT"
+    # public on 443: the dashboard's tailnet-only https:// (Serve, also 443) moves to 9443
+    if [[ "$PUBLIC_DASH_PORT" == 443 || "$PUBLIC_API_PORT" == 443 ]]; then
+        dashboard_https_move "$name"
+    fi
     for t in "${todo[@]}"; do
         IFS='|' read -r what port mount shown target <<<"$t"
         setpath=()
@@ -198,41 +280,35 @@ public_on_cmd() {
 public_off_cmd() {
     ny_need_root
     public_parse "$@"
-    public_ts_json >/dev/null
-    local h port mount
-    local -a handlers=()
-    [[ $PUB_DASH -eq 1 ]] && handlers+=("${PUBLIC_DASH_PORT}|/")
-    [[ $PUB_API -eq 1 ]] && handlers+=("${PUBLIC_API_PORT}|/api/v1" "${PUBLIC_API_PORT}|/")
-    for h in "${handlers[@]}"; do
-        IFS='|' read -r port mount <<<"$h"
-        if [[ "$NY_DRY_RUN" -eq 1 ]]; then
-            ny_plan_add run "tailscale funnel --https=${port}$([[ "$mount" == "/" ]] || echo " --set-path=${mount}") off"
-            continue
-        fi
-        if [[ "$mount" == "/" ]]; then
-            ny_run tailscale funnel --https="$port" off >/dev/null 2>&1 || true
-        else
-            ny_run tailscale funnel --https="$port" --set-path="$mount" off >/dev/null 2>&1 || true
-        fi
-    done
+    local st name kinds=""
+    st="$(public_ts_json)"
+    name="$(public_name "$st")"
+    [[ $PUB_DASH -eq 1 ]] && kinds+="dashboard "
+    [[ $PUB_API -eq 1 ]] && kinds+="api control"
+    public_drop "$name" "$kinds"   # on whichever public ports they are
     [[ "$NY_DRY_RUN" -eq 1 ]] || ny_ok "Public access is off$([[ $PUB_DASH -eq 1 && $PUB_API -eq 0 ]] && echo ' for the dashboard' || true)$([[ $PUB_API -eq 1 && $PUB_DASH -eq 0 ]] && echo ' for the model API' || true)."
     return 0
 }
 
-# public_state -> JSON {"name":..., "dashboard": url|null, "api": url|null, "control": url|null}
+# public_state -> JSON {"name":..., "dashboard": url|null, "api": url|null, "control": url|null}, wherever they are
 public_state() {
-    local st name cfg
+    local st name port mount proxy kind hp d="null" a="null" c="null"
     st="$(tailscale status --json 2>/dev/null || true)"
     name="$(public_name "$st")"
-    cfg="$(tailscale funnel status --json 2>/dev/null || true)"
-    jq -e . >/dev/null 2>&1 <<<"$cfg" || cfg='{}'
-    jq -cn --arg n "$name" --argjson c "$cfg" --arg dp "$PUBLIC_DASH_PORT" --arg ap "$PUBLIC_API_PORT" '
-        def on(p): (($c.AllowFunnel // {}) | has($n + ":" + p));
-        def handlers(p): (($c.Web // {})[$n + ":" + p].Handlers);
-        {name: $n,
-         dashboard: (if on($dp) then "https://\($n):\($dp)/" else null end),
-         api: (if on($ap) and (handlers($ap) == null or (handlers($ap) | has("/"))) then "https://\($n):\($ap)/v1" else null end),
-         control: (if on($ap) and ((handlers($ap) // {}) | has("/api/v1")) then "https://\($n):\($ap)/api/v1" else null end)}' 2>/dev/null || printf '{"name":"%s","dashboard":null,"api":null,"control":null}\n' "$name"
+    if [[ -n "$name" ]]; then
+        while IFS='|' read -r port mount proxy; do
+            [[ -n "$port" ]] || continue
+            kind="$(public_kind "$mount" "$proxy")"
+            hp="$name"
+            [[ "$port" == 443 ]] || hp+=":${port}"
+            case "$kind" in
+                dashboard) d="\"https://${hp}/\"" ;;
+                api) a="\"https://${hp}/v1\"" ;;
+                control) c="\"https://${hp}/api/v1\"" ;;
+            esac
+        done < <(public_funnel_handlers "$name")
+    fi
+    jq -cn --arg n "$name" --argjson d "$d" --argjson a "$a" --argjson c "$c" '{name: $n, dashboard: $d, api: $a, control: $c}'
     return 0
 }
 
