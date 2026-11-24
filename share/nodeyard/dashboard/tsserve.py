@@ -17,8 +17,12 @@ def _lookup(port):
         ts = shutil.which("tailscale") or ("/usr/bin/tailscale" if os.path.exists("/usr/bin/tailscale") else "")
         if ts:
             out = subprocess.run([ts, "serve", "status", "--json"], capture_output=True, text=True, timeout=4, check=False)
-            web = (json.loads(out.stdout or "{}") or {}).get("Web") or {}
+            status = json.loads(out.stdout or "{}") or {}
+            web = status.get("Web") or {}
+            public = status.get("AllowFunnel") or {}
             for hostport, conf in web.items():
+                if public.get(hostport):
+                    continue   # Funnel (public access), not the tailnet-only address
                 for handler in ((conf or {}).get("Handlers") or {}).values():
                     proxy = str((handler or {}).get("Proxy") or "")
                     if proxy.rstrip("/").endswith(":%d" % port):

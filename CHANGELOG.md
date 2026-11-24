@@ -9,6 +9,10 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Public access: pick the ports.** `sudo nodeyard config set public.api-port 443` (model API + control API) and `public.dashboard-port` choose any of Funnel's ports, 443, 8443 or 10000 (defaults 10000 and 8443). 443 gets through most school and work firewalls that block the others:
+  - run `nodeyard public on` again after changing one; it takes ours off the old port first, and `public off` and `public status` find them on whichever port they are;
+  - while a public port is 443, the dashboard's tailnet-only `https://` address moves to port 9443 so it never goes public, and the dashboard doesn't mistake a public address for it.
+
 - **Public control API: list, load and chat with models from the internet, dashboard stays private.** `nodeyard public on --api` now also publishes a short list of `/api/v1` calls at `https://NAME.ts.net:10000/api/v1` (next to the model API at `/v1`):
   - `GET status`, `targets`, `models`, `jobs`, and `POST models/load`, `models/unload`, `chat/completions`;
   - the server API key is always needed, and wrong keys are rate-limited as before;
