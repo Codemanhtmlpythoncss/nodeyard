@@ -17,6 +17,7 @@
 
 ny_cmd "public on" public_on_cmd "Network" "Reach the dashboard and model API from anywhere on the internet (Tailscale Funnel)" public
 ny_cmd "public off" public_off_cmd "Network" "Stop public access (Tailscale Funnel)" public
+ny_cmd "public port" public_port_cmd "Network" "Choose the public ports (443, 8443 or 10000) and move what is public there" public
 ny_cmd "public status" public_status_cmd "Network" "Show what is reachable from the internet, and its addresses" public json
 
 ny_cfg_schema_add public.api-port enum:443,8443,10000 "" "Public port of the model API and control API (Tailscale Funnel; default 10000). 443 gets through most school and work firewalls"
@@ -101,9 +102,12 @@ addresses with a real certificate:
   control API https://<this machine>.<your tailnet>.ts.net:10000/api/v1
 
 Ports: Funnel allows 443, 8443 and 10000. Pick others with
+  sudo nodeyard public port --api 443 --dashboard 8443
+(or Dashboard > Settings > Public access). Whatever is public moves to the new
+port at once and the old one is turned off. The same keys, set by hand:
   sudo nodeyard config set public.api-port 443        (model + control API)
   sudo nodeyard config set public.dashboard-port 10000
-then run "nodeyard public on" again; the old port is turned off. 443 gets
+then run "nodeyard public on" again. 443 gets
 through most school and work firewalls. While a public port is 443, the
 dashboard's tailnet-only https:// address moves to port 9443.
 
@@ -130,6 +134,7 @@ HELP
 }
 public_off_cmd_help() { public_on_cmd_help; }
 public_status_cmd_help() { public_on_cmd_help; }
+public_port_cmd_help() { public_on_cmd_help; }
 
 # public_ts_json -- this machine's Tailscale status, or dies explaining why not
 public_ts_json() {
@@ -308,7 +313,48 @@ public_state() {
             esac
         done < <(public_funnel_handlers "$name")
     fi
-    jq -cn --arg n "$name" --argjson d "$d" --argjson a "$a" --argjson c "$c" '{name: $n, dashboard: $d, api: $a, control: $c}'
+    public_ports
+    jq -cn --arg n "$name" --argjson d "$d" --argjson a "$a" --argjson c "$c" \
+        --argjson pd "$PUBLIC_DASH_PORT" --argjson pa "$PUBLIC_API_PORT" \
+        '{name: $n, dashboard: $d, api: $a, control: $c, ports: {dashboard: $pd, api: $pa}}'
+    return 0
+}
+
+# public port [--api PORT] [--dashboard PORT] -- save the ports, then move whatever is public
+public_port_cmd() {
+    ny_need_root
+    local api="" dash=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --api) api="${2:-}"; shift ;;
+            --dashboard) dash="${2:-}"; shift ;;
+            --yes | -y) NY_YES=1 ;;
+            *) ny_usage_error "Unknown option: $1" "nodeyard public port [--api 443|8443|10000] [--dashboard 443|8443|10000]" ;;
+        esac
+        shift
+    done
+    public_ports
+    api="${api:-$PUBLIC_API_PORT}"
+    dash="${dash:-$PUBLIC_DASH_PORT}"
+    [[ "$api" =~ ^(443|8443|10000)$ && "$dash" =~ ^(443|8443|10000)$ ]] ||
+        ny_usage_error "Funnel only allows ports 443, 8443 and 10000." "nodeyard public port --api 443 --dashboard 8443"
+    [[ "$api" != "$dash" ]] ||
+        ny_die "The dashboard and the API can't share public port ${api}." "Give them different ones, e.g. --api 443 --dashboard 8443" "$NY_E_USAGE"
+    ny_cfg_set public "" api-port "$api"
+    ny_cfg_set public "" dashboard-port "$dash"
+    public_ports
+    local s d a c
+    s="$(public_state)"
+    d="$(jq -r '.dashboard // empty' <<<"$s")"
+    a="$(jq -r '.api // .control // empty' <<<"$s")"
+    local -a flags=(--yes)
+    [[ -n "$d" ]] && flags+=(--dashboard)
+    [[ -n "$a" ]] && flags+=(--api)
+    if [[ ${#flags[@]} -gt 1 ]]; then
+        public_on_cmd "${flags[@]}"
+    elif [[ "$NY_DRY_RUN" -ne 1 ]]; then
+        ny_ok "Public ports saved: API ${api}, dashboard ${dash}. Nothing is public yet; turn it on with: sudo nodeyard public on"
+    fi
     return 0
 }
 

@@ -514,7 +514,8 @@ class Settings:
     def public_state(self):
         """{'name', 'dashboard': url|None, 'api': url|None} from `nodeyard public status --json` (30 s cache)."""
         if self.demo:
-            return {"name": "yard-1.tail1234.ts.net", "dashboard": None, "api": "https://yard-1.tail1234.ts.net:10000/v1", "available": True}
+            return {"name": "yard-1.tail1234.ts.net", "dashboard": None, "api": "https://yard-1.tail1234.ts.net:10000/v1", "available": True,
+                    "ports": {"dashboard": 8443, "api": 10000}}
         return self._fresh_enough("public_cache", 30, self._public_lookup)
 
     def _public_lookup(self):
@@ -523,7 +524,8 @@ class Settings:
             data = json.loads([x for x in out.splitlines() if x.startswith("{")][-1]) if rc == 0 else None
         except (SettingsError, ValueError, IndexError):
             data = None
-        return {"name": data.get("name"), "dashboard": data.get("dashboard"), "api": data.get("api"), "available": True} if isinstance(data, dict) \
+        return {"name": data.get("name"), "dashboard": data.get("dashboard"), "api": data.get("api"), "available": True,
+                "ports": data.get("ports") if isinstance(data.get("ports"), dict) else {"dashboard": 8443, "api": 10000}} if isinstance(data, dict) \
             else {"name": None, "dashboard": None, "api": None, "available": False}
 
     def reset(self):

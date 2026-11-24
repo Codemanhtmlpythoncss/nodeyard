@@ -275,7 +275,16 @@
     return html`<p class="muted small" style="margin-top:0">Reach these from anywhere on the internet (a phone on mobile data, a work laptop), with no Tailscale needed there. Through Tailscale Funnel, with a real HTTPS certificate.</p>
       ${row("Dashboard", p.dashboard, "dashboard", "Asks for the dashboard password. Wrong passwords from the internet can't lock you out at home.")}
       ${row("Model API", p.api, "api", "Every request from the internet needs the server API key, even if your own network doesn't.")}
+      ${portRow(p.ports || {})}
       <p class="faint small">Anyone can find a public address, so use a strong dashboard password (Sign-in → Make a random one). Turning the dashboard on needs one.</p>`;
+  }
+  function portRow(ports) {
+    const pick = (id, cur) => html`<select id="${id}">${[443, 8443, 10000].map((n) => html`<option value="${n}" ${String(n) === String(cur) ? raw("selected") : ""}>${n}</option>`)}</select>`;
+    return html`<div class="row wrap" style="gap:8px;margin:12px 0 4px;align-items:center"><b style="min-width:92px">Ports</b>
+        <label class="small">Model API ${pick("st-port-api", ports.api || 10000)}</label>
+        <label class="small">Dashboard ${pick("st-port-dash", ports.dashboard || 8443)}</label>
+        <span class="grow"></span><button class="btn small" data-st="public-port">Save ports</button></div>
+      <div class="faint small" style="margin:0 0 8px 100px">Funnel allows 443, 8443 and 10000. School and work Wi-Fi often only lets 443 out. Whatever is public moves at once; with 443 in use, the tailnet-only https:// address moves to port 9443.</div>`;
   }
   V.settings = {
     build() { NY.freshHTML($("#view"), html`<div id="set-body"></div>`); renderSettings(); loadSettings().then(renderSettings); },
@@ -380,6 +389,10 @@
         const u = T.settings && T.settings.https && T.settings.https.url;
         if (a === "https-on" && u) toast("The secure address is ready: " + u);
       });
+    } else if (a === "public-port") {
+      const api = $("#st-port-api").value, dashboard = $("#st-port-dash").value;
+      if (api === dashboard) { toast("The model API and the dashboard need different ports."); return; }
+      startJob("public-port", { api, dashboard }, async () => { await post("/api/settings/public-refresh"); loadSettings().then(renderSettings); });
     } else if (a === "public-off") startJob("public-off", { what: el.dataset.what }, async () => { await post("/api/settings/public-refresh"); loadSettings().then(renderSettings); });
     else if (a === "name-set") startJob("cluster-name", { name: $("#st-name").value.trim() });
     else if (a === "bg-remove") { const r = await post("/api/settings/background-remove"); if (r.ok) { applyBackground(null); loadSettings().then(renderSettings); } }
