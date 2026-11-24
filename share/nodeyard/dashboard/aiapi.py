@@ -707,6 +707,17 @@ def build_command(action, p, nodes, key_path):
         verb = "on" if action == "public-on" else "off"
         title = ("Public access on: " if verb == "on" else "Public access off: ") + {"both": "dashboard and model API", "dashboard": "dashboard", "api": "model API"}[what]
         return title, ["public", verb, "--yes"] + flags
+    if action == "public-port":
+        ports = {}
+        for k in ("api", "dashboard"):
+            v = str(p.get(k) or "").strip()
+            if v not in ("443", "8443", "10000"):
+                raise AIError("Public ports are 443, 8443 or 10000.")
+            ports[k] = v
+        if ports["api"] == ports["dashboard"]:
+            raise AIError("The dashboard and the API need different ports.")
+        return ("Public ports: API %s, dashboard %s" % (ports["api"], ports["dashboard"]),
+                ["public", "port", "--api", ports["api"], "--dashboard", ports["dashboard"], "--yes"])
     if action in ("https-on", "https-off"):
         verb = "on" if action == "https-on" else "off"
         return ("Secure https:// address on the tailnet: " + verb), ["dashboard", "https", verb, "--yes"]

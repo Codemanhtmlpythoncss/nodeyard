@@ -9,6 +9,7 @@ each minor release completes one phase of the [roadmap](docs/STATUS.md).
 
 ### Added
 
+- **Public ports in Settings.** Dashboard > Settings > Public access has Model API and Dashboard port pickers (443, 8443, 10000), and `sudo nodeyard public port --api 443 --dashboard 8443` does the same from the shell. Whatever is public moves to the new port at once.
 - **Load progress in `/api/v1/status`.** While a split model loads, `model.load` gives its phase and percent, so small clients (like the ESP32 terminal) can show a bar.
 - **Public access: pick the ports.** `sudo nodeyard config set public.api-port 443` (model API + control API) and `public.dashboard-port` choose any of Funnel's ports, 443, 8443 or 10000 (defaults 10000 and 8443). 443 gets through most school and work firewalls that block the others:
   - run `nodeyard public on` again after changing one; it takes ours off the old port first, and `public off` and `public status` find them on whichever port they are;
