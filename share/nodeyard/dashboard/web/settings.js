@@ -392,7 +392,16 @@
     } else if (a === "public-port") {
       const api = $("#st-port-api").value, dashboard = $("#st-port-dash").value;
       if (api === dashboard) { toast("The model API and the dashboard need different ports."); return; }
-      startJob("public-port", { api, dashboard }, async () => { await post("/api/settings/public-refresh"); loadSettings().then(renderSettings); });
+      // This page is the tailnet-only https:// address on 443: a public port of 443 takes that port, so it moves to 9443.
+      const moving = location.protocol === "https:" && !location.port && (api === "443" || dashboard === "443");
+      if (moving && !window.confirm("Port 443 will be public, so this tailnet address moves to port 9443:\n\n" + location.hostname + ":9443\n\nThe page goes there when it's done.")) return;
+      const go = () => { location.href = "https://" + location.hostname + ":9443" + location.pathname + location.hash; };
+      const started = await startJob("public-port", { api, dashboard }, async (job) => {
+        if (moving && job && job.status === "ok") return go();
+        await post("/api/settings/public-refresh"); loadSettings().then(renderSettings);
+      });
+      // this page loses port 443 part way through, so its job window may never hear "done"
+      if (started && moving) setTimeout(go, 25000);
     } else if (a === "public-off") startJob("public-off", { what: el.dataset.what }, async () => { await post("/api/settings/public-refresh"); loadSettings().then(renderSettings); });
     else if (a === "name-set") startJob("cluster-name", { name: $("#st-name").value.trim() });
     else if (a === "bg-remove") { const r = await post("/api/settings/background-remove"); if (r.ok) { applyBackground(null); loadSettings().then(renderSettings); } }

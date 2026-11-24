@@ -1246,7 +1246,7 @@
     if (next === "auto") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", next);
     renderChrome(); toast("Theme: " + next);
   }
-  function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("on"), 1600); }
+  function toast(msg) { const t = $("#toast"); t.textContent = msg && typeof msg === "object" ? (msg.message || "That didn't work.") : msg; t.classList.add("on"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("on"), 1600); }
   function legacyCopyText(text) {
     const ta = document.createElement("textarea");
     const previous = document.activeElement;
