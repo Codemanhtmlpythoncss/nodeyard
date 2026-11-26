@@ -27,6 +27,11 @@ struct TermTarget: Decodable, Identifiable, Hashable {
 }
 
 struct TerminalsView: View {
+    var body: some View { NavigationStack { TerminalsList() } }
+}
+
+/// The machines a shell can open on (also pushed from the More tab).
+struct TerminalsList: View {
     @EnvironmentObject private var model: AppModel
     @State private var targets: [TermTarget] = []
     @State private var problem: String?
@@ -37,7 +42,7 @@ struct TerminalsView: View {
     private struct Reply: Decodable { var targets: [TermTarget]? }
 
     var body: some View {
-        NavigationStack {
+        Group {
             List {
                 if let problem { ErrorBanner(text: problem).listRowBackground(SwiftUI.Color.clear) }
                 if targets.isEmpty && loaded && problem == nil {
