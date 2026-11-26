@@ -208,7 +208,7 @@ final class ClusterStore: ObservableObject {
     }
 
     private func loadHistory() async {
-        guard let api, let reply = try? await api.get("/api/history", ["points": "180"], as: HistoryReply.self) else { return }
+        guard let api, let reply = try? await api.get("/api/history", ["points": "600"], as: HistoryReply.self) else { return }
         let points = reply.points ?? []
         let cpuTotal = totals?.cpu_total ?? nodes.compactMap(\.cpu_cores).reduce(0, +)
         let memTotal = totals?.mem_total ?? nodes.compactMap(\.mem_total).reduce(0, +)

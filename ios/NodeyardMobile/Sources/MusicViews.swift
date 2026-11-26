@@ -350,9 +350,9 @@ struct FullPlayer: View {
 
                 VStack(spacing: 6) {
                     Slider(value: Binding(get: { scrub ?? player.elapsed }, set: { scrub = $0 }),
-                           in: 0...max(1, player.duration)) { editing in
+                           in: 0...max(1, player.duration), onEditingChanged: { editing in
                         if !editing, let s = scrub { player.seek(s); scrub = nil }
-                    }
+                    })
                     .tint(Theme.teal)
                     HStack {
                         Text(Format.clock(scrub ?? player.elapsed))

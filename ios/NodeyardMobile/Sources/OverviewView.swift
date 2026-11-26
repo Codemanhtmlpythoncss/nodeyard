@@ -105,7 +105,7 @@ struct OverviewView: View {
         Panel {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text("Last hours").font(.system(size: 15, weight: .semibold, design: .rounded))
+                    Text("Recent usage").font(.system(size: 15, weight: .semibold, design: .rounded))
                     Spacer()
                     Legend(color: Theme.indigo, text: "CPU")
                     Legend(color: Theme.teal, text: "Memory")

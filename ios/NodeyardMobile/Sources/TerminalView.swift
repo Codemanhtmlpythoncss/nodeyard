@@ -39,10 +39,10 @@ struct TerminalsView: View {
     var body: some View {
         NavigationStack {
             List {
-                if let problem { ErrorBanner(text: problem).listRowBackground(Color.clear) }
+                if let problem { ErrorBanner(text: problem).listRowBackground(SwiftUI.Color.clear) }
                 if targets.isEmpty && loaded && problem == nil {
                     EmptyNote(symbol: "terminal", title: "No devices", detail: "The dashboard hasn't found any machines to open.")
-                        .listRowBackground(Color.clear)
+                        .listRowBackground(SwiftUI.Color.clear)
                 }
                 ForEach(targets) { t in
                     let methods = t.methods ?? []
@@ -210,13 +210,13 @@ private struct TerminalScreenBody: View {
     var body: some View {
         NavigationStack {
             ZStack(alignment: .top) {
-                Color.black.ignoresSafeArea()
+                SwiftUI.Color.black.ignoresSafeArea()
                 TermHost(session: session).ignoresSafeArea(.container, edges: .bottom)
                 if let p = session.problem { ErrorBanner(text: p).padding() }
             }
             .navigationTitle(session.status)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Color.black, for: .navigationBar)
+            .toolbarBackground(SwiftUI.Color.black, for: .navigationBar)
             .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -239,7 +239,6 @@ private struct TermHost: UIViewRepresentable {
         v.backgroundColor = .black
         v.nativeBackgroundColor = .black
         v.nativeForegroundColor = UIColor(red: 0.86, green: 0.89, blue: 0.97, alpha: 1)
-        v.caretColor = UIColor(Theme.teal)
         v.font = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         session.view = v
         DispatchQueue.main.async {

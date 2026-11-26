@@ -1,12 +1,17 @@
 # Nodeyard for iPhone
 
-A native SwiftUI app around your nodeyard dashboard:
+A native SwiftUI app for your nodeyard cluster. No web pages inside: it reads the dashboard's JSON API.
 
-- Asks once for your dashboard address and checks it answers.
-- Native tab bar: Overview, AI, Music, Terminal, and More (every other page).
-- Music keeps playing with the screen locked, with lock-screen and Control Centre controls.
+- **Overview**: live CPU, memory and disk rings, alerts, network, a history chart, and every node.
+- **Cluster**: nodes, pods, apps, services and events, with filters and namespaces. Tap a pod for its containers
+  and live logs.
+- **AI**: chat with any ready model on the cluster. Answers stream in word by word.
+- **Music**: your liked songs, library and playlists, plus SoundCloud search. Plays natively, keeps going with the
+  screen locked, and shows on the lock screen and in Control Centre.
+- **Terminal**: real terminals (SwiftTerm) on the server and the nodes.
+- Sign in with the dashboard password once. It's kept in the Keychain and used to sign in again when the session
+  runs out.
 - Optional Face ID (or passcode) lock, which also hides the app in the app switcher.
-- Pull down to reload. Links to other sites open in Safari.
 
 Your phone has to reach the dashboard, so turn on Tailscale on the phone and use the tailnet name
 (for example `my-mac.tailnet.ts.net`, or `http://my-mac:9092`).
