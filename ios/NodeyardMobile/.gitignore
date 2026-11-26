@@ -1,0 +1,7 @@
+# made by `xcodegen generate` and xcodebuild
+NodeyardMobile.xcodeproj/
+Info.plist
+build/
+build.log
+Payload/
+*.ipa

@@ -1,0 +1,67 @@
+# XcodeGen spec for the Nodeyard iPhone app. `xcodegen generate` makes NodeyardMobile.xcodeproj (not committed).
+name: NodeyardMobile
+options:
+  bundleIdPrefix: com.nodeyard
+  deploymentTarget:
+    iOS: "16.0"
+packages:
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    exactVersion: 1.13.0
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  NodeyardMobile:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - Resources
+    dependencies:
+      - package: SwiftTerm
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Nodeyard
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIUserInterfaceStyle: Dark
+        UIStatusBarStyle: UIStatusBarStyleLightContent
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        # music keeps playing with the screen locked; the app fills the lock-screen controls
+        UIBackgroundModes:
+          - audio
+        # tailnet addresses are often plain http://name:9092
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+        NSFaceIDUsageDescription: Nodeyard uses Face ID to unlock the app.
+        NSLocalNetworkUsageDescription: Nodeyard connects to the dashboard on your own network.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.nodeyard.mobile
+        PRODUCT_NAME: Nodeyard
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_IDENTITY: ""
