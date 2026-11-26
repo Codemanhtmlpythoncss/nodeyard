@@ -213,6 +213,12 @@ final class NodeyardAPI: @unchecked Sendable {
         Keychain.save(password, for: Keychain.password(base))
     }
 
+    /// After the password changed from this phone: sign in again with the new one later.
+    func rememberPassword(_ password: String) {
+        lock.withLock { self.password = password }
+        Keychain.save(password, for: Keychain.password(base))
+    }
+
     func signOut() async {
         _ = try? await raw(request("/api/logout", body: [:]))
         lock.withLock { cookie = ""; password = nil }

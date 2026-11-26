@@ -89,8 +89,8 @@ struct MainTabs: View {
                 .tabItem { Label("AI", systemImage: "sparkles") }.tag("ai")
             MusicView().withMiniPlayer()
                 .tabItem { Label("Music", systemImage: "music.note") }.tag("music")
-            TerminalsView().withMiniPlayer()
-                .tabItem { Label("Terminal", systemImage: "terminal") }.tag("terminal")
+            MoreView().withMiniPlayer()
+                .tabItem { Label("More", systemImage: "ellipsis.circle") }.tag("more")
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: player.current?.id)
     }
