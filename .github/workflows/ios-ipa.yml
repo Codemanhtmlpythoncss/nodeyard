@@ -1,0 +1,58 @@
+# Builds the Nodeyard iPhone app as an unsigned .ipa. Sideload it with Sideloadly or AltStore (see ios/README.md).
+name: iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, feat/ios-app]
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios-ipa.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ios/NodeyardMobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Make the Xcode project
+        run: xcodegen generate
+
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild -project NodeyardMobile.xcodeproj -scheme NodeyardMobile \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build | tee build.log | grep -E "error:|warning:|BUILD (SUCCEEDED|FAILED)" || true
+          test -d build/Build/Products/Release-iphoneos/Nodeyard.app
+
+      - name: Package the IPA
+        run: |
+          rm -rf Payload && mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/Nodeyard.app Payload/
+          zip -qry Nodeyard.ipa Payload
+          ls -lh Nodeyard.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nodeyard-ipa
+          path: ios/NodeyardMobile/Nodeyard.ipa
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log
+          path: ios/NodeyardMobile/build.log

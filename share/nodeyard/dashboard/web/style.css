@@ -611,6 +611,8 @@ body.term-full .tbox { flex: 1; height: auto; }
 html.embed .side, html.embed .top, html.embed .devices, html.embed .mobile-tabs { display: none !important; }
 html.embed .shell, html.embed .shell.devs-on { display: block; }
 html.embed .content { padding-bottom: 16px; }
+html.embed #ny-player { bottom: 0 !important; }   /* no web tab bar in the apps, so the player sits at the very bottom */
+html.embed body:has(#ny-player.on) .content { padding-bottom: 84px; }
 html.embed .tbox { height: calc(100vh - 150px); }
 /* the Terminal page's device list and tabs */
 .tgroup { margin-top: 12px; }
