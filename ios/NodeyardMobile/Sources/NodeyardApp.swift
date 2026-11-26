@@ -29,6 +29,7 @@ struct RootView: View {
     @EnvironmentObject private var web: WebController
     @Environment(\.scenePhase) private var phase
     @State private var covered = false
+    @State private var askOnActive = true     // prompt once at launch and after each return from the background
 
     var body: some View {
         ZStack {
@@ -48,15 +49,20 @@ struct RootView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: model.server)
         .animation(.easeInOut(duration: 0.2), value: covered)
+        .onAppear {
+            if phase == .active && model.locked && askOnActive { askOnActive = false; Task { await model.unlock() } }
+        }
         .onChange(of: phase) { newPhase in
             switch newPhase {
             case .background:
                 model.appWentToBackground()
+                askOnActive = true
             case .inactive:
                 covered = model.faceIDEnabled     // hide the dashboard in the app switcher
             case .active:
                 covered = false
-                if model.locked { Task { await model.unlock() } }
+                // only once: a cancelled Face ID sheet also comes back through .active, and must not ask again
+                if model.locked && askOnActive { askOnActive = false; Task { await model.unlock() } }
             @unknown default: break
             }
         }
