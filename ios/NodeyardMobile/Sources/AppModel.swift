@@ -2,38 +2,68 @@ import Foundation
 import LocalAuthentication
 import SwiftUI
 
-/// App-wide state: which dashboard to open, and the Face ID lock.
+/// App-wide state: which dashboard, whether we're signed in, and the Face ID lock.
 @MainActor
 final class AppModel: ObservableObject {
     private enum Key {
         static let server = "nodeyard.server"
         static let faceID = "nodeyard.faceID"
-        static let lastPage = "nodeyard.lastPage"
+        static let active = "nodeyard.signedIn"
     }
 
-    @Published private(set) var server: URL?
+    @Published private(set) var api: NodeyardAPI?
     @Published var faceIDEnabled: Bool { didSet { UserDefaults.standard.set(faceIDEnabled, forKey: Key.faceID) } }
     @Published var locked = false
-    @Published var lastPage: String { didSet { UserDefaults.standard.set(lastPage, forKey: Key.lastPage) } }
+    @Published var signedOutReason: String?
 
+    let cluster = ClusterStore()
+    let player = MusicPlayer()
     private var authenticating = false
 
     init() {
-        let defaults = UserDefaults.standard
-        server = defaults.string(forKey: Key.server).flatMap(URL.init(string:))
-        faceIDEnabled = defaults.bool(forKey: Key.faceID)
-        lastPage = defaults.string(forKey: Key.lastPage) ?? Pages.overview.id
-        locked = faceIDEnabled && server != nil
+        faceIDEnabled = UserDefaults.standard.bool(forKey: Key.faceID)
+        if UserDefaults.standard.bool(forKey: Key.active),
+           let saved = UserDefaults.standard.string(forKey: Key.server).flatMap(URL.init(string:)) {
+            use(NodeyardAPI(base: saved, cookie: Keychain.load(Keychain.cookie(saved)) ?? "", password: Keychain.load(Keychain.password(saved))))
+        }
+        locked = faceIDEnabled && api != nil
     }
 
-    func setServer(_ url: URL?) {
-        server = url
-        UserDefaults.standard.set(url?.absoluteString, forKey: Key.server)
+    var server: URL? { api?.base }
+
+    /// Signed in: remember the address and start the live feed.
+    func use(_ api: NodeyardAPI) {
+        api.onSignedOut = { [weak self] in
+            Task { @MainActor in self?.signedOut("The dashboard password changed, or the sign-in ran out. Sign in again.") }
+        }
+        self.api = api
+        signedOutReason = nil
+        UserDefaults.standard.set(api.base.absoluteString, forKey: Key.server)
+        UserDefaults.standard.set(true, forKey: Key.active)
+        player.api = api
+        cluster.start(api)
+    }
+
+    func signOut() async {
+        guard let api else { return }
+        player.stop()
+        cluster.stop()
+        await api.signOut()
+        UserDefaults.standard.set(false, forKey: Key.active)
+        self.api = nil
+    }
+
+    private func signedOut(_ why: String) {
+        guard api != nil else { return }
+        player.stop()
+        cluster.stop()
+        signedOutReason = why
+        UserDefaults.standard.set(false, forKey: Key.active)
+        api = nil
     }
 
     // MARK: - Lock
 
-    /// What the device unlocks with, for labels ("Face ID", "Touch ID", or the passcode).
     var biometryName: String {
         let context = LAContext()
         _ = context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
@@ -55,10 +85,9 @@ final class AppModel: ObservableObject {
     var canUseLock: Bool { LAContext().canEvaluatePolicy(.deviceOwnerAuthentication, error: nil) }
 
     func appWentToBackground() {
-        if faceIDEnabled { locked = true }
+        if faceIDEnabled && api != nil { locked = true }
     }
 
-    /// Ask for Face ID (falls back to the passcode). Returns whether it worked.
     @discardableResult
     func unlock() async -> Bool {
         guard locked, !authenticating else { return !locked }
@@ -69,7 +98,6 @@ final class AppModel: ObservableObject {
         return ok
     }
 
-    /// Turning the lock on asks once, so nobody gets locked out by a lock that doesn't work.
     func setFaceID(_ on: Bool) async {
         if !on { faceIDEnabled = false; return }
         if await Self.evaluate(reason: "Turn on \(biometryName) for Nodeyard") { faceIDEnabled = true; Haptics.success() }
@@ -79,15 +107,15 @@ final class AppModel: ObservableObject {
     private static func evaluate(reason: String) async -> Bool {
         let context = LAContext()
         context.localizedFallbackTitle = "Use Passcode"
-        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: nil) else { return true }   // no passcode set: nothing to lock with
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: nil) else { return true }
         return await withCheckedContinuation { cont in
             context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { ok, _ in cont.resume(returning: ok) }
         }
     }
 
-    // MARK: - Server address
+    // MARK: - Address
 
-    /// Turns what someone typed ("barnaby.tailnet.ts.net", "http://10.0.0.5:9092/") into the dashboard's base URL.
+    /// "my-mac.tailnet.ts.net" or "http://10.0.0.5:9092/" → the dashboard's base URL.
     static func normalize(_ text: String) -> URL? {
         var s = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { return nil }
@@ -100,32 +128,97 @@ final class AppModel: ObservableObject {
         parts.fragment = nil
         return parts.url
     }
+}
 
-    enum CheckResult { case ok, notNodeyard, unreachable(String) }
+/// The live cluster: the dashboard pushes a fresh snapshot every couple of seconds.
+@MainActor
+final class ClusterStore: ObservableObject {
+    @Published private(set) var snapshot: Snapshot?
+    @Published private(set) var live = false
+    @Published private(set) var problem: String?
+    @Published private(set) var cpuHistory: [Sample] = []
+    @Published private(set) var memHistory: [Sample] = []
 
-    /// Is a nodeyard dashboard answering at this address?
-    static func check(_ base: URL) async -> CheckResult {
-        var request = URLRequest(url: base.appendingPathComponent("login"), cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
-        request.httpMethod = "GET"
-        do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse else { return .notNodeyard }
-            let serverHeader = (http.value(forHTTPHeaderField: "Server") ?? "").lowercased()
-            if serverHeader.contains("nodeyard") || http.statusCode == 200 { return .ok }
-            return .notNodeyard
-        } catch let error as URLError {
-            switch error.code {
-            case .cannotFindHost, .dnsLookupFailed:
-                return .unreachable("That address doesn't exist from this phone. If it's a tailnet name, turn on Tailscale and try again.")
-            case .timedOut, .cannotConnectToHost, .networkConnectionLost, .notConnectedToInternet:
-                return .unreachable("Nothing answered at that address. Check the dashboard is running and Tailscale is on.")
-            case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot:
-                return .unreachable("The secure connection failed. Try the https://name.ts.net address, or http:// with the port.")
-            default:
-                return .unreachable(error.localizedDescription)
+    private(set) var api: NodeyardAPI?
+    private var feed: Task<Void, Never>?
+    private var history: Task<Void, Never>?
+
+    var state: ClusterState? { snapshot?.state }
+    var totals: Totals? { snapshot?.totals }
+    var nodes: [Node] { state?.nodes ?? [] }
+    var pods: [Pod] { state?.pods ?? [] }
+    var alerts: [Alert] { snapshot?.alerts ?? [] }
+
+    func start(_ api: NodeyardAPI) {
+        stop()
+        self.api = api
+        resume()
+    }
+
+    /// (Re)connects; called again when the app comes back to the front.
+    func resume() {
+        guard let api, feed == nil else { return }
+        feed = Task { [weak self] in
+            var wait: UInt64 = 1
+            while !Task.isCancelled {
+                do {
+                    for try await event in api.events("/api/stream") {
+                        guard event.name == "state", let data = event.data.data(using: .utf8),
+                              let snap = try? JSONDecoder().decode(Snapshot.self, from: data) else { continue }
+                        self?.snapshot = snap
+                        self?.live = true
+                        self?.problem = nil
+                        wait = 1
+                    }
+                } catch let e as APIError where e.status == 401 {
+                    self?.live = false
+                    return
+                } catch {
+                    self?.problem = error.localizedDescription
+                    // the feed is down: one plain read so the screens still fill
+                    if self?.snapshot == nil, let snap = try? await api.get("/api/state", as: Snapshot.self) { self?.snapshot = snap }
+                }
+                self?.live = false
+                try? await Task.sleep(nanoseconds: wait * 1_000_000_000)
+                wait = min(wait * 2, 15)
             }
-        } catch {
-            return .unreachable(error.localizedDescription)
+        }
+        history = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.loadHistory()
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+            }
+        }
+    }
+
+    /// Stops reading while the app is in the background (saves battery and data).
+    func pause() {
+        feed?.cancel(); feed = nil
+        history?.cancel(); history = nil
+        live = false
+    }
+
+    func stop() {
+        pause()
+        api = nil
+        snapshot = nil
+        cpuHistory = []
+        memHistory = []
+        problem = nil
+    }
+
+    private func loadHistory() async {
+        guard let api, let reply = try? await api.get("/api/history", ["points": "180"], as: HistoryReply.self) else { return }
+        let points = reply.points ?? []
+        let cpuTotal = totals?.cpu_total ?? nodes.compactMap(\.cpu_cores).reduce(0, +)
+        let memTotal = totals?.mem_total ?? nodes.compactMap(\.mem_total).reduce(0, +)
+        cpuHistory = points.map { p in
+            let used = (p.nodes ?? [:]).values.compactMap { $0.first ?? nil }.reduce(0, +)
+            return Sample(time: Date(timeIntervalSince1970: p.t), value: cpuTotal > 0 ? min(1, used / cpuTotal) : 0)
+        }
+        memHistory = points.map { p in
+            let used = (p.nodes ?? [:]).values.compactMap { $0.count > 1 ? $0[1] : nil }.reduce(0, +)
+            return Sample(time: Date(timeIntervalSince1970: p.t), value: memTotal > 0 ? min(1, used / memTotal) : 0)
         }
     }
 }

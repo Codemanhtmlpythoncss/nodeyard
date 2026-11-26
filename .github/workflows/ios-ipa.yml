@@ -33,7 +33,7 @@ jobs:
           set -o pipefail
           xcodebuild -project NodeyardMobile.xcodeproj -scheme NodeyardMobile \
             -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
-            -derivedDataPath build \
+            -derivedDataPath build -skipPackagePluginValidation -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build | tee build.log | grep -E "error:|warning:|BUILD (SUCCEEDED|FAILED)" || true
           test -d build/Build/Products/Release-iphoneos/Nodeyard.app

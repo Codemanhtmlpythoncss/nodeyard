@@ -4,6 +4,10 @@ options:
   bundleIdPrefix: com.nodeyard
   deploymentTarget:
     iOS: "16.0"
+packages:
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    exactVersion: 1.13.0
 settings:
   base:
     SWIFT_VERSION: "5.0"
@@ -16,6 +20,8 @@ targets:
     sources:
       - Sources
       - Resources
+    dependencies:
+      - package: SwiftTerm
     info:
       path: Info.plist
       properties:
@@ -39,7 +45,7 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
-        # music keeps playing with the screen locked; the page's Media Session fills the lock-screen controls
+        # music keeps playing with the screen locked; the app fills the lock-screen controls
         UIBackgroundModes:
           - audio
         # tailnet addresses are often plain http://name:9092
@@ -47,9 +53,6 @@ targets:
           NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
         NSFaceIDUsageDescription: Nodeyard uses Face ID to unlock the app.
-        NSMicrophoneUsageDescription: Voice chat with your cluster's AI uses the microphone.
-        NSCameraUsageDescription: Lets you take a photo or video to upload to your dashboard.
-        NSPhotoLibraryUsageDescription: Lets you pick photos or videos to upload to your dashboard.
         NSLocalNetworkUsageDescription: Nodeyard connects to the dashboard on your own network.
     settings:
       base:
